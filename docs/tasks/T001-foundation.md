@@ -29,7 +29,7 @@ Prerequisites/authority: user's linked roadmap and explicit KH2FM-only/Steam-sou
 | Actual English/Japanese coverage / decoded payload equality | NOT RUN | No qualified sources/decoder corpus yet |
 | Real game behavior / fidelity / save import / clean-machine release | NOT RUN | No gameplay implementation or reference scenario exists |
 | CI execution / physical controller / secondary account | NOT RUN | CI authored; local pad mapping needs user calibration |
-| Clean checkout and backup recovery | Pending receipt | Performed after foundation commit; local receipt/status recorded in follow-up task record |
+| Clean checkout and backup recovery | PASS | External bundle restored, offline pinned build/tests and its own synthetic asset smoke passed; see T001R for exact identity/limits |
 
 External evidence root: `%LOCALAPPDATA%/KH2FinalRewrite/research/foundation-20261003/`. Local build/smoke logs are `.local/`. Initial unoptimized multi-gigabyte scan was explicitly superseded by optimized scanner runs; it produced no candidate manifest and is not counted as a pass. Reads, fingerprints and structural checks support only the stated file subset; they do not prove clean vendor bytes or complete dependency/language coverage.
 

@@ -8,7 +8,7 @@ Updated 2026-10-03. The [user-supplied roadmap](https://docs.google.com/document
 | P01 | Installed-source and release boundary | Policy authored; candidate scanner source/output isolation tested; launch/cache/release enforcement pending |
 | P02 | Installed edition/build identity | 13 files / 16.4 GB hashed twice identically; edition/integrity/shared/language closure unqualified |
 | P03 | Windows/Rust/Bevy environment | Build, image load, native window, clean timed exit and interactive Escape passed; reference boot/controller/second environment pending |
-| P04 | Durable repository/evidence | Instructions, records, schemas, CI and provenance authored; clean-checkout/backup recovery verification in foundation task |
+| P04 | Durable repository/evidence | Instructions/records/CI/provenance authored; external bundle restored, clean checkout built/tested and synthetic smoke passed (T001R); user review/visibility/second environment pending |
 | P05 | Pinned tool/license audit | OpenKH/Skate3/iw4L pinned and inspected; six HEDs independently checked; payload extraction fixture and tool license gaps remain |
 | P06 | Native folder picker and source validation | Not started; supported edition/file profile P02 must be qualified; do not enable play on filename evidence |
 | P07 | Packages/archives/dependencies | Preliminary index/header inspection: 46,076 records; all checked ranges valid; payload/name/language/replacement closure pending |
