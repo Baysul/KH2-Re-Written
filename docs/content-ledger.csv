@@ -1,0 +1,5 @@
+id,category,required,discovered,decoded,inspected,behavior_tested,release_passed,evidence,owner
+campaign-denominator,campaign,true,false,false,false,false,false,pending-source-discovery,agent-and-user
+optional-denominator,optional-bosses-cups-challenges-minigames-gummi,true,false,false,false,false,false,pending-source-discovery,agent-and-user
+presentation-denominator,menus-hud-cutscenes-settings-credits,true,false,false,false,false,false,pending-source-discovery,agent-and-user
+progression-denominator,party-inventory-journal-saves,true,false,false,false,false,false,pending-source-discovery,agent-and-user

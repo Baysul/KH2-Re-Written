@@ -1,0 +1,3 @@
+# Foundation decisions — 2026-10-03
+
+The user confirmed KH2FM only and local Steam files. Honor the roadmap's fallback while P00 choices remain unresolved: scope/policy/source inspection, build smoke and durable evidence; no invented gameplay. Keep observed installed metadata distinct from independently verified edition/content. Create only three implemented crates rather than every proposed subsystem. Pin installed stable Rust 1.99.0 and published stable Bevy 0.19.1 (MSRV 1.95) after registry/upstream inspection. The published 0.20 release candidate is not selected. Keep the repository's existing Apache-2.0 license.

@@ -1,0 +1,12 @@
+[package]
+name = "windows_shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bevy = { version = "=0.19.1", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_log", "bevy_asset", "bevy_window", "bevy_winit", "bevy_render", "bevy_camera", "bevy_image", "bevy_sprite", "bevy_sprite_render", "bevy_core_pipeline", "bmp", "bevy_gilrs"] }
+
+[lints]
+workspace = true

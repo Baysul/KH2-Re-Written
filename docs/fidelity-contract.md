@@ -1,0 +1,33 @@
+# P00 fidelity and scope contract
+
+Authority: [user-supplied roadmap](https://docs.google.com/document/d/1lewKD-h2ZVOOES1qugUgj82QVMybWwb8sqK3ed-4wPI/edit?tab=t.0), and the user's 2026-10-03 instruction to start P00 and continue, clarified as "only kh2fm nothing else and use steam files". Execution is authorized; unresolved product choices below are not presented as user approvals.
+
+Status: DRAFT WITH CONFIRMED CORE SCOPE. P00 final acceptance awaits the comparison configuration and remaining user choices. Independent source inspection and platform smoke work are allowed by P00's failure route.
+
+| Dimension | Contract / current evidence | Confidence | Verification and owner |
+|---|---|---|---|
+| Product | KH2 Final Mix within Steam app 2552430; exclude other collection games | User confirmed | Agent maps KH2 dependencies; user confirms source |
+| Source baseline | Local manifest reports build 15194255, language english; KH2 executable and six HED/PKG pairs exist | Observed; unqualified | Agent hashes candidate set; user reports mod/verification history; P02 establishes complete profile |
+| Edition / integrity | Steam language and `Image/dt` names are clues; no clean/International equivalence claim | Unknown | Agent compares file identity and runtime; user/vendor verification |
+| Architecture | Native Rust/Bevy, Windows x86_64 MSVC, own game implementation | Roadmap required | P03 build; P11 headless rules; P31 fresh-machine package |
+| OS / hardware floor | Development on Windows 11; release floor remains unmeasured | Unknown | Agent measures P30; user approves supported test hardware |
+| Display baseline | Propose 1920x1080, 60 Hz, SDR, fixed reference settings; no reference capture yet | Provisional | User approves configuration; agent records mode, scaling, frame pacing and capture settings |
+| Time / simulation | Measure reference clocks, update order, pause/slowdown, RNG, event and animation cadence before selecting simulation frequency | Required, not measured | Agent P09/P10/P17 traces and first-divergence replay |
+| Controls | Keyboard/mouse and Windows XInput controller proposed; button mappings, deadzones, repeat and latency measured | Provisional | User identifies devices; agent P03/P17/P18 tests |
+| Campaign | Full KH2FM route, all worlds/returns, difficulty variants, endings and progression surfaces | Roadmap scope | Agent expands discovered ledger; user plays documented P28 routes |
+| Optional content | All discovered KH2FM optional bosses, cups, minigames, challenges, Gummi routes, journals and completion systems | Roadmap scope; enumeration incomplete | Agent derives denominator from data/reference; user reviews ledger; P27/P28 |
+| Story / presentation | KH2FM menus, HUD, cutscenes, transitions, credits and settings | Roadmap required | Agent P24/P25 screen/transition suite |
+| Text | English and Japanese selectable text; missing language must be identified, never fabricated or downloaded | Roadmap required; local completeness unknown | Agent language ledger/P12/P25; user chooses lawful additional source if needed |
+| Text vs edition | Language is presentation-only only where shared gameplay is established; different edition behavior compared separately | Required | Agent paired replay and separate source profiles |
+| Audio | Reproduce installed baseline music, SFX and voices; alternative voice language undecided | Provisional baseline | Agent P26 onset, loop, mix and transition measurements; user reviews voice choice |
+| Saves | Versioned native saves and recovery required; vendor-save import requirement undecided, never overwrite vendor saves | Mixed required/unknown | Agent P23 synthetic corruption/version tests; user decides vendor compatibility |
+| Launch | Every gameplay session requires selected, validated supported Steam files even with cache | Roadmap required/user Steam instruction | Agent source/cache matrix P06/P08/P29/P31 |
+| Package | Own executable/code and audited dependencies; source/cache/saves/captures excluded; private local work, publication undecided | Required/provisional distribution | Agent provenance audit; user release decision |
+
+## Comparison rules
+
+Each scenario names source identity, rewrite commit, save fixture, language/edition, device, display settings, initial state, timestamped inputs, captured evidence and first divergence. Decoded record identities, discrete game state, flags, inventory, damage, RNG consumption and progression require exact agreement. Numeric rounding, tick alignment, pixel/camera and audio tolerances must be measured and pinned before those gates can pass; none is silently assigned a generous default. Timing uses the identified reference clock, not guessed 60 Hz simulation. Screenshots alone do not prove hidden state.
+
+Layers are tracked separately: decoding, hidden state/rules, timing, rendering, audio, controls, persistence and coverage. Every required record/route remains in the denominator including unknowns. The final finish line is P31 acceptance plus complete P27/P28 ledgers and no unresolved required discrepancy. No percentage or smoke-app result constitutes game equivalence. Enhancements such as extra games, extra voice sources, cloud sync and new rendering effects require a later explicit scope decision.
+
+The agent owns implementation and reproducible measurements. The user owns source edition, physical play/review, devices, save-import priority and release decisions. See `docs/unknowns.md` for the remaining concrete inputs.

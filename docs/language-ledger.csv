@@ -1,0 +1,3 @@
+language,surface,required,source_identified,decoded,rendered,reviewed,behavior_invariant,release_passed,evidence
+en,all-discovered-text-and-font-surfaces,true,false,false,false,false,false,false,pending
+ja,all-discovered-text-and-font-surfaces,true,false,false,false,false,false,false,pending
