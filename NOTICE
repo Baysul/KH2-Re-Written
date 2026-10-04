@@ -7,6 +7,8 @@ The implementation is modified for bounded byte-wise handling in Rust.
 Candidate name generation in tools/Compare-CandidateNames.ps1 follows
 the KH2-only EgsTools rules at the same pin; upstream catalogs are
 referenced privately and are not included in this repository.
+The bounded message-record reader follows Msg.Read/GetMsgData at the
+same OpenKH pin, retaining encoded spans without a glyph dictionary.
 
 OpenKH - Open Kingdom Hearts Research and Development
 Copyright 2019-2022 OpenKH Team and Contributors

@@ -5,8 +5,10 @@ use serde::Serialize;
 use std::{collections::HashSet, io};
 
 pub mod bar;
+pub mod message;
 pub mod original;
 pub mod plain;
+pub mod probe;
 pub mod replacement;
 
 pub const RECORD_SIZE: usize = 32;

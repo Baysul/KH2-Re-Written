@@ -41,3 +41,11 @@ cargo run -p package_reader --bin original_probe --locked -- '<selected-install-
 ```
 
 The storage reader is checked against pinned OpenKH and .NET on finite samples; source names, full dependency closure and semantic/gameplay decoding remain under research. Both commands retain only private metadata/hashes and require a full source rescan to establish mutation assurance. See [T005 evidence](docs/tasks/T005-storage-decoding.md).
+
+Selected message/font structure inspection:
+
+```powershell
+cargo run -p package_reader --bin message_probe --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/selection.json' '<private-directory>/new-message-report.json'
+```
+
+The bounded selection names source identity and each index/ordinal/name hash plus a `message` or `font` research purpose. Message records retain encoded spans/hashes; no Unicode/glyph or font rendering claim is made. See [T007 evidence](docs/tasks/T007-message-font-structure.md) for the independently compared corpus and limits.

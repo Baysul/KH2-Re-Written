@@ -9,11 +9,24 @@ $pin = '7a3b945c538d32c6a285128c98aefba093f52ceb'
 if ((git -C $OpenKhRoot rev-parse HEAD) -ne $pin) { throw 'OpenKH checkout is not the audited pin' }
 if (git -C $OpenKhRoot status --porcelain -- OpenKh.Egs/EgsEncryption.cs) { throw 'Reference transform is locally modified' }
 $referenceText = Get-Content -LiteralPath (Join-Path $OpenKhRoot 'OpenKh.Egs/EgsEncryption.cs') -Raw
+$report = Get-Content -LiteralPath $ProbePath -Raw | ConvertFrom-Json
+$messageMode = $report.qualification -eq 'message_font_structure_inspection_only'
+if ($messageMode) {
+    if (git -C $OpenKhRoot status --porcelain -- OpenKh.Kh2/Msg.cs) { throw 'Reference message reader is modified' }
+    $msgText = Get-Content -LiteralPath (Join-Path $OpenKhRoot 'OpenKh.Kh2/Msg.cs') -Raw
+    # Move using directives only; the upstream Msg method bodies are unchanged.
+    $referenceText = "using System.Collections.Generic;`nusing System.Linq;`n" + $referenceText + ($msgText -replace '(?m)^using [^;]+;\r?\n','')
+}
 # EgsEncryption only depends on this stream extension; compile the unchanged
 # transform in memory. This does not run any OpenKH source writer/extractor.
 $extension = @'
 namespace OpenKh.Common {
     public static class ProbeStreamExtension {
+        public static uint PeekUInt32(this System.IO.Stream stream) {
+            long position = stream.Position;
+            try { return new System.IO.BinaryReader(stream).ReadUInt32(); }
+            finally { stream.Position = position; }
+        }
         public static byte[] ReadBytes(this System.IO.Stream stream, int count) {
             byte[] result = new byte[count];
             stream.ReadExactly(result);
@@ -23,11 +36,13 @@ namespace OpenKh.Common {
 }
 '@
 Add-Type -TypeDefinition ($referenceText + $extension)
-$report = Get-Content -LiteralPath $ProbePath -Raw | ConvertFrom-Json
-if ($report.qualification -ne 'bounded_original_sample_inspection_only') { throw 'Unexpected report qualification' }
+if (!$messageMode -and $report.qualification -ne 'bounded_original_sample_inspection_only') { throw 'Unexpected report qualification' }
 $totalBytes = 0L
 $replacementBytes = 0L
 $replacementVerified = 0
+$messageRecordsVerified = 0
+$messageEncodedBytes = 0L
+$barRecordsVerified = 0
 foreach ($sample in $report.samples) {
     $hedPath = Join-Path $InstallRoot $sample.index
     $pkgPath = [IO.Path]::ChangeExtension($hedPath, 'pkg')
@@ -78,6 +93,39 @@ foreach ($sample in $report.samples) {
             $data.Length -ne $expected -or $data.Length -ne $sample.original_size -or
             [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($data)) -ne $sample.sha256) { throw 'Independent original decode/hash mismatch' }
         $totalBytes += $data.Length
+        if ($messageMode) {
+            # Independently read all BAR scalars before selecting message payloads.
+            $barStream = [IO.MemoryStream]::new($data,$false)
+            $barReader = [IO.BinaryReader]::new($barStream)
+            try {
+                if ($barReader.ReadUInt32() -ne 0x01524142 -or $barReader.ReadInt32() -ne $sample.bar.entries.Count -or
+                    $barReader.ReadInt32() -ne $sample.bar.header_field_8 -or $barReader.ReadInt32() -ne $sample.bar.header_field_12) { throw 'Independent BAR header mismatch' }
+                foreach ($child in $sample.bar.entries) {
+                    if ($barReader.ReadUInt16() -ne $child.entry_type -or $barReader.ReadInt16() -ne $child.index -or
+                        [Convert]::ToHexString($barReader.ReadBytes(4)) -ne [Convert]::ToHexString([byte[]]$child.name_bytes) -or
+                        $barReader.ReadInt32() -ne $child.offset -or $barReader.ReadInt32() -ne $child.size) { throw 'Independent BAR table mismatch' }
+                    $barRecordsVerified++
+                }
+                foreach ($table in $sample.message_tables) {
+                    $child = $sample.bar.entries[$table.bar_ordinal]
+                    $messageData = [byte[]]::new($child.size)
+                    [Array]::Copy($data,$child.offset,$messageData,0,$child.size)
+                    $messageStream = [IO.MemoryStream]::new($messageData,$false)
+                    try { $decodedMessages = [OpenKh.Kh2.Msg]::Read($messageStream) } finally { $messageStream.Dispose() }
+                    if ($decodedMessages.Count -ne $table.inventory.entries.Count) { throw 'Reference message count mismatch' }
+                    for ($recordIndex = 0; $recordIndex -lt $decodedMessages.Count; $recordIndex++) {
+                        $actual = $decodedMessages[$recordIndex]
+                        $expectedMessage = $table.inventory.entries[$recordIndex]
+                        $sourceOffset = [BitConverter]::ToInt32($messageData,12+8*$recordIndex)
+                        if ($actual.Id -ne $expectedMessage.id -or $sourceOffset -ne $expectedMessage.source_offset -or
+                            $actual.Data.Length -ne $expectedMessage.encoded_length -or
+                            [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($actual.Data)) -ne $expectedMessage.sha256) { throw 'Reference message id/span/hash mismatch' }
+                        $messageRecordsVerified++
+                        $messageEncodedBytes += $actual.Data.Length
+                    }
+                }
+            } finally { $barReader.Dispose(); $barStream.Dispose() }
+        }
         $replacementStart = $offset + 16 + 48L * $replacementCount + $length
         foreach ($replacement in $sample.replacement_samples) {
             $meta = $replacement.metadata
@@ -130,3 +178,4 @@ foreach ($sample in $report.samples) {
     } finally { $hed.Dispose(); $pkg.Dispose() }
 }
 "PASS: $($report.samples.Count) originals / $totalBytes bytes and $replacementVerified replacements / $replacementBytes bytes agree with pinned OpenKH transform and .NET deflate; source was only read."
+if ($messageMode) { "PASS: $barRecordsVerified BAR records and $messageRecordsVerified message records / $messageEncodedBytes encoded bytes match independent scalars and pinned OpenKH Msg.Read; no glyph/Unicode mapping asserted." }
