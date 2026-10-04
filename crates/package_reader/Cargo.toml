@@ -1,5 +1,6 @@
 [package]
 name = "package_reader"
+default-run = "package_reader"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 source_identity = { path = "../source_identity" }
 
 [lints]

@@ -4,6 +4,9 @@
 use serde::Serialize;
 use std::{collections::HashSet, io};
 
+pub mod bar;
+pub mod plain;
+
 pub const RECORD_SIZE: usize = 32;
 pub const MAX_INDEX_BYTES: usize = 32 * 1024 * 1024;
 

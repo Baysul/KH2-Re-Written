@@ -27,3 +27,11 @@ cargo run -p source_identity --release --locked -- '<selected-install-root>' '<p
 The scanner hashes only the observed KH2 candidate set. It never labels an unknown build supported and refuses existing output files. Full shared/language dependency coverage and actual gameplay remain pending. Every eventual gameplay session will require the supported installation even when a cache exists.
 
 Use the optimized scanner for multi-gigabyte packages. Detailed manifests and package records are stored outside this repository. The smoke app's default log goes under `%LOCALAPPDATA%/KH2FinalRewrite/logs/`.
+
+Developer source probe (unencrypted originals and BAR table metadata only):
+
+```powershell
+cargo run -p package_reader --bin plain_probe --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/new-plain-report.json'
+```
+
+This verifies the bound HED hashes and package metadata, retains unknown formats, and exports no original asset files. Encrypted/compressed and HD replacement readers are still under research.

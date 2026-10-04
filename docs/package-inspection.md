@@ -21,4 +21,6 @@ Reader command after selecting the install root:
 cargo run -p package_reader --locked -- '<selected-install-root>' '<existing-private-directory>/new-inventory.json'
 ```
 
-Output must be outside the source and use a new filename. Readers never export game payload bytes. No actual decoder or importer is present.
+Output must be outside the source and use a new filename. The index/header command writes metadata only. No semantic asset decoder or importer is present.
+
+T003 subsequently checked 47 unencrypted/uncompressed originals (22,622,432 bytes) and 34 BAR container tables (23 records) against independent readers. The probe writes only private fingerprint/table metadata, never extracted original asset files. Thirteen original formats remain unknown; transformed originals and HD replacement payloads remain unverified. See `tasks/T003-plain-source-inspection.md` for source identity/check limits.
