@@ -11,7 +11,7 @@ Updated 2026-10-03. The [user-supplied roadmap](https://docs.google.com/document
 | P04 | Durable repository/evidence | Instructions/records/CI/provenance authored; external bundle restored, clean checkout built/tested and synthetic smoke passed (T001R); user review/visibility/second environment pending |
 | P05 | Pinned tool/license audit | Six HEDs/47 plain originals/34 BAR tables checked (T003); 23 original storage + 8 HD samples match independent reference (T005); full closure/license audit gaps remain |
 | P06 | Native folder picker and source validation | Not started; supported edition/file profile P02 must be qualified; do not enable play on filename evidence |
-| P07 | Packages/archives/dependencies | 46,076 index/header records; 64 unique original payloads and 8 HD samples checked (T003/T005); unsampled payload/name/shared/language closure pending |
+| P07 | Packages/archives/dependencies | 46,076 headers and candidate name hashes (T006); 64 unique originals/8 HD samples checked (T003/T005); unsampled payload/semantic/shared/language closure pending |
 | P08 | Read-only importer/source-bound cache | Not started; P06/P07 qualified input required |
 | P09 | Reference capture/replay harness | Exploratory private credits/title screenshots and hashed save/config copy (T002); controlled settings/input/time/replay harness pending |
 | P10 | Installed executable/runtime research | Not started; qualified binary and controlled reference observations required |
@@ -37,4 +37,4 @@ Updated 2026-10-03. The [user-supplied roadmap](https://docs.google.com/document
 | P30 | Performance/Windows reliability | Not started; full candidate and measured hardware matrix required |
 | P31 | Windows package/release qualification | Not started; all required gates and separate user release decision required |
 
-Next tasks: T002 observe manually opened reference settings and establish mod/verification history/baseline configuration; inspect independently matching candidate name hashes and KH2/shared/language dependencies; T004 qualify the supported source profile, then implement P06. Do not substitute a synthetic game loop or a placeholder KH2 viewer for missing measurements.
+Next tasks: T002 observe manually opened reference settings and establish mod/verification history/baseline configuration; use matched candidate names to inspect actual message/font/room structures and KH2/shared/language dependencies; T004 qualify the supported source profile, then implement P06. Do not substitute a synthetic game loop or a placeholder KH2 viewer for missing measurements.

@@ -1,0 +1,13 @@
+# T006 — source-bound candidate name coverage
+
+Owner Codex, 2026-10-03 local / 2026-10-04 UTC. P07 dependency discovery lead. Prerequisites: storage inspection `d69f74f`, source manifest after T005, pinned OpenKH `7a3b945c538d32c6a285128c98aefba093f52ceb`. Execution remains authorized; source stays unqualified. No runtime/name semantic pass is asserted.
+
+`tools/Compare-CandidateNames.ps1` reads only the audited KH2 catalog/constants and KH2-specific generation rules from `EgsTools.cs`. It constructs exact UTF-8 MD5 candidates with the standard .NET hash API, checks the unchanged upstream pin/files, binds each of six actual HED content hashes to the private manifest, and retains each package/ordinal/hash/offset/size with a candidate name. Candidate collisions abort; all semantic verification flags remain false. No other collection game's dictionary is added. The catalog is not copied into Rust or Git; output rejects source/Git/link ancestors and existing files.
+
+PASS: 274,592 unique generated candidates yield one match for every one of 46,076 observed HED records: 1,116 / 8,995 / 8,995 / 8,995 / 8,995 / 8,980 across the six pairs. There are 45,852 distinct matched names. Zero unmatched hashes in this candidate comparison does not eliminate semantic unknowns, prove authenticity, or imply every payload decodes. Repeated names retain separate package/ordinal identities.
+
+Private evidence: `%LOCALAPPDATA%/KH2FinalRewrite/research/foundation-20261003/candidate-name-matches.json`, final-script rerun `candidate-name-matches-final.json`, and `candidate-name-aggregate.json`. These retain actual names/hashes and upstream file fingerprints. Language-like path tokens include `fm`, `us`, `uk`, `fr`, `gr`, `it`, `sp`; no observed matched path token was `jp` in the chosen heuristic. This says nothing yet about Japanese text completeness or whether `fm` data supplies it; headers/message/fonts and paired rendering remain required. No text, game bytes or captures are saved in Git.
+
+Checks: successful full candidate comparison; reproducible PowerShell script execution on all six bound HEDs. Output ancestor rejection was tightened before the final rerun. No Rust code changed after T005's 20-test/build/lint pass, so those checks need no redundant rerun for this metadata-only task. Final HED hashes still match their bound manifest. Source was only read.
+
+Verdict: PROGRESS. P07 remains incomplete. Next: use candidates to select message/font/room/HD format samples, independently check structures, and establish KH2/shared/language closure. Do not enable gameplay or declare a language available from path tokens. T002 physical menu-input/mod-history clarification remains pending; progress is still possible in read-only source research.

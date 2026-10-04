@@ -4,6 +4,9 @@ The package original transform in crates/package_reader/src/original.rs
 is adapted from OpenKH EgsEncryption.cs at commit
 7a3b945c538d32c6a285128c98aefba093f52ceb under Apache-2.0.
 The implementation is modified for bounded byte-wise handling in Rust.
+Candidate name generation in tools/Compare-CandidateNames.ps1 follows
+the KH2-only EgsTools rules at the same pin; upstream catalogs are
+referenced privately and are not included in this repository.
 
 OpenKH - Open Kingdom Hearts Research and Development
 Copyright 2019-2022 OpenKH Team and Contributors
