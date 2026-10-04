@@ -1,0 +1,12 @@
+KH2FinalRewrite
+
+The package original transform in crates/package_reader/src/original.rs
+is adapted from OpenKH EgsEncryption.cs at commit
+7a3b945c538d32c6a285128c98aefba093f52ceb under Apache-2.0.
+The implementation is modified for bounded byte-wise handling in Rust.
+
+OpenKH - Open Kingdom Hearts Research and Development
+Copyright 2019-2022 OpenKH Team and Contributors
+
+This product includes software developed at
+The OpenKH GitHub Repository (https://git.openkh.dev/).

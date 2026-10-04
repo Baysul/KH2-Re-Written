@@ -1,2 +1,2 @@
-identity_basis,discovered_package_records,package_headers_checked,plain_originals_fingerprinted,bar_containers_checked,bar_records_checked,semantic_assets_decoded,visually_inspected,runtime_referenced,behavior_tested,release_passed,unknown_plain_formats,evidence
-HED-pair-plus-ordinal-plus-name-hash,46076,46076,47,34,23,0,0,0,0,0,13,T003-private-probe-records
+identity_basis,discovered_package_records,package_headers_checked,plain_originals_fingerprinted,unique_original_payloads_checked,transformed_original_samples_checked,replacement_samples_checked,bar_tables_parsed,bar_records_parsed,bar_tables_independently_compared,bar_records_independently_compared,semantic_assets_decoded,visually_inspected,runtime_referenced,behavior_tested,release_passed,unknown_plain_formats,evidence
+HED-pair-plus-ordinal-plus-name-hash,46076,46076,47,64,17,8,45,142,34,23,0,0,0,0,0,13,T003-and-T005-private-probe-records

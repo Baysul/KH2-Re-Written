@@ -7,16 +7,16 @@ Updated 2026-10-03. The [user-supplied roadmap](https://docs.google.com/document
 | P00 | Scope and fidelity contract | Draft authored; core scope confirmed; display/controller/tolerances, vendor-save and voice decisions pending |
 | P01 | Installed-source and release boundary | Policy authored; candidate scanner source/output isolation tested; launch/cache/release enforcement pending |
 | P02 | Installed edition/build identity | 13 files / 16.4 GB hashed twice identically; edition/integrity/shared/language closure unqualified |
-| P03 | Windows/Rust/Bevy environment | Build, image load, native window, clean timed exit and interactive Escape passed; reference boot/controller/second environment pending |
+| P03 | Windows/Rust/Bevy environment | Build/image/window/timed exit and interactive Escape passed; Steam reference title observed (T002); controller/settings/second environment pending |
 | P04 | Durable repository/evidence | Instructions/records/CI/provenance authored; external bundle restored, clean checkout built/tested and synthetic smoke passed (T001R); user review/visibility/second environment pending |
-| P05 | Pinned tool/license audit | Pinned tool audit; six HEDs and 47 unencrypted original fingerprints independently checked (T003); encrypted/compressed/HD payload fixtures and license gaps remain |
+| P05 | Pinned tool/license audit | Six HEDs/47 plain originals/34 BAR tables checked (T003); 23 original storage + 8 HD samples match independent reference (T005); full closure/license audit gaps remain |
 | P06 | Native folder picker and source validation | Not started; supported edition/file profile P02 must be qualified; do not enable play on filename evidence |
-| P07 | Packages/archives/dependencies | 46,076 index/header records; 47 plain originals / 34 BAR tables independently checked (T003); transformed payload/name/language/replacement closure pending |
+| P07 | Packages/archives/dependencies | 46,076 index/header records; 64 unique original payloads and 8 HD samples checked (T003/T005); unsampled payload/name/shared/language closure pending |
 | P08 | Read-only importer/source-bound cache | Not started; P06/P07 qualified input required |
-| P09 | Reference capture/replay harness | Not started; installed reference title/session and backed-up save/config required |
+| P09 | Reference capture/replay harness | Exploratory private credits/title screenshots and hashed save/config copy (T002); controlled settings/input/time/replay harness pending |
 | P10 | Installed executable/runtime research | Not started; qualified binary and controlled reference observations required |
 | P11 | Authoritative simulation boundary | Not started; measured time/input/state contract required |
-| P12 | Traceable decoded representation | Preliminary BAR table reader/source maps only (T003); no qualified model/text/animation decoder or round-trip corpus |
+| P12 | Traceable decoded representation | Bounded storage decoder and BAR table/source maps (T003/T005); no qualified model/text/animation decoder or round-trip corpus |
 | P13 | Asset/animation inspection app | Not started; actual decoded assets required |
 | P14 | PC rendering/presentation | Not started; P09/P12/P13 reference alignment required |
 | P15 | Animation/motion events | Not started; decoded tracks and observed triggers required |
@@ -37,4 +37,4 @@ Updated 2026-10-03. The [user-supplied roadmap](https://docs.google.com/document
 | P30 | Performance/Windows reliability | Not started; full candidate and measured hardware matrix required |
 | P31 | Windows package/release qualification | Not started; all required gates and separate user release decision required |
 
-Next tasks: T002 obtain a normally booted Steam reference, mod/verification history and baseline configuration; continue source inspection with bounded encrypted/compressed original and HD replacement compatibility samples, then close KH2/shared/language dependencies; T004 qualify the supported source profile, then implement P06. Do not substitute a synthetic game loop or a placeholder KH2 viewer for missing measurements.
+Next tasks: T002 observe manually opened reference settings and establish mod/verification history/baseline configuration; inspect independently matching candidate name hashes and KH2/shared/language dependencies; T004 qualify the supported source profile, then implement P06. Do not substitute a synthetic game loop or a placeholder KH2 viewer for missing measurements.

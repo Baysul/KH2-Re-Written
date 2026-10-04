@@ -11,7 +11,7 @@ Status: DRAFT WITH CONFIRMED CORE SCOPE. P00 final acceptance awaits the compari
 | Edition / integrity | Steam language and `Image/dt` names are clues; no clean/International equivalence claim | Unknown | Agent compares file identity and runtime; user/vendor verification |
 | Architecture | Native Rust/Bevy, Windows x86_64 MSVC, own game implementation | Roadmap required | P03 build; P11 headless rules; P31 fresh-machine package |
 | OS / hardware floor | Development on Windows 11; release floor remains unmeasured | Unknown | Agent measures P30; user approves supported test hardware |
-| Display baseline | Propose 1920x1080, 60 Hz, SDR, fixed reference settings; no reference capture yet | Provisional | User approves configuration; agent records mode, scaling, frame pacing and capture settings |
+| Display baseline | Propose 1920x1080, 60 Hz, SDR, fixed reference settings; exploratory title screenshot exists, configuration unverified | Provisional | User approves configuration; agent records mode, scaling, frame pacing and capture settings |
 | Time / simulation | Measure reference clocks, update order, pause/slowdown, RNG, event and animation cadence before selecting simulation frequency | Required, not measured | Agent P09/P10/P17 traces and first-divergence replay |
 | Controls | Keyboard/mouse and Windows XInput controller proposed; button mappings, deadzones, repeat and latency measured | Provisional | User identifies devices; agent P03/P17/P18 tests |
 | Campaign | Full KH2FM route, all worlds/returns, difficulty variants, endings and progression surfaces | Roadmap scope | Agent expands discovered ledger; user plays documented P28 routes |

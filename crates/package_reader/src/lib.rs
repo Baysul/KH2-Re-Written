@@ -1,11 +1,13 @@
-//! Bounded index inspection only. No decoding, decryption or game-data export.
+//! Bounded package inspection. Original data stays in memory; no game-data export.
 //! Layout reference: OpenKH Hed.cs, commit 7a3b945c538d32c6a285128c98aefba093f52ceb.
 
 use serde::Serialize;
 use std::{collections::HashSet, io};
 
 pub mod bar;
+pub mod original;
 pub mod plain;
+pub mod replacement;
 
 pub const RECORD_SIZE: usize = 32;
 pub const MAX_INDEX_BYTES: usize = 32 * 1024 * 1024;

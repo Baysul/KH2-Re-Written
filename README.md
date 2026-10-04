@@ -34,4 +34,10 @@ Developer source probe (unencrypted originals and BAR table metadata only):
 cargo run -p package_reader --bin plain_probe --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/new-plain-report.json'
 ```
 
-This verifies the bound HED hashes and package metadata, retains unknown formats, and exports no original asset files. Encrypted/compressed and HD replacement readers are still under research.
+This verifies the bound HED hashes and package metadata, retains unknown formats, and exports no original asset files. A second developer probe checks bounded storage samples and their first two HD replacements:
+
+```powershell
+cargo run -p package_reader --bin original_probe --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/new-storage-report.json'
+```
+
+The storage reader is checked against pinned OpenKH and .NET on finite samples; source names, full dependency closure and semantic/gameplay decoding remain under research. Both commands retain only private metadata/hashes and require a full source rescan to establish mutation assurance. See [T005 evidence](docs/tasks/T005-storage-decoding.md).
