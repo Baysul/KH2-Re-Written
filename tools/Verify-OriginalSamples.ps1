@@ -72,6 +72,40 @@ namespace OpenKh.Kh2.Messages.Internals {
             }
             throw new System.IO.InvalidDataException("Unterminated");
         }
+        public static string TextFingerprint(byte[] data, out int count, out int characters,
+            out int complex, out int unsupported, out int unmapped) {
+            int tokenCount; long[] opcodes;
+            Fingerprint(data, out tokenCount, out opcodes);
+            count = 0; characters = 0; complex = 0; unsupported = 0; unmapped = 0;
+            for (int opcode = 0x19; opcode <= 0x1f; opcode++) unmapped += (int)opcodes[opcode];
+            // The upstream generic '?' is intentionally not compatibility evidence.
+            if (unmapped != 0) return null;
+            var decoded = new InternationalSystemDecode().Decode(data);
+            using (var buffer = new System.IO.MemoryStream()) {
+                using (var writer = new System.IO.BinaryWriter(buffer, System.Text.Encoding.UTF8, true)) {
+                    foreach (var entry in decoded) {
+                        byte tag; byte[] content;
+                        if (entry.Command == OpenKh.Kh2.Messages.MessageCommand.PrintText ||
+                            entry.Command == OpenKh.Kh2.Messages.MessageCommand.PrintComplex) {
+                            tag = (byte)(entry.Command == OpenKh.Kh2.Messages.MessageCommand.PrintText ? 1 : 2);
+                            content = System.Text.Encoding.UTF8.GetBytes(entry.Text);
+                            characters += entry.Text.Length; // All characters in this pinned profile are BMP.
+                            if (tag == 2) complex++;
+                        } else if (entry.Command == OpenKh.Kh2.Messages.MessageCommand.Unsupported) {
+                            tag = 4; content = entry.Data; unsupported++;
+                        } else {
+                            tag = 3;
+                            byte opcode = InternationalSystemDecode._table.Single(x => x.Value.Command == entry.Command).Key;
+                            content = new byte[1 + entry.Data.Length]; content[0] = opcode;
+                            Array.Copy(entry.Data, 0, content, 1, entry.Data.Length);
+                        }
+                        writer.Write(tag); writer.Write(content.Length); writer.Write(content); count++;
+                    }
+                    writer.Flush();
+                }
+                return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(buffer.ToArray())).ToLowerInvariant();
+            }
+        }
     }
 }
 '@
@@ -109,6 +143,11 @@ $spacingTablesVerified = 0
 $tokenRecordsVerified = 0
 $tokenFailuresVerified = 0
 $systemTokensVerified = 0L
+$textRecordsVerified = 0
+$unicodeCharactersVerified = 0L
+$complexSymbolsVerified = 0L
+$unsupportedTextSegmentsVerified = 0L
+$unmappedTextRecords = 0
 if ($tokenMode) {
     $arities = @(0,0,0,0,1,6,1,4,3,1,1,1,1,0,1,5,0,4,2,4,2,2,1,2,2,1,1,1,1,1,1,1)
     foreach ($opcode in 0..255) {
@@ -193,6 +232,9 @@ foreach ($sample in $report.samples) {
                     if ($table.system_decoder_tokens -and $table.system_decoder_tokens.records.Count -ne $decodedMessages.Count) {
                         throw 'Reference token record count mismatch'
                     }
+                    if ($table.international_text.requested -and $table.international_text.records.Count -ne $decodedMessages.Count) {
+                        throw 'International text record count mismatch'
+                    }
                     for ($recordIndex = 0; $recordIndex -lt $decodedMessages.Count; $recordIndex++) {
                         $actual = $decodedMessages[$recordIndex]
                         $expectedMessage = $table.inventory.entries[$recordIndex]
@@ -222,6 +264,30 @@ foreach ($sample in $report.samples) {
                                     $observation.observation.boundaries_sha256 -cne $fingerprint) {throw 'Independent token boundary mismatch'}
                                 for ($opcode=0; $opcode -lt 256; $opcode++) {$tokenCounts[$opcode]+=$opcodes[$opcode]}
                                 $tokenRecordsVerified++; $systemTokensVerified+=$tokenCount
+                            }
+                        }
+                        if ($table.international_text.requested) {
+                            $textRecord = $table.international_text.records[$recordIndex]
+                            if ($textRecord.id -ne $actual.Id -or $textRecord.source_offset -ne $sourceOffset) {
+                                throw 'International text source identity differs'
+                            }
+                            $segments=0; $characters=0; $complex=0; $unsupported=0; $unmapped=0
+                            $fingerprint=[OpenKh.Kh2.Messages.Internals.ResearchSystemTokens]::TextFingerprint(
+                                $actual.Data,[ref]$segments,[ref]$characters,[ref]$complex,[ref]$unsupported,[ref]$unmapped)
+                            $textObservation=$textRecord.observation
+                            if ($textObservation.status -cne 'PASS' -or $textObservation.unmapped_tables -ne $unmapped) {
+                                throw 'International decode status/unmapped count differs'
+                            }
+                            if ($unmapped) {
+                                $unmappedTextRecords++
+                            } else {
+                                if ($textObservation.content_sha256 -cne $fingerprint -or
+                                    $textObservation.segment_count -ne $segments -or
+                                    $textObservation.unicode_scalar_count -ne $characters -or
+                                    $textObservation.complex_symbols -ne $complex -or
+                                    $textObservation.unsupported_segments -ne $unsupported) {throw 'International decoded content differs'}
+                                $textRecordsVerified++; $unicodeCharactersVerified+=$characters
+                                $complexSymbolsVerified+=$complex; $unsupportedTextSegmentsVerified+=$unsupported
                             }
                         }
                     }
@@ -334,3 +400,4 @@ foreach ($sample in $report.samples) {
 if ($messageMode) { "PASS: $barRecordsVerified BAR records and $messageRecordsVerified message records / $messageEncodedBytes encoded bytes match independent scalars and pinned OpenKH Msg.Read; no glyph/Unicode mapping asserted." }
 if ($messageMode) { "PASS: $fontImagesVerified font palette planes / $fontPixelsVerified pixels match pinned RawBitmap packed pixels and palettes plus independent RGBA expansion; $spacingTablesVerified spacing byte tables match. Runtime glyph mapping/rendering remains unverified." }
 if ($tokenMode) { "PASS: 256 generated opcode arities; $tokenRecordsVerified records / $systemTokensVerified system tokens match pinned decoder-model boundaries and opcode counts; $tokenFailuresVerified record failures agree. No Unicode/runtime semantics asserted." }
+if ($textRecordsVerified -or $unmappedTextRecords) { "PASS: $textRecordsVerified explicit International-profile records / $unicodeCharactersVerified Unicode scalars / $complexSymbolsVerified complex symbols / $unsupportedTextSegmentsVerified retained unsupported segments match unchanged decoder content. NOT QUALIFIED: $unmappedTextRecords generic-table records; runtime language/rendering remains unverified." }

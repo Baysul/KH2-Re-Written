@@ -2,6 +2,7 @@ use package_reader::{
     bar::read_bar,
     font::{FontSlot, PaletteLane, decode_font},
     message::{read_messages, system_message_tokens},
+    message_text::{InternationalContent, decode_international_system, international_fingerprint},
     original::read_original,
     probe::ProbeSource,
 };
@@ -27,6 +28,7 @@ struct Selection {
     name_hash: [u8; 16],
     candidate_name: String,
     purpose: String,
+    text_profile: Option<String>,
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -68,6 +70,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             || !matches!(item.purpose.as_str(), "message" | "font")
             || !seen.insert((&item.index, item.ordinal))
             || item.candidate_name.len() > 1024
+            || item.text_profile.as_deref().is_some_and(|profile| {
+                profile != "international_system" || item.purpose != "message"
+            })
         {
             return Err(
                 "selection contains unsupported index/purpose or duplicate identity".into(),
@@ -167,6 +172,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let mut opcode_counts = vec![0u64; 256];
                     let mut tokenization_failures = 0;
                     let mut token_bytes = 0;
+                    let mut international_records = Vec::new();
                     for entry in &inventory.entries {
                         token_bytes += entry.encoded_length as usize;
                         if token_bytes > 128 * 1024 * 1024 {
@@ -194,6 +200,41 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         token_records.push(serde_json::json!({"id":entry.id,
                             "source_offset":entry.source_offset,"observation":observation}));
+                        if item.text_profile.as_deref() == Some("international_system") {
+                            let observation = match decode_international_system(encoded) {
+                                Ok(segments) => {
+                                    let mut characters = 0;
+                                    let mut complex_symbols = 0;
+                                    let mut unsupported = 0;
+                                    let mut unmapped = 0;
+                                    for segment in &segments {
+                                        match &segment.content {
+                                            InternationalContent::Text(text) => {
+                                                characters += text.chars().count();
+                                            }
+                                            InternationalContent::Complex(text) => {
+                                                characters += text.chars().count();
+                                                complex_symbols += 1;
+                                            }
+                                            InternationalContent::Unsupported { .. } => {
+                                                unsupported += 1
+                                            }
+                                            InternationalContent::UnmappedTable => unmapped += 1,
+                                            InternationalContent::Command => {}
+                                        }
+                                    }
+                                    serde_json::json!({"status":"PASS", "segment_count":segments.len(),
+                                        "content_sha256":international_fingerprint(&segments),
+                                        "unicode_scalar_count":characters,"complex_symbols":complex_symbols,
+                                        "unsupported_segments":unsupported,"unmapped_tables":unmapped})
+                                }
+                                Err(error) => {
+                                    serde_json::json!({"status":"FAIL", "reason":error.to_string()})
+                                }
+                            };
+                            international_records.push(serde_json::json!({"id":entry.id,
+                                "source_offset":entry.source_offset,"observation":observation}));
+                        }
                     }
                     message_tables.push(serde_json::json!({"bar_ordinal":ordinal,
                         "bar_payload_offset":child.offset,"bar_payload_size":child.size,
@@ -203,7 +244,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "record_reader_opcode_17_arity_conflict":true,
                             "failed_records":tokenization_failures,
                             "opcode_counts_for_successful_records":opcode_counts,
-                            "records":token_records}}));
+                            "records":token_records},
+                        "international_text":{"requested":item.text_profile.as_deref()==Some("international_system"),
+                            "qualification":"explicit_public_profile_only_not_runtime_language",
+                            "runtime_semantics_verified":false,"original_bytes_retained":true,
+                            "records":international_records}}));
                 }
             }
             if item.purpose == "message" && message_tables.is_empty() {
@@ -221,7 +266,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let count = samples.len();
     let result = serde_json::json!({"schema_version":1,"source_content_identity":source.content_identity(),
         "qualification":"message_font_structure_inspection_only","source_check":"HED hashes and package size/mtime; full rescan required for mutation assurance",
-        "asset_files_exported":!previews.is_empty(),"text_decoded_to_unicode":false,
+        "asset_files_exported":!previews.is_empty(),
+        "text_decoded_to_unicode":selection.selections.iter().any(|item|item.text_profile.as_deref()==Some("international_system")),
         "font_pixels_rendered":!previews.is_empty(),"font_preview_kind":"checkerboard_composited_inspection_only",
         "samples":samples});
     for (path, bytes) in &previews {
