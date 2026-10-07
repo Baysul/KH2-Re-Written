@@ -8,6 +8,7 @@ use std::{collections::HashSet, io};
 pub mod bar;
 pub mod font;
 pub mod font_cell;
+pub mod hd_image;
 pub mod message;
 pub mod message_text;
 pub mod original;

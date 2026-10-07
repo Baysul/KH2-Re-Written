@@ -114,35 +114,57 @@ impl DecodedFont {
     /// Private visual inspection only: 24-bit BMP composited onto a checkerboard.
     /// The authoritative decoded RGBA bytes are fingerprinted separately.
     pub fn write_preview(&self, writer: &mut impl Write) -> io::Result<()> {
-        let stride = (self.width * 3).next_multiple_of(4);
-        let data_size = stride * self.height;
-        writer.write_all(b"BM")?;
-        writer.write_all(&((54 + data_size) as u32).to_le_bytes())?;
-        writer.write_all(&[0; 4])?;
-        writer.write_all(&54u32.to_le_bytes())?;
-        writer.write_all(&40u32.to_le_bytes())?;
-        writer.write_all(&(self.width as i32).to_le_bytes())?;
-        writer.write_all(&(-(self.height as i32)).to_le_bytes())?;
-        writer.write_all(&1u16.to_le_bytes())?;
-        writer.write_all(&24u16.to_le_bytes())?;
-        writer.write_all(&0u32.to_le_bytes())?;
-        writer.write_all(&(data_size as u32).to_le_bytes())?;
-        writer.write_all(&[0; 16])?;
-        let mut row = vec![0; stride];
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let rgba = &self.pixels_rgba[(y * self.width + x) * 4..][..4];
-                let background = if (x / 8 + y / 8) % 2 == 0 { 24 } else { 40 };
-                for (dst, src) in [2, 1, 0].into_iter().enumerate() {
-                    let alpha = rgba[3] as u32;
-                    row[x * 3 + dst] =
-                        ((rgba[src] as u32 * alpha + background * (255 - alpha) + 127) / 255) as u8;
-                }
-            }
-            writer.write_all(&row)?;
-        }
-        Ok(())
+        write_rgba_preview(writer, self.width, self.height, &self.pixels_rgba)
     }
+}
+
+/// Private 24-bit inspection BMP, composited on a checkerboard. Input pixels
+/// remain separate and authoritative; this does not implement game rendering.
+pub fn write_rgba_preview(
+    writer: &mut impl Write,
+    width: usize,
+    height: usize,
+    pixels: &[u8],
+) -> io::Result<()> {
+    if width == 0
+        || height == 0
+        || width > 4096
+        || height > 4096
+        || pixels.len() != width * height * 4
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid preview dimensions/pixels",
+        ));
+    }
+    let stride = (width * 3).next_multiple_of(4);
+    let data_size = stride * height;
+    writer.write_all(b"BM")?;
+    writer.write_all(&((54 + data_size) as u32).to_le_bytes())?;
+    writer.write_all(&[0; 4])?;
+    writer.write_all(&54u32.to_le_bytes())?;
+    writer.write_all(&40u32.to_le_bytes())?;
+    writer.write_all(&(width as i32).to_le_bytes())?;
+    writer.write_all(&(-(height as i32)).to_le_bytes())?;
+    writer.write_all(&1u16.to_le_bytes())?;
+    writer.write_all(&24u16.to_le_bytes())?;
+    writer.write_all(&0u32.to_le_bytes())?;
+    writer.write_all(&(data_size as u32).to_le_bytes())?;
+    writer.write_all(&[0; 16])?;
+    let mut row = vec![0; stride];
+    for y in 0..height {
+        for x in 0..width {
+            let rgba = &pixels[(y * width + x) * 4..][..4];
+            let background = if (x / 8 + y / 8) % 2 == 0 { 24 } else { 40 };
+            for (dst, src) in [2, 1, 0].into_iter().enumerate() {
+                let alpha = rgba[3] as u32;
+                row[x * 3 + dst] =
+                    ((rgba[src] as u32 * alpha + background * (255 - alpha) + 127) / 255) as u8;
+            }
+        }
+        writer.write_all(&row)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

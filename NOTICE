@@ -6,6 +6,11 @@ is adapted from OpenKH EgsEncryption.cs at commit
 The implementation is modified for bounded byte-wise handling in Rust.
 Replacement payload alignment follows EgsHdAsset.cs at the same pin;
 complete explicit selection adds count and cumulative allocation bounds.
+HD image decoding uses image 0.25.10/png 0.18.1 and crc32fast 1.5.2
+(MIT OR Apache-2.0), with owned range/profile checks. The codec feature graph
+uses zlib-rs 0.6.8 (Zlib); its unchanged notice is retained in
+docs/release/zlib-rs-LICENSE.txt. Full dependency attribution remains a release
+qualification requirement.
 Candidate name generation in tools/Compare-CandidateNames.ps1 follows
 the KH2-only EgsTools rules at the same pin; upstream catalogs are
 referenced privately and are not included in this repository.

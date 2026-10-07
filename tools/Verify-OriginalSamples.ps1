@@ -3,13 +3,25 @@ param(
     [Parameter(Mandatory)][string]$InstallRoot,
     [Parameter(Mandatory)][string]$ProbePath,
     [Parameter(Mandatory)][string]$OpenKhRoot,
-    [string]$ReplacementPreviewDirectory
+    [string]$ReplacementPreviewDirectory,
+    [string]$HdImageOraclePath,
+    [string]$HdImageOracleDirectory
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ManagedReader.ps1')
 if ($ReplacementPreviewDirectory) {
     $ReplacementPreviewDirectory = Assert-PrivateResearchDirectory -Directory $ReplacementPreviewDirectory -SourceRoot $InstallRoot
 }
+if ([bool]$HdImageOraclePath -ne [bool]$HdImageOracleDirectory) {throw 'HD oracle executable and private directory must be supplied together'}
+if ($HdImageOracleDirectory) {
+    $HdImageOracleDirectory = Assert-PrivateResearchDirectory -Directory $HdImageOracleDirectory -SourceRoot $InstallRoot
+    $HdImageOraclePath = Get-ResearchCanonicalPath $HdImageOraclePath
+    $null = Assert-PrivateResearchDirectory -Directory (Split-Path -Parent $HdImageOraclePath) -SourceRoot $InstallRoot
+}
+$hdPixels = 0L
+$hdImages = 0
+$hdFailedImages = 0
+$hdComparison = @()
 $pngPreviews = 0
 $previewPixels = 0L
 $pin = '7a3b945c538d32c6a285128c98aefba093f52ceb'
@@ -17,6 +29,7 @@ if ((git -C $OpenKhRoot rev-parse HEAD) -ne $pin) { throw 'OpenKH checkout is no
 if (git -C $OpenKhRoot status --porcelain -- OpenKh.Egs/EgsEncryption.cs) { throw 'Reference transform is locally modified' }
 $referenceText = Get-Content -LiteralPath (Join-Path $OpenKhRoot 'OpenKh.Egs/EgsEncryption.cs') -Raw
 $report = Get-Content -LiteralPath $ProbePath -Raw | ConvertFrom-Json
+if ($HdImageOracleDirectory -and !$report.hd_image_decoding_requested) {throw 'Native pixel comparison requires explicitly requested HD image observations'}
 $messageMode = $report.qualification -eq 'message_font_structure_inspection_only'
 $tokenMode = $false
 $reencodingMode = $false
@@ -509,6 +522,31 @@ foreach ($sample in $report.samples) {
                 [Convert]::ToHexString([byte[]]$replacementData[0..([Math]::Min(128,$replacementData.Length)-1)]) -ne $replacement.inspection_prefix_hex) {
                 throw 'Independent replacement inspection prefix mismatch'
             }
+            if ($HdImageOracleDirectory -and $replacement.decoded_image) {
+                $image = $replacement.decoded_image
+                if ($image.width -le 0 -or $image.height -le 0 -or $image.width -gt 4096 -or $image.height -gt 4096 -or
+                    $image.rgba_byte_count -ne [long]$image.width * $image.height * 4 -or
+                    $hdPixels + [long]$image.width * $image.height -gt 33554432) {throw 'HD image observation exceeds oracle bounds'}
+                $stem = 'sample-{0:D2}-replacement-{1:D2}' -f $report.samples.IndexOf($sample),[int]$meta.ordinal
+                $inputPath = Join-Path $HdImageOracleDirectory ($stem+'.image')
+                $rgbaPath = Join-Path $HdImageOracleDirectory ($stem+'.rgba')
+                Write-NewResearchFile -Path $inputPath -Bytes $replacementData
+                & $HdImageOraclePath $inputPath $rgbaPath
+                if ($LASTEXITCODE -ne 0) {throw 'Native HD pixel oracle failed'}
+                if ((Get-Item -LiteralPath $rgbaPath).Length -ne 12 + $image.rgba_byte_count) {throw 'Oracle RGBA size mismatch'}
+                $rgba = [IO.File]::ReadAllBytes($rgbaPath)
+                if ([Text.Encoding]::ASCII.GetString($rgba,0,4) -ne 'RGBA' -or
+                    [BitConverter]::ToUInt32($rgba,4) -ne $image.width -or [BitConverter]::ToUInt32($rgba,8) -ne $image.height) {throw 'Native image dimensions mismatch'}
+                $pixelStream = [IO.MemoryStream]::new($rgba,12,$rgba.Length-12,$false)
+                try {$pixelHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pixelStream))}
+                finally {$pixelStream.Dispose()}
+                $exact = $pixelHash -eq $image.pixels_rgba_sha256
+                $hdComparison += [ordered]@{id=$stem;format=$image.format;width=$image.width;height=$image.height;
+                    exact=$exact;rust_rgba_sha256=$image.pixels_rgba_sha256;wic_rgba_sha256=$pixelHash.ToLowerInvariant();
+                    input_file=$inputPath;pixel_file=$rgbaPath}
+                if ($exact) {$hdImages++} else {$hdFailedImages++; "FAIL: native HD pixel hash mismatch: $stem"}
+                $hdPixels += [long]$image.width * $image.height
+            }
             if ($ReplacementPreviewDirectory -and $replacementData.Length -ge 33 -and
                 [Convert]::ToHexString([byte[]]$replacementData[0..7]) -eq '89504E470D0A1A0A') {
                 # Windows' existing PNG decoder creates a derived preview only.
@@ -555,6 +593,11 @@ foreach ($sample in $report.samples) {
 }
 "PASS: $($report.samples.Count) originals / $totalBytes bytes and $replacementVerified replacements / $replacementBytes bytes agree with pinned OpenKH transform and .NET deflate; source was only read."
 if ($ReplacementPreviewDirectory) {"PASS: $pngPreviews independently decoded PNG previews / $previewPixels pixels saved privately; DDS pixels and installed rendering are unqualified."}
+if ($HdImageOracleDirectory) {
+    Write-NewResearchFile -Path (Join-Path $HdImageOracleDirectory 'comparison.json') -Bytes ([Text.Encoding]::UTF8.GetBytes(($hdComparison|ConvertTo-Json -Depth 6)))
+    "Native WIC comparison: $hdImages exact images, $hdFailedImages mismatches, $hdPixels compared pixels; installed rendering remains unqualified."
+    if ($hdFailedImages) {throw 'Independent HD pixel comparison has unresolved mismatches'}
+}
 if ($messageMode) { "PASS: $barRecordsVerified BAR records and $messageRecordsVerified message records / $messageEncodedBytes encoded bytes match independent scalars and pinned OpenKH Msg.Read; no glyph/Unicode mapping asserted." }
 if ($messageMode) { "PASS: $fontImagesVerified font palette planes / $fontPixelsVerified pixels match pinned RawBitmap packed pixels and palettes plus independent RGBA expansion; $spacingTablesVerified spacing byte tables match. Runtime glyph mapping/rendering remains unverified." }
 if ($tokenMode) { "PASS: 256 generated opcode arities; $tokenRecordsVerified records / $systemTokensVerified system tokens match pinned decoder-model boundaries and opcode counts; $tokenFailuresVerified record failures agree. No Unicode/runtime semantics asserted." }

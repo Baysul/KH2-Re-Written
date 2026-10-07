@@ -13,6 +13,8 @@ struct SelectionFile {
     schema_version: u32,
     source_content_identity: String,
     selections: Vec<Selection>,
+    #[serde(default)]
+    inspect_hd_images: bool,
 }
 #[derive(Deserialize)]
 struct Selection {
@@ -23,15 +25,15 @@ struct Selection {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if !matches!(args.len(), 3 | 4) {
-        return Err("usage: original_probe <selected-install-root> <private-source-manifest.json> <new-private-report.json> [private-explicit-selection.json]".into());
+    if !matches!(args.len(), 3..=5) {
+        return Err("usage: original_probe <selected-install-root> <private-source-manifest.json> <new-private-report.json> [private-explicit-selection.json] [existing-private-preview-directory]".into());
     }
     let source = package_reader::probe::ProbeSource::bind(
         &PathBuf::from(&args[0]),
         &PathBuf::from(&args[1]),
     )?;
     let output = source.output_path(&PathBuf::from(&args[2]))?;
-    let selections = if let Some(path) = args.get(3) {
+    let (selections, inspect_images) = if let Some(path) = args.get(3) {
         let mut bytes = Vec::new();
         File::open(path)?
             .take(1024 * 1024 + 1)
@@ -59,12 +61,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        Some(selection.selections)
+        (Some(selection.selections), selection.inspect_hd_images)
     } else {
-        None
+        (None, false)
     };
+    let preview_dir = args.get(4).map(PathBuf::from);
+    if preview_dir
+        .as_ref()
+        .is_some_and(|p| !inspect_images || !p.is_dir())
+    {
+        return Err(
+            "HD previews require explicit image inspection and an existing private directory"
+                .into(),
+        );
+    }
+    if let Some(directory) = &preview_dir {
+        source.output_path(&directory.join("preview-admission-check.bmp"))?;
+    }
     let mut samples = Vec::new();
     let mut total_bytes = 0usize;
+    let mut image_bytes = 0usize;
     for (relative, _) in source_identity::required_files()
         .into_iter()
         .filter(|(name, _)| name.ends_with(".hed"))
@@ -127,17 +143,62 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if total_bytes > 128 * 1024 * 1024 {
                 return Err("original probe exceeds 128 MiB cumulative decoded limit".into());
             }
-            let replacements: Vec<_> = replacement_samples
-            .into_iter()
-            .map(|sample| {
-                serde_json::json!({
+            let mut replacements = Vec::new();
+            for sample in replacement_samples {
+                let decoded_image = if inspect_images {
+                    let image = package_reader::hd_image::decode_hd_image(
+                        &sample.bytes,
+                        sample.metadata.declared_decompressed_length as usize,
+                    )?;
+                    image_bytes += image.pixels_rgba.len();
+                    if image_bytes > 128 * 1024 * 1024 {
+                        return Err("HD image probe exceeds 128 MiB cumulative RGBA limit".into());
+                    }
+                    let preview = if let Some(directory) = &preview_dir {
+                        let name = format!(
+                            "sample-{:02}-replacement-{:02}.bmp",
+                            samples.len(),
+                            sample.metadata.ordinal
+                        );
+                        let path = source.output_path(&directory.join(&name))?;
+                        let mut file =
+                            OpenOptions::new().write(true).create_new(true).open(path)?;
+                        image.write_preview(&mut file)?;
+                        file.sync_all()?;
+                        let pixel_name = name.replace(".bmp", ".rgba");
+                        let pixel_path = source.output_path(&directory.join(pixel_name))?;
+                        let mut pixel_file = OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(pixel_path)?;
+                        pixel_file.write_all(b"RGBA")?;
+                        pixel_file.write_all(&image.width.to_le_bytes())?;
+                        pixel_file.write_all(&image.height.to_le_bytes())?;
+                        pixel_file.write_all(&image.pixels_rgba)?;
+                        pixel_file.sync_all()?;
+                        Some(name)
+                    } else {
+                        None
+                    };
+                    Some(
+                        serde_json::json!({"format":image.format,"width":image.width,"height":image.height,
+                        "encoded_length":image.encoded_length,"storage_padding":image.storage_padding,
+                        "rgba_byte_count":image.pixels_rgba.len(),
+                        "pixels_rgba_sha256":format!("{:x}",Sha256::digest(&image.pixels_rgba)),
+                        "preview_file":preview,"pixel_decode_profile":"image_0_25_10_stored_rgba8",
+                        "color_profile_transform_applied":false,"independent_pixel_check":"NOT RUN","runtime_verified":false}),
+                    )
+                } else {
+                    None
+                };
+                replacements.push(serde_json::json!({
                     "metadata":sample.metadata,"decoded_size":sample.bytes.len(),
                     "format_hint":if sample.bytes.starts_with(b"DDS ") {"DDS"} else if sample.bytes.starts_with(b"\x89PNG\r\n\x1a\n") {"PNG"} else {"unknown"},
                     "inspection_prefix_hex":if selections.is_some() {Some(sample.bytes.iter().take(128).map(|b| format!("{b:02x}")).collect::<String>())} else {None},
+                    "decoded_image":decoded_image,
                     "sha256":format!("{:x}",Sha256::digest(&sample.bytes))
-                })
-            })
-            .collect();
+                }));
+            }
             let format_hint = if original.bytes.starts_with(b"BAR\x01") {
                 "BAR"
             } else if original.bytes.starts_with(b"DDS ") {
@@ -170,6 +231,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "qualification":"bounded_original_sample_inspection_only","source_check":"HED content hashes; package size/mtime; full rescan required for mutation assurance",
         "selection_policy":if selections.is_some() {"explicit identities with every replacement; any decoding error aborts"} else {"first two originals per storage category per index, with their first two replacements; any decoding error aborts"},
         "all_declared_replacements_requested":selections.is_some(),
+        "hd_image_decoding_requested":inspect_images,
         "original_asset_files_exported":false,"samples":samples});
     let report_bytes = serde_json::to_vec_pretty(&result)?;
     if report_bytes.len() > 32 * 1024 * 1024 {
