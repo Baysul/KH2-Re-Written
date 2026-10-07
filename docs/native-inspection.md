@@ -58,3 +58,5 @@ See [T013](tasks/T013-startup-path.md) for the PE/CLR entry distinction, loader 
 [T014](tasks/T014-startup-followup.md) follows two proven direct branches beyond the CLR MethodDef list and independently checks the startup worker and its call target. A mutable indirect-call slot is retained as a static lead; its file value does not establish a live destination.
 
 [T015](tasks/T015-static-indirect-entry.md) qualifies that static-slot route and independently checks its application entry candidate. Recorded global operands/direct branches guide subsequent initialization research without establishing ownership or live execution.
+
+[T016](tasks/T016-initialization-preflight.md) independently checks three initialization listings and links an incoming object's field initialization/global assignment to the earlier getter. Nested calls may change the field before assignment. Language strings/interface ABI, final values and executed behavior remain unqualified; no product rule is derived from this static relationship.
