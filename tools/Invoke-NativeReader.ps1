@@ -8,10 +8,12 @@ param(
     [Parameter(Mandatory)][string]$OutputDirectory,
     [string]$ManagedInventory,
     [string]$ConformanceReceipt,
+    [string]$ParentNativeDirectory,
     [switch]$PreservePrivateProject
 )
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'ManagedReader.ps1')
+. (Join-Path $PSScriptRoot 'NativeReader.ps1')
 $output=Assert-PrivateResearchDirectory $OutputDirectory $InstallRoot
 $inputPath=Get-ResearchCanonicalPath $InputFile
 $inputItem=Get-Item -LiteralPath $inputPath
@@ -57,6 +59,7 @@ try {
     if ($inputPe.PEHeaders.CoffHeader.Machine -ne [Reflection.PortableExecutable.Machine]::Amd64 -or
         $inputPe.PEHeaders.PEHeader.Magic -ne [Reflection.PortableExecutable.PEMagic]::PE32Plus) {throw 'Native reader requires observed x64 PE32+'}
     $expectedImageBase=$inputPe.PEHeaders.PEHeader.ImageBase.ToString('x')
+    $inputSections=$inputPe.PEHeaders.SectionHeaders
 } finally {$inputPe.Dispose();$inputMemory.Dispose()}
 $sourceRoot=Get-ResearchCanonicalPath $InstallRoot
 $privateRoot=Get-ResearchCanonicalPath (Join-Path $env:LOCALAPPDATA 'KH2FinalRewrite/research')
@@ -90,10 +93,55 @@ if ($inputPath.StartsWith($sourceRoot+[IO.Path]::DirectorySeparatorChar,[StringC
     if ($inventory.qualification -ne 'quarantined_static_managed_research_only' -or
         $inventory.executable_sha256 -cne $inputHash -or $selection.source_content_identity -cnotmatch '^[0-9a-f]{64}$' -or
         $selection.source_content_identity -cne $inventory.source_content_identity) {throw 'Native inventory/selection/source binding differs'}
+    if (@($selection.methods | Where-Object kind -eq 'direct_branch').Count) {
+        if (!$ParentNativeDirectory) {throw 'Direct branch selection requires a qualified private parent run'}
+        $parent=Assert-PrivateResearchDirectory $ParentNativeDirectory $InstallRoot
+        $parentReportPath=Join-Path $parent 'report.json'
+        $parentReceiptPath=Join-Path $parent 'launcher-receipt.json'
+        if ((Get-Item $parentReportPath).Length -gt 8388608 -or (Get-Item $parentReceiptPath).Length -gt 1048576) {
+            throw 'Parent native evidence exceeds JSON bounds'
+        }
+        $parentReceipt=Get-Content $parentReceiptPath -Raw | ConvertFrom-Json
+        $parentReport=Get-Content $parentReportPath -Raw | ConvertFrom-Json
+        $parentReportHash=(Get-FileHash $parentReportPath).Hash.ToLowerInvariant()
+        if ($parentReceipt.verdict -ne 'PASS' -or $parentReceipt.qualification -ne 'static_native_reader_only' -or
+            $parentReceipt.input_sha256 -cne $inputHash -or $parentReceipt.report_sha256 -ine $parentReportHash -or
+            $parentReceipt.script_sha256 -ine (Get-FileHash (Join-Path $PSScriptRoot 'NativeSelected.java')).Hash -or
+            $parentReceipt.package_sha256 -ne $oracleLauncher.package_sha256 -or
+            $parentReceipt.java_sha256 -ine $oracleLauncher.java_sha256 -or
+            $parentReceipt.loader_profile -ne $oracleLauncher.loader_profile -or
+            $parentReport.qualification -ne 'quarantined_static_native_research_only' -or
+            $parentReport.executable_sha256 -cne $inputHash -or $parentReport.ghidra_version -ne '12.1.4' -or
+            $parentReport.image_base -cne $expectedImageBase -or $parentReport.language -ne 'x86:LE:64:default' -or
+            $parentReport.compiler_spec -ne 'windows') {throw 'Parent native evidence identity/profile differs'}
+        foreach ($component in $coreHashes.Keys) {
+            if ($parentReceipt.core_components.$component -cne $coreHashes[$component]) {throw 'Parent native engine components differ'}
+        }
+    }
     foreach ($method in $selection.methods) {
-        $rows=@($inventory.methods | Where-Object {$_.token -ceq $method.token})
-        if ($rows.Count -ne 1 -or $rows[0].implementation_kind -ne 'Native' -or $rows[0].rva -ne $method.rva -or
-            $rows[0].method_file_offset -ne $method.file_offset) {throw 'Selected native lead differs from bound MethodDef'}
+        if (!$method.kind -or $method.kind -eq 'methoddef') {
+            $rows=@($inventory.methods | Where-Object {$_.token -ceq $method.token})
+            if ($rows.Count -ne 1 -or $rows[0].implementation_kind -ne 'Native' -or $rows[0].rva -ne $method.rva -or
+                $rows[0].method_file_offset -ne $method.file_offset) {throw 'Selected native lead differs from bound MethodDef'}
+        } elseif ($method.kind -eq 'direct_branch') {
+            if ($method.parent_report_sha256 -cne $parentReportHash) {throw 'Selected branch parent report differs'}
+            $findings=@($parentReport.findings | Where-Object rva -eq $method.parent_function_rva)
+            $instructions=@($findings.instructions | Where-Object rva -eq $method.instruction_rva)
+            if ($findings.Count -ne 1 -or $instructions.Count -ne 1 -or $instructions[0].size -ne 5) {
+                throw 'Selected branch instruction is not uniquely recorded in parent body'
+            }
+            $instruction=$instructions[0]
+            $offset=Get-NativePeOffset $inputSections $instruction.rva 5 $inputBytes.LongLength
+            $bytes=[byte[]]$inputBytes[$offset..($offset+4)]
+            if ($offset -ne $instruction.file_offset -or
+                [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() -cne $instruction.sha256) {
+                throw 'Parent branch instruction differs from physical source'
+            }
+            $target=Get-NativeRelativeBranchTarget $inputBytes $instruction.rva $offset
+            if ($target -ne $method.rva -or (Get-NativePeOffset $inputSections $target $method.prefix_size $inputBytes.LongLength) -ne $method.file_offset) {
+                throw 'Selected branch target or physical mapping differs'
+            }
+        } else {throw 'Unknown native selection kind'}
     }
 } elseif (!$inputPath.StartsWith($privateRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) {
     throw 'Native input must be selected KH2FM or a private authored fixture'
@@ -140,6 +188,8 @@ $receipt=[ordered]@{verdict='PASS';qualification='static_native_reader_only';inp
     report_sha256=(Get-FileHash -LiteralPath (Join-Path $output 'report.json')).Hash;
     private_project_preserved=[bool]$PreservePrivateProject;
     loader_profile='native_pe_no_cli_no_ordinal_lookup_v1';
+    parent_report_sha256=if ($ParentNativeDirectory) {$parentReportHash} else {$null};
+    branch_helper_sha256=(Get-FileHash (Join-Path $PSScriptRoot 'NativeReader.ps1')).Hash;
     limitations='Native PE import with CLR parsing disabled; no auto-analysis, target execution, fresh full source scan or source-support qualification'}
 Write-NewResearchFile (Join-Path $output 'launcher-receipt.json') ([Text.Encoding]::UTF8.GetBytes(($receipt | ConvertTo-Json -Depth 5)))
 Write-Output "PASS: $($report.findings.Count) selected static native findings; installed input unchanged."
