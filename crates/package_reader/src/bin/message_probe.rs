@@ -1,5 +1,9 @@
 use package_reader::{
-    bar::read_bar, message::read_messages, original::read_original, probe::ProbeSource,
+    bar::read_bar,
+    font::{FontSlot, PaletteLane, decode_font},
+    message::read_messages,
+    original::read_original,
+    probe::ProbeSource,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -27,11 +31,17 @@ struct Selection {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.len() != 4 {
-        return Err("usage: message_probe <source-root> <private-manifest> <private-selection> <new-private-report>".into());
+    if !matches!(args.len(), 4 | 5) {
+        return Err("usage: message_probe <source-root> <private-manifest> <private-selection> <new-private-report> [existing-private-preview-directory]".into());
     }
     let source = ProbeSource::bind(&PathBuf::from(&args[0]), &PathBuf::from(&args[1]))?;
     let output = source.output_path(&PathBuf::from(&args[3]))?;
+    let preview_dir = args.get(4).map(PathBuf::from);
+    if preview_dir.as_ref().is_some_and(|path| !path.is_dir()) {
+        return Err("preview directory must already exist".into());
+    }
+    let mut previews = Vec::new();
+    let mut preview_bytes = 0;
     let mut bytes = Vec::new();
     File::open(&args[2])?
         .take(1024 * 1024 + 1)
@@ -88,6 +98,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let bar = read_bar(&original.bytes)?;
             let mut children = Vec::new();
             let mut message_tables = Vec::new();
+            let mut font_images = Vec::new();
+            let mut spacing_tables = Vec::new();
             for (ordinal, child) in bar.entries.iter().enumerate() {
                 if child.offset < 0 {
                     continue;
@@ -95,6 +107,56 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let data = &original.bytes
                     [child.offset as usize..child.offset as usize + child.size as usize];
                 children.push(serde_json::json!({"bar_ordinal":ordinal,"sha256":format!("{:x}",Sha256::digest(data))}));
+                let slot = match &child.name_bytes {
+                    b"sys\0" => Some(FontSlot::System),
+                    b"evt\0" => Some(FontSlot::Event),
+                    b"icon" => Some(FontSlot::Icon),
+                    _ => None,
+                };
+                if item.purpose == "font" && child.entry_type == 2 && slot.is_some() {
+                    spacing_tables.push(serde_json::json!({"bar_ordinal":ordinal,
+                        "byte_count":data.len(),"sha256":format!("{:x}",Sha256::digest(data)),
+                        "spacing_units_and_glyph_mapping_verified":false}));
+                }
+                if item.purpose == "font"
+                    && child.entry_type == 36
+                    && let Some(slot) = slot
+                {
+                    let lanes = if slot == FontSlot::Icon {
+                        &[PaletteLane::First][..]
+                    } else {
+                        &[PaletteLane::First, PaletteLane::Second][..]
+                    };
+                    for (lane_index, &lane) in lanes.iter().enumerate() {
+                        let image = decode_font(data, slot, lane)?;
+                        let preview = if let Some(dir) = &preview_dir {
+                            let index_name = relative.rsplit('/').next().unwrap();
+                            let name =
+                                format!("{index_name}-{}-{ordinal}-{lane_index}.bmp", item.ordinal);
+                            let path = source.output_path(&dir.join(&name))?;
+                            let mut bytes = Vec::new();
+                            image.write_preview(&mut bytes)?;
+                            preview_bytes += bytes.len();
+                            if preview_bytes > 32 * 1024 * 1024 {
+                                return Err(
+                                    "private previews exceed 32 MiB aggregate inspection limit"
+                                        .into(),
+                                );
+                            }
+                            previews.push((path, bytes));
+                            Some(name)
+                        } else {
+                            None
+                        };
+                        font_images.push(serde_json::json!({"bar_ordinal":ordinal,"palette_lane":lane_index,
+                                "width":image.width,"height":image.height,"bits_per_pixel":image.bits_per_pixel,
+                                "embedded_palette":image.embedded_palette,
+                                "packed_pixel_sha256":format!("{:x}",Sha256::digest(&image.packed_pixels)),
+                                "clut_rgba_sha256":format!("{:x}",Sha256::digest(&image.clut_rgba)),
+                                "pixels_rgba_sha256":format!("{:x}",Sha256::digest(&image.pixels_rgba)),
+                                "preview_file":preview,"runtime_rendering_verified":false}));
+                    }
+                }
                 // List + Msg magic is a structural lead only, restricted to selected message containers.
                 if item.purpose == "message"
                     && child.entry_type == 2
@@ -112,21 +174,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "candidate_name_semantics_verified":false,"purpose":item.purpose,"name_hash":entry.name_hash,
                 "package_offset":entry.package_offset,"compression_tag":original.header.compression_tag,
                 "original_size":original.bytes.len(),"sha256":format!("{:x}",Sha256::digest(&original.bytes)),
-                "replacement_count":original.header.remastered_asset_count,"bar":bar,"child_hashes":children,"message_tables":message_tables}));
+                "replacement_count":original.header.remastered_asset_count,"bar":bar,"child_hashes":children,
+                "message_tables":message_tables,"font_images":font_images,"spacing_tables":spacing_tables}));
         }
         checked.verify_unchanged()?;
     }
     let count = samples.len();
     let result = serde_json::json!({"schema_version":1,"source_content_identity":source.content_identity(),
         "qualification":"message_font_structure_inspection_only","source_check":"HED hashes and package size/mtime; full rescan required for mutation assurance",
-        "asset_files_exported":false,"text_decoded_to_unicode":false,"font_pixels_rendered":false,"samples":samples});
+        "asset_files_exported":!previews.is_empty(),"text_decoded_to_unicode":false,
+        "font_pixels_rendered":!previews.is_empty(),"font_preview_kind":"checkerboard_composited_inspection_only",
+        "samples":samples});
+    for (path, bytes) in &previews {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(output)?;
     file.write_all(&serde_json::to_vec_pretty(&result)?)?;
     file.sync_all()?;
-    println!("Inspected {count} selected message/font containers; private spans/hashes only.");
+    println!(
+        "Inspected {count} selected message/font containers; {} private font previews.",
+        previews.len()
+    );
     Ok(())
 }
 fn main() {

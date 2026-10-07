@@ -9,6 +9,9 @@ the KH2-only EgsTools rules at the same pin; upstream catalogs are
 referenced privately and are not included in this repository.
 The bounded message-record reader follows Msg.Read/GetMsgData at the
 same OpenKH pin, retaining encoded spans without a glyph dictionary.
+The localized font plane/palette decoder follows RawBitmap.cs,
+Contextes/FontContext.cs and Ps2.Utility.cs/Ps2.Repl.cs at that pin.
+The Rust decoder adds strict plane/palette length checks and private previews.
 
 OpenKH - Open Kingdom Hearts Research and Development
 Copyright 2019-2022 OpenKH Team and Contributors

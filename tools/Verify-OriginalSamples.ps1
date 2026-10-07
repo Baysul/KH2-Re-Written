@@ -16,6 +16,18 @@ if ($messageMode) {
     $msgText = Get-Content -LiteralPath (Join-Path $OpenKhRoot 'OpenKh.Kh2/Msg.cs') -Raw
     # Move using directives only; the upstream Msg method bodies are unchanged.
     $referenceText = "using System.Collections.Generic;`nusing System.Linq;`n" + $referenceText + ($msgText -replace '(?m)^using [^;]+;\r?\n','')
+    $fontFiles = @('OpenKh.Kh2/RawBitmap.cs','OpenKh.Kh2/Ps2.Utility.cs','OpenKh.Kh2/Ps2.Repl.cs',
+        'OpenKh.Imaging/IImage.cs','OpenKh.Imaging/IImageRead.cs','OpenKh.Imaging/PixelFormat.cs','OpenKh.Imaging/ImageDataHelpers.cs')
+    if (git -C $OpenKhRoot status --porcelain -- $fontFiles) { throw 'Reference font sources are modified' }
+    $referenceText = "using System.Drawing;`nusing OpenKh.Imaging;`n" + $referenceText
+    foreach ($path in $fontFiles | Where-Object {$_ -ne 'OpenKh.Imaging/ImageDataHelpers.cs'}) {
+        $referenceText += (Get-Content -LiteralPath (Join-Path $OpenKhRoot $path) -Raw) -replace '(?m)^using [^;]+;\r?\n',''
+    }
+    # Use the exact upstream nibble-swap method body, without unrelated image helpers.
+    $helpers = Get-Content -LiteralPath (Join-Path $OpenKhRoot 'OpenKh.Imaging/ImageDataHelpers.cs') -Raw
+    $swap = [regex]::Match($helpers, '(?s)public static void SwapEndianIndexed4\(byte\[\] data\)\s*\{.*?\n\s*\}')
+    if (!$swap.Success) { throw 'Pinned nibble-swap method not found' }
+    $referenceText += 'namespace OpenKh.Imaging { public static class ImageDataHelpers {' + $swap.Value + '}}'
 }
 # EgsEncryption only depends on this stream extension; compile the unchanged
 # transform in memory. This does not run any OpenKH source writer/extractor.
@@ -43,6 +55,9 @@ $replacementVerified = 0
 $messageRecordsVerified = 0
 $messageEncodedBytes = 0L
 $barRecordsVerified = 0
+$fontImagesVerified = 0
+$fontPixelsVerified = 0L
+$spacingTablesVerified = 0
 foreach ($sample in $report.samples) {
     $hedPath = Join-Path $InstallRoot $sample.index
     $pkgPath = [IO.Path]::ChangeExtension($hedPath, 'pkg')
@@ -124,6 +139,49 @@ foreach ($sample in $report.samples) {
                         $messageEncodedBytes += $actual.Data.Length
                     }
                 }
+                foreach ($spacing in $sample.spacing_tables) {
+                    $child = $sample.bar.entries[$spacing.bar_ordinal]
+                    $spacingBytes = [byte[]]::new($child.size)
+                    [Array]::Copy($data,$child.offset,$spacingBytes,0,$child.size)
+                    if ($child.entry_type -ne 2 -or $spacingBytes.Length -ne $spacing.byte_count -or
+                        [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($spacingBytes)) -ne $spacing.sha256) {throw 'Independent spacing bytes mismatch'}
+                    $spacingTablesVerified++
+                }
+                foreach ($font in $sample.font_images) {
+                    $child = $sample.bar.entries[$font.bar_ordinal]
+                    if ($child.entry_type -ne 36) {throw 'Font payload is not a RawBitmap record'}
+                    $fontBytes = [byte[]]::new($child.size)
+                    [Array]::Copy($data,$child.offset,$fontBytes,0,$child.size)
+                    $fontStream = [IO.MemoryStream]::new($fontBytes,$false)
+                    try {
+                        $slot = [Text.Encoding]::ASCII.GetString([byte[]]$child.name_bytes).TrimEnd([char]0)
+                        if ($slot -eq 'icon') {
+                            $width=256; $height=160; $bpp=8
+                            if ($font.palette_lane -ne 0) {throw 'Unexpected icon palette lane'}
+                            $image=[OpenKh.Kh2.RawBitmap]::Read8bit($fontStream,$width,$height)
+                        } elseif ($slot -in @('sys','evt')) {
+                            $width=512; $bpp=4
+                            $height = if ($fontBytes.Length -lt 131072) {256} elseif ($fontBytes.Length -lt 262144) {512} elseif ($fontBytes.Length -lt 524288) {1024} else {throw 'Unsupported reference font size'}
+                            $image=if ($font.palette_lane -eq 0) {[OpenKh.Kh2.RawBitmap]::Read4bitPalette1($fontStream,$width,$height)}
+                                elseif ($font.palette_lane -eq 1) {[OpenKh.Kh2.RawBitmap]::Read4bitPalette2($fontStream,$width,$height)}
+                                else {throw 'Unexpected font palette lane'}
+                        } else {throw 'Unrecognized font slot'}
+                        $packed=$image.GetData(); $clut=$image.GetClut()
+                        $embedded=($fontBytes.Length -gt ($width*$height*$bpp/8))
+                        if ($image.Size.Width -ne $font.width -or $image.Size.Height -ne $font.height -or $bpp -ne $font.bits_per_pixel -or
+                            $embedded -ne $font.embedded_palette -or
+                            [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($packed)) -ne $font.packed_pixel_sha256 -or
+                            [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($clut)) -ne $font.clut_rgba_sha256) {throw 'Pinned font dimensions/packed pixels/palette mismatch'}
+                        $rgba=[byte[]]::new($width*$height*4)
+                        for ($pixel=0; $pixel -lt $width*$height; $pixel++) {
+                            $color=if ($bpp -eq 8) {[int]$packed[$pixel]} elseif (($pixel -band 1) -eq 0) {$packed[[int][Math]::Floor($pixel/2)] -shr 4} else {$packed[[int][Math]::Floor($pixel/2)] -band 15}
+                            [Array]::Copy($clut,4*$color,$rgba,4*$pixel,4)
+                        }
+                        if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($rgba)) -ne $font.pixels_rgba_sha256) {throw 'Expanded straight RGBA font pixels mismatch'}
+                        $fontImagesVerified++
+                        $fontPixelsVerified += $width*$height
+                    } finally {$fontStream.Dispose()}
+                }
             } finally { $barReader.Dispose(); $barStream.Dispose() }
         }
         $replacementStart = $offset + 16 + 48L * $replacementCount + $length
@@ -179,3 +237,4 @@ foreach ($sample in $report.samples) {
 }
 "PASS: $($report.samples.Count) originals / $totalBytes bytes and $replacementVerified replacements / $replacementBytes bytes agree with pinned OpenKH transform and .NET deflate; source was only read."
 if ($messageMode) { "PASS: $barRecordsVerified BAR records and $messageRecordsVerified message records / $messageEncodedBytes encoded bytes match independent scalars and pinned OpenKH Msg.Read; no glyph/Unicode mapping asserted." }
+if ($messageMode) { "PASS: $fontImagesVerified font palette planes / $fontPixelsVerified pixels match pinned RawBitmap packed pixels and palettes plus independent RGBA expansion; $spacingTablesVerified spacing byte tables match. Runtime glyph mapping/rendering remains unverified." }

@@ -1,10 +1,12 @@
-//! Bounded package inspection. Original data stays in memory; no game-data export.
+//! Bounded package inspection/decoding. Originals stay in memory; the probe can
+//! write derived font previews only to guarded private destinations.
 //! Layout reference: OpenKH Hed.cs, commit 7a3b945c538d32c6a285128c98aefba093f52ceb.
 
 use serde::Serialize;
 use std::{collections::HashSet, io};
 
 pub mod bar;
+pub mod font;
 pub mod message;
 pub mod original;
 pub mod plain;
