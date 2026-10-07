@@ -12,6 +12,7 @@ $referenceText = Get-Content -LiteralPath (Join-Path $OpenKhRoot 'OpenKh.Egs/Egs
 $report = Get-Content -LiteralPath $ProbePath -Raw | ConvertFrom-Json
 $messageMode = $report.qualification -eq 'message_font_structure_inspection_only'
 $tokenMode = $false
+$reencodingMode = $false
 if ($messageMode) {
     if (git -C $OpenKhRoot status --porcelain -- OpenKh.Kh2/Msg.cs) { throw 'Reference message reader is modified' }
     $msgText = Get-Content -LiteralPath (Join-Path $OpenKhRoot 'OpenKh.Kh2/Msg.cs') -Raw
@@ -30,6 +31,7 @@ if ($messageMode) {
     if (!$swap.Success) { throw 'Pinned nibble-swap method not found' }
     $referenceText += 'namespace OpenKh.Imaging { public static class ImageDataHelpers {' + $swap.Value + '}}'
     $tokenMode = @($report.samples.message_tables | Where-Object {$_.system_decoder_tokens}).Count -gt 0
+    $reencodingMode = @($report.samples.message_tables | Where-Object {$_.international_reencoding.requested}).Count -gt 0
     if ($tokenMode) {
         $tokenFiles = @('MessageCommand.cs','MessageCommandModel.cs','IMessageDecode.cs',
             'Internals/BaseCmdModel.cs','Internals/DataCmdModel.cs','Internals/SingleDataCmdModel.cs',
@@ -40,6 +42,74 @@ if ($messageMode) {
         $referenceText = "using System.Text;`n" + $referenceText
         foreach ($path in $tokenFiles) {
             $referenceText += (Get-Content -LiteralPath (Join-Path $OpenKhRoot $path) -Raw) -replace '(?m)^using [^;]+;\r?\n',''
+        }
+        if ($reencodingMode) {
+            $encoderFiles = @('OpenKh.Kh2/Messages/IMessageEncode.cs',
+                'OpenKh.Kh2/Messages/Internals/InternationalSystemEncode.cs',
+                'OpenKh.Common/Exceptions/ParseException.cs')
+            if (git -C $OpenKhRoot status --porcelain -- $encoderFiles) {throw 'Reference encoder sources are modified'}
+            $referenceText = "using OpenKh.Common.Exceptions;`n" + $referenceText
+            foreach ($path in $encoderFiles) {
+                $referenceText += (Get-Content -LiteralPath (Join-Path $OpenKhRoot $path) -Raw) -replace '(?m)^using [^;]+;\r?\n',''
+            }
+            $referenceText += @'
+namespace OpenKh.Kh2.Messages.Internals {
+    public static class ResearchReencoding {
+        public static string Fingerprint(byte[] data, out int count, out int bytes,
+            out int changed, out int textChanged, out int unsupported, out int unmapped,
+            out string wholeHash, out bool wholeExact) {
+            int tokens; long[] opcodes;
+            ResearchSystemTokens.Fingerprint(data,out tokens,out opcodes);
+            count=0; bytes=0; changed=0; textChanged=0; unsupported=0; unmapped=0;
+            wholeHash=null; wholeExact=false;
+            for (int opcode=0x19; opcode<=0x1f; opcode++) unmapped+=(int)opcodes[opcode];
+            // Do not qualify the public generic question-mark fallback.
+            if (unmapped!=0) return null;
+            var spans = new List<KeyValuePair<int,int>>();
+            int pending=-1;
+            for (int cursor=0; cursor<data.Length;) {
+                int start=cursor; byte opcode=data[cursor++];
+                cursor+=ResearchSystemTokens.ParameterLength(opcode);
+                var model=InternationalSystemDecode._table[opcode];
+                if (model.Command==OpenKh.Kh2.Messages.MessageCommand.PrintText) {
+                    if (pending<0) pending=start;
+                } else {
+                    if (pending>=0) {spans.Add(new KeyValuePair<int,int>(pending,start-pending));pending=-1;}
+                    spans.Add(new KeyValuePair<int,int>(start,cursor-start));
+                }
+            }
+            if (pending>=0) spans.Add(new KeyValuePair<int,int>(pending,data.Length-pending));
+            var decoded=new InternationalSystemDecode().Decode(data);
+            if (decoded.Count!=spans.Count) throw new System.IO.InvalidDataException("Segment spans differ");
+            var encoder=new InternationalSystemEncode();
+            using (var fingerprint=new System.IO.MemoryStream())
+            using (var whole=new System.IO.MemoryStream()) {
+                using (var writer=new System.IO.BinaryWriter(fingerprint,System.Text.Encoding.UTF8,true)) {
+                    for (int i=0; i<decoded.Count; i++) {
+                        var entry=decoded[i];
+                        byte tag=entry.Command==OpenKh.Kh2.Messages.MessageCommand.PrintText ? (byte)1 :
+                            entry.Command==OpenKh.Kh2.Messages.MessageCommand.PrintComplex ? (byte)2 :
+                            entry.Command==OpenKh.Kh2.Messages.MessageCommand.Unsupported ? (byte)4 : (byte)3;
+                        var encoded=encoder.Encode(new List<OpenKh.Kh2.Messages.MessageCommandModel>{entry});
+                        var span=spans[i];
+                        bool exact=encoded.Length==span.Value;
+                        if (exact) for (int j=0; j<encoded.Length; j++) if (encoded[j]!=data[span.Key+j]) {exact=false;break;}
+                        if (!exact) {changed++;if(tag==1 || tag==2) textChanged++;}
+                        if (tag==4) unsupported++;
+                        writer.Write(tag); writer.Write(encoded.Length); writer.Write(encoded);
+                        whole.Write(encoded); bytes+=encoded.Length; count++;
+                    }
+                    writer.Flush();
+                }
+                var all=whole.ToArray();
+                wholeExact=all.SequenceEqual(data);
+                wholeHash=Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(all)).ToLowerInvariant();
+                return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fingerprint.ToArray())).ToLowerInvariant();
+            }
+        }
+    }
+}
+'@
         }
         # Own observation adapter: derive lengths from unchanged upstream model objects.
         # No text is substituted for unknown entries and no rendering rule is inferred.
@@ -148,6 +218,13 @@ $unicodeCharactersVerified = 0L
 $complexSymbolsVerified = 0L
 $unsupportedTextSegmentsVerified = 0L
 $unmappedTextRecords = 0
+$reencodedRecordsVerified = 0
+$reencodedBytesVerified = 0L
+$reencodedChangedSegments = 0
+$reencodedTextChanged = 0
+$reencodedUnsupported = 0
+$reencodedWholeExact = 0
+$reencodedUnmappedRecords = 0
 if ($tokenMode) {
     $arities = @(0,0,0,0,1,6,1,4,3,1,1,1,1,0,1,5,0,4,2,4,2,2,1,2,2,1,1,1,1,1,1,1)
     foreach ($opcode in 0..255) {
@@ -235,6 +312,9 @@ foreach ($sample in $report.samples) {
                     if ($table.international_text.requested -and $table.international_text.records.Count -ne $decodedMessages.Count) {
                         throw 'International text record count mismatch'
                     }
+                    if ($table.international_reencoding.requested -and $table.international_reencoding.records.Count -ne $decodedMessages.Count) {
+                        throw 'Reencoding record count mismatch'
+                    }
                     for ($recordIndex = 0; $recordIndex -lt $decodedMessages.Count; $recordIndex++) {
                         $actual = $decodedMessages[$recordIndex]
                         $expectedMessage = $table.inventory.entries[$recordIndex]
@@ -288,6 +368,28 @@ foreach ($sample in $report.samples) {
                                     $textObservation.unsupported_segments -ne $unsupported) {throw 'International decoded content differs'}
                                 $textRecordsVerified++; $unicodeCharactersVerified+=$characters
                                 $complexSymbolsVerified+=$complex; $unsupportedTextSegmentsVerified+=$unsupported
+                            }
+                        }
+                        if ($table.international_reencoding.requested) {
+                            $entry = $table.international_reencoding.records[$recordIndex]
+                            if ($entry.id -ne $actual.Id -or $entry.source_offset -ne $sourceOffset) {throw 'Reencoding source identity differs'}
+                            $count=0; $encodedBytes=0; $changed=0; $textChanged=0; $unsupported=0; $unmapped=0; $wholeHash=$null; $wholeExact=$false
+                            $encodingHash = [OpenKh.Kh2.Messages.Internals.ResearchReencoding]::Fingerprint(
+                                $actual.Data,[ref]$count,[ref]$encodedBytes,[ref]$changed,[ref]$textChanged,
+                                [ref]$unsupported,[ref]$unmapped,[ref]$wholeHash,[ref]$wholeExact)
+                            $observation = $entry.observation
+                            if ($observation.status -cne 'PASS' -or $observation.unmapped_tables -ne $unmapped) {throw 'Reencoding status/unmapped mismatch'}
+                            if ($unmapped) {
+                                if ($observation.canonical_sha256 -or $observation.whole_record_exact) {throw 'Unmapped encoding incorrectly qualified'}
+                                $reencodedUnmappedRecords++
+                            } else {
+                                if ($observation.segment_count -ne $count -or $observation.canonical_byte_count -ne $encodedBytes -or
+                                    $observation.changed_segments -ne $changed -or $observation.text_route_changed_segments -ne $textChanged -or
+                                    $observation.unsupported_segments -ne $unsupported -or $observation.canonical_sha256 -cne $wholeHash -or
+                                    $observation.whole_record_exact -ne $wholeExact -or $observation.ordered_encoding_sha256 -cne $encodingHash) {throw 'Independent reencoding differs'}
+                                $reencodedRecordsVerified++; $reencodedBytesVerified+=$encodedBytes; $reencodedChangedSegments+=$changed
+                                $reencodedTextChanged+=$textChanged; $reencodedUnsupported+=$unsupported
+                                if ($wholeExact) {$reencodedWholeExact++}
                             }
                         }
                     }
@@ -401,3 +503,4 @@ if ($messageMode) { "PASS: $barRecordsVerified BAR records and $messageRecordsVe
 if ($messageMode) { "PASS: $fontImagesVerified font palette planes / $fontPixelsVerified pixels match pinned RawBitmap packed pixels and palettes plus independent RGBA expansion; $spacingTablesVerified spacing byte tables match. Runtime glyph mapping/rendering remains unverified." }
 if ($tokenMode) { "PASS: 256 generated opcode arities; $tokenRecordsVerified records / $systemTokensVerified system tokens match pinned decoder-model boundaries and opcode counts; $tokenFailuresVerified record failures agree. No Unicode/runtime semantics asserted." }
 if ($textRecordsVerified -or $unmappedTextRecords) { "PASS: $textRecordsVerified explicit International-profile records / $unicodeCharactersVerified Unicode scalars / $complexSymbolsVerified complex symbols / $unsupportedTextSegmentsVerified retained unsupported segments match unchanged decoder content. NOT QUALIFIED: $unmappedTextRecords generic-table records; runtime language/rendering remains unverified." }
+if ($reencodingMode) { "PASS: $reencodedRecordsVerified records / $reencodedBytesVerified canonical bytes / $reencodedWholeExact exact whole records match unchanged public encoding; $reencodedChangedSegments changed segments ($reencodedTextChanged text-route changes), $reencodedUnsupported unsupported slots retained. NOT QUALIFIED: $reencodedUnmappedRecords unmapped records; installed rendering/command semantics remain unverified." }

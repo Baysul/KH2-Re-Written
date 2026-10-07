@@ -16,6 +16,9 @@ The optional explicit International-system text profile follows the public
 InternationalSystemDecode table and BaseMessageDecoder text grouping at that
 same pin. Complex symbols and original encoded spans remain distinct;
 unsupported slots and unmapped tables are preserved without fabricated text.
+Optional public-profile re-encoding follows InternationalSystemEncode at the
+same pin, paired with original borrowed spans and explicit unmapped exclusions.
+Public unsupported-value aliases are observations, never source replacements.
 The localized font plane/palette decoder follows RawBitmap.cs,
 Contextes/FontContext.cs and Ps2.Utility.cs/Ps2.Repl.cs at that pin.
 The Rust decoder adds strict plane/palette length checks and private previews.

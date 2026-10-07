@@ -3,7 +3,7 @@
 //! Source bytes remain authoritative; Unicode is not a reversible glyph identity.
 use crate::message::system_message_tokens;
 use sha2::{Digest, Sha256};
-use std::io;
+use std::{collections::HashMap, io, sync::OnceLock};
 
 #[derive(Clone, Copy)]
 enum CharacterMapping {
@@ -333,9 +333,128 @@ pub fn international_fingerprint(segments: &[InternationalSegment<'_>]) -> Strin
     format!("{:x}", hash.finalize())
 }
 
+/// Public encoder observation paired with its exact original span. It must not
+/// replace authoritative source bytes or select the installed rendering profile.
+#[derive(Debug)]
+pub struct InternationalReencoded<'a> {
+    pub source: InternationalSegment<'a>,
+    /// None retains unmapped tables, excluding the public generic '?' fallback.
+    pub canonical: Option<Vec<u8>>,
+}
+
+/// Re-encode the pinned decoded profile, preserving source trace independently.
+/// Unknown command behavior remains unknown even when its bytes round-trip.
+pub fn reencode_international_system(bytes: &[u8]) -> io::Result<Vec<InternationalReencoded<'_>>> {
+    static CHARACTERS: OnceLock<HashMap<char, u8>> = OnceLock::new();
+    let characters = CHARACTERS.get_or_init(|| {
+        INTERNATIONAL
+            .iter()
+            .enumerate()
+            .filter_map(|(index, mapping)| match mapping {
+                Text(character) => Some((*character, (index + 0x20) as u8)),
+                _ => None,
+            })
+            .chain([(' ', 1), ('\n', 2)])
+            .collect()
+    });
+    let segments = decode_international_system(bytes)?;
+    let mut result = Vec::with_capacity(segments.len());
+    for source in segments {
+        let canonical = match &source.content {
+            InternationalContent::Text(text) => {
+                let mut encoded = Vec::with_capacity(source.encoded.len());
+                for character in text.chars() {
+                    let code = *characters.get(&character).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "decoded character has no public encoding",
+                        )
+                    })?;
+                    encoded.push(code);
+                }
+                Some(encoded)
+            }
+            InternationalContent::Complex(text) => {
+                let index = INTERNATIONAL
+                    .iter()
+                    .position(|mapping| matches!(mapping, Complex(value) if value == text))
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "decoded complex symbol has no public encoding",
+                        )
+                    })?;
+                Some(vec![(index + 0x20) as u8])
+            }
+            // Every known non-text command in this fixed profile has a unique
+            // opcode and the decoder/encoder share its arity. Runtime semantics
+            // and the separate record-reader length conflict are not inferred.
+            InternationalContent::Command => Some(source.encoded.to_vec()),
+            InternationalContent::Unsupported { profile_value } => Some(vec![*profile_value]),
+            InternationalContent::UnmappedTable => None,
+        };
+        result.push(InternationalReencoded { source, canonical });
+    }
+    Ok(result)
+}
+
+/// Ordered public command encoding: category, little-endian byte length, bytes.
+/// Unmapped spans stay explicitly tagged original data, never replacement text.
+pub fn international_reencoding_fingerprint(parts: &[InternationalReencoded<'_>]) -> String {
+    let mut hash = Sha256::new();
+    for part in parts {
+        let tag = match part.source.content {
+            InternationalContent::Text(_) => 1u8,
+            InternationalContent::Complex(_) => 2,
+            InternationalContent::Command => 3,
+            InternationalContent::Unsupported { .. } => 4,
+            InternationalContent::UnmappedTable => 5,
+        };
+        let bytes = part.canonical.as_deref().unwrap_or(part.source.encoded);
+        hash.update([tag]);
+        hash.update((bytes.len() as u32).to_le_bytes());
+        hash.update(bytes);
+    }
+    format!("{:x}", hash.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reencoding_preserves_complex_identity_and_reports_public_alias_without_rewriting_source() {
+        // Plain "II", a complex Roman numeral, embedded command parameter and
+        // public unsupported alias: generated inputs, not vendor text or bytes.
+        let bytes = [0x36, 0x36, 0x75, 7, 0, 0x36, 0x74, 0, 0x6f, 0];
+        let parts = reencode_international_system(&bytes).unwrap();
+        let plain = &parts[0];
+        assert_eq!(plain.source.encoded, &[0x36, 0x36]);
+        assert_eq!(plain.canonical.as_deref(), Some(&[0x36, 0x36][..]));
+        let complex = &parts[1];
+        assert_eq!(complex.source.content, InternationalContent::Complex("II"));
+        assert_eq!(complex.canonical.as_deref(), Some(&[0x75][..]));
+        let alias = &parts[3];
+        assert_eq!(alias.source.encoded, &[0x6f]);
+        assert_eq!(alias.canonical.as_deref(), Some(&[0x6e][..]));
+        let original: Vec<_> = parts
+            .iter()
+            .flat_map(|part| part.source.encoded.iter().copied())
+            .collect();
+        assert_eq!(original, bytes);
+        assert!(reencode_international_system(&[0x17, 1, 0]).is_err());
+    }
+
+    #[test]
+    fn reencoding_retains_unmapped_tables_without_a_question_mark_encoding() {
+        let bytes = [0x2e, 0x19, 0, 0x2f, 0];
+        let parts = reencode_international_system(&bytes).unwrap();
+        assert_eq!(parts[1].source.encoded, &[0x19, 0]);
+        assert_eq!(parts[1].source.content, InternationalContent::UnmappedTable);
+        assert_eq!(parts[1].canonical, None);
+        assert_eq!(parts[0].canonical.as_deref(), Some(&[0x2e][..]));
+        assert_eq!(parts[2].canonical.as_deref(), Some(&[0x2f][..]));
+    }
 
     #[test]
     fn complete_generated_profile_matches_independent_pinned_decoder_fingerprint() {
@@ -375,6 +494,29 @@ mod tests {
             international_fingerprint(&segments),
             "b87061c07f59fb249f64b0b3c33887acc122b4980521ac5957a00bc110db16f1"
         );
+        let parts = reencode_international_system(&bytes).unwrap();
+        assert_eq!(parts.len(), 58);
+        assert_eq!(
+            international_reencoding_fingerprint(&parts),
+            "bf9b9338f2e7682b0e2984e4db4c4a1bc482ffdfab75a4297582f991ee4e0ab8"
+        );
+        let canonical: Vec<_> = parts
+            .iter()
+            .flat_map(|part| part.canonical.as_ref().unwrap().iter().copied())
+            .collect();
+        assert_eq!(canonical.len(), 293);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&canonical)),
+            "da9790c118f7e13a783a30abe019a2edd7e3d1a4062f90fd036bf01c18082961"
+        );
+        assert_eq!(
+            parts
+                .iter()
+                .filter(|part| part.canonical.as_deref() != Some(part.source.encoded))
+                .count(),
+            1
+        );
+        assert_eq!(bytes.len(), canonical.len());
     }
 
     #[test]

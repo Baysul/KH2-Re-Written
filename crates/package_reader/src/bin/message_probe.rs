@@ -2,7 +2,10 @@ use package_reader::{
     bar::read_bar,
     font::{FontSlot, PaletteLane, decode_font},
     message::{read_messages, system_message_tokens},
-    message_text::{InternationalContent, decode_international_system, international_fingerprint},
+    message_text::{
+        InternationalContent, decode_international_system, international_fingerprint,
+        international_reencoding_fingerprint, reencode_international_system,
+    },
     original::read_original,
     probe::ProbeSource,
 };
@@ -29,6 +32,8 @@ struct Selection {
     candidate_name: String,
     purpose: String,
     text_profile: Option<String>,
+    #[serde(default)]
+    inspect_reencoding: bool,
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -73,6 +78,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             || item.text_profile.as_deref().is_some_and(|profile| {
                 profile != "international_system" || item.purpose != "message"
             })
+            || (item.inspect_reencoding
+                && item.text_profile.as_deref() != Some("international_system"))
         {
             return Err(
                 "selection contains unsupported index/purpose or duplicate identity".into(),
@@ -173,6 +180,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let mut tokenization_failures = 0;
                     let mut token_bytes = 0;
                     let mut international_records = Vec::new();
+                    let mut reencoding_records = Vec::new();
                     for entry in &inventory.entries {
                         token_bytes += entry.encoded_length as usize;
                         if token_bytes > 128 * 1024 * 1024 {
@@ -235,6 +243,52 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             international_records.push(serde_json::json!({"id":entry.id,
                                 "source_offset":entry.source_offset,"observation":observation}));
                         }
+                        if item.inspect_reencoding {
+                            let observation = match reencode_international_system(encoded) {
+                                Ok(parts) => {
+                                    let mut canonical = Vec::with_capacity(encoded.len());
+                                    let mut changed = 0;
+                                    let mut text_changed = 0;
+                                    let mut unsupported = 0;
+                                    let mut unmapped = 0;
+                                    for part in &parts {
+                                        if matches!(
+                                            part.source.content,
+                                            InternationalContent::Unsupported { .. }
+                                        ) {
+                                            unsupported += 1;
+                                        }
+                                        if let Some(bytes) = &part.canonical {
+                                            canonical.extend_from_slice(bytes);
+                                            if bytes != part.source.encoded {
+                                                changed += 1;
+                                                if matches!(
+                                                    part.source.content,
+                                                    InternationalContent::Text(_)
+                                                        | InternationalContent::Complex(_)
+                                                ) {
+                                                    text_changed += 1;
+                                                }
+                                            }
+                                        } else {
+                                            unmapped += 1;
+                                        }
+                                    }
+                                    serde_json::json!({"status":"PASS","segment_count":parts.len(),
+                                        "ordered_encoding_sha256":international_reencoding_fingerprint(&parts),
+                                        "canonical_byte_count":canonical.len(),
+                                        "canonical_sha256":if unmapped==0 {Some(format!("{:x}",Sha256::digest(&canonical)))} else {None},
+                                        "whole_record_exact":unmapped==0 && canonical==encoded,
+                                        "changed_segments":changed,"text_route_changed_segments":text_changed,
+                                        "unsupported_segments":unsupported,"unmapped_tables":unmapped})
+                                }
+                                Err(error) => {
+                                    serde_json::json!({"status":"FAIL","reason":error.to_string()})
+                                }
+                            };
+                            reencoding_records.push(serde_json::json!({"id":entry.id,
+                                "source_offset":entry.source_offset,"observation":observation}));
+                        }
                     }
                     message_tables.push(serde_json::json!({"bar_ordinal":ordinal,
                         "bar_payload_offset":child.offset,"bar_payload_size":child.size,
@@ -248,7 +302,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "international_text":{"requested":item.text_profile.as_deref()==Some("international_system"),
                             "qualification":"explicit_public_profile_only_not_runtime_language",
                             "runtime_semantics_verified":false,"original_bytes_retained":true,
-                            "records":international_records}}));
+                            "records":international_records},
+                        "international_reencoding":{"requested":item.inspect_reencoding,
+                            "qualification":"explicit_public_encoder_only_not_installed_rendering",
+                            "unsupported_slots_are_not_text_draw_commands":true,
+                            "original_bytes_retained":true,"runtime_semantics_verified":false,
+                            "records":reencoding_records}}));
                 }
             }
             if item.purpose == "message" && message_tables.is_empty() {
