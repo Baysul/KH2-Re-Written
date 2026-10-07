@@ -9,6 +9,9 @@ the KH2-only EgsTools rules at the same pin; upstream catalogs are
 referenced privately and are not included in this repository.
 The bounded message-record reader follows Msg.Read/GetMsgData at the
 same OpenKH pin, retaining encoded spans without a glyph dictionary.
+System-message token boundaries additionally follow the pinned system decoder
+length table. The differing command 0x17 length is retained as an explicit
+research conflict; installed runtime semantics and Unicode are not asserted.
 The localized font plane/palette decoder follows RawBitmap.cs,
 Contextes/FontContext.cs and Ps2.Utility.cs/Ps2.Repl.cs at that pin.
 The Rust decoder adds strict plane/palette length checks and private previews.

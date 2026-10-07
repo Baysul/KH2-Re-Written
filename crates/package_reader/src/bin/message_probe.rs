@@ -1,7 +1,7 @@
 use package_reader::{
     bar::read_bar,
     font::{FontSlot, PaletteLane, decode_font},
-    message::read_messages,
+    message::{read_messages, system_message_tokens},
     original::read_original,
     probe::ProbeSource,
 };
@@ -162,9 +162,48 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     && child.entry_type == 2
                     && data.starts_with(&1u32.to_le_bytes())
                 {
+                    let inventory = read_messages(data)?;
+                    let mut token_records = Vec::new();
+                    let mut opcode_counts = vec![0u64; 256];
+                    let mut tokenization_failures = 0;
+                    let mut token_bytes = 0;
+                    for entry in &inventory.entries {
+                        token_bytes += entry.encoded_length as usize;
+                        if token_bytes > 128 * 1024 * 1024 {
+                            return Err("system token scan exceeds 128 MiB table budget".into());
+                        }
+                        let start = entry.source_offset as usize;
+                        let encoded = &data[start..start + entry.encoded_length as usize];
+                        let observation = match system_message_tokens(encoded) {
+                            Ok(tokens) => {
+                                let mut fingerprint = Sha256::new();
+                                for token in &tokens {
+                                    opcode_counts[token.opcode as usize] += 1;
+                                    fingerprint.update((token.source_offset as u32).to_le_bytes());
+                                    fingerprint.update([token.opcode]);
+                                    fingerprint
+                                        .update((token.parameters.len() as u32).to_le_bytes());
+                                }
+                                serde_json::json!({"status":"PASS", "token_count":tokens.len(),
+                                    "boundaries_sha256":format!("{:x}",fingerprint.finalize())})
+                            }
+                            Err(error) => {
+                                tokenization_failures += 1;
+                                serde_json::json!({"status":"FAIL", "reason":error.to_string()})
+                            }
+                        };
+                        token_records.push(serde_json::json!({"id":entry.id,
+                            "source_offset":entry.source_offset,"observation":observation}));
+                    }
                     message_tables.push(serde_json::json!({"bar_ordinal":ordinal,
                         "bar_payload_offset":child.offset,"bar_payload_size":child.size,
-                        "inventory":read_messages(data)?}));
+                        "inventory":inventory,
+                        "system_decoder_tokens":{"qualification":"pinned_decoder_lengths_only",
+                            "runtime_semantics_verified":false,"unicode_decoded":false,
+                            "record_reader_opcode_17_arity_conflict":true,
+                            "failed_records":tokenization_failures,
+                            "opcode_counts_for_successful_records":opcode_counts,
+                            "records":token_records}}));
                 }
             }
             if item.purpose == "message" && message_tables.is_empty() {

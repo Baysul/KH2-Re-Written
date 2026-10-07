@@ -11,6 +11,7 @@ if (git -C $OpenKhRoot status --porcelain -- OpenKh.Egs/EgsEncryption.cs) { thro
 $referenceText = Get-Content -LiteralPath (Join-Path $OpenKhRoot 'OpenKh.Egs/EgsEncryption.cs') -Raw
 $report = Get-Content -LiteralPath $ProbePath -Raw | ConvertFrom-Json
 $messageMode = $report.qualification -eq 'message_font_structure_inspection_only'
+$tokenMode = $false
 if ($messageMode) {
     if (git -C $OpenKhRoot status --porcelain -- OpenKh.Kh2/Msg.cs) { throw 'Reference message reader is modified' }
     $msgText = Get-Content -LiteralPath (Join-Path $OpenKhRoot 'OpenKh.Kh2/Msg.cs') -Raw
@@ -28,6 +29,53 @@ if ($messageMode) {
     $swap = [regex]::Match($helpers, '(?s)public static void SwapEndianIndexed4\(byte\[\] data\)\s*\{.*?\n\s*\}')
     if (!$swap.Success) { throw 'Pinned nibble-swap method not found' }
     $referenceText += 'namespace OpenKh.Imaging { public static class ImageDataHelpers {' + $swap.Value + '}}'
+    $tokenMode = @($report.samples.message_tables | Where-Object {$_.system_decoder_tokens}).Count -gt 0
+    if ($tokenMode) {
+        $tokenFiles = @('MessageCommand.cs','MessageCommandModel.cs','IMessageDecode.cs',
+            'Internals/BaseCmdModel.cs','Internals/DataCmdModel.cs','Internals/SingleDataCmdModel.cs',
+            'Internals/SimpleCmdModel.cs','Internals/TextCmdModel.cs','Internals/TableCmdModel.cs',
+            'Internals/UnsupportedCmdModel.cs','Internals/BaseMessageDecoder.cs','Internals/InternationalSystemDecode.cs') |
+            ForEach-Object {"OpenKh.Kh2/Messages/$_"}
+        if (git -C $OpenKhRoot status --porcelain -- $tokenFiles) {throw 'Reference system decoder sources are modified'}
+        $referenceText = "using System.Text;`n" + $referenceText
+        foreach ($path in $tokenFiles) {
+            $referenceText += (Get-Content -LiteralPath (Join-Path $OpenKhRoot $path) -Raw) -replace '(?m)^using [^;]+;\r?\n',''
+        }
+        # Own observation adapter: derive lengths from unchanged upstream model objects.
+        # No text is substituted for unknown entries and no rendering rule is inferred.
+        $referenceText += @'
+namespace OpenKh.Kh2.Messages.Internals {
+    public static class ResearchSystemTokens {
+        public static int ParameterLength(byte opcode) {
+            var model = InternationalSystemDecode._table[opcode];
+            return model is TableCmdModel ? 1 : model.Length;
+        }
+        public static string Fingerprint(byte[] data, out int count, out long[] opcodes) {
+            if (data.Length > 1048576) throw new System.IO.InvalidDataException("Limit");
+            using (var boundaries = new System.IO.MemoryStream()) {
+                using (var writer = new System.IO.BinaryWriter(boundaries, System.Text.Encoding.UTF8, true)) {
+                    count = 0; opcodes = new long[256];
+                    for (int cursor = 0; cursor < data.Length;) {
+                        int start = cursor; byte opcode = data[cursor++];
+                        int length = ParameterLength(opcode);
+                        if (cursor + length > data.Length) throw new System.IO.InvalidDataException("Truncated");
+                        cursor += length;
+                        writer.Write(start); writer.Write(opcode); writer.Write(length);
+                        count++; opcodes[opcode]++;
+                        if (opcode == 0) {
+                            if (cursor != data.Length) throw new System.IO.InvalidDataException("Trailing");
+                            writer.Flush();
+                            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(boundaries.ToArray())).ToLowerInvariant();
+                        }
+                    }
+                }
+            }
+            throw new System.IO.InvalidDataException("Unterminated");
+        }
+    }
+}
+'@
+    }
 }
 # EgsEncryption only depends on this stream extension; compile the unchanged
 # transform in memory. This does not run any OpenKH source writer/extractor.
@@ -58,6 +106,18 @@ $barRecordsVerified = 0
 $fontImagesVerified = 0
 $fontPixelsVerified = 0L
 $spacingTablesVerified = 0
+$tokenRecordsVerified = 0
+$tokenFailuresVerified = 0
+$systemTokensVerified = 0L
+if ($tokenMode) {
+    $arities = @(0,0,0,0,1,6,1,4,3,1,1,1,1,0,1,5,0,4,2,4,2,2,1,2,2,1,1,1,1,1,1,1)
+    foreach ($opcode in 0..255) {
+        $expectedArity = if ($opcode -lt 32) {$arities[$opcode]} else {0}
+        if ([OpenKh.Kh2.Messages.Internals.ResearchSystemTokens]::ParameterLength([byte]$opcode) -ne $expectedArity) {
+            throw 'Generated system opcode arity oracle differs'
+        }
+    }
+}
 foreach ($sample in $report.samples) {
     $hedPath = Join-Path $InstallRoot $sample.index
     $pkgPath = [IO.Path]::ChangeExtension($hedPath, 'pkg')
@@ -128,6 +188,11 @@ foreach ($sample in $report.samples) {
                     $messageStream = [IO.MemoryStream]::new($messageData,$false)
                     try { $decodedMessages = [OpenKh.Kh2.Msg]::Read($messageStream) } finally { $messageStream.Dispose() }
                     if ($decodedMessages.Count -ne $table.inventory.entries.Count) { throw 'Reference message count mismatch' }
+                    $tokenCounts = [long[]]::new(256)
+                    $tableTokenFailures = 0
+                    if ($table.system_decoder_tokens -and $table.system_decoder_tokens.records.Count -ne $decodedMessages.Count) {
+                        throw 'Reference token record count mismatch'
+                    }
                     for ($recordIndex = 0; $recordIndex -lt $decodedMessages.Count; $recordIndex++) {
                         $actual = $decodedMessages[$recordIndex]
                         $expectedMessage = $table.inventory.entries[$recordIndex]
@@ -137,6 +202,36 @@ foreach ($sample in $report.samples) {
                             [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($actual.Data)) -ne $expectedMessage.sha256) { throw 'Reference message id/span/hash mismatch' }
                         $messageRecordsVerified++
                         $messageEncodedBytes += $actual.Data.Length
+                        if ($table.system_decoder_tokens) {
+                            $observation = $table.system_decoder_tokens.records[$recordIndex]
+                            if ($observation.id -ne $actual.Id -or $observation.source_offset -ne $sourceOffset) {
+                                throw 'Reference token identity mismatch'
+                            }
+                            $tokenCount=0; $opcodes=[long[]]::new(256); $fingerprint=$null
+                            try {
+                                $fingerprint=[OpenKh.Kh2.Messages.Internals.ResearchSystemTokens]::Fingerprint($actual.Data,[ref]$tokenCount,[ref]$opcodes)
+                            } catch [System.Management.Automation.MethodInvocationException] {
+                                if ($_.Exception.InnerException -isnot [IO.InvalidDataException]) {throw}
+                            }
+                            if ($null -eq $fingerprint) {
+                                if ($observation.observation.status -cne 'FAIL') {throw 'Expected tokenization failure not reported'}
+                                $tokenFailuresVerified++; $tableTokenFailures++
+                            } else {
+                                if ($observation.observation.status -cne 'PASS' -or
+                                    $observation.observation.token_count -ne $tokenCount -or
+                                    $observation.observation.boundaries_sha256 -cne $fingerprint) {throw 'Independent token boundary mismatch'}
+                                for ($opcode=0; $opcode -lt 256; $opcode++) {$tokenCounts[$opcode]+=$opcodes[$opcode]}
+                                $tokenRecordsVerified++; $systemTokensVerified+=$tokenCount
+                            }
+                        }
+                    }
+                    if ($table.system_decoder_tokens) {
+                        if ($tableTokenFailures -ne $table.system_decoder_tokens.failed_records) {throw 'Token failure count mismatch'}
+                        for ($opcode=0; $opcode -lt 256; $opcode++) {
+                            if ($tokenCounts[$opcode] -ne $table.system_decoder_tokens.opcode_counts_for_successful_records[$opcode]) {
+                                throw 'Independent opcode count mismatch'
+                            }
+                        }
                     }
                 }
                 foreach ($spacing in $sample.spacing_tables) {
@@ -238,3 +333,4 @@ foreach ($sample in $report.samples) {
 "PASS: $($report.samples.Count) originals / $totalBytes bytes and $replacementVerified replacements / $replacementBytes bytes agree with pinned OpenKH transform and .NET deflate; source was only read."
 if ($messageMode) { "PASS: $barRecordsVerified BAR records and $messageRecordsVerified message records / $messageEncodedBytes encoded bytes match independent scalars and pinned OpenKH Msg.Read; no glyph/Unicode mapping asserted." }
 if ($messageMode) { "PASS: $fontImagesVerified font palette planes / $fontPixelsVerified pixels match pinned RawBitmap packed pixels and palettes plus independent RGBA expansion; $spacingTablesVerified spacing byte tables match. Runtime glyph mapping/rendering remains unverified." }
+if ($tokenMode) { "PASS: 256 generated opcode arities; $tokenRecordsVerified records / $systemTokensVerified system tokens match pinned decoder-model boundaries and opcode counts; $tokenFailuresVerified record failures agree. No Unicode/runtime semantics asserted." }

@@ -33,6 +33,62 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+fn record_parameter_length(opcode: u8) -> usize {
+    match opcode {
+        0x04 | 0x06 | 0x09..=0x0c | 0x0e | 0x16 | 0x19..=0x1f => 1,
+        0x12 | 0x14 | 0x15 | 0x18 => 2,
+        0x08 => 3,
+        0x07 | 0x11 | 0x13 => 4,
+        0x0f => 5,
+        0x05 => 6,
+        _ => 0,
+    }
+}
+
+/// Lossless command boundaries from the pinned system decoder's length table.
+/// This is a research interpretation, not a claim about installed runtime semantics.
+/// In particular its two-byte 0x17 parameters disagree with Msg.GetMsgData.
+#[derive(Debug)]
+pub struct SystemMessageToken<'a> {
+    pub source_offset: usize,
+    pub opcode: u8,
+    pub parameters: &'a [u8],
+}
+
+pub fn system_message_tokens(bytes: &[u8]) -> io::Result<Vec<SystemMessageToken<'_>>> {
+    if bytes.len() > MAX_ENCODED_MESSAGE_BYTES {
+        return Err(invalid("encoded message exceeds inspection limit"));
+    }
+    let mut tokens = Vec::new();
+    let mut cursor = 0;
+    while let Some(&opcode) = bytes.get(cursor) {
+        let source_offset = cursor;
+        cursor += 1;
+        let length = if opcode == 0x17 {
+            2
+        } else {
+            record_parameter_length(opcode)
+        };
+        let end = cursor + length;
+        let parameters = bytes
+            .get(cursor..end)
+            .ok_or_else(|| invalid("truncated system decoder parameters"))?;
+        tokens.push(SystemMessageToken {
+            source_offset,
+            opcode,
+            parameters,
+        });
+        cursor = end;
+        if opcode == 0 {
+            if cursor != bytes.len() {
+                return Err(invalid("data follows system message terminator"));
+            }
+            return Ok(tokens);
+        }
+    }
+    Err(invalid("unterminated system message"))
+}
+
 fn encoded_length(bytes: &[u8]) -> io::Result<usize> {
     let mut cursor = 0;
     loop {
@@ -43,16 +99,7 @@ fn encoded_length(bytes: &[u8]) -> io::Result<usize> {
             .get(cursor)
             .ok_or_else(|| invalid("unterminated message"))?;
         cursor += 1;
-        let parameters = match opcode {
-            0x04 | 0x06 | 0x09..=0x0c | 0x0e | 0x16 | 0x19..=0x1f => 1,
-            0x12 | 0x14 | 0x15 | 0x18 => 2,
-            0x08 => 3,
-            0x07 | 0x11 | 0x13 => 4,
-            0x0f => 5,
-            0x05 => 6,
-            _ => 0,
-        };
-        cursor += parameters;
+        cursor += record_parameter_length(opcode);
         if cursor > bytes.len() {
             return Err(invalid("truncated message command parameters"));
         }
@@ -139,6 +186,50 @@ mod tests {
         }
         bytes.extend(payload);
         bytes
+    }
+
+    #[test]
+    fn system_tokens_preserve_all_opcodes_and_embedded_parameter_bytes() {
+        let mut bytes = Vec::new();
+        let control_arities = [
+            0, 0, 0, 0, 1, 6, 1, 4, 3, 1, 1, 1, 1, 0, 1, 5, 0, 4, 2, 4, 2, 2, 1, 2, 2, 1, 1, 1, 1,
+            1, 1, 1,
+        ];
+        for opcode in 1..=u8::MAX {
+            bytes.push(opcode);
+            let arity = control_arities.get(opcode as usize).copied().unwrap_or(0);
+            bytes.extend((0..arity).map(|index| if index == 0 { 0 } else { 0xff }));
+        }
+        bytes.push(0);
+        let tokens = system_message_tokens(&bytes).unwrap();
+        assert_eq!(tokens.len(), 256);
+        let mut reconstructed = Vec::new();
+        for token in tokens {
+            assert_eq!(token.source_offset, reconstructed.len());
+            reconstructed.push(token.opcode);
+            reconstructed.extend(token.parameters);
+        }
+        assert_eq!(reconstructed, bytes);
+    }
+
+    #[test]
+    fn reports_reader_decoder_disagreement_without_changing_record_spans() {
+        let bytes = [0x17, 0, 0xff, 0];
+        assert_eq!(encoded_length(&bytes).unwrap(), 2);
+        assert!(system_message_tokens(&bytes[..2]).is_err());
+        let tokens = system_message_tokens(&bytes).unwrap();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].parameters, &[0, 0xff]);
+        assert_eq!(tokens[1].source_offset, 3);
+    }
+
+    #[test]
+    fn system_tokens_reject_truncation_trailing_data_and_oversized_input() {
+        for bytes in [&[][..], &[0x17, 0], &[0, 0x80], &[0x05, 0, 0]] {
+            assert!(system_message_tokens(bytes).is_err());
+        }
+        assert!(system_message_tokens(&vec![0x80; MAX_ENCODED_MESSAGE_BYTES + 1]).is_err());
+        assert_eq!(system_message_tokens(&[0]).unwrap().len(), 1);
     }
 
     #[test]

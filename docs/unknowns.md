@@ -11,3 +11,4 @@
 | U007 | Controller and second/restricted Windows environment | User | Final P03/P04/P30/P31 | Physical device and second machine/account test |
 | U008 | Every campaign/optional route and language surface denominator | Agent | P00/P27/P28 | Discover from source/reference, preserve unknown records |
 | U009 | Repository visibility and public/private release preference | User + agent | Any push/release | Check visibility; private research never pushed |
+| U010 | Message command 0x17 record-reader/decoder length disagreement | Agent | P12/P25 command semantics | T017 preserves both interpretations; 485 source tokens observed, runtime behavior and future parameter-zero cases unresolved |
