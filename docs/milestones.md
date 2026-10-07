@@ -14,7 +14,7 @@ Updated 2026-10-07. The [user-supplied roadmap](https://docs.google.com/document
 | P07 | Packages/archives/dependencies | 46,076 headers/candidate names; 82 unique originals/8 HD samples and 19 message/font containers inspected (T003/T005/T007); unsampled/semantic/shared/language closure pending |
 | P08 | Read-only importer/source-bound cache | Not started; P06/P07 qualified input required |
 | P09 | Reference capture/replay harness | Exploratory private credits/title screenshots and hashed save/config copy (T002); controlled settings/input/time/replay harness pending |
-| P10 | Installed executable/runtime research | Mixed native/CLR header and metadata prerequisite checks (T009); native/managed body analysis and controlled runtime observations pending |
+| P10 | Installed executable/runtime research | Mixed-PE audit (T009); qualified static managed reader, 597 declarations / 439 source-mapped CIL bodies and four selected pseudocode methods (T010); native bodies, active callers and controlled runtime observations pending |
 | P11 | Authoritative simulation boundary | Not started; measured time/input/state contract required |
 | P12 | Traceable decoded representation | Bounded storage/BAR/message/font readers; 16,765 encoded records and 30 font planes independently compared (T007/T008); glyph/model/script/animation semantics and round-trip corpus pending |
 | P13 | Asset/animation inspection app | Not started; actual decoded assets required |
@@ -37,4 +37,4 @@ Updated 2026-10-07. The [user-supplied roadmap](https://docs.google.com/document
 | P30 | Performance/Windows reliability | Not started; full candidate and measured hardware matrix required |
 | P31 | Windows package/release qualification | Not started; all required gates and separate user release decision required |
 
-Next tasks: T002 establish a current controlled reference session/settings and mod/verification history; map encoded message symbols/commands to the actual decoded glyph/spacing data, then rooms and KH2/shared/language closure. T009's prerequisite audit directs mixed-executable research to compatible managed and native readers; verify a pinned engine/reader before invocation. T004 qualify the supported source profile, then implement P06. Do not substitute a synthetic game loop or a placeholder KH2 viewer for missing measurements.
+Next tasks: T002 establish a current controlled reference session/settings and mod/verification history; map encoded message symbols/commands to the actual decoded glyph/spacing data, then rooms and KH2/shared/language closure. T010 qualifies the bounded managed reader; qualify a pinned native engine on an authored fixture before inspecting the private native getter/startup leads. T004 qualify the supported source profile, then implement P06. Do not substitute a synthetic game loop or a placeholder KH2 viewer for missing measurements.
