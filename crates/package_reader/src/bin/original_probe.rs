@@ -16,6 +16,8 @@ struct SelectionFile {
     #[serde(default)]
     inspect_hd_images: bool,
     #[serde(default)]
+    inspect_model_skeletons: bool,
+    #[serde(default)]
     dds_pixel_decode_profile: package_reader::hd_image::HdPixelDecodeProfile,
 }
 #[derive(Deserialize)]
@@ -35,7 +37,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &PathBuf::from(&args[1]),
     )?;
     let output = source.output_path(&PathBuf::from(&args[2]))?;
-    let (selections, inspect_images, dds_profile) = if let Some(path) = args.get(3) {
+    let (selections, inspect_images, dds_profile, inspect_models) = if let Some(path) = args.get(3)
+    {
         let mut bytes = Vec::new();
         File::open(path)?
             .take(1024 * 1024 + 1)
@@ -73,14 +76,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Some(selection.selections),
             selection.inspect_hd_images,
             selection.dds_pixel_decode_profile,
+            selection.inspect_model_skeletons,
         )
     } else {
         (
             None,
             false,
             package_reader::hd_image::HdPixelDecodeProfile::default(),
+            false,
         )
     };
+    if inspect_models {
+        source.verify_full_source()?;
+    }
     let preview_dir = args.get(4).map(PathBuf::from);
     if preview_dir
         .as_ref()
@@ -234,22 +242,52 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             };
-            samples.push(serde_json::json!({"index":relative,"ordinal":ordinal,
+            let mut sample_report = serde_json::json!({"index":relative,"ordinal":ordinal,
                 "package_offset":entry.package_offset,"name_hash":entry.name_hash,
                 "compression_tag":original.header.compression_tag,"compressed_bytes_consumed":original.compressed_bytes_consumed,
                 "original_size":original.bytes.len(),"replacement_count":original.header.remastered_asset_count,
                 "format_hint":format_hint,"bar":bar,"replacement_samples":replacements,
-                "sha256":format!("{:x}",Sha256::digest(&original.bytes))}));
+                "sha256":format!("{:x}",Sha256::digest(&original.bytes))});
+            if inspect_models {
+                let inventory = bar
+                    .as_ref()
+                    .ok_or("model inspection requires BAR original")?;
+                let mut models = Vec::new();
+                for (bar_ordinal, entry) in inventory
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.entry_type == 4)
+                {
+                    if entry.offset < 0 || entry.size == 0 {
+                        return Err("model entry has no payload".into());
+                    }
+                    let start = entry.offset as usize;
+                    let payload = &original.bytes[start..start + entry.size as usize];
+                    let structure = package_reader::model_skeleton::read_model_structure(payload)?;
+                    models
+                        .push(serde_json::json!({"bar_ordinal":bar_ordinal,"structure":structure}));
+                }
+                if models.is_empty() {
+                    return Err("model inspection requires a type-4 BAR entry".into());
+                }
+                sample_report["model_skeletons"] = serde_json::to_value(models)?;
+            }
+            samples.push(sample_report);
         }
         checked.verify_unchanged()?;
     }
     let count = samples.len();
-    let result = serde_json::json!({"schema_version":1,"source_content_identity":source.content_identity(),
+    let mut result = serde_json::json!({"schema_version":1,"source_content_identity":source.content_identity(),
         "qualification":"bounded_original_sample_inspection_only","source_check":"HED content hashes; package size/mtime; full rescan required for mutation assurance",
         "selection_policy":if selections.is_some() {"explicit identities with every replacement; any decoding error aborts"} else {"first two originals per storage category per index, with their first two replacements; any decoding error aborts"},
         "all_declared_replacements_requested":selections.is_some(),
         "hd_image_decoding_requested":inspect_images,
         "original_asset_files_exported":false,"samples":samples});
+    if inspect_models {
+        result["model_skeleton_inspection_requested"] = true.into();
+        result["source_check"] = "fresh full bound-source hashes before model inspection; HED content hashes and package size/mtime during reads; final rescan remains required".into();
+    }
     let report_bytes = serde_json::to_vec_pretty(&result)?;
     if report_bytes.len() > 32 * 1024 * 1024 {
         return Err("original report exceeds 32 MiB limit".into());

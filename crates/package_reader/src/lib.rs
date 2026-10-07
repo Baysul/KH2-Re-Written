@@ -13,6 +13,7 @@ pub mod image_structure;
 pub mod inspection;
 pub mod message;
 pub mod message_text;
+pub mod model_skeleton;
 pub mod original;
 pub mod plain;
 pub mod probe;
