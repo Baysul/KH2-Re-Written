@@ -18,6 +18,8 @@ struct SelectionFile {
     #[serde(default)]
     inspect_model_skeletons: bool,
     #[serde(default)]
+    inspect_model_packets: bool,
+    #[serde(default)]
     dds_pixel_decode_profile: package_reader::hd_image::HdPixelDecodeProfile,
 }
 #[derive(Deserialize)]
@@ -37,55 +39,63 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &PathBuf::from(&args[1]),
     )?;
     let output = source.output_path(&PathBuf::from(&args[2]))?;
-    let (selections, inspect_images, dds_profile, inspect_models) = if let Some(path) = args.get(3)
-    {
-        let mut bytes = Vec::new();
-        File::open(path)?
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > 1024 * 1024 {
-            return Err("original selection exceeds 1 MiB limit".into());
-        }
-        let selection: SelectionFile = serde_json::from_slice(&bytes)?;
-        if selection.schema_version != 1
-            || selection.source_content_identity != source.content_identity()
-            || selection.selections.is_empty()
-            || selection.selections.len() > 64
-        {
-            return Err("original selection schema/source identity/count is invalid".into());
-        }
-        let mut seen = HashSet::new();
-        for item in &selection.selections {
-            if !source_identity::required_files()
-                .iter()
-                .any(|(name, _)| name == &item.index && name.ends_with(".hed"))
-                || !seen.insert((&item.index, item.ordinal))
+    let (selections, inspect_images, dds_profile, inspect_models, inspect_packets) =
+        if let Some(path) = args.get(3) {
+            let mut bytes = Vec::new();
+            File::open(path)?
+                .take(1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 1024 * 1024 {
+                return Err("original selection exceeds 1 MiB limit".into());
+            }
+            let selection: SelectionFile = serde_json::from_slice(&bytes)?;
+            if selection.schema_version != 1
+                || selection.source_content_identity != source.content_identity()
+                || selection.selections.is_empty()
+                || selection.selections.len() > 64
             {
+                return Err("original selection schema/source identity/count is invalid".into());
+            }
+            let mut seen = HashSet::new();
+            for item in &selection.selections {
+                if !source_identity::required_files()
+                    .iter()
+                    .any(|(name, _)| name == &item.index && name.ends_with(".hed"))
+                    || !seen.insert((&item.index, item.ordinal))
+                {
+                    return Err(
+                        "original selection contains unsupported index or duplicate identity"
+                            .into(),
+                    );
+                }
+            }
+            if !selection.inspect_hd_images
+                && selection.dds_pixel_decode_profile
+                    != package_reader::hd_image::HdPixelDecodeProfile::default()
+            {
+                return Err("DDS decoding profile requires explicit HD image inspection".into());
+            }
+            if selection.inspect_model_packets && !selection.inspect_model_skeletons {
                 return Err(
-                    "original selection contains unsupported index or duplicate identity".into(),
+                    "packet inspection requires explicit model structure inspection".into(),
                 );
             }
-        }
-        if !selection.inspect_hd_images
-            && selection.dds_pixel_decode_profile
-                != package_reader::hd_image::HdPixelDecodeProfile::default()
-        {
-            return Err("DDS decoding profile requires explicit HD image inspection".into());
-        }
-        (
-            Some(selection.selections),
-            selection.inspect_hd_images,
-            selection.dds_pixel_decode_profile,
-            selection.inspect_model_skeletons,
-        )
-    } else {
-        (
-            None,
-            false,
-            package_reader::hd_image::HdPixelDecodeProfile::default(),
-            false,
-        )
-    };
+            (
+                Some(selection.selections),
+                selection.inspect_hd_images,
+                selection.dds_pixel_decode_profile,
+                selection.inspect_model_skeletons,
+                selection.inspect_model_packets,
+            )
+        } else {
+            (
+                None,
+                false,
+                package_reader::hd_image::HdPixelDecodeProfile::default(),
+                false,
+                false,
+            )
+        };
     if inspect_models {
         source.verify_full_source()?;
     }
@@ -265,8 +275,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let start = entry.offset as usize;
                     let payload = &original.bytes[start..start + entry.size as usize];
                     let structure = package_reader::model_skeleton::read_model_structure(payload)?;
-                    models
-                        .push(serde_json::json!({"bar_ordinal":bar_ordinal,"structure":structure}));
+                    let mut model =
+                        serde_json::json!({"bar_ordinal":bar_ordinal,"structure":structure});
+                    if inspect_packets {
+                        model["packet_groups"] = serde_json::to_value(
+                            package_reader::model_packets::read_packet_groups(payload)?,
+                        )?;
+                    }
+                    models.push(model);
                 }
                 if models.is_empty() {
                     return Err("model inspection requires a type-4 BAR entry".into());
@@ -287,6 +303,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if inspect_models {
         result["model_skeleton_inspection_requested"] = true.into();
         result["source_check"] = "fresh full bound-source hashes before model inspection; HED content hashes and package size/mtime during reads; final rescan remains required".into();
+    }
+    if inspect_packets {
+        result["model_packet_inspection_requested"] = true.into();
+        result["model_packet_profile"] = package_reader::model_packets::PROFILE.into();
+        result["vif_cpu_profile"] = package_reader::vif::PROFILE.into();
     }
     let report_bytes = serde_json::to_vec_pretty(&result)?;
     if report_bytes.len() > 32 * 1024 * 1024 {

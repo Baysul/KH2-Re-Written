@@ -33,6 +33,12 @@ Explicit font-cell candidate coordinates follow Constants.cs and the
 Kh2MessageRenderer DrawChar methods at the same pin, with added bounds and
 non-aliased bank checks. Original spacing bytes remain uninterpreted;
 public profile coordinates do not assert installed runtime glyph behavior.
+Bounded model structure and DMA selection follow Mdlx.Model.cs at that pin.
+The explicit CPU VIF profile in vif.rs adapts VifUnpacker.cs for bounded Rust
+first-run, zero-TOPS execution while retaining the public reader's behavior.
+Raw type-1 VU data ranges follow VpuPacket.cs; bounds, integer bit preservation
+and format exclusions are added. Neither CPU profile nor model observations
+assert PS2 hardware, installed transforms, shadow geometry or gameplay fidelity.
 
 OpenKH - Open Kingdom Hearts Research and Development
 Copyright 2019-2022 OpenKH Team and Contributors

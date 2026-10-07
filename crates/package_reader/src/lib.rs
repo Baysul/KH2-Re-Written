@@ -13,11 +13,14 @@ pub mod image_structure;
 pub mod inspection;
 pub mod message;
 pub mod message_text;
+pub mod model_packets;
 pub mod model_skeleton;
 pub mod original;
 pub mod plain;
 pub mod probe;
 pub mod replacement;
+pub mod vif;
+pub mod vpu;
 
 pub const RECORD_SIZE: usize = 32;
 pub const MAX_INDEX_BYTES: usize = 32 * 1024 * 1024;
