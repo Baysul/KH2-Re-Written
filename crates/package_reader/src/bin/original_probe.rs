@@ -15,6 +15,8 @@ struct SelectionFile {
     selections: Vec<Selection>,
     #[serde(default)]
     inspect_hd_images: bool,
+    #[serde(default)]
+    dds_pixel_decode_profile: package_reader::hd_image::HdPixelDecodeProfile,
 }
 #[derive(Deserialize)]
 struct Selection {
@@ -33,7 +35,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &PathBuf::from(&args[1]),
     )?;
     let output = source.output_path(&PathBuf::from(&args[2]))?;
-    let (selections, inspect_images) = if let Some(path) = args.get(3) {
+    let (selections, inspect_images, dds_profile) = if let Some(path) = args.get(3) {
         let mut bytes = Vec::new();
         File::open(path)?
             .take(1024 * 1024 + 1)
@@ -61,9 +63,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        (Some(selection.selections), selection.inspect_hd_images)
+        if !selection.inspect_hd_images
+            && selection.dds_pixel_decode_profile
+                != package_reader::hd_image::HdPixelDecodeProfile::default()
+        {
+            return Err("DDS decoding profile requires explicit HD image inspection".into());
+        }
+        (
+            Some(selection.selections),
+            selection.inspect_hd_images,
+            selection.dds_pixel_decode_profile,
+        )
     } else {
-        (None, false)
+        (
+            None,
+            false,
+            package_reader::hd_image::HdPixelDecodeProfile::default(),
+        )
     };
     let preview_dir = args.get(4).map(PathBuf::from);
     if preview_dir
@@ -146,9 +162,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut replacements = Vec::new();
             for sample in replacement_samples {
                 let decoded_image = if inspect_images {
-                    let image = package_reader::hd_image::decode_hd_image(
+                    let image = package_reader::hd_image::decode_hd_image_with_profile(
                         &sample.bytes,
                         sample.metadata.declared_decompressed_length as usize,
+                        dds_profile,
                     )?;
                     image_bytes += image.pixels_rgba.len();
                     if image_bytes > 128 * 1024 * 1024 {
@@ -185,7 +202,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "encoded_length":image.encoded_length,"storage_padding":image.storage_padding,
                         "rgba_byte_count":image.pixels_rgba.len(),
                         "pixels_rgba_sha256":format!("{:x}",Sha256::digest(&image.pixels_rgba)),
-                        "preview_file":preview,"pixel_decode_profile":"image_0_25_10_stored_rgba8",
+                        "preview_file":preview,"pixel_decode_profile":image.pixel_decode_profile,
                         "color_profile_transform_applied":false,"independent_pixel_check":"NOT RUN","runtime_verified":false}),
                     )
                 } else {

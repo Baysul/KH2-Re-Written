@@ -1,7 +1,7 @@
 //! Bounded HD texture samples. Pixels are stored-channel straight RGBA8, with
 //! no color-profile transform or claim about installed shader interpretation.
 use image::{ImageFormat, ImageReader, Limits};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::{self, Cursor, Write};
 
 const MAX_INPUT: usize = 32 * 1024 * 1024;
@@ -14,8 +14,20 @@ pub enum HdImageFormat {
     DdsBc3,
 }
 
+/// Explicit CPU arithmetic; neither profile qualifies installed GPU behavior.
+/// PNG always uses the pinned image codec, even when the BC3 override is chosen.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HdPixelDecodeProfile {
+    #[default]
+    #[serde(rename = "image_0_25_10_stored_rgba8")]
+    Image02510StoredRgba8,
+    #[serde(rename = "bc3_normalized_nearest_rgba8_v1")]
+    Bc3NormalizedNearestRgba8V1,
+}
+
 pub struct DecodedHdImage {
     pub format: HdImageFormat,
+    pub pixel_decode_profile: HdPixelDecodeProfile,
     pub width: u32,
     pub height: u32,
     pub encoded_length: usize,
@@ -157,6 +169,16 @@ fn dds_length(bytes: &[u8]) -> io::Result<usize> {
 /// `declared_length` comes from validated replacement metadata. Uncompressed
 /// alignment bytes remain an opaque source span; their values are not guessed.
 pub fn decode_hd_image(bytes: &[u8], declared_length: usize) -> io::Result<DecodedHdImage> {
+    decode_hd_image_with_profile(bytes, declared_length, HdPixelDecodeProfile::default())
+}
+
+/// Common admission bounds precede either CPU decoder. The override applies
+/// only to BC3; the result records the decoder actually used for each image.
+pub fn decode_hd_image_with_profile(
+    bytes: &[u8],
+    declared_length: usize,
+    dds_profile: HdPixelDecodeProfile,
+) -> io::Result<DecodedHdImage> {
     if bytes.len() > MAX_INPUT {
         return Err(invalid("HD image exceeds 32 MiB input limit"));
     }
@@ -178,6 +200,21 @@ pub fn decode_hd_image(bytes: &[u8], declared_length: usize) -> io::Result<Decod
     } else {
         return Err(unsupported("unknown HD image signature"));
     };
+    if format == HdImageFormat::DdsBc3
+        && dds_profile == HdPixelDecodeProfile::Bc3NormalizedNearestRgba8V1
+    {
+        let width = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        let height = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        return Ok(DecodedHdImage {
+            format,
+            pixel_decode_profile: dds_profile,
+            width,
+            height,
+            encoded_length,
+            storage_padding,
+            pixels_rgba: normalized_bc3(bytes, width as usize, height as usize),
+        });
+    }
     let mut limits = Limits::default();
     limits.max_image_width = Some(4096);
     limits.max_image_height = Some(4096);
@@ -191,12 +228,62 @@ pub fn decode_hd_image(bytes: &[u8], declared_length: usize) -> io::Result<Decod
     let (width, height) = pixels.dimensions();
     Ok(DecodedHdImage {
         format,
+        pixel_decode_profile: HdPixelDecodeProfile::Image02510StoredRgba8,
         width,
         height,
         encoded_length,
         storage_padding,
         pixels_rgba: pixels.into_raw(),
     })
+}
+
+// Public BC3 layout/normalized interpolation, followed by nearest UNORM8.
+// Qualification: T024 pinned DirectXTex methods + WIC, finite scalar corpus.
+// Called only after strict single-level DDS admission above, preserving hidden
+// RGB and straight alpha. No gamma transform, premultiplication or filtering.
+fn normalized_bc3(bytes: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let nearest = |value: u32, divisor: u32| ((value + divisor / 2) / divisor) as u8;
+    let mut rgba = vec![0; width * height * 4];
+    for (block_index, block) in bytes[128..].as_chunks::<16>().0.iter().enumerate() {
+        let first = u16::from_le_bytes(block[8..10].try_into().unwrap()) as u32;
+        let second = u16::from_le_bytes(block[10..12].try_into().unwrap()) as u32;
+        let mut colors = [[0u8; 3]; 4];
+        for (channel, (mask, shift)) in [(31, 11), (63, 5), (31, 0)].into_iter().enumerate() {
+            let (a, b) = ((first >> shift) & mask, (second >> shift) & mask);
+            for (selector, (n, m, divisor)) in [(1, 0, 1), (0, 1, 1), (2, 1, 3), (1, 2, 3)]
+                .into_iter()
+                .enumerate()
+            {
+                colors[selector][channel] = nearest((n * a + m * b) * 255, divisor * mask);
+            }
+        }
+        let mut alphas = [0u8; 8];
+        alphas[..2].copy_from_slice(&block[..2]);
+        let (divisor, end) = if block[0] > block[1] { (7, 8) } else { (5, 6) };
+        for (selector, alpha) in alphas.iter_mut().enumerate().take(end).skip(2) {
+            *alpha = nearest(
+                (divisor + 1 - selector as u32) * block[0] as u32
+                    + (selector as u32 - 1) * block[1] as u32,
+                divisor,
+            );
+        }
+        if end == 6 {
+            alphas[7] = 255;
+        }
+        let colors_index = u32::from_le_bytes(block[12..16].try_into().unwrap());
+        let mut alpha_bytes = [0u8; 8];
+        alpha_bytes[..6].copy_from_slice(&block[2..8]);
+        let alphas_index = u64::from_le_bytes(alpha_bytes);
+        for p in 0..16 {
+            let x = (block_index % (width / 4)) * 4 + p % 4;
+            let y = (block_index / (width / 4)) * 4 + p / 4;
+            let position = (y * width + x) * 4;
+            rgba[position..position + 3]
+                .copy_from_slice(&colors[((colors_index >> (p * 2)) & 3) as usize]);
+            rgba[position + 3] = alphas[((alphas_index >> (p * 3)) & 7) as usize];
+        }
+    }
+    rgba
 }
 
 impl DecodedHdImage {
@@ -346,5 +433,90 @@ mod tests {
             decode(&unknown).err().unwrap().kind(),
             io::ErrorKind::Unsupported
         );
+    }
+
+    #[test]
+    fn explicit_bc3_profile_distinguishes_endpoint_and_alpha_quantization() {
+        let mut bytes = dds();
+        bytes[128] = 1;
+        bytes[129] = 0;
+        let mut indices = 0u64;
+        for p in 0..16 {
+            indices |= (p as u64 % 8) << (p * 3);
+        }
+        bytes[130..136].copy_from_slice(&indices.to_le_bytes()[..6]);
+        bytes[136..138].copy_from_slice(&(3u16 << 11).to_le_bytes());
+        bytes[138..140].copy_from_slice(&(3u16 << 11).to_le_bytes());
+        let legacy = decode(&bytes).unwrap();
+        let normalized = decode_hd_image_with_profile(
+            &bytes,
+            bytes.len(),
+            HdPixelDecodeProfile::Bc3NormalizedNearestRgba8V1,
+        )
+        .unwrap();
+        assert_eq!(&legacy.pixels_rgba[8..12], &[24, 0, 0, 0]);
+        assert_eq!(&normalized.pixels_rgba[8..12], &[25, 0, 0, 1]);
+        assert_eq!(
+            legacy.pixel_decode_profile,
+            HdPixelDecodeProfile::Image02510StoredRgba8
+        );
+        assert_eq!(
+            normalized.pixel_decode_profile,
+            HdPixelDecodeProfile::Bc3NormalizedNearestRgba8V1
+        );
+    }
+
+    #[test]
+    fn normalized_bc3_preserves_four_colors_hidden_rgb_and_equal_alpha_branch() {
+        let mut bytes = dds();
+        bytes[128..144].copy_from_slice(&[
+            0, 0, 0x88, 0xc6, 0xfa, 0x88, 0xc6, 0xfa, 0, 0, 0, 0xf8, 0xe4, 0xe4, 0xe4, 0xe4,
+        ]);
+        let normalized = decode_hd_image_with_profile(
+            &bytes,
+            bytes.len(),
+            HdPixelDecodeProfile::Bc3NormalizedNearestRgba8V1,
+        )
+        .unwrap();
+        for (p, pixel) in normalized.pixels_rgba.as_chunks::<4>().0.iter().enumerate() {
+            assert_eq!(
+                *pixel,
+                [
+                    [0, 0, 0, 0],
+                    [255, 0, 0, 0],
+                    [85, 0, 0, 0],
+                    [170, 0, 0, 0],
+                    [0, 0, 0, 0],
+                    [255, 0, 0, 0],
+                    [85, 0, 0, 0],
+                    [170, 0, 0, 255]
+                ][p % 8]
+            );
+        }
+    }
+
+    #[test]
+    fn profiles_share_admission_and_png_always_reports_its_actual_decoder() {
+        let profile = HdPixelDecodeProfile::Bc3NormalizedNearestRgba8V1;
+        let mut bytes = png();
+        let logical = bytes.len();
+        bytes.resize(logical.next_multiple_of(16), 0xab);
+        let legacy = decode_hd_image(&bytes, logical).unwrap();
+        let overridden = decode_hd_image_with_profile(&bytes, logical, profile).unwrap();
+        assert_eq!(legacy.pixels_rgba, overridden.pixels_rgba);
+        assert_eq!(
+            overridden.pixel_decode_profile,
+            HdPixelDecodeProfile::default()
+        );
+        let mut invalid_dds = dds();
+        invalid_dds[28..32].copy_from_slice(&2u32.to_le_bytes());
+        for bytes in [&invalid_dds[..], &invalid_dds[..143], b"unknown".as_slice()] {
+            let legacy = decode_hd_image(bytes, bytes.len()).err().unwrap();
+            let normalized = decode_hd_image_with_profile(bytes, bytes.len(), profile)
+                .err()
+                .unwrap();
+            assert_eq!(legacy.kind(), normalized.kind());
+        }
+        assert!(serde_json::from_str::<HdPixelDecodeProfile>("\"unqualified_gpu\"").is_err());
     }
 }

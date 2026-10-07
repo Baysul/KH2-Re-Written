@@ -1,7 +1,9 @@
 //! Owned numerical diagnostics, not an installed-rendering compatibility profile.
 //! Generate authored BC3 bytes, then compare explicit arithmetic hypotheses with
 //! independent RGBA evidence. All outputs are new files outside source and Git.
-use package_reader::hd_image::{HdImageFormat, decode_hd_image};
+use package_reader::hd_image::{
+    HdImageFormat, HdPixelDecodeProfile, decode_hd_image, decode_hd_image_with_profile,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
@@ -48,10 +50,15 @@ fn block(a: u8, b: u8, c: u16, d: u16) -> [u8; 16] {
     bytes
 }
 fn generate(root: &Path, directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let outputs: Vec<_> = ["boundaries.dds", "image-rs.rgba", "corpus.json"]
-        .iter()
-        .map(|name| source_identity::safe_output(root, &directory.join(name)))
-        .collect::<io::Result<_>>()?;
+    let outputs: Vec<_> = [
+        "boundaries.dds",
+        "image-rs.rgba",
+        "corpus.json",
+        "normalized-bc3.rgba",
+    ]
+    .iter()
+    .map(|name| source_identity::safe_output(root, &directory.join(name)))
+    .collect::<io::Result<_>>()?;
     let (width, height) = (2048u32, 1072u32);
     let mut bytes = vec![0u8; 128];
     bytes[..4].copy_from_slice(b"DDS ");
@@ -84,10 +91,17 @@ fn generate(root: &Path, directory: &Path) -> Result<(), Box<dyn std::error::Err
         }
     }
     let decoded = decode_hd_image(&bytes, bytes.len())?;
+    let normalized = decode_hd_image_with_profile(
+        &bytes,
+        bytes.len(),
+        HdPixelDecodeProfile::Bc3NormalizedNearestRgba8V1,
+    )?;
     let mut rgba = b"RGBA".to_vec();
     rgba.extend(width.to_le_bytes());
     rgba.extend(height.to_le_bytes());
     rgba.extend(&decoded.pixels_rgba);
+    let mut normalized_rgba = rgba[..12].to_vec();
+    normalized_rgba.extend(&normalized.pixels_rgba);
     let report = json!({"schema_version":1, "fixture":"authored_bc3_scalar_boundaries_v1",
         "width":width, "height":height, "blocks":(bytes.len()-128)/16,
         "pixels":width as u64*height as u64,
@@ -100,10 +114,13 @@ fn generate(root: &Path, directory: &Path) -> Result<(), Box<dyn std::error::Err
         "dds_sha256":format!("{:x}",Sha256::digest(&bytes)),
         "pixel_decode_profile":"image_0_25_10_stored_rgba8",
         "rgba_sha256":format!("{:x}",Sha256::digest(&decoded.pixels_rgba)),
+        "normalized_pixel_decode_profile":normalized.pixel_decode_profile,
+        "normalized_rgba_sha256":format!("{:x}",Sha256::digest(&normalized.pixels_rgba)),
         "installed_rendering_qualified":false});
     write_new(&outputs[0], &bytes)?;
     write_new(&outputs[1], &rgba)?;
     write_new(&outputs[2], &serde_json::to_vec_pretty(&report)?)?;
+    write_new(&outputs[3], &normalized_rgba)?;
     println!(
         "Generated 137216 authored blocks / {} pixels.",
         width as u64 * height as u64
