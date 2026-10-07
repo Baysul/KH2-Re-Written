@@ -20,6 +20,8 @@ struct SelectionFile {
     #[serde(default)]
     inspect_model_packets: bool,
     #[serde(default)]
+    inspect_model_geometry: bool,
+    #[serde(default)]
     dds_pixel_decode_profile: package_reader::hd_image::HdPixelDecodeProfile,
 }
 #[derive(Deserialize)]
@@ -39,63 +41,71 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &PathBuf::from(&args[1]),
     )?;
     let output = source.output_path(&PathBuf::from(&args[2]))?;
-    let (selections, inspect_images, dds_profile, inspect_models, inspect_packets) =
-        if let Some(path) = args.get(3) {
-            let mut bytes = Vec::new();
-            File::open(path)?
-                .take(1024 * 1024 + 1)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() > 1024 * 1024 {
-                return Err("original selection exceeds 1 MiB limit".into());
-            }
-            let selection: SelectionFile = serde_json::from_slice(&bytes)?;
-            if selection.schema_version != 1
-                || selection.source_content_identity != source.content_identity()
-                || selection.selections.is_empty()
-                || selection.selections.len() > 64
+    let (
+        selections,
+        inspect_images,
+        dds_profile,
+        inspect_models,
+        inspect_packets,
+        inspect_geometry,
+    ) = if let Some(path) = args.get(3) {
+        let mut bytes = Vec::new();
+        File::open(path)?
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 1024 * 1024 {
+            return Err("original selection exceeds 1 MiB limit".into());
+        }
+        let selection: SelectionFile = serde_json::from_slice(&bytes)?;
+        if selection.schema_version != 1
+            || selection.source_content_identity != source.content_identity()
+            || selection.selections.is_empty()
+            || selection.selections.len() > 64
+        {
+            return Err("original selection schema/source identity/count is invalid".into());
+        }
+        let mut seen = HashSet::new();
+        for item in &selection.selections {
+            if !source_identity::required_files()
+                .iter()
+                .any(|(name, _)| name == &item.index && name.ends_with(".hed"))
+                || !seen.insert((&item.index, item.ordinal))
             {
-                return Err("original selection schema/source identity/count is invalid".into());
-            }
-            let mut seen = HashSet::new();
-            for item in &selection.selections {
-                if !source_identity::required_files()
-                    .iter()
-                    .any(|(name, _)| name == &item.index && name.ends_with(".hed"))
-                    || !seen.insert((&item.index, item.ordinal))
-                {
-                    return Err(
-                        "original selection contains unsupported index or duplicate identity"
-                            .into(),
-                    );
-                }
-            }
-            if !selection.inspect_hd_images
-                && selection.dds_pixel_decode_profile
-                    != package_reader::hd_image::HdPixelDecodeProfile::default()
-            {
-                return Err("DDS decoding profile requires explicit HD image inspection".into());
-            }
-            if selection.inspect_model_packets && !selection.inspect_model_skeletons {
                 return Err(
-                    "packet inspection requires explicit model structure inspection".into(),
+                    "original selection contains unsupported index or duplicate identity".into(),
                 );
             }
-            (
-                Some(selection.selections),
-                selection.inspect_hd_images,
-                selection.dds_pixel_decode_profile,
-                selection.inspect_model_skeletons,
-                selection.inspect_model_packets,
-            )
-        } else {
-            (
-                None,
-                false,
-                package_reader::hd_image::HdPixelDecodeProfile::default(),
-                false,
-                false,
-            )
-        };
+        }
+        if !selection.inspect_hd_images
+            && selection.dds_pixel_decode_profile
+                != package_reader::hd_image::HdPixelDecodeProfile::default()
+        {
+            return Err("DDS decoding profile requires explicit HD image inspection".into());
+        }
+        if selection.inspect_model_packets && !selection.inspect_model_skeletons {
+            return Err("packet inspection requires explicit model structure inspection".into());
+        }
+        if selection.inspect_model_geometry && !selection.inspect_model_packets {
+            return Err("geometry inspection requires explicit packet inspection".into());
+        }
+        (
+            Some(selection.selections),
+            selection.inspect_hd_images,
+            selection.dds_pixel_decode_profile,
+            selection.inspect_model_skeletons,
+            selection.inspect_model_packets,
+            selection.inspect_model_geometry,
+        )
+    } else {
+        (
+            None,
+            false,
+            package_reader::hd_image::HdPixelDecodeProfile::default(),
+            false,
+            false,
+            false,
+        )
+    };
     if inspect_models {
         source.verify_full_source()?;
     }
@@ -282,6 +292,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             package_reader::model_packets::read_packet_groups(payload)?,
                         )?;
                     }
+                    if inspect_geometry {
+                        model["geometry"] = serde_json::to_value(
+                            package_reader::model_geometry::read_geometry(payload)?,
+                        )?;
+                    }
                     models.push(model);
                 }
                 if models.is_empty() {
@@ -308,6 +323,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         result["model_packet_inspection_requested"] = true.into();
         result["model_packet_profile"] = package_reader::model_packets::PROFILE.into();
         result["vif_cpu_profile"] = package_reader::vif::PROFILE.into();
+    }
+    if inspect_geometry {
+        result["model_geometry_inspection_requested"] = true.into();
+        result["model_geometry_profile"] = package_reader::model_geometry::PROFILE.into();
     }
     let report_bytes = serde_json::to_vec_pretty(&result)?;
     if report_bytes.len() > 32 * 1024 * 1024 {

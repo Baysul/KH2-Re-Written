@@ -37,7 +37,12 @@ Bounded model structure and DMA selection follow Mdlx.Model.cs at that pin.
 The explicit CPU VIF profile in vif.rs adapts VifUnpacker.cs for bounded Rust
 first-run, zero-TOPS execution while retaining the public reader's behavior.
 Raw type-1 VU data ranges follow VpuPacket.cs; bounds, integer bit preservation
-and format exclusions are added. Neither CPU profile nor model observations
+and format exclusions are added. The explicit type-1 topology profile follows
+VpuPacketExtensions.cs and
+Kkdf2MdlxParser.cs at that pin, adding association/index/ring/allocation checks.
+Topology retains the public integer UV truncation and first-submodel scope;
+bind matrices, numerical skinning, materials and installed rendering stay open.
+Neither CPU profile nor model observations
 assert PS2 hardware, installed transforms, shadow geometry or gameplay fidelity.
 
 OpenKH - Open Kingdom Hearts Research and Development
