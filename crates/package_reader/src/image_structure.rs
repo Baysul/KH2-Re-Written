@@ -108,6 +108,53 @@ pub fn read_imgd_header(bytes: &[u8]) -> io::Result<ImgdHeader> {
     })
 }
 
+pub const IMGD_INDEXED8_LINEAR_PROFILE: &str = "imgd_indexed8_linear_ps2_palette_v1";
+pub struct DecodedIndexed8Imgd {
+    pub header: ImgdHeader,
+    pub indices: Vec<u8>,
+    pub clut_rgba: Vec<u8>,
+    pub pixels_rgba: Vec<u8>,
+}
+
+/// Explicit finite CPU profile. Other IMGD routes remain structural evidence;
+/// unsupported formats/flags never fall back to a guessed interpretation.
+pub fn decode_imgd_indexed8_linear(bytes: &[u8]) -> io::Result<DecodedIndexed8Imgd> {
+    let header = read_imgd_header(bytes)?;
+    let count = header.width as usize * header.height as usize;
+    if header.version != 256
+        || header.gs_psm != 19
+        || header.flags & !3 != 0
+        || header.bitmap_length as usize != count
+        || header.clut_length != 1024
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "IMGD is outside the explicit indexed8 linear CPU profile",
+        ));
+    }
+    let indices =
+        bytes[header.bitmap_offset as usize..header.bitmap_offset as usize + count].to_vec();
+    let stored_clut = &bytes[header.clut_offset as usize..header.clut_offset as usize + 1024];
+    let mut clut_rgba = Vec::with_capacity(1024);
+    for index in 0..256usize {
+        // OpenKH Ps2.Repl: interchange palette index bits 3 and 4.
+        let source = (index & 0xe7) | ((index & 0x10) >> 1) | ((index & 0x08) << 1);
+        clut_rgba.extend_from_slice(&stored_clut[source * 4..source * 4 + 3]);
+        clut_rgba.push(stored_clut[source * 4 + 3].saturating_mul(2));
+    }
+    let mut pixels_rgba = Vec::with_capacity(count * 4);
+    for index in &indices {
+        let offset = *index as usize * 4;
+        pixels_rgba.extend_from_slice(&clut_rgba[offset..offset + 4]);
+    }
+    Ok(DecodedIndexed8Imgd {
+        header,
+        indices,
+        clut_rgba,
+        pixels_rgba,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +204,46 @@ mod tests {
         let mut bytes = fixture();
         bytes[28..30].copy_from_slice(&(-1i16).to_le_bytes());
         assert!(read_imgd_header(&bytes).is_err());
+    }
+
+    fn indexed_fixture() -> Vec<u8> {
+        let mut bytes = vec![0; 64 + 4 + 1024];
+        bytes[..64].copy_from_slice(&fixture()[..64]);
+        bytes[20..24].copy_from_slice(&1024i32.to_le_bytes());
+        bytes[60..64].copy_from_slice(&3i32.to_le_bytes());
+        bytes[64..68].copy_from_slice(&[8, 16, 0, 255]);
+        for index in 0..256usize {
+            bytes[68 + index * 4..72 + index * 4].copy_from_slice(&[
+                index as u8,
+                7,
+                11,
+                index as u8,
+            ]);
+        }
+        bytes
+    }
+    #[test]
+    fn linear_imgd_qualifies_palette_swap_alpha_saturation_and_hidden_rgb() {
+        let decoded = decode_imgd_indexed8_linear(&indexed_fixture()).unwrap();
+        assert_eq!(decoded.indices, [8, 16, 0, 255]);
+        assert_eq!(
+            decoded.pixels_rgba,
+            [16, 7, 11, 32, 8, 7, 11, 16, 0, 7, 11, 0, 255, 7, 11, 255]
+        );
+        assert_eq!(&decoded.clut_rgba[127 * 4..128 * 4], &[127, 7, 11, 254]);
+        assert_eq!(&decoded.clut_rgba[128 * 4..129 * 4], &[128, 7, 11, 255]);
+    }
+    #[test]
+    fn linear_imgd_rejects_unqualified_formats_flags_and_incomplete_planes() {
+        for (offset, value) in [(4, 257i32), (12, 3), (20, 1020), (60, 7), (60, 8)] {
+            let mut bytes = indexed_fixture();
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            assert!(decode_imgd_indexed8_linear(&bytes).is_err());
+        }
+        let mut bytes = indexed_fixture();
+        bytes[38..40].copy_from_slice(&20u16.to_le_bytes());
+        assert!(decode_imgd_indexed8_linear(&bytes).is_err());
+        bytes.truncate(100);
+        assert!(decode_imgd_indexed8_linear(&bytes).is_err());
     }
 }
