@@ -7,7 +7,8 @@ param(
     [Parameter(Mandatory)][string]$SelectionPath,
     [Parameter(Mandatory)][string]$OutputDirectory,
     [string]$ManagedInventory,
-    [string]$ConformanceReceipt
+    [string]$ConformanceReceipt,
+    [switch]$PreservePrivateProject
 )
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'ManagedReader.ps1')
@@ -111,9 +112,12 @@ $vmargs=@('-Djava.system.class.loader=ghidra.GhidraClassLoader','-Dfile.encoding
     'ghidra.app.util.headless.AnalyzeHeadless',(Join-Path $output 'projects'),'SelectedNative',
     '-import',$inputPath,'-loader','PeLoader','-loader-parseCliHeaders','false','-loader-loadLibraries','false',
     '-loader-linkExistingProjectLibraries','false','-processor','x86:LE:64:default','-cspec','windows',
-    '-noanalysis','-readOnly','-scriptPath',$PSScriptRoot,'-postScript','NativeSelected.java',
+    '-noanalysis','-scriptPath',$PSScriptRoot,'-postScript','NativeSelected.java',
     (Get-ResearchCanonicalPath $SelectionPath),(Join-Path $output 'report.json'),
     '-log',(Join-Path $output 'headless.log'),'-scriptlog',(Join-Path $output 'script.log'))
+# A retained project contains derived source bytes and uses the same private
+# output/source guards. The default remains a disposable read-only project.
+if (!$PreservePrivateProject) {$vmargs += '-readOnly'}
 # Direct launch matches the official launcher bootstrap and keeps settings/temp
 # private without modifying JAVA_HOME, global Ghidra configuration or plugins.
 & $java @vmargs *> (Join-Path $output 'console.log')
@@ -123,12 +127,17 @@ if (!(Test-Path -LiteralPath (Join-Path $output 'report.json'))) {throw 'No nati
 $report=Get-Content -LiteralPath (Join-Path $output 'report.json') -Raw | ConvertFrom-Json
 if ($report.executable_sha256 -cne $inputHash -or $report.ghidra_version -ne '12.1.4' -or $report.image_base -ne $expectedImageBase -or
     $report.findings.Count -ne $selection.methods.Count) {throw 'Native report identity/version/coverage differs'}
+if ($PreservePrivateProject -and (!(Test-Path -LiteralPath (Join-Path $output 'projects/SelectedNative.gpr')) -or
+    !(Test-Path -LiteralPath (Join-Path $output 'projects/SelectedNative.rep') -PathType Container))) {
+    throw 'Requested private project was not saved'
+}
 $receipt=[ordered]@{verdict='PASS';qualification='static_native_reader_only';input_sha256=$inputHash;
     package_sha256='ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db';
     core_components=$coreHashes;script_sha256=(Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'NativeSelected.java')).Hash;
     java_sha256=(Get-FileHash -LiteralPath $java).Hash;java_version=$report.java_version;
     selection_sha256=(Get-FileHash -LiteralPath $SelectionPath).Hash;
     report_sha256=(Get-FileHash -LiteralPath (Join-Path $output 'report.json')).Hash;
+    private_project_preserved=[bool]$PreservePrivateProject;
     limitations='Native PE import with CLR parsing disabled; no auto-analysis, target execution, fresh full source scan or source-support qualification'}
 Write-NewResearchFile (Join-Path $output 'launcher-receipt.json') ([Text.Encoding]::UTF8.GetBytes(($receipt | ConvertTo-Json -Depth 5)))
 Write-Output "PASS: $($report.findings.Count) selected static native findings; installed input unchanged."
