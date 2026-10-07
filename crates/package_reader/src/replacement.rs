@@ -1,4 +1,4 @@
-//! First two replacement payloads, located by pinned OpenKH sequential alignment.
+//! Bounded replacement payloads, located by pinned OpenKH sequential alignment.
 //! Declared offsets remain opaque; this is a compatibility sample, not a name map.
 use crate::{
     HedEntry,
@@ -31,6 +31,23 @@ pub fn read_first_replacements<R: Read + Seek>(
     reader: &mut R,
     entry: &HedEntry,
 ) -> io::Result<Vec<ReplacementSample>> {
+    read_replacements(reader, entry, false)
+}
+
+/// Read every declared replacement, or reject the container before returning a
+/// partial list. Limits apply to count and cumulative padded/output allocation.
+pub fn read_all_replacements<R: Read + Seek>(
+    reader: &mut R,
+    entry: &HedEntry,
+) -> io::Result<Vec<ReplacementSample>> {
+    read_replacements(reader, entry, true)
+}
+
+fn read_replacements<R: Read + Seek>(
+    reader: &mut R,
+    entry: &HedEntry,
+    all: bool,
+) -> io::Result<Vec<ReplacementSample>> {
     let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
     let package_end = reader.seek(SeekFrom::End(0))?;
     let indexed_end = entry
@@ -45,6 +62,11 @@ pub fn read_first_replacements<R: Read + Seek>(
     let mut seed = [0; 16];
     reader.read_exact(&mut seed)?;
     let header = read_asset_header(&seed, entry.stored_length)?;
+    if all && header.remastered_asset_count > 64 {
+        return Err(invalid(
+            "replacement count exceeds 64-entry inspection limit",
+        ));
+    }
     let original_stored = if header.compression_tag >= 0 {
         header.compression_tag as u64
     } else {
@@ -53,7 +75,13 @@ pub fn read_first_replacements<R: Read + Seek>(
     let mut payload_start =
         entry.package_offset + 16 + header.remastered_asset_count as u64 * 48 + original_stored;
     let mut samples = Vec::new();
-    for ordinal in 0..header.remastered_asset_count.min(2) {
+    let count = if all {
+        header.remastered_asset_count
+    } else {
+        header.remastered_asset_count.min(2)
+    };
+    let mut total_allocation = 0u64;
+    for ordinal in 0..count {
         reader.seek(SeekFrom::Start(
             entry.package_offset + 16 + ordinal as u64 * 48,
         ))?;
@@ -72,6 +100,14 @@ pub fn read_first_replacements<R: Read + Seek>(
         let padded = stored.div_ceil(16) * 16;
         if padded > MAX_ORIGINAL_BYTES as u64 || expected as u32 > MAX_ORIGINAL_BYTES {
             return Err(invalid("replacement exceeds 32 MiB inspection limit"));
+        }
+        // Include both input and output for compressed data, even though the
+        // input can be released between entries. Plain output retains padding.
+        total_allocation += padded + if tag >= 0 { expected as u64 } else { 0 };
+        if total_allocation > 128 * 1024 * 1024 {
+            return Err(invalid(
+                "replacement allocation exceeds 128 MiB inspection limit",
+            ));
         }
         payload_start = payload_start
             .checked_add(15)
@@ -172,5 +208,76 @@ mod tests {
         let (mut reader, mut entry) = fixture();
         entry.stored_length = 130;
         assert!(read_first_replacements(&mut reader, &entry).is_err());
+    }
+
+    fn plain_fixture(count: u32) -> (Cursor<Vec<u8>>, HedEntry) {
+        let mut bytes = vec![0; 16 + count as usize * 48];
+        bytes[..4].copy_from_slice(&3i32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&count.to_le_bytes());
+        bytes[8..12].copy_from_slice(&(-2i32).to_le_bytes());
+        for ordinal in 0..count as usize {
+            let start = 16 + ordinal * 48;
+            bytes[start + 32..start + 36].copy_from_slice(&(-99i32).to_le_bytes());
+            bytes[start + 40..start + 44].copy_from_slice(&3i32.to_le_bytes());
+            bytes[start + 44..start + 48].copy_from_slice(&(-2i32).to_le_bytes());
+        }
+        bytes.extend(b"src");
+        bytes.resize(bytes.len().div_ceil(16) * 16, 0);
+        for ordinal in 0..count {
+            bytes.extend([ordinal as u8; 16]);
+        }
+        let entry = HedEntry {
+            name_hash: [0; 16],
+            package_offset: 0,
+            stored_length: bytes.len() as u32,
+            original_length: 3,
+        };
+        (Cursor::new(bytes), entry)
+    }
+
+    #[test]
+    fn complete_reader_includes_third_entry_and_rejects_invalid_tail() {
+        let (mut reader, mut entry) = plain_fixture(3);
+        assert_eq!(
+            read_first_replacements(&mut reader, &entry).unwrap().len(),
+            2
+        );
+        let all = read_all_replacements(&mut reader, &entry).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2].metadata.ordinal, 2);
+        assert_eq!(all[2].metadata.declared_offset, -99);
+        assert_eq!(all[2].metadata.package_offset, 208);
+        assert_eq!(all[2].bytes, [2; 16]);
+        entry.stored_length -= 1;
+        assert!(read_all_replacements(&mut reader, &entry).is_err());
+        assert_eq!(
+            read_first_replacements(&mut reader, &entry).unwrap().len(),
+            2
+        );
+        let (mut reader, entry) = plain_fixture(3);
+        reader.get_mut()[16 + 2 * 48 + 44..16 + 3 * 48].copy_from_slice(&(-3i32).to_le_bytes());
+        assert!(read_all_replacements(&mut reader, &entry).is_err());
+        assert!(read_first_replacements(&mut reader, &entry).is_ok());
+    }
+
+    #[test]
+    fn complete_reader_count_boundary_and_legacy_storage_agree() {
+        for count in [0, 1, 64] {
+            let (mut reader, entry) = plain_fixture(count);
+            assert_eq!(
+                read_all_replacements(&mut reader, &entry).unwrap().len(),
+                count as usize
+            );
+        }
+        let (mut reader, entry) = plain_fixture(65);
+        assert!(read_all_replacements(&mut reader, &entry).is_err());
+        assert_eq!(
+            read_first_replacements(&mut reader, &entry).unwrap().len(),
+            2
+        );
+        let (mut reader, entry) = fixture();
+        let all = read_all_replacements(&mut reader, &entry).unwrap();
+        assert_eq!(all[0].bytes, [b"abc".as_slice(), &[0x42; 13]].concat());
+        assert_eq!(all[1].bytes, b"synthetic replacement");
     }
 }

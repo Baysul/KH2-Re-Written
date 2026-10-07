@@ -2,9 +2,16 @@
 param(
     [Parameter(Mandatory)][string]$InstallRoot,
     [Parameter(Mandatory)][string]$ProbePath,
-    [Parameter(Mandatory)][string]$OpenKhRoot
+    [Parameter(Mandatory)][string]$OpenKhRoot,
+    [string]$ReplacementPreviewDirectory
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'ManagedReader.ps1')
+if ($ReplacementPreviewDirectory) {
+    $ReplacementPreviewDirectory = Assert-PrivateResearchDirectory -Directory $ReplacementPreviewDirectory -SourceRoot $InstallRoot
+}
+$pngPreviews = 0
+$previewPixels = 0L
 $pin = '7a3b945c538d32c6a285128c98aefba093f52ceb'
 if ((git -C $OpenKhRoot rev-parse HEAD) -ne $pin) { throw 'OpenKH checkout is not the audited pin' }
 if (git -C $OpenKhRoot status --porcelain -- OpenKh.Egs/EgsEncryption.cs) { throw 'Reference transform is locally modified' }
@@ -448,8 +455,14 @@ foreach ($sample in $report.samples) {
             } finally { $barReader.Dispose(); $barStream.Dispose() }
         }
         $replacementStart = $offset + 16 + 48L * $replacementCount + $length
+        if ($report.all_declared_replacements_requested -and @($sample.replacement_samples).Count -ne $replacementCount) {
+            throw 'Complete replacement observation omits declared entries'
+        }
+        $replacementOrdinal = 0
         foreach ($replacement in $sample.replacement_samples) {
             $meta = $replacement.metadata
+            if ($meta.ordinal -ne $replacementOrdinal) {throw 'Replacement observations are not in contiguous source order'}
+            $replacementOrdinal++
             $pkg.BaseStream.Position = $offset + 16 + 48L * $meta.ordinal
             $replacementName = $pkg.ReadBytes(32)
             $declaredOffset = $pkg.ReadInt32()
@@ -492,6 +505,48 @@ foreach ($sample in $report.samples) {
             }
             if ($replacementData.Length -ne $replacement.decoded_size -or
                 [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($replacementData)) -ne $replacement.sha256) { throw 'Independent replacement decode/hash mismatch' }
+            if ($replacement.inspection_prefix_hex -and
+                [Convert]::ToHexString([byte[]]$replacementData[0..([Math]::Min(128,$replacementData.Length)-1)]) -ne $replacement.inspection_prefix_hex) {
+                throw 'Independent replacement inspection prefix mismatch'
+            }
+            if ($ReplacementPreviewDirectory -and $replacementData.Length -ge 33 -and
+                [Convert]::ToHexString([byte[]]$replacementData[0..7]) -eq '89504E470D0A1A0A') {
+                # Windows' existing PNG decoder creates a derived preview only.
+                # This is independent asset inspection, not a Rust/renderer oracle.
+                if ([Convert]::ToHexString([byte[]]$replacementData[8..15]) -ne '0000000D49484452') {throw 'Invalid PNG IHDR prefix'}
+                $width = [uint32]::Parse([Convert]::ToHexString([byte[]]$replacementData[16..19]),[Globalization.NumberStyles]::HexNumber)
+                $height = [uint32]::Parse([Convert]::ToHexString([byte[]]$replacementData[20..23]),[Globalization.NumberStyles]::HexNumber)
+                if ($width -eq 0 -or $height -eq 0 -or $width -gt 4096 -or $height -gt 4096 -or
+                    $previewPixels + [long]$width * $height -gt 16777216 -or $pngPreviews -ge 64) {throw 'PNG preview dimensions/count exceed inspection limit'}
+                $previewPixels += [long]$width * $height
+                $pngStream = [IO.MemoryStream]::new($replacementData,$false)
+                $bitmap = $null
+                $composite = $null
+                $graphics = $null
+                $previewFile = $null
+                try {
+                    $bitmap = [Drawing.Bitmap]::new($pngStream)
+                    if ($bitmap.Width -ne $width -or $bitmap.Height -ne $height) {throw 'PNG decoded/header dimensions differ'}
+                    # BMP viewers can ignore source alpha. Composite explicitly
+                    # against black to inspect the decoded PNG's visible content.
+                    $composite = [Drawing.Bitmap]::new([int]$width,[int]$height,[Drawing.Imaging.PixelFormat]::Format24bppRgb)
+                    $graphics = [Drawing.Graphics]::FromImage($composite)
+                    $graphics.Clear([Drawing.Color]::Black)
+                    $graphics.DrawImageUnscaled($bitmap,0,0)
+                    # Numeric IDs prevent source names becoming output paths.
+                    $previewName = 'sample-{0:D2}-replacement-{1:D2}.bmp' -f $report.samples.IndexOf($sample),[int]$meta.ordinal
+                    $previewFile = [IO.File]::Open((Join-Path $ReplacementPreviewDirectory $previewName),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                    $composite.Save($previewFile,[Drawing.Imaging.ImageFormat]::Bmp)
+                    $previewFile.Flush($true)
+                    $pngPreviews++
+                } finally {
+                    if ($previewFile) {$previewFile.Dispose()}
+                    if ($graphics) {$graphics.Dispose()}
+                    if ($composite) {$composite.Dispose()}
+                    if ($bitmap) {$bitmap.Dispose()}
+                    $pngStream.Dispose()
+                }
+            }
             $replacementBytes += $replacementData.Length
             $replacementVerified++
             $replacementStart += $replacementPadded
@@ -499,6 +554,7 @@ foreach ($sample in $report.samples) {
     } finally { $hed.Dispose(); $pkg.Dispose() }
 }
 "PASS: $($report.samples.Count) originals / $totalBytes bytes and $replacementVerified replacements / $replacementBytes bytes agree with pinned OpenKH transform and .NET deflate; source was only read."
+if ($ReplacementPreviewDirectory) {"PASS: $pngPreviews independently decoded PNG previews / $previewPixels pixels saved privately; DDS pixels and installed rendering are unqualified."}
 if ($messageMode) { "PASS: $barRecordsVerified BAR records and $messageRecordsVerified message records / $messageEncodedBytes encoded bytes match independent scalars and pinned OpenKH Msg.Read; no glyph/Unicode mapping asserted." }
 if ($messageMode) { "PASS: $fontImagesVerified font palette planes / $fontPixelsVerified pixels match pinned RawBitmap packed pixels and palettes plus independent RGBA expansion; $spacingTablesVerified spacing byte tables match. Runtime glyph mapping/rendering remains unverified." }
 if ($tokenMode) { "PASS: 256 generated opcode arities; $tokenRecordsVerified records / $systemTokensVerified system tokens match pinned decoder-model boundaries and opcode counts; $tokenFailuresVerified record failures agree. No Unicode/runtime semantics asserted." }

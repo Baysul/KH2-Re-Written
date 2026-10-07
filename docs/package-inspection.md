@@ -1,5 +1,7 @@
 # Preliminary P07 structural evidence
 
+[T022](tasks/T022-hd-font-dependencies.md) reads every declared replacement in 14 explicit font dependency originals: all 19 HD payloads / 6,177,952 bytes match independent storage decoding. Fifteen are PNG and four are DXT5 DDS; PNGs have private independent previews, with representative glyph/icon sheets viewed. Eighteen payloads are new unique samples, bringing HD coverage to 26 while original coverage stays 187. Eighteen flagged offsets match type-36 BAR starts; one root font points inside a type-24 record and remains an internal-image lead. HD layout, DDS pixels and installed font/glyph rendering remain unqualified. Explicit mode: `original_probe <root> <manifest> <new-report> <private-selection>`; default sampling remains. Prefix observations and derived previews stay private.
+
 This is source inspection allowed by the P00 fallback, not a passed P07 gate. P02/P05/P06 are not qualified yet. Source: candidate Steam manifest build 15194255. Two full candidate scans agree on 13 files / 16,406,876,704 bytes; hashes and source identity remain private.
 
 | Pair | HED records | Replacement-header count | Original compressed tags | Original encrypted tags |
