@@ -5,6 +5,7 @@ import java.nio.file.*;
 import java.security.MessageDigest;
 import java.util.*;
 import com.google.gson.*;
+import ghidra.app.cmd.function.CreateFunctionCmd;
 import ghidra.app.decompiler.*;
 import ghidra.app.script.GhidraScript;
 import ghidra.framework.Application;
@@ -81,10 +82,15 @@ public class NativeSelected extends GhidraScript {
                         throw new IllegalArgumentException("Native prefix physical mapping differs");
                 }
                 Function function = getFunctionAt(address);
+                // A loader can declare a function without disassembling its
+                // entry. Require actual instructions in either case.
+                if (getInstructionAt(address) == null && !disassemble(address))
+                    throw new IllegalStateException("Selected address did not disassemble");
                 if (function == null) {
-                    if (!disassemble(address)) throw new IllegalStateException("Selected address did not disassemble");
                     function = createFunction(address, null);
                 }
+                if (function != null)
+                    CreateFunctionCmd.fixupFunctionBody(currentProgram, function, monitor);
                 if (function == null || !function.getEntryPoint().equals(address) ||
                     function.getBody().getNumAddresses() > 4096)
                     throw new IllegalStateException("Missing or oversized selected function body");
@@ -96,6 +102,8 @@ public class NativeSelected extends GhidraScript {
                     long instructionRva = instruction.getAddress().subtract(currentProgram.getImageBase());
                     var info = currentProgram.getMemory().getAddressSourceInfo(instruction.getAddress());
                     byte[] bytes = instruction.getBytes();
+                    if (!function.getBody().contains(instruction.getMinAddress(), instruction.getMaxAddress()))
+                        throw new IllegalStateException("Function body truncates an instruction");
                     if (info == null || info.getFileOffset() < 0 || info.getFileOffset() + bytes.length > snapshot.length ||
                         !Arrays.equals(bytes, Arrays.copyOfRange(snapshot, (int)info.getFileOffset(), (int)info.getFileOffset() + bytes.length)))
                         throw new IllegalStateException("Instruction differs from physical source bytes");

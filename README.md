@@ -52,6 +52,6 @@ The bounded selection names source identity and each index/ordinal/name hash plu
 
 For bounded developer inspection of the mixed executable's managed portion, see [static managed research](docs/managed-inspection.md). The pinned reader must pass an authored oracle before source-bound selections are inspected. Vendor bytes are parsed without execution; all findings/pseudocode remain private. This does not qualify native methods or enable gameplay.
 
-For its selected native MethodDef leads, see [bounded static native research](docs/native-inspection.md). A separately pinned Ghidra engine must pass an authored native oracle and preserve native PE source mappings. Two getters have finite independent instruction evidence; active runtime behavior and gameplay remain unimplemented.
+For its selected native MethodDef leads, see [bounded static native research](docs/native-inspection.md). A separately pinned Ghidra engine must pass the current authored oracle/profile and preserve native PE mappings. Two getters and two startup-related bodies have finite independent instruction evidence, including the PE/CLR entry distinction; full initialization, active runtime behavior and gameplay remain unimplemented.
 
 The [pinned MCP bridge research path](docs/bridge-inspection.md) has finite fixture/source qualification and a private prepared-project workflow. Its generic importer cannot apply the required mixed-PE settings. The project database and all source findings remain external; opening a bridge does not qualify gameplay.

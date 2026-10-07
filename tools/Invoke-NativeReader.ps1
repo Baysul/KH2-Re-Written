@@ -83,6 +83,7 @@ if ($inputPath.StartsWith($sourceRoot+[IO.Path]::DirectorySeparatorChar,[StringC
     $oracleLauncher=Get-Content $oracleLauncherPath -Raw | ConvertFrom-Json
     if ($oracleLauncher.verdict -ne 'PASS' -or $oracleLauncher.package_sha256 -ne
         'ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db' -or
+        $oracleLauncher.loader_profile -ne 'native_pe_no_cli_no_ordinal_lookup_v1' -or
         $oracleLauncher.java_sha256 -ne (Get-FileHash (Join-Path $JavaHome 'bin/java.exe')).Hash) {
         throw 'Native oracle tool/host identity differs'
     }
@@ -110,7 +111,7 @@ $vmargs=@('-Djava.system.class.loader=ghidra.GhidraClassLoader','-Dfile.encoding
     "-Drewrite.input.imagebase=$expectedImageBase",
     '-cp',(Join-Path $distribution 'Ghidra/Framework/Utility/lib/Utility.jar'),'ghidra.Ghidra',
     'ghidra.app.util.headless.AnalyzeHeadless',(Join-Path $output 'projects'),'SelectedNative',
-    '-import',$inputPath,'-loader','PeLoader','-loader-parseCliHeaders','false','-loader-loadLibraries','false',
+    '-import',$inputPath,'-loader','PeLoader','-loader-parseCliHeaders','false','-loader-ordinalLookup','false','-loader-loadLibraries','false',
     '-loader-linkExistingProjectLibraries','false','-processor','x86:LE:64:default','-cspec','windows',
     '-noanalysis','-scriptPath',$PSScriptRoot,'-postScript','NativeSelected.java',
     (Get-ResearchCanonicalPath $SelectionPath),(Join-Path $output 'report.json'),
@@ -138,6 +139,7 @@ $receipt=[ordered]@{verdict='PASS';qualification='static_native_reader_only';inp
     selection_sha256=(Get-FileHash -LiteralPath $SelectionPath).Hash;
     report_sha256=(Get-FileHash -LiteralPath (Join-Path $output 'report.json')).Hash;
     private_project_preserved=[bool]$PreservePrivateProject;
+    loader_profile='native_pe_no_cli_no_ordinal_lookup_v1';
     limitations='Native PE import with CLR parsing disabled; no auto-analysis, target execution, fresh full source scan or source-support qualification'}
 Write-NewResearchFile (Join-Path $output 'launcher-receipt.json') ([Text.Encoding]::UTF8.GetBytes(($receipt | ConvertTo-Json -Depth 5)))
 Write-Output "PASS: $($report.findings.Count) selected static native findings; installed input unchanged."
