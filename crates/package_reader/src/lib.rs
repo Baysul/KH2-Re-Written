@@ -9,6 +9,7 @@ pub mod bar;
 pub mod font;
 pub mod font_cell;
 pub mod hd_image;
+pub mod image_structure;
 pub mod inspection;
 pub mod message;
 pub mod message_text;

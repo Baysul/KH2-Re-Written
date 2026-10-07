@@ -8,7 +8,7 @@ Status: DRAFT WITH CONFIRMED CORE SCOPE. P00 final acceptance awaits the compari
 |---|---|---|---|
 | Product | KH2 Final Mix within Steam app 2552430; exclude other collection games | User confirmed | Agent maps KH2 dependencies; user confirms source |
 | Source baseline | Local manifest reports build 15194255, language english; KH2 executable and six HED/PKG pairs exist | Observed; unqualified | Agent hashes candidate set; user reports mod/verification history; P02 establishes complete profile |
-| Edition / integrity | Steam language and `Image/dt` names are clues; no clean/International equivalence claim | Unknown | Agent compares file identity and runtime; user/vendor verification |
+| Edition / integrity | User reports never modded (2026-10-07); Steam language and `Image/dt` names remain clues; independent vendor integrity/International equivalence unqualified | User history confirmed; independent integrity unknown | Agent compares file identity and runtime; vendor verification remains separate |
 | Architecture | Native Rust/Bevy, Windows x86_64 MSVC, own game implementation | Roadmap required | P03 build; P11 headless rules; P31 fresh-machine package |
 | OS / hardware floor | Development on Windows 11; release floor remains unmeasured | Unknown | Agent measures P30; user approves supported test hardware |
 | Display baseline | Propose 1920x1080, 60 Hz, SDR, fixed reference settings; exploratory title screenshot exists, configuration unverified | Provisional | User approves configuration; agent records mode, scaling, frame pacing and capture settings |
