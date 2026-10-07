@@ -15,3 +15,12 @@ sha2 = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Full selected-source hashing is required even for development inspection.
+# Optimize only this measured startup path; simulation/presentation stays on
+# the ordinary development profile.
+[profile.dev.package.source_identity]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

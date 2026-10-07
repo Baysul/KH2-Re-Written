@@ -4163,6 +4163,10 @@ name = "windows_shell"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "image",
+ "package_reader",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

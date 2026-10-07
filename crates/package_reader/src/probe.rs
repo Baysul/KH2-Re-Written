@@ -59,6 +59,30 @@ impl ProbeSource {
         &self.manifest.content_identity
     }
 
+    /// Rehash the selected candidate, retaining quarantine. Research viewers
+    /// must call this at startup; matching cached metadata is insufficient.
+    pub fn verify_full_source(&self) -> ProbeResult<()> {
+        let fresh = source_identity::scan(&self.root)?;
+        if fresh.content_identity != self.manifest.content_identity
+            || fresh.files.iter().any(|observed| {
+                self.manifest
+                    .files
+                    .iter()
+                    .find(|expected| expected.relative_path == observed.relative_path)
+                    .is_none_or(|expected| {
+                        observed.sha256 != expected.sha256
+                            || observed.size != expected.size
+                            || observed.modified_unix_nanos != expected.modified_unix_nanos
+                    })
+            })
+        {
+            return Err(
+                "selected source differs from the bound manifest; full scan rejected".into(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn output_path(&self, path: &Path) -> std::io::Result<PathBuf> {
         source_identity::safe_output(&self.root, path)
     }
@@ -234,5 +258,14 @@ mod tests {
         manifest.content_identity = source_identity::content_identity(&manifest.files);
         fs::write(&fixture.manifest, serde_json::to_vec(&manifest).unwrap()).unwrap();
         assert!(ProbeSource::bind(&fixture.root, &fixture.manifest).is_err());
+    }
+
+    #[test]
+    fn full_validation_checks_the_executable_as_bytes_without_loading_it() {
+        let fixture = Fixture::new();
+        let source = ProbeSource::bind(&fixture.root, &fixture.manifest).unwrap();
+        source.verify_full_source().unwrap();
+        fs::write(fixture.root.join(source_identity::KH2_EXECUTABLE), [1; 16]).unwrap();
+        assert!(source.verify_full_source().is_err());
     }
 }
