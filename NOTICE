@@ -19,6 +19,10 @@ unsupported slots and unmapped tables are preserved without fabricated text.
 The localized font plane/palette decoder follows RawBitmap.cs,
 Contextes/FontContext.cs and Ps2.Utility.cs/Ps2.Repl.cs at that pin.
 The Rust decoder adds strict plane/palette length checks and private previews.
+Explicit font-cell candidate coordinates follow Constants.cs and the
+Kh2MessageRenderer DrawChar methods at the same pin, with added bounds and
+non-aliased bank checks. Original spacing bytes remain uninterpreted;
+public profile coordinates do not assert installed runtime glyph behavior.
 
 OpenKH - Open Kingdom Hearts Research and Development
 Copyright 2019-2022 OpenKH Team and Contributors

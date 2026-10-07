@@ -1,3 +1,3 @@
 language,surface,required,source_identified,decoded,rendered,reviewed,behavior_invariant,release_passed,evidence
-en,all-discovered-text-and-font-surfaces,true,false,false,false,false,false,false,T018-explicit-International-Unicode-corpus-51-unsupported-slots-glyph-runtime-and-full-surfaces-unverified
-ja,all-discovered-text-and-font-surfaces,true,false,false,false,false,false,false,T008-kana-kanji-atlas-T017-no-msg-jp-candidate-other-names-and-full-message-mapping-unresolved
+en,all-discovered-text-and-font-surfaces,true,false,false,false,false,false,false,T018-explicit-Unicode-51-unknown-slots-T020-cell-candidates-compared-runtime-and-full-surfaces-unverified
+ja,all-discovered-text-and-font-surfaces,true,false,false,false,false,false,false,T008-kana-kanji-atlas-T020-explicit-cell-profile-T017-no-msg-jp-candidate-full-message-mapping-unresolved
