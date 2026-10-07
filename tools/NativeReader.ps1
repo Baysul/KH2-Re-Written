@@ -17,3 +17,24 @@ function Get-NativeRelativeBranchTarget([byte[]]$Bytes, [long]$InstructionRva, [
     if ($target -lt 0 -or $target -gt [uint32]::MaxValue) {throw 'Relative branch target exceeds PE RVA range'}
     return $target
 }
+
+function Get-NativeStaticPointerTarget([byte[]]$Bytes, $Sections, [ulong]$ImageBase,
+    [long]$InstructionRva, [long]$Offset) {
+    if ($InstructionRva -lt 0 -or $InstructionRva -gt [uint32]::MaxValue -or
+        $Offset -lt 0 -or $Offset + 6 -gt $Bytes.LongLength) {throw 'Indirect instruction span exceeds input'}
+    if ($Bytes[$Offset] -ne 0xFF -or $Bytes[$Offset+1] -notin @(0x15,0x25)) {
+        throw 'Only unprefixed RIP-relative indirect CALL/JMP leads are admitted'
+    }
+    $slotRva=$InstructionRva + 6 + [BitConverter]::ToInt32($Bytes,[int]$Offset + 2)
+    if ($slotRva -lt 0 -or $slotRva -gt [uint32]::MaxValue) {throw 'Indirect slot exceeds PE RVA range'}
+    $slotOffset=Get-NativePeOffset $Sections $slotRva 8 $Bytes.LongLength
+    $value=[BitConverter]::ToUInt64($Bytes,[int]$slotOffset)
+    if ($value -lt $ImageBase -or $value-$ImageBase -gt [uint32]::MaxValue) {
+        throw 'Static pointer is not an in-image PE RVA candidate'
+    }
+    return [pscustomobject]@{slot_rva=$slotRva;slot_file_offset=$slotOffset;
+        slot_sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+            [byte[]]$Bytes[$slotOffset..($slotOffset+7)])).ToLowerInvariant();
+        static_target_rva=[long]($value-$ImageBase);
+        qualification='static_file_pointer_only_not_live_destination'}
+}

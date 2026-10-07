@@ -59,6 +59,7 @@ try {
     if ($inputPe.PEHeaders.CoffHeader.Machine -ne [Reflection.PortableExecutable.Machine]::Amd64 -or
         $inputPe.PEHeaders.PEHeader.Magic -ne [Reflection.PortableExecutable.PEMagic]::PE32Plus) {throw 'Native reader requires observed x64 PE32+'}
     $expectedImageBase=$inputPe.PEHeaders.PEHeader.ImageBase.ToString('x')
+    $inputImageBase=$inputPe.PEHeaders.PEHeader.ImageBase
     $inputSections=$inputPe.PEHeaders.SectionHeaders
 } finally {$inputPe.Dispose();$inputMemory.Dispose()}
 $sourceRoot=Get-ResearchCanonicalPath $InstallRoot
@@ -93,8 +94,8 @@ if ($inputPath.StartsWith($sourceRoot+[IO.Path]::DirectorySeparatorChar,[StringC
     if ($inventory.qualification -ne 'quarantined_static_managed_research_only' -or
         $inventory.executable_sha256 -cne $inputHash -or $selection.source_content_identity -cnotmatch '^[0-9a-f]{64}$' -or
         $selection.source_content_identity -cne $inventory.source_content_identity) {throw 'Native inventory/selection/source binding differs'}
-    if (@($selection.methods | Where-Object kind -eq 'direct_branch').Count) {
-        if (!$ParentNativeDirectory) {throw 'Direct branch selection requires a qualified private parent run'}
+    if (@($selection.methods | Where-Object {$_.kind -in @('direct_branch','static_pointer')}).Count) {
+        if (!$ParentNativeDirectory) {throw 'Source-derived selection requires a qualified private parent run'}
         $parent=Assert-PrivateResearchDirectory $ParentNativeDirectory $InstallRoot
         $parentReportPath=Join-Path $parent 'report.json'
         $parentReceiptPath=Join-Path $parent 'launcher-receipt.json'
@@ -123,21 +124,29 @@ if ($inputPath.StartsWith($sourceRoot+[IO.Path]::DirectorySeparatorChar,[StringC
             $rows=@($inventory.methods | Where-Object {$_.token -ceq $method.token})
             if ($rows.Count -ne 1 -or $rows[0].implementation_kind -ne 'Native' -or $rows[0].rva -ne $method.rva -or
                 $rows[0].method_file_offset -ne $method.file_offset) {throw 'Selected native lead differs from bound MethodDef'}
-        } elseif ($method.kind -eq 'direct_branch') {
+        } elseif ($method.kind -in @('direct_branch','static_pointer')) {
             if ($method.parent_report_sha256 -cne $parentReportHash) {throw 'Selected branch parent report differs'}
             $findings=@($parentReport.findings | Where-Object rva -eq $method.parent_function_rva)
             $instructions=@($findings.instructions | Where-Object rva -eq $method.instruction_rva)
-            if ($findings.Count -ne 1 -or $instructions.Count -ne 1 -or $instructions[0].size -ne 5) {
+            $instructionSize=if ($method.kind -eq 'direct_branch') {5} else {6}
+            if ($findings.Count -ne 1 -or $instructions.Count -ne 1 -or $instructions[0].size -ne $instructionSize) {
                 throw 'Selected branch instruction is not uniquely recorded in parent body'
             }
             $instruction=$instructions[0]
-            $offset=Get-NativePeOffset $inputSections $instruction.rva 5 $inputBytes.LongLength
-            $bytes=[byte[]]$inputBytes[$offset..($offset+4)]
+            $offset=Get-NativePeOffset $inputSections $instruction.rva $instructionSize $inputBytes.LongLength
+            $bytes=[byte[]]$inputBytes[$offset..($offset+$instructionSize-1)]
             if ($offset -ne $instruction.file_offset -or
                 [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() -cne $instruction.sha256) {
                 throw 'Parent branch instruction differs from physical source'
             }
-            $target=Get-NativeRelativeBranchTarget $inputBytes $instruction.rva $offset
+            if ($method.kind -eq 'direct_branch') {
+                $target=Get-NativeRelativeBranchTarget $inputBytes $instruction.rva $offset
+            } else {
+                $pointer=Get-NativeStaticPointerTarget $inputBytes $inputSections $inputImageBase $instruction.rva $offset
+                if ($method.slot_rva -ne $pointer.slot_rva -or $method.slot_file_offset -ne $pointer.slot_file_offset -or
+                    $method.slot_sha256 -cne $pointer.slot_sha256) {throw 'Selected static pointer slot differs from source'}
+                $target=$pointer.static_target_rva
+            }
             if ($target -ne $method.rva -or (Get-NativePeOffset $inputSections $target $method.prefix_size $inputBytes.LongLength) -ne $method.file_offset) {
                 throw 'Selected branch target or physical mapping differs'
             }
@@ -190,6 +199,7 @@ $receipt=[ordered]@{verdict='PASS';qualification='static_native_reader_only';inp
     loader_profile='native_pe_no_cli_no_ordinal_lookup_v1';
     parent_report_sha256=if ($ParentNativeDirectory) {$parentReportHash} else {$null};
     branch_helper_sha256=(Get-FileHash (Join-Path $PSScriptRoot 'NativeReader.ps1')).Hash;
+    static_pointer_leads=@($selection.methods | Where-Object kind -eq 'static_pointer').Count;
     limitations='Native PE import with CLR parsing disabled; no auto-analysis, target execution, fresh full source scan or source-support qualification'}
 Write-NewResearchFile (Join-Path $output 'launcher-receipt.json') ([Text.Encoding]::UTF8.GetBytes(($receipt | ConvertTo-Json -Depth 5)))
 Write-Output "PASS: $($report.findings.Count) selected static native findings; installed input unchanged."

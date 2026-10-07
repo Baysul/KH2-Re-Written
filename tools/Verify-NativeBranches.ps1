@@ -38,4 +38,36 @@ foreach ($case in @(
     if (!$rejected) {throw 'Invalid synthetic PE span accepted'}
     $checks++
 }
-Write-Output "PASS: $checks synthetic direct-branch and PE mapping checks."
+$pointerSections=@([pscustomobject]@{VirtualAddress=0;SizeOfRawData=128;PointerToRawData=0})
+foreach ($case in @(@{opcode=0x15;pc=16;slot=64},@{opcode=0x25;pc=16;slot=64},@{opcode=0x15;pc=96;slot=32})) {
+    $bytes=[byte[]]::new(128)
+    $bytes[$case.pc]=0xFF; $bytes[$case.pc+1]=$case.opcode
+    [Array]::Copy([BitConverter]::GetBytes([int]($case.slot-$case.pc-6)),0,$bytes,$case.pc+2,4)
+    [Array]::Copy([BitConverter]::GetBytes([ulong]0x100050),0,$bytes,$case.slot,8)
+    $pointer=Get-NativeStaticPointerTarget $bytes $pointerSections 0x100000 $case.pc $case.pc
+    if ($pointer.slot_rva -ne $case.slot -or $pointer.slot_file_offset -ne $case.slot -or
+        $pointer.static_target_rva -ne 80 -or $pointer.qualification -ne 'static_file_pointer_only_not_live_destination') {
+        throw 'Synthetic static pointer observation differs'
+    }
+    $checks++
+}
+foreach ($case in @(
+    @{opcode=0xD0;slot=64;value=0x100050;length=128},
+    @{opcode=0x15;slot=-1;value=0x100050;length=128},
+    @{opcode=0x15;slot=124;value=0x100050;length=128},
+    @{opcode=0x15;slot=64;value=0;length=128},
+    @{opcode=0x15;slot=64;value=0x100100000;length=128},
+    @{opcode=0x15;slot=64;value=0x100050;length=20}
+)) {
+    $bytes=[byte[]]::new($case.length)
+    $bytes[16]=0xFF; $bytes[17]=$case.opcode
+    if ($bytes.Length -ge 22) {[Array]::Copy([BitConverter]::GetBytes([int]($case.slot-22)),0,$bytes,18,4)}
+    if ($case.slot -ge 0 -and $case.slot+8 -le $bytes.Length) {
+        [Array]::Copy([BitConverter]::GetBytes([ulong]$case.value),0,$bytes,$case.slot,8)
+    }
+    $rejected=$false
+    try {[void](Get-NativeStaticPointerTarget $bytes $pointerSections 0x100000 16 16)} catch {$rejected=$true}
+    if (!$rejected) {throw 'Invalid synthetic indirect observation accepted'}
+    $checks++
+}
+Write-Output "PASS: $checks synthetic direct/indirect branch and PE mapping checks."
