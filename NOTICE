@@ -35,6 +35,15 @@ follow VpuPacket.cs. Added limits/rejection paths and Bevy scene code are owned.
 Candidate name generation in tools/Compare-CandidateNames.ps1 follows
 the KH2-only EgsTools rules at the same pin; upstream catalogs are
 referenced privately and are not included in this repository.
+The bounded interpolated-motion reader adapts Motion.cs at the same OpenKH pin.
+Complete keys and alignment tails remain separate; constraint/helper/root and
+expression structures are retained without claiming installed evaluation.
+Explicit basic FK sampling follows legacy Motion.Read, Kh2MotionEngine.cs and
+MathEx.cs, with added bounds and rejection of undefined zero-duration results.
+It ignores scale, inverse curves, IK, constraints, expressions, root motion and
+triggers just as the selected basic consumer does; no installed clock is chosen.
+Retained skin bindings reuse the explicit public pose arithmetic above. Native
+preview frame stepping, mesh updates and finite capture tours are owned code.
 The bounded message-record reader follows Msg.Read/GetMsgData at the
 same OpenKH pin, retaining encoded spans without a glyph dictionary.
 System-message token boundaries additionally follow the pinned system decoder
@@ -101,6 +110,11 @@ at the same OpenKH pin. Fixed-size frame graphs and signed slots remain
 observations; body/allocation/visit bounds are added. Unknown controls and raw
 duration/sprite/header values remain retained. No playback, timer, slot or
 installed animation behavior is inferred.
+
+The bounded PRTY inspection reader additionally follows PrtyFile.Read at the
+same pin, retaining distinct raw offset records after the first table slot.
+Header-overlapping records are exposed explicitly. Character mappings, units
+and runtime movement rules are not inferred from these records.
 
 OpenKH - Open Kingdom Hearts Research and Development
 Copyright 2019-2022 OpenKH Team and Contributors

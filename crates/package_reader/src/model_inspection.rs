@@ -51,6 +51,7 @@ pub struct InspectionModel {
     pub excluded_linked_groups: usize,
     pub parts: Vec<InspectionPart>,
     pub poses: Vec<ModelPose>,
+    pub skinning: crate::model_pose::Skinning,
     pub textures: Option<Arc<InspectionTextures>>,
     pub texture_routes: Vec<UvRoutes>,
 }
@@ -270,10 +271,11 @@ pub fn read_selected_models(
                 let start = entry.offset as usize;
                 let payload = &original.bytes[start..start + entry.size as usize];
                 let geometry = crate::model_geometry::read_geometry(payload)?;
+                let skinning = crate::model_pose::Skinning::read(payload)?;
                 let poses: Vec<_> = selection
                     .model_pose_profiles
                     .iter()
-                    .map(|&profile| crate::model_pose::read_pose(payload, profile))
+                    .map(|&profile| skinning.bind_pose(profile))
                     .collect::<io::Result<_>>()?;
                 let mesh_parts = parts(&geometry, &poses)?;
                 let texture_routes = if let Some(set) = &textures {
@@ -326,6 +328,7 @@ pub fn read_selected_models(
                     excluded_linked_groups: geometry.excluded_linked_groups,
                     parts: mesh_parts,
                     poses,
+                    skinning,
                     textures: textures.clone(),
                     texture_routes,
                 });

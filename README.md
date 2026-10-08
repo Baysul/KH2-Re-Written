@@ -2,13 +2,13 @@
 
 Native Windows Rust/Bevy research project for **Kingdom Hearts II Final Mix only**, using a user-selected local Steam installation. No game assets are distributed. This is a foundation under development; it cannot play KH2 yet.
 
-Current implementation priority is a first playable room. A source-bound Bevy scene now displays an actual textured room and a static character together, reading their data from the selected Steam installation. This is a preview with explicit inspection placement and materials; it cannot play KH2. See [T052](docs/tasks/T052-first-room-visual.md).
+Current implementation priority is a test room with controllable Sora, walking, jumping and attacking. A source-bound Bevy scene displays an actual textured room and a character with an explicit basic skeletal motion preview, reading their data from the selected Steam installation. Placement, materials and animation frames are inspection choices; it cannot play KH2 yet. See [T053](docs/tasks/T053-character-motion.md) and [T054](docs/tasks/T054-test-room-controls.md).
 
 | Works now | Still missing |
 |---|---|
 | Checked package, model, texture and room collision readers | Complete source/build/language support |
 | Room visual geometry with independently compared packet and mesh inputs | Installed rendering, culling, skeletal room props and HD material routing |
-| Textured room and static character in one native preview | Character animation, movement, camera rules and collision response |
+| Textured room and character with basic FK motion and retained skin bindings | Complete animation/IK, action selection, movement, camera rules and collision response |
 | Synthetic platform window and repeatable checks | Combat, scripts, progression, saves and the full campaign/optional content |
 
 Developer room preview (each launch revalidates the selected Steam files; all selections and outputs remain private):
@@ -17,7 +17,7 @@ Developer room preview (each launch revalidates the selected Steam files; all se
 cargo run -p windows_shell --bin room_scene --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/room-selection.json' '<private-directory>/actor-selection.json' '<private-directory>/new-scene.jsonl' '<private-directory>/new-scene.png'
 ```
 
-The preview supports J/L camera orbit, +/- zoom and Escape. It captures a private PNG after settling. Its source remains quarantined, and these inspection controls do not implement KH2 gameplay. Use `--frames 900` after the arguments for a bounded capture run. Movement and animation are the next implementation priority.
+The preview supports J/L camera orbit, +/- zoom and Escape. It captures a private PNG after settling. Its source remains quarantined, and these inspection controls do not implement KH2 gameplay. Use `--frames 900` after the arguments for a bounded capture run. Add `--motion '<private-directory>/motion-selection.json'` for the checked basic FK profile: Space pauses, N advances a paused frame, B steps back and M cycles selected motion slots. `--tour motion` captures two explicit frames per selected slot. Missing IK, inverse curves, scale, constraints, expressions, root motion, triggers and installed cadence remain recorded. Movement, jumping and attacks require further reference work.
 
 Start with [scope](docs/fidelity-contract.md), [milestones](docs/milestones.md), [unknowns](docs/unknowns.md), and [source policy](docs/source-and-release-policy.md). The external [roadmap](https://docs.google.com/document/d/1lewKD-h2ZVOOES1qugUgj82QVMybWwb8sqK3ed-4wPI/edit?tab=t.0) is the execution plan.
 

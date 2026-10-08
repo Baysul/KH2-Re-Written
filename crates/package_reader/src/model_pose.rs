@@ -183,46 +183,88 @@ fn bind_matrices(bones: &[BoneRecord], profile: PoseProfile) -> io::Result<Vec<M
     }
     Ok(result)
 }
-pub fn read_pose(bytes: &[u8], profile: PoseProfile) -> io::Result<ModelPose> {
-    let structure = crate::model_skeleton::read_model_structure(bytes)?;
-    let geometry = crate::model_geometry::read_geometry(bytes)?;
-    let groups = crate::model_packets::read_packet_groups(bytes)?;
-    let matrices = bind_matrices(&structure.blocks[0].bones, profile)?;
-    let mut positions = Vec::new();
-    let mut bindings = 0;
-    for part in &geometry.parts {
-        let group = groups
-            .iter()
-            .find(|g| {
-                g.block_offset == geometry.block_offset && g.group_ordinal == part.group_ordinal
-            })
-            .ok_or_else(|| invalid("pose group missing"))?;
-        let data = group
-            .packets
-            .get(part.packet_ordinal)
-            .and_then(|p| p.vpu_data.as_ref())
-            .ok_or_else(|| invalid("pose type-1 packet missing"))?;
-        for assignment in &part.assignments {
-            bindings += assignment.len();
-            if assignment.is_empty()
-                || assignment.len() > 32
-                || bindings > MAX_ITEMS
-                || positions.len() == MAX_ITEMS
-            {
-                return Err(invalid("pose assignments exceed bounded profile"));
+#[derive(Serialize)]
+struct Influence {
+    matrix: usize,
+    vertex_bits: [u32; 4],
+}
+/// Checked, retained coordinates and assignments; packet decoding happens once.
+#[derive(Default, Serialize)]
+pub struct Skinning {
+    pub bones: Vec<BoneRecord>,
+    assignments: Vec<Vec<Influence>>,
+}
+impl Skinning {
+    pub fn read(bytes: &[u8]) -> io::Result<Self> {
+        let structure = crate::model_skeleton::read_model_structure(bytes)?;
+        let geometry = crate::model_geometry::read_geometry(bytes)?;
+        let groups = crate::model_packets::read_packet_groups(bytes)?;
+        let bones = structure
+            .blocks
+            .into_iter()
+            .next()
+            .ok_or_else(|| invalid("skin skeleton absent"))?
+            .bones;
+        let mut assignments = Vec::new();
+        let mut bindings = 0;
+        for part in &geometry.parts {
+            let group = groups
+                .iter()
+                .find(|g| {
+                    g.block_offset == geometry.block_offset && g.group_ordinal == part.group_ordinal
+                })
+                .ok_or_else(|| invalid("pose group missing"))?;
+            let data = group
+                .packets
+                .get(part.packet_ordinal)
+                .and_then(|p| p.vpu_data.as_ref())
+                .ok_or_else(|| invalid("pose type-1 packet missing"))?;
+            for assignment in &part.assignments {
+                bindings += assignment.len();
+                if assignment.is_empty()
+                    || assignment.len() > 32
+                    || bindings > MAX_ITEMS
+                    || assignments.len() == MAX_ITEMS
+                {
+                    return Err(invalid("pose assignments exceed bounded profile"));
+                }
+                let mut influences = Vec::new();
+                for binding in assignment {
+                    let matrix = usize::try_from(binding.matrix_index)
+                        .ok()
+                        .filter(|&i| i < bones.len())
+                        .ok_or_else(|| invalid("pose matrix index out of range"))?;
+                    let vertex = finite(
+                        data.vertex_bits
+                            .get(binding.vertex_index)
+                            .ok_or_else(|| invalid("pose coordinate index out of range"))?
+                            .map(f32::from_bits),
+                    )?;
+                    influences.push(Influence {
+                        matrix,
+                        vertex_bits: vertex.map(f32::to_bits),
+                    });
+                }
+                assignments.push(influences);
             }
+        }
+        Ok(Self { bones, assignments })
+    }
+    fn pose(
+        &self,
+        matrices: Vec<Matrix>,
+        profile: PoseProfile,
+        arithmetic_profile: &'static str,
+    ) -> io::Result<ModelPose> {
+        if matrices.len() != self.bones.len() {
+            return Err(invalid("skin matrix count mismatch"));
+        }
+        let mut positions = Vec::with_capacity(self.assignments.len());
+        for assignment in &self.assignments {
             let mut position = [0.; 3];
-            for binding in assignment {
-                let matrix = usize::try_from(binding.matrix_index)
-                    .ok()
-                    .and_then(|i| matrices.get(i))
-                    .ok_or_else(|| invalid("pose matrix index out of range"))?;
-                let vertex = finite(
-                    data.vertex_bits
-                        .get(binding.vertex_index)
-                        .ok_or_else(|| invalid("pose coordinate index out of range"))?
-                        .map(f32::from_bits),
-                )?;
+            for influence in assignment {
+                let matrix = &matrices[influence.matrix];
+                let vertex = influence.vertex_bits.map(f32::from_bits);
                 if assignment.len() == 1 {
                     position = transform3([vertex[0], vertex[1], vertex[2]], matrix);
                 } else {
@@ -234,17 +276,74 @@ pub fn read_pose(bytes: &[u8], profile: PoseProfile) -> io::Result<ModelPose> {
             }
             positions.push(finite(position)?.map(f32::to_bits));
         }
+        Ok(ModelPose {
+            profile,
+            arithmetic_profile,
+            matrix_bits: matrices
+                .iter()
+                .map(|m| std::array::from_fn(|i| m[i / 4][i % 4].to_bits()))
+                .collect(),
+            position_bits: positions,
+            runtime_verified: false,
+        })
     }
-    Ok(ModelPose {
-        profile,
-        arithmetic_profile: "dotnet10_fma_order_std_sincos_candidate_v1",
-        matrix_bits: matrices
-            .iter()
-            .map(|m| std::array::from_fn(|i| m[i / 4][i % 4].to_bits()))
-            .collect(),
-        position_bits: positions,
-        runtime_verified: false,
-    })
+    pub fn bind_pose(&self, profile: PoseProfile) -> io::Result<ModelPose> {
+        self.pose(
+            bind_matrices(&self.bones, profile)?,
+            profile,
+            "dotnet10_fma_order_std_sincos_candidate_v1",
+        )
+    }
+    /// Explicit basic public FK profile. Scale, IK, root and events are not applied.
+    pub fn sample_fk(
+        &self,
+        motion: &crate::motion::InterpolatedMotion,
+        frame: u32,
+    ) -> io::Result<ModelPose> {
+        let locals = motion.sample_fk(&self.bones, frame)?;
+        let mut rotations = Vec::new();
+        let mut translations: Vec<[f32; 3]> = Vec::new();
+        let mut matrices = Vec::new();
+        for (i, (bone, local)) in self.bones.iter().zip(locals).enumerate() {
+            let parent = bone.header_i32[1];
+            if parent >= 0 && parent as usize >= i {
+                return Err(invalid("motion parent must precede child"));
+            }
+            let (parent_rotation, parent_translation) = if parent < 0 {
+                ([0., 0., 0., 1.], [0.; 3])
+            } else {
+                (rotations[parent as usize], translations[parent as usize])
+            };
+            let rotated = transform3(local.translation, &quaternion_matrix(parent_rotation));
+            let absolute_translation = finite(std::array::from_fn(|axis| {
+                parent_translation[axis] + rotated[axis]
+            }))?;
+            let mut local_rotation = [0., 0., 0., 1.];
+            for axis in [2, 1, 0] {
+                local_rotation =
+                    quaternion_product(local_rotation, axis_quaternion(axis, local.rotation[axis]));
+            }
+            let absolute_rotation = finite(quaternion_product(parent_rotation, local_rotation))?;
+            let matrix = multiply(
+                &multiply(&IDENTITY, &quaternion_matrix(absolute_rotation)),
+                &translation(absolute_translation),
+            );
+            for row in matrix {
+                finite(row)?;
+            }
+            rotations.push(absolute_rotation);
+            translations.push(absolute_translation);
+            matrices.push(matrix);
+        }
+        self.pose(
+            matrices,
+            PoseProfile::Legacy,
+            "openkh_basic_fk_dotnet10_fma_std_sincos_candidate_v1",
+        )
+    }
+}
+pub fn read_pose(bytes: &[u8], profile: PoseProfile) -> io::Result<ModelPose> {
+    Skinning::read(bytes)?.bind_pose(profile)
 }
 
 #[cfg(test)]
@@ -257,6 +356,36 @@ mod tests {
             transform_bits: [scale, scale, scale, 0., 0., 0., 0., 0., x, 0., 0., 0.]
                 .map(f32::to_bits),
         }
+    }
+    #[test]
+    fn retained_skinning_reuses_single_and_weighted_bindings_without_packets() {
+        let skin = Skinning {
+            bones: vec![bone(-1, 1., 10.), bone(0, 1., 1.)],
+            assignments: vec![
+                vec![Influence {
+                    matrix: 1,
+                    vertex_bits: [2., 0., 0., 0.].map(f32::to_bits),
+                }],
+                vec![
+                    Influence {
+                        matrix: 0,
+                        vertex_bits: [1., 0., 0., 0.5].map(f32::to_bits),
+                    },
+                    Influence {
+                        matrix: 1,
+                        vertex_bits: [2., 0., 0., 0.5].map(f32::to_bits),
+                    },
+                ],
+            ],
+        };
+        let pose = skin.bind_pose(PoseProfile::Legacy).unwrap();
+        assert_eq!(pose.position_bits[0].map(f32::from_bits), [13., 0., 0.]);
+        assert_eq!(pose.position_bits[1].map(f32::from_bits), [13.5, 0., 0.]);
+        assert!(skin.pose(vec![], PoseProfile::Legacy, "authored").is_err());
+        assert_eq!(
+            skin.bind_pose(PoseProfile::Legacy).unwrap().position_bits,
+            pose.position_bits
+        );
     }
     #[test]
     fn distinct_parent_scale_routes_and_homogeneous_weights() {

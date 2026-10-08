@@ -639,6 +639,7 @@ mod tests {
             })
             .collect();
         let model = InspectionModel {
+            skinning: package_reader::model_pose::Skinning::default(),
             index: String::new(),
             ordinal: 0,
             bar_ordinal: 0,
