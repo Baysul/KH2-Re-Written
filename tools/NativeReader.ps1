@@ -1,4 +1,79 @@
 # Authored helpers for source-bound static native inspection.
+function Assert-NativeSharedModuleEvidence($Manifest, $Runtime, [string]$SourceRoot,
+    [string]$RelativePath, [long]$Size, [string]$Hash, [string]$SelectedIdentity) {
+    if ($RelativePath -cnotin @('KINGDOM HEARTS HD 1.5+2.5 ReMIX.exe','steam_api64.dll') -or
+        $Manifest.schema_version -ne 1 -or $Manifest.qualification -ne 'quarantined_unqualified' -or
+        ![StringComparer]::OrdinalIgnoreCase.Equals($SourceRoot,(Get-ResearchCanonicalPath $Manifest.canonical_source_path)) -or
+        $Manifest.content_identity -cnotmatch '^[0-9a-f]{64}$' -or $SelectedIdentity -cne $Manifest.content_identity -or
+        $Runtime.os_module_metadata_enumerated -ne $true -or $Runtime.process_memory_modified -ne $false -or
+        $Runtime.custom_game_state_or_code_memory_read -ne $false) {throw 'Shared module source/runtime scope differs'}
+    $required=@('KINGDOM HEARTS II FINAL MIX.exe')
+    foreach ($pair in @('first','second','third','fourth','fifth','sixth')) {
+        foreach ($extension in @('hed','pkg')) {$required += "Image/dt/kh2_$pair.$extension"}
+    }
+    $required=@($required | Sort-Object -CaseSensitive)
+    if ($Manifest.files.Count -ne $required.Count) {throw 'Shared module requires complete selected candidate commitment'}
+    $memory=[IO.MemoryStream]::new();$writer=[IO.BinaryWriter]::new($memory)
+    try {
+        $writer.Write([Text.Encoding]::UTF8.GetBytes("kh2-source-identity-v1`0"))
+        foreach ($name in $required) {
+            $rows=@($Manifest.files | Where-Object relative_path -CEQ $name)
+            if ($rows.Count -ne 1 -or $rows[0].size -le 0 -or $rows[0].sha256 -cnotmatch '^[0-9a-f]{64}$') {
+                throw 'Shared module selected candidate record differs'
+            }
+            $bytes=[Text.Encoding]::UTF8.GetBytes($name)
+            $writer.Write([uint64]$bytes.Length);$writer.Write($bytes);$writer.Write([uint64]$rows[0].size)
+            $writer.Write([Text.Encoding]::ASCII.GetBytes($rows[0].sha256))
+        }
+        $identity=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($memory.ToArray())).ToLowerInvariant()
+        if ($identity -cne $SelectedIdentity) {throw 'Shared module selected candidate aggregate differs'}
+    } finally {$writer.Dispose();$memory.Dispose()}
+    $observed=@($Runtime.processes.source_root_modules | Where-Object relative_path -CEQ $RelativePath)
+    if (!$observed.Count -or @($observed | Where-Object {$_.size -ne $Size -or $_.sha256 -cne $Hash}).Count) {
+        throw 'Shared module lacks matching observed runtime file identity'
+    }
+    return $identity
+}
+
+function Get-NativeNamedExport([byte[]]$Bytes, $Sections, $Directory, [string]$Name) {
+    if (!$Name -or $Name.Length -gt 1024 -or $Directory.RelativeVirtualAddress -le 0 -or $Directory.Size -lt 40) {
+        throw 'Bounded named PE export required'
+    }
+    $header=Get-NativePeOffset $Sections $Directory.RelativeVirtualAddress 40 $Bytes.LongLength
+    $base=[BitConverter]::ToUInt32($Bytes,[int]$header+16)
+    $functions=[BitConverter]::ToUInt32($Bytes,[int]$header+20)
+    $names=[BitConverter]::ToUInt32($Bytes,[int]$header+24)
+    $functionTable=[BitConverter]::ToUInt32($Bytes,[int]$header+28)
+    $nameTable=[BitConverter]::ToUInt32($Bytes,[int]$header+32)
+    $ordinalTable=[BitConverter]::ToUInt32($Bytes,[int]$header+36)
+    if ($functions -gt 65536 -or $names -gt 65536) {throw 'PE export table exceeds inspection bound'}
+    $matches=[Collections.Generic.List[object]]::new()
+    for ($i=0;$i -lt $names;$i++) {
+        $pointer=Get-NativePeOffset $Sections ([long]$nameTable+$i*4) 4 $Bytes.LongLength
+        $nameRva=[BitConverter]::ToUInt32($Bytes,[int]$pointer)
+        $chars=[Collections.Generic.List[byte]]::new();$ended=$false
+        for ($j=0;$j -lt 1024;$j++) {
+            $offset=Get-NativePeOffset $Sections ([long]$nameRva+$j) 1 $Bytes.LongLength
+            $value=$Bytes[$offset]
+            if ($value -eq 0) {$ended=$true;break}
+            if ($value -lt 32 -or $value -ge 127) {throw 'Invalid ASCII PE export name'}
+            $chars.Add($value)
+        }
+        if (!$ended -or !$chars.Count) {throw 'Unterminated or empty PE export name'}
+        if ([Text.Encoding]::ASCII.GetString($chars.ToArray()) -cne $Name) {continue}
+        $indexOffset=Get-NativePeOffset $Sections ([long]$ordinalTable+$i*2) 2 $Bytes.LongLength
+        $index=[BitConverter]::ToUInt16($Bytes,[int]$indexOffset)
+        if ($index -ge $functions) {throw 'PE export ordinal index exceeds table'}
+        $functionOffset=Get-NativePeOffset $Sections ([long]$functionTable+$index*4) 4 $Bytes.LongLength
+        $rva=[BitConverter]::ToUInt32($Bytes,[int]$functionOffset)
+        if ($rva -eq 0 -or ($rva -ge $Directory.RelativeVirtualAddress -and
+            [long]$rva -lt [long]$Directory.RelativeVirtualAddress+$Directory.Size)) {throw 'Missing or forwarded native export'}
+        $matches.Add([pscustomobject]@{rva=[long]$rva;ordinal=[long]$base+$index})
+    }
+    if ($matches.Count -ne 1) {throw 'Named PE export absent or ambiguous'}
+    return $matches[0]
+}
+
 function Get-NativePeOffset($Sections, [long]$Rva, [int]$Count, [long]$FileSize) {
     if ($Rva -lt 0 -or $Count -lt 1 -or $Count -gt 64) {throw 'Invalid bounded native PE span'}
     $rows=@($Sections | Where-Object {$Rva -ge $_.VirtualAddress -and
