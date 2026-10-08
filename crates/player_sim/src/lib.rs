@@ -33,6 +33,9 @@ pub struct Params {
     /// Test-room choice: body radius/height for wall contact.
     pub radius: f32,
     pub height: f32,
+    /// Test-room choice: ticks without attacking before the weapon is put
+    /// away and field locomotion resumes.
+    pub disarm_ticks: u32,
 }
 
 impl Params {
@@ -105,13 +108,21 @@ pub struct AttackStep {
     /// PTYA "Jump" field, applied as a lift height when an aerial step starts
     /// (public label only; the installed use is unobserved).
     pub hop: f32,
+    /// Root-position translation per tick in model space (+Z is facing).
+    /// Its per-tick change moves the player; empty means no root motion.
+    pub root: Vec<Vec3>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Clips {
+    /// Battle-mode (weapon drawn) locomotion.
     pub idle: Clip,
     pub walk: Clip,
     pub run: Clip,
+    /// Field-mode (weapon put away) locomotion.
+    pub field_idle: Clip,
+    pub field_walk: Clip,
+    pub field_run: Clip,
     pub jump: Clip,
     pub fall: Clip,
     pub land: Clip,
@@ -163,6 +174,9 @@ pub struct Player {
     pub action: Action,
     /// Ticks since the current action started.
     pub frame: u32,
+    /// Battle mode: weapon drawn, battle locomotion clips.
+    pub armed: bool,
+    idle_ticks: u32,
     queued_attack: bool,
     air_combo_spent: bool,
 }
@@ -187,6 +201,8 @@ impl Player {
             vertical_speed: 0.,
             action: Action::Idle,
             frame: 0,
+            armed: false,
+            idle_ticks: 0,
             queued_attack: false,
             air_combo_spent: false,
         }
@@ -200,16 +216,36 @@ impl Player {
     }
 
     pub fn clip<'a>(&self, clips: &'a Clips) -> &'a Clip {
-        match self.action {
-            Action::Idle => &clips.idle,
-            Action::Walk => &clips.walk,
-            Action::Run => &clips.run,
-            Action::Jump => &clips.jump,
-            Action::Fall => &clips.fall,
-            Action::Land => &clips.land,
-            Action::Attack(i) => &clips.ground_combo[i].clip,
-            Action::AirAttack(i) => &clips.air_combo[i].clip,
+        match (self.action, self.armed) {
+            (Action::Idle, true) => &clips.idle,
+            (Action::Walk, true) => &clips.walk,
+            (Action::Run, true) => &clips.run,
+            (Action::Idle, false) => &clips.field_idle,
+            (Action::Walk, false) => &clips.field_walk,
+            (Action::Run, false) => &clips.field_run,
+            (Action::Jump, _) => &clips.jump,
+            (Action::Fall, _) => &clips.fall,
+            (Action::Land, _) => &clips.land,
+            (Action::Attack(i), _) => &clips.ground_combo[i].clip,
+            (Action::AirAttack(i), _) => &clips.air_combo[i].clip,
         }
+    }
+
+    /// Root-motion translation for the current attack frame, model space.
+    pub fn root_offset(&self, clips: &Clips) -> Vec3 {
+        let root = match self.action {
+            Action::Attack(i) => &clips.ground_combo[i].root,
+            Action::AirAttack(i) => &clips.air_combo[i].root,
+            _ => return [0.; 3],
+        };
+        root.get(self.motion_frame(clips) as usize)
+            .copied()
+            .unwrap_or([0.; 3])
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+        self.idle_ticks = 0;
     }
 
     /// Motion frame to sample for the current action.
@@ -285,6 +321,7 @@ impl Player {
                     if moving {
                         self.yaw = direction[0].atan2(direction[1]);
                     }
+                    self.arm();
                     self.start(Action::Attack(0), &mut step);
                 } else if input.jump {
                     self.vertical_speed = p.jump_speed();
@@ -301,7 +338,12 @@ impl Player {
                     } else {
                         Action::Run
                     };
-                    if target != self.action {
+                    self.idle_ticks = self.idle_ticks.saturating_add(1);
+                    if self.armed && self.idle_ticks >= p.disarm_ticks && target != Action::Land {
+                        // Weapon put away: restart the locomotion clip in field mode.
+                        self.armed = false;
+                        self.start(target, &mut step);
+                    } else if target != self.action {
                         self.start(target, &mut step);
                     }
                     if moving {
@@ -324,6 +366,19 @@ impl Player {
                 let clip = &clips.ground_combo[i].clip;
                 if input.attack {
                     self.queued_attack = true;
+                }
+                // Root motion: the attack's root-curve change this tick.
+                let root = &clips.ground_combo[i].root;
+                let at = |f: u32| root.get(clip.held_frame(f) as usize).copied();
+                if let (Some(now), Some(before)) = (at(self.frame), at(self.frame - 1)) {
+                    let (s, c) = self.yaw.sin_cos();
+                    let (dx, dz) = (now[0] - before[0], now[2] - before[2]);
+                    let delta = [dx * c + dz * s, -dx * s + dz * c];
+                    if (delta[0] != 0. || delta[1] != 0.) && !self.travel(delta, p, world, true) {
+                        self.vertical_speed = 0.;
+                        self.start(Action::Fall, &mut step);
+                        return step;
+                    }
                 }
                 let can_chain = Clip::within(&clip.combo_windows, self.frame);
                 let recovery = self.frame >= clip.blend_to_idle.unwrap_or(clip.end);
@@ -383,6 +438,7 @@ impl Player {
             if moving {
                 self.yaw = direction[0].atan2(direction[1]);
             }
+            self.arm();
             self.start(Action::AirAttack(0), step);
             self.lift(clips.air_combo[0].hop, p);
         } else if self.action == Action::Jump && self.vertical_speed <= 0. {
@@ -551,6 +607,7 @@ mod tests {
             walk_threshold: 0.5,
             radius: 30.,
             height: 140.,
+            disarm_ticks: 120,
         }
     }
     fn attack(end: u32, window: (u32, u32), hop: f32) -> AttackStep {
@@ -563,6 +620,7 @@ mod tests {
                 no_gravity: vec![],
             },
             hop,
+            root: Vec::new(),
         }
     }
     fn clips() -> Clips {
@@ -570,6 +628,9 @@ mod tests {
             idle: Clip::looping(100, 0),
             walk: Clip::looping(60, 0),
             run: Clip::looping(40, 0),
+            field_idle: Clip::looping(90, 0),
+            field_walk: Clip::looping(50, 0),
+            field_run: Clip::looping(36, 0),
             jump: Clip::looping(30, 0),
             fall: Clip::looping(30, 0),
             land: Clip::looping(12, 0),
@@ -798,6 +859,61 @@ mod tests {
         let w = [[0., 0., -10.], [0., 99., -10.], [0., 99., 10.]];
         let world = TriangleWorld::new([(f, false, true), (w, true, false)], 0.5);
         assert_eq!(world.counts(), (0, 0));
+    }
+
+    #[test]
+    fn attacking_draws_the_weapon_until_idle_timeout() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([0., 0., 0.], 0.);
+        assert!(!player.armed);
+        assert_eq!(player.clip(&c).end, 90);
+        player.tick(
+            &Input {
+                attack: true,
+                ..Input::default()
+            },
+            &p,
+            &c,
+            &w,
+        );
+        assert!(player.armed);
+        for _ in 0..60 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        assert_eq!(player.action, Action::Idle);
+        assert!(player.armed);
+        assert_eq!(player.clip(&c).end, 100);
+        for _ in 0..p.disarm_ticks {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        assert!(!player.armed);
+        assert_eq!(player.clip(&c).end, 90);
+    }
+
+    #[test]
+    fn attack_root_motion_moves_along_facing() {
+        let (p, mut c, w) = (params(), clips(), room());
+        c.ground_combo[0].root = (0..40).map(|f| [0., 0., f as f32 * 2.]).collect();
+        // Facing +X: model +Z root motion moves the player along +X.
+        let mut player = Player::new([0., 0., 0.], std::f32::consts::FRAC_PI_2);
+        player.tick(
+            &Input {
+                attack: true,
+                ..Input::default()
+            },
+            &p,
+            &c,
+            &w,
+        );
+        for _ in 0..10 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        assert!(
+            (player.position[0] - 20.).abs() < 1e-3,
+            "{:?}",
+            player.position
+        );
+        assert!(player.position[2].abs() < 1e-3);
     }
 
     #[test]

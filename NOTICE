@@ -136,3 +136,8 @@ motion slot chooser follows MotionSet.GetMotionSetIndex. Range-trigger IDs
 honoured by the test room follow docs/kh2/file/anb/anb.md and COCT surface
 flag bits follow docs/kh2/file/type/coct.md. These are public labels; the
 test-room controller does not claim installed movement or combat rules.
+The motion evaluator in crates/package_reader/src/motion_eval.rs reads the IK
+helper, joint order, constraint, limiter, expression and root-position tables
+using the layouts in OpenKH docs/kh2/file/anb/motion.md (pin above) and
+kenjiuno's msetDoc README (gitlab.com/kenjiuno/msetDoc). No code was copied;
+the solver rules are this project's own and are recorded as inferences in T057.

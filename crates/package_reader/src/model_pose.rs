@@ -342,6 +342,28 @@ impl Skinning {
         )
     }
 }
+impl Skinning {
+    /// Full motion evaluation (IK helpers, constraints, IK chains and
+    /// expressions; see motion_eval). Returns the skinned pose and the
+    /// evaluation, whose root translation drives root motion.
+    pub fn sample_evaluated(
+        &self,
+        motion: &crate::motion::InterpolatedMotion,
+        frame: f32,
+    ) -> io::Result<(ModelPose, crate::motion_eval::Evaluated)> {
+        let evaluated = crate::motion_eval::evaluate(&self.bones, motion, frame)?;
+        let matrices = evaluated.joints[..self.bones.len()]
+            .iter()
+            .map(|w| w.matrix())
+            .collect();
+        let pose = self.pose(
+            matrices,
+            PoseProfile::Legacy,
+            "motion_eval_ik_constraints_v1",
+        )?;
+        Ok((pose, evaluated))
+    }
+}
 pub fn read_pose(bytes: &[u8], profile: PoseProfile) -> io::Result<ModelPose> {
     Skinning::read(bytes)?.bind_pose(profile)
 }

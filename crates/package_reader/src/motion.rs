@@ -241,6 +241,10 @@ pub fn read_interpolated(bytes: &[u8]) -> io::Result<InterpolatedMotion> {
 }
 
 impl InterpolatedMotion {
+    /// Key `index` as (time, value, in-tangent, out-tangent).
+    pub(crate) fn key_record(&self, index: usize) -> io::Result<[f32; 4]> {
+        self.key(index)
+    }
     fn key(&self, index: usize) -> io::Result<[f32; 4]> {
         let key = self
             .keys

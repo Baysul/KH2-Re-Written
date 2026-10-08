@@ -2,14 +2,14 @@
 
 Native Windows Rust/Bevy research project for **Kingdom Hearts II Final Mix only**, using a user-selected local Steam installation. No game assets are distributed. This is a foundation under development; it cannot play KH2 yet.
 
-Current implementation priority is a test room with controllable Sora. **A playable test room now runs**: Sora walks, runs, jumps, lands and attacks (3-hit ground combo, 3-hit air combo) with his own animations and Kingdom Key, in a Twilight Town map, all read from the selected Steam installation at startup. Movement numbers come from Sora's installed parameter records; several values (gravity, step height, combo order, body size) are explicit test-room choices, and it is not a measured reproduction of KH2's rules. See [T056](docs/tasks/T056-playable-test-room.md).
+Current implementation priority is a test room with controllable Sora. **A playable test room now runs**: Sora walks, runs, jumps, lands and attacks (3-hit ground combo, 3-hit air combo) with his own animations and Kingdom Key, in a Twilight Town map, all read from the selected Steam installation at startup. Poses use each motion's own IK skeleton and constraints ([T057](docs/tasks/T057-sora-ik-and-modes.md)); he walks in field mode with the Keyblade put away, draws it when attacking, and attacks lunge forward with the motion's root movement. Movement numbers come from Sora's installed parameter records; several values (gravity, step height, combo order, body size) are explicit test-room choices, and it is not a measured reproduction of KH2's rules. See [T056](docs/tasks/T056-playable-test-room.md).
 
 | Works now | Still missing |
 |---|---|
 | Checked package, model, texture, motion and room collision readers | Complete source/build/language support |
 | Playable test room: walk/run by stick or Shift, jump/fall/land, ground and air combos, follow camera, wall/floor collision from the map's own surface flags | Enemies, hit detection, damage, sounds/effects, root motion during attacks, IK |
 | Sora's walk/run speed, jump height, turn rate (PRTY), fall cap (SSTM), combo motions (PTYA), combo windows (ANB triggers), weapon joint (objentry) | Measured installed timing/physics; reference comparison (no Sora save yet) |
-| Textured room and character, basic FK motion, Keyblade on the hand joint | Installed materials/lighting, culling, skeletal room props, HD routing |
+| Textured room and character; motion evaluation with IK helpers, leg/arm IK chains, constraints, limiters, expressions and root motion; Keyblade on the hand joint | Installed materials/lighting, culling, skeletal room props, HD routing; limiter damping, scale channels, root rotation |
 | Synthetic platform window and repeatable checks | Combat, scripts, progression, saves and the full campaign/optional content |
 
 ### Playing the test room
@@ -19,6 +19,8 @@ Each launch rehashes the selected Steam files (about a minute), then decodes eve
 ```powershell
 cargo run -p windows_shell --bin test_room --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/test-room.json'
 ```
+
+To launch by double-clicking, build `cargo build --release -p windows_shell --bin test_room --locked` and create `%LOCALAPPDATA%/KH2FinalRewrite/test-room-launch.json` with `steam_root`, `manifest`, `config` (and optional `options`, e.g. `["--gamepad"]`); `target/release/test_room.exe` then starts without arguments. `--basic-fk` selects the older T053 FK-only poses for comparison.
 
 Controls: WASD or arrows move (hold Shift to walk), Space jumps, Enter / K / left mouse attacks (press again during a swing to continue the combo; attack in the air for the air combo), Q/E or right-mouse drag turns the camera, +/- zoom, F1 shows collision, Esc exits. Add `--gamepad` for a controller (left stick move, A attack, B jump, right stick camera), `--log '<new.jsonl>'` for an action log, or `--autoplay '<empty-private-dir>'` for an unattended scripted run with captures.
 

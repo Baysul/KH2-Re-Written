@@ -81,6 +81,8 @@ const BODY_RADIUS: f32 = 30.;
 const BODY_HEIGHT: f32 = 140.;
 const FLOOR_MIN_NORMAL_Y: f32 = 0.5;
 const BLEND_TICKS: u32 = 6;
+/// Test-room choice: put the weapon away after 6 s without attacking.
+const DISARM_TICKS: u32 = 360;
 /// Presentation mirror. Raw source coordinates render with the objentry
 /// weapon joint (25) as Sora's left hand; mirroring X puts the Kingdom Key
 /// in his right hand. Inferred handedness, not an observed render matrix.
@@ -93,6 +95,8 @@ struct ClipPoses {
     frames: Vec<Vec<Vec3>>,
     /// Model-space matrix of the objentry weapon joint for each frame.
     weapon: Vec<Mat4>,
+    /// Root-position curve translation for each frame (model space).
+    root: Vec<Vec3>,
 }
 
 #[derive(Resource)]
@@ -101,7 +105,7 @@ struct Game {
     clips: Clips,
     world: TriangleWorld,
     player: Player,
-    poses: HashMap<Action, usize>,
+    poses: HashMap<(Action, bool), usize>,
     clip_poses: Vec<ClipPoses>,
     part_indices: Vec<Vec<u32>>,
     tick: u64,
@@ -237,7 +241,7 @@ struct Loaded {
     weapon: model_inspection::InspectionModel,
     params: Params,
     clips: Clips,
-    actions: Vec<(Action, usize)>,
+    actions: Vec<((Action, bool), usize)>,
     clip_poses: Vec<ClipPoses>,
     spawn: Vec3,
     world: TriangleWorld,
@@ -273,7 +277,11 @@ fn floor_levels(triangles: &[CollisionTriangle]) -> Vec<(f32, [f32; 3])> {
     levels
 }
 
-fn load(source: &ProbeSource, config_path: &Path) -> Result<Loaded, Box<dyn std::error::Error>> {
+fn load(
+    source: &ProbeSource,
+    config_path: &Path,
+    basic_fk: bool,
+) -> Result<Loaded, Box<dyn std::error::Error>> {
     let config: Config = serde_json::from_slice(&read_limited(config_path)?)?;
     if config.schema_version != 1
         || config.source_content_identity != source.content_identity()
@@ -344,6 +352,7 @@ fn load(source: &ProbeSource, config_path: &Path) -> Result<Loaded, Box<dyn std:
         walk_threshold: WALK_THRESHOLD,
         radius: BODY_RADIUS,
         height: BODY_HEIGHT,
+        disarm_ticks: DISARM_TICKS,
     };
     params.validate()?;
 
@@ -378,11 +387,25 @@ fn load(source: &ProbeSource, config_path: &Path) -> Result<Loaded, Box<dyn std:
         battle: config.battle_mode,
         has_weapon: config.has_weapon,
     };
-    let motions = motion::read_motion_ids(source, &selection, &ids)?;
+    let mut motions = motion::read_motion_ids(source, &selection, &ids)?;
+    // Field-mode (weapon put away) idle/walk/run through the same public
+    // chooser with battle=false, has_weapon=false.
+    let field_selection = motion::MotionSetSelection {
+        battle: false,
+        has_weapon: false,
+        ..selection
+    };
+    motions.extend(motion::read_motion_ids(
+        source,
+        &field_selection,
+        &[0, 1, 2],
+    )?);
+    ids.extend([0, 1, 2]);
 
     // Precompute every frame of every clip; undefined basic-FK frames reject
     // the session instead of substituting a pose.
     let mut clip_poses = Vec::new();
+    let mut eval_totals = [0usize; 4];
     let mut clip_list = Vec::new();
     let mut by_slot: HashMap<usize, usize> = HashMap::new();
     let mut slots = Vec::new();
@@ -393,8 +416,34 @@ fn load(source: &ProbeSource, config_path: &Path) -> Result<Loaded, Box<dyn std:
             None => {
                 let mut frames = Vec::with_capacity(clip.end as usize);
                 let mut weapon = Vec::with_capacity(clip.end as usize);
+                let mut root = Vec::with_capacity(clip.end as usize);
                 for frame in 0..clip.end {
-                    let pose = actor.skinning.sample_fk(&selected.motion, frame)?;
+                    let pose = if basic_fk {
+                        root.push(Vec3::ZERO);
+                        actor.skinning.sample_fk(&selected.motion, frame)?
+                    } else {
+                        let (mut pose, evaluated) = actor
+                            .skinning
+                            .sample_evaluated(&selected.motion, frame as f32)?;
+                        // Root motion moves the player; the rendered pose
+                        // stays at the player origin.
+                        let r = evaluated.root_translation;
+                        root.push(Vec3::from_array(r));
+                        for p in &mut pose.position_bits {
+                            *p = std::array::from_fn(|i| (f32::from_bits(p[i]) - r[i]).to_bits());
+                        }
+                        for m in &mut pose.matrix_bits {
+                            for i in 0..3 {
+                                m[12 + i] = (f32::from_bits(m[12 + i]) - r[i]).to_bits();
+                            }
+                        }
+                        let s = evaluated.stats;
+                        eval_totals[0] += s.constraints_applied;
+                        eval_totals[1] += s.ik_chains_solved;
+                        eval_totals[2] += s.expressions_applied;
+                        eval_totals[3] += s.unsupported_constraints;
+                        pose
+                    };
                     // Row-vector matrices: the row-major words are Bevy's
                     // column-major layout of the same transform.
                     weapon.push(Mat4::from_cols_array(
@@ -407,7 +456,11 @@ fn load(source: &ProbeSource, config_path: &Path) -> Result<Loaded, Box<dyn std:
                             .collect(),
                     );
                 }
-                clip_poses.push(ClipPoses { frames, weapon });
+                clip_poses.push(ClipPoses {
+                    frames,
+                    weapon,
+                    root,
+                });
                 by_slot.insert(selected.slot, clip_poses.len() - 1);
                 clip_poses.len() - 1
             }
@@ -417,15 +470,24 @@ fn load(source: &ProbeSource, config_path: &Path) -> Result<Loaded, Box<dyn std:
             "blend_to_idle":clip.blend_to_idle,"no_gravity":clip.no_gravity}));
         clip_list.push((clip, index));
     }
-    let step = |entry: &ptya::PtyaEntry, (clip, _): &(Clip, usize)| AttackStep {
+    let step = |entry: &ptya::PtyaEntry, (clip, index): &(Clip, usize)| AttackStep {
         clip: clip.clone(),
         hop: f32::from_bits(entry.float_bits[0]),
+        root: clip_poses[*index]
+            .root
+            .iter()
+            .map(|r| r.to_array())
+            .collect(),
     };
     let n = LOCOMOTION.len();
+    let field = n + ground.len() + air.len();
     let clips = Clips {
         idle: clip_list[0].0.clone(),
         walk: clip_list[1].0.clone(),
         run: clip_list[2].0.clone(),
+        field_idle: clip_list[field].0.clone(),
+        field_walk: clip_list[field + 1].0.clone(),
+        field_run: clip_list[field + 2].0.clone(),
         jump: clip_list[3].0.clone(),
         fall: clip_list[4].0.clone(),
         land: clip_list[5].0.clone(),
@@ -440,19 +502,29 @@ fn load(source: &ProbeSource, config_path: &Path) -> Result<Loaded, Box<dyn std:
             .map(|(e, c)| step(e, c))
             .collect(),
     };
+    // Pose clip per (action, weapon drawn).
     let mut actions = vec![
-        (Action::Idle, clip_list[0].1),
-        (Action::Walk, clip_list[1].1),
-        (Action::Run, clip_list[2].1),
+        ((Action::Idle, true), clip_list[0].1),
+        ((Action::Walk, true), clip_list[1].1),
+        ((Action::Run, true), clip_list[2].1),
+        ((Action::Idle, false), clip_list[field].1),
+        ((Action::Walk, false), clip_list[field + 1].1),
+        ((Action::Run, false), clip_list[field + 2].1),
+    ];
+    let mut both = vec![
         (Action::Jump, clip_list[3].1),
         (Action::Fall, clip_list[4].1),
         (Action::Land, clip_list[5].1),
     ];
     for i in 0..ground.len() {
-        actions.push((Action::Attack(i), clip_list[n + i].1));
+        both.push((Action::Attack(i), clip_list[n + i].1));
     }
     for i in 0..air.len() {
-        actions.push((Action::AirAttack(i), clip_list[n + ground.len() + i].1));
+        both.push((Action::AirAttack(i), clip_list[n + ground.len() + i].1));
+    }
+    for (action, clip) in both {
+        actions.push(((action, true), clip));
+        actions.push(((action, false), clip));
     }
 
     // Floors must carry partyStand and walls partyCollide (public labels).
@@ -523,9 +595,11 @@ fn load(source: &ProbeSource, config_path: &Path) -> Result<Loaded, Box<dyn std:
             "air":air.iter().map(|e| serde_json::json!({"id":e.id,"kind":e.kind,"flag":e.flag,"motion_id":e.motion_id})).collect::<Vec<_>>()},
         "motions":slots,"collision":{"floors":floors,"walls":walls,"surface_flags":flag_counts,"bounds":[low.to_array(),high.to_array()],
             "largest_levels":levels.iter().take(8).map(|(area,p)| serde_json::json!({"area":area,"point":p})).collect::<Vec<_>>()},
-        "spawn":spawn.to_array(),"weapon_joint":weapon_joint,"weapon_bounds":weapon_bounds,"idle_hand_matrix":idle_hand,"weapon_root_matrix":weapon_root,"weapon_bones":weapon.skinning.bones.len(),"object_candidates":object_candidates,
+        "spawn":spawn.to_array(),"pose_evaluator":if basic_fk {"basic public FK (T053)"} else {"motion_eval IK/constraints (T057)"},
+        "evaluation_totals":{"constraints":eval_totals[0],"ik_chains":eval_totals[1],"expressions":eval_totals[2],"unsupported_constraints":eval_totals[3]},"weapon_joint":weapon_joint,"weapon_bounds":weapon_bounds,"idle_hand_matrix":idle_hand,"weapon_root_matrix":weapon_root,"weapon_bones":weapon.skinning.bones.len(),"object_candidates":object_candidates,
         "object_count":objects.len(),
-        "missing":["IK","inverse curves","scale","constraints","expressions","root motion","weapon constraint motion","hit detection","enemies","measured installed timing"],
+        "missing":["scale channels","up-vector/path/camera constraint types","limiter damping","root rotation","weapon constraint motion","hit detection","enemies","measured installed timing"],
+        "inferred_rules":["direction constraints aim local +X","two-joint IK bends the middle joint about local Z","expression list/condition semantics","Hermite tangents scaled by key span","field/battle mode switch with 6 s disarm timeout"],
         "gameplay_verified":false});
     Ok(Loaded {
         room,
@@ -721,7 +795,7 @@ fn setup(
     ));
     let actor = startup.actor.take().expect("actor retained for setup");
     let weapon = startup.weapon.take().expect("weapon retained for setup");
-    let pose = game.clip_poses[game.poses[&Action::Idle]].frames[0].clone();
+    let pose = game.clip_poses[game.poses[&(Action::Idle, false)]].frames[0].clone();
     let root = commands
         .spawn((
             SoraRoot,
@@ -749,7 +823,7 @@ fn setup(
         .spawn((
             WeaponRoot,
             ChildOf(root),
-            Transform::from_matrix(game.clip_poses[game.poses[&Action::Idle]].weapon[0]),
+            Transform::from_matrix(game.clip_poses[game.poses[&(Action::Idle, false)]].weapon[0]),
             Visibility::default(),
         ))
         .id();
@@ -827,10 +901,10 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 13] = [
-    90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760,
+const AUTOPLAY_CAPTURES: [u64; 15] = [
+    90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100,
 ];
-const AUTOPLAY_END: u64 = 800;
+const AUTOPLAY_END: u64 = 1140;
 
 fn simulate(
     keys: Res<ButtonInput<KeyCode>>,
@@ -895,9 +969,10 @@ fn simulate(
     game.tick += 1;
     if let Some(action) = step.started {
         let position = game.player.position;
+        let armed = game.player.armed;
         game.action_started = game.tick;
         game.event(
-            serde_json::json!({"event":"action","tick":tick,"action":format!("{action:?}"),
+            serde_json::json!({"event":"action","tick":tick,"action":format!("{action:?}"),"armed":armed,
             "position":position,"landed":step.landed}),
         );
     }
@@ -910,6 +985,8 @@ fn simulate(
     }
 }
 
+/// The weapon root, distinct from Sora's root transform.
+type WeaponOnly = (With<WeaponRoot>, Without<SoraRoot>);
 /// The camera never shares a transform with Sora's hierarchy.
 type CameraOnly = (With<Camera3d>, Without<SoraRoot>, Without<WeaponRoot>);
 
@@ -974,7 +1051,7 @@ fn camera_control(
 fn present(
     mut game: ResMut<Game>,
     mut roots: Query<&mut Transform, (With<SoraRoot>, Without<WeaponRoot>)>,
-    mut hands: Query<&mut Transform, (With<WeaponRoot>, Without<SoraRoot>)>,
+    mut hands: Query<(&mut Transform, &mut Visibility), WeaponOnly>,
     parts: Query<(&SoraPart, &Mesh3d)>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
@@ -987,14 +1064,20 @@ fn present(
         game.shown_action = Some((action, started));
     }
     let frame = game.player.motion_frame(&game.clips) as usize;
-    let clip = game.poses[&action];
+    let clip = game.poses[&(action, game.player.armed)];
     let target = &game.clip_poses[clip].frames;
     let target = &target[frame.min(target.len() - 1)];
     let mut display = target.clone();
     let weapons = &game.clip_poses[clip].weapon;
     let hand = weapons[frame.min(weapons.len() - 1)];
-    if let Ok(mut transform) = hands.single_mut() {
+    if let Ok((mut transform, mut visibility)) = hands.single_mut() {
         *transform = Transform::from_matrix(hand);
+        // The Keyblade is drawn only in battle mode.
+        *visibility = if game.player.armed {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
     }
     if let Some((from, remaining)) = game.blend_from.take() {
         let weight = remaining as f32 / (BLEND_TICKS + 1) as f32;
@@ -1091,21 +1174,48 @@ fn finish(
     }
 }
 
+/// Double-click launch: with no arguments, read the three required paths
+/// (and optional extra options) from a private launch file outside Git.
+fn launch_file_args() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    #[derive(Deserialize)]
+    struct Launch {
+        steam_root: PathBuf,
+        manifest: PathBuf,
+        config: PathBuf,
+        #[serde(default)]
+        options: Vec<String>,
+    }
+    let path = PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA absent")?)
+        .join("KH2FinalRewrite/test-room-launch.json");
+    let launch: Launch = serde_json::from_slice(
+        &read_limited(&path)
+            .map_err(|e| format!("no arguments and no launch file at {}: {e}", path.display()))?,
+    )?;
+    let mut args = vec![launch.steam_root, launch.manifest, launch.config];
+    args.extend(launch.options.into_iter().map(PathBuf::from));
+    Ok(args)
+}
+
 fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let mut args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    if args.is_empty() {
+        args = launch_file_args()?;
+    }
     if args.len() < 3 {
-        return Err("usage: test_room <Steam-root> <manifest> <test-room-config> [--log new.jsonl] [--frames N] [--autoplay <new-capture-dir>] [--gamepad] [--show-collision]".into());
+        return Err("usage: test_room <Steam-root> <manifest> <test-room-config> [--log new.jsonl] [--frames N] [--autoplay <new-capture-dir>] [--gamepad] [--show-collision] [--basic-fk]".into());
     }
     let mut log_path = None;
     let mut limit = None;
     let mut autoplay = None;
     let mut gamepad = false;
     let mut show_collision = false;
+    let mut basic_fk = false;
     let mut options = args[3..].iter();
     while let Some(option) = options.next() {
         match option.to_str() {
             Some("--gamepad") => gamepad = true,
             Some("--show-collision") => show_collision = true,
+            Some("--basic-fk") => basic_fk = true,
             Some("--log") if log_path.is_none() => log_path = options.next().cloned(),
             Some("--frames") if limit.is_none() => {
                 limit = Some(
@@ -1140,7 +1250,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         None => None,
     };
     eprintln!("Validating the selected KH2FM source (full rehash), then decoding the test room...");
-    let loaded = load(&source, &args[2])?;
+    let loaded = load(&source, &args[2], basic_fk)?;
     let mut poses = HashMap::new();
     for (action, clip) in &loaded.actions {
         poses.insert(*action, *clip);
@@ -1209,6 +1319,11 @@ fn main() -> std::process::ExitCode {
         Ok(_) => std::process::ExitCode::FAILURE,
         Err(e) => {
             eprintln!("Test room rejected: {e}");
+            // Keep a double-clicked console open long enough to read the error.
+            if std::env::args_os().len() == 1 {
+                eprintln!("Press Enter to close.");
+                let _ = std::io::stdin().read_line(&mut String::new());
+            }
             std::process::ExitCode::FAILURE
         }
     }
