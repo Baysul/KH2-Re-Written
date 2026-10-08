@@ -212,6 +212,36 @@ pub fn associate_geometry(
         }
         uv_pool.extend_from_slice(&part.uv_bits);
     }
+    associate_geometry_with_uv_pool(geometry, environment_count, &uv_pool)
+}
+
+/// Alternate explicit UV expressions use the same qualified global topology.
+/// The complete bounded pool must correspond to every original UV record.
+pub fn associate_geometry_with_uv_pool(
+    geometry: &Geometry,
+    environment_count: usize,
+    uv_pool: &[[u32; 2]],
+) -> io::Result<Vec<PartTextureRoute>> {
+    if environment_count == 0
+        || environment_count > 4096
+        || uv_pool.len() > 262_144
+        || uv_pool
+            .iter()
+            .flatten()
+            .any(|&v| !f32::from_bits(v).is_finite())
+    {
+        return Err(invalid("alternate UV pool/environment bounds"));
+    }
+    let mut count = 0;
+    for part in &geometry.parts {
+        if part.uv_base != count || count + part.uv_bits.len() > uv_pool.len() {
+            return Err(invalid("alternate UV pool shape differs from geometry"));
+        }
+        count += part.uv_bits.len();
+    }
+    if count != uv_pool.len() {
+        return Err(invalid("alternate UV pool has extra records"));
+    }
     let mut result = Vec::new();
     let mut corners = 0usize;
     for (part_ordinal, part) in geometry.parts.iter().enumerate() {
@@ -410,6 +440,25 @@ mod tests {
             routes[1].expanded_uv_bits[0],
             [(-0.25f32).to_bits(), 2.0f32.to_bits()]
         );
+    }
+    #[test]
+    fn alternate_uv_pool_preserves_global_corners_and_rejects_shape_or_nonfinite_data() {
+        let data = geometry();
+        let pool = [
+            [1.0f32.to_bits(), (-2.0f32).to_bits()],
+            [3.0f32.to_bits(), 4.0f32.to_bits()],
+        ];
+        let routes = associate_geometry_with_uv_pool(&data, 2, &pool).unwrap();
+        assert_eq!(routes[1].expanded_uv_bits, [pool[0], pool[1], pool[0]]);
+        assert_eq!(routes[1].cross_part_uv_corners, 2);
+        assert!(associate_geometry_with_uv_pool(&data, 2, &pool[..1]).is_err());
+        let extra = [pool[0], pool[1], pool[0]];
+        assert!(associate_geometry_with_uv_pool(&data, 2, &extra).is_err());
+        let nonfinite = [[f32::NAN.to_bits(), 0], pool[1]];
+        assert!(associate_geometry_with_uv_pool(&data, 2, &nonfinite).is_err());
+        let mut bad = data;
+        bad.parts[1].uv_base = 0;
+        assert!(associate_geometry_with_uv_pool(&bad, 2, &pool).is_err());
     }
     #[test]
     fn unknown_environment_bad_global_bases_corners_and_nonfinite_uvs_reject() {

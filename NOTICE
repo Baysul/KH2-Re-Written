@@ -82,6 +82,11 @@ signature scan. Exact replacement offsets remain raw; unmatched or ambiguous
 links are retained. Geometry associations retain Kkdf2 global UV references
 and the GraphicsDeviceExtensions 16-bit texture-index mask. This does not
 select the installed UV route or interpret high replacement-offset flags.
+Textured model inspection adapts both pinned public UV expressions while
+retaining Kkdf2 topology. The signed16 expression does not incorporate the
+whole legacy parser. Original/exact HD bindings and diagnostic presentation
+choices remain explicit; source mip levels and TEXA metadata are retained
+without inferred sampling, material or animation behavior.
 
 OpenKH - Open Kingdom Hearts Research and Development
 Copyright 2019-2022 OpenKH Team and Contributors

@@ -1,23 +1,27 @@
-//! Source-bound untextured 3D research. No simulation or installed rendering claim.
+//! Source-bound 3D research. Explicit texture/UV choices; no installed rendering claim.
 use bevy::{
     app::AppExit,
     asset::RenderAssetUsages,
     camera::ScalingMode,
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
+    ecs::system::SystemParam,
+    image::ImageSampler,
     mesh::VertexAttributeValues,
     prelude::*,
     render::{
-        render_resource::PrimitiveTopology,
+        render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat},
         view::screenshot::{Screenshot, ScreenshotCaptured},
     },
     window::PrimaryWindow,
 };
 use package_reader::{
     model_inspection::{InspectionModel, read_selected_models},
+    model_inspection_textures::TextureMode,
     probe::ProbeSource,
 };
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs::{File, OpenOptions},
     io::Write,
     path::PathBuf,
@@ -25,11 +29,19 @@ use std::{
 
 #[derive(Component)]
 struct ModelPart;
+#[derive(SystemParam)]
+struct InspectorAssets<'w> {
+    meshes: ResMut<'w, Assets<Mesh>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    images: ResMut<'w, Assets<Image>>,
+}
 #[derive(Resource)]
 struct Inspector {
     models: Vec<InspectionModel>,
     item: usize,
     pose: usize,
+    uv: usize,
+    texture_mode: usize,
     part: Option<usize>,
     direction: Vec3,
     up: Vec3,
@@ -37,6 +49,7 @@ struct Inspector {
     dirty: bool,
     mesh_handles: Vec<Handle<Mesh>>,
     material_handles: Vec<Handle<StandardMaterial>>,
+    image_handles: Vec<Handle<Image>>,
     log: File,
     frames: u64,
     dwell: u64,
@@ -57,10 +70,14 @@ impl Inspector {
     fn tour_state(&mut self) {
         let mut remaining = self.step;
         for (item, model) in self.models.iter().enumerate() {
-            let count = model.poses.len() * 4;
+            let count =
+                model.poses.len() * model.uv_profile_count() * model.texture_modes().len() * 4;
             if remaining < count {
                 self.item = item;
-                self.pose = remaining / 4;
+                let choice = remaining / 4;
+                self.pose = choice / (model.uv_profile_count() * model.texture_modes().len());
+                self.uv = (choice / model.texture_modes().len()) % model.uv_profile_count();
+                self.texture_mode = choice % model.texture_modes().len();
                 self.part = (remaining % 4 == 3).then(|| {
                     model
                         .parts
@@ -155,7 +172,12 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
     eprintln!("Fresh full selected-source scan; model research remains quarantined.");
     let models = read_selected_models(&source, &selection)?;
     let count = if tour {
-        models.iter().map(|model| model.poses.len() * 4).sum()
+        models
+            .iter()
+            .map(|model| {
+                model.poses.len() * model.uv_profile_count() * model.texture_modes().len() * 4
+            })
+            .sum()
     } else {
         usize::from(capture_dir.is_some())
     };
@@ -169,6 +191,8 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         models,
         item: 0,
         pose: 0,
+        uv: 0,
+        texture_mode: 0,
         part: None,
         direction: Vec3::Z,
         up: Vec3::Y,
@@ -176,6 +200,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         dirty: true,
         mesh_handles: Vec::new(),
         material_handles: Vec::new(),
+        image_handles: Vec::new(),
         log: OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -190,10 +215,16 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         pending: false,
         captured: 0,
     };
+    let textured = state.models[0].textures.is_some();
     state.event(serde_json::json!({"event":"admitted","qualification":"quarantined_model_research_only",
         "source_content_identity":source.content_identity(),"fresh_full_scan":true,"models":state.models.len(),
         "tour":tour,"expected_captures":count,"gameplay_enabled":false,
-        "presentation":"common fit; orthographic; unlit part colors; double-sided opaque triangles; no source material, normal or renderer claim"}));
+        "presentation":if textured {"common fit; orthographic; explicit texture/UV choices; base mip zero; nearest clamp; SRGB texture; fixed opaque/unlit/double-sided; missing or ambiguous HD is magenta; no installed material/animation/filtering claim"} else {"common fit; orthographic; unlit part colors; double-sided opaque triangles; no source material, normal or renderer claim"}}));
+    if textured {
+        let details:Vec<_>=state.models.iter().enumerate().map(|(item,m)|serde_json::json!({"item":item,"index":m.index,"ordinal":m.ordinal,
+            "bar_ordinal":m.bar_ordinal,"textures":m.textures.as_ref().map(|t|t.as_ref()),"uv_routes":m.texture_routes})).collect();
+        state.event(serde_json::json!({"event":"texture_admission","models":details,"gameplay_enabled":false,"runtime_verified":false}));
+    }
     if tour {
         state.tour_state();
     }
@@ -246,6 +277,15 @@ fn controls(
     }
     if state.tour || state.pending {
         return;
+    }
+    if keys.just_pressed(KeyCode::KeyT) {
+        state.texture_mode =
+            (state.texture_mode + 1) % state.models[state.item].texture_modes().len();
+        state.dirty = true;
+    }
+    if keys.just_pressed(KeyCode::KeyU) {
+        state.uv = (state.uv + 1) % state.models[state.item].uv_profile_count();
+        state.dirty = true;
     }
     for (key, delta) in [(KeyCode::ArrowRight, 1isize), (KeyCode::ArrowLeft, -1)] {
         if keys.just_pressed(key) {
@@ -305,7 +345,7 @@ fn controls(
 fn refresh(
     mut commands: Commands,
     mut state: ResMut<Inspector>,
-    assets: (ResMut<Assets<Mesh>>, ResMut<Assets<StandardMaterial>>),
+    assets: InspectorAssets,
     parts: Query<Entity, With<ModelPart>>,
     mut cameras: Query<(&mut Transform, &mut Projection), With<Camera3d>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
@@ -314,7 +354,11 @@ fn refresh(
     if !state.dirty {
         return;
     }
-    let (mut meshes, mut materials) = assets;
+    let InspectorAssets {
+        mut meshes,
+        mut materials,
+        mut images,
+    } = assets;
     for entity in &parts {
         commands.entity(entity).despawn();
     }
@@ -323,6 +367,9 @@ fn refresh(
     }
     for handle in state.material_handles.drain(..) {
         materials.remove(handle.id());
+    }
+    for handle in state.image_handles.drain(..) {
+        images.remove(handle.id());
     }
     let model = &state.models[state.item];
     let pose = &model.poses[state.pose];
@@ -339,6 +386,8 @@ fn refresh(
     let mut rendered = Vec::new();
     let mut mesh_handles = Vec::new();
     let mut material_handles = Vec::new();
+    let mut image_handles: HashMap<usize, Handle<Image>> = HashMap::new();
+    let mode = model.texture_modes()[state.texture_mode];
     for (ordinal, part) in model.parts.iter().enumerate() {
         if part.indices.is_empty() || state.part.is_some_and(|p| p != ordinal) {
             continue;
@@ -348,7 +397,7 @@ fn refresh(
             .iter()
             .map(|&i| normalized[i as usize])
             .collect();
-        let mesh = Mesh::new(
+        let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         )
@@ -362,13 +411,83 @@ fn refresh(
             .iter()
             .map(|p| p.map(f32::to_bits))
             .collect();
-        let rgb = color(ordinal);
-        rendered.push(
-            serde_json::json!({"part":ordinal,"source":part,"rgb":rgb,"mesh_position_bits":words}),
-        );
+        let mut rgb = color(ordinal);
+        let mut texture_handle = None;
+        let mut observation =
+            serde_json::json!({"part":ordinal,"source":part,"rgb":rgb,"mesh_position_bits":words});
+        if let Some(set) = &model.textures {
+            let route = &model.texture_routes[state.uv].parts[ordinal];
+            let binding = set
+                .bind(route.environment_ordinal, mode)
+                .expect("admitted texture binding");
+            if mode != TextureMode::PartColors {
+                mesh.insert_attribute(
+                    Mesh::ATTRIBUTE_UV_0,
+                    route
+                        .expanded_uv_bits
+                        .iter()
+                        .map(|uv| uv.map(f32::from_bits))
+                        .collect::<Vec<_>>(),
+                );
+                let Some(VertexAttributeValues::Float32x2(uvs)) =
+                    mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+                else {
+                    panic!("mesh UV attribute")
+                };
+                observation["mesh_uv_bits"] = serde_json::to_value(
+                    uvs.iter()
+                        .map(|uv| uv.map(f32::to_bits))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+                if let Some(image_index) = binding.image_index {
+                    let image = &set.images[image_index];
+                    let level = &image.levels[0];
+                    let handle = image_handles
+                        .entry(image_index)
+                        .or_insert_with(|| {
+                            let mut image = Image::new(
+                                Extent3d {
+                                    width: level.width,
+                                    height: level.height,
+                                    depth_or_array_layers: 1,
+                                },
+                                TextureDimension::D2,
+                                level.pixels_rgba.clone(),
+                                TextureFormat::Rgba8UnormSrgb,
+                                RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+                            );
+                            image.sampler = ImageSampler::nearest();
+                            images.add(image)
+                        })
+                        .clone();
+                    observation["image"] = serde_json::to_value(image).unwrap();
+                    observation["image_upload_input_sha256"] = format!(
+                        "{:x}",
+                        Sha256::digest(images.get(&handle).unwrap().data.as_ref().unwrap())
+                    )
+                    .into();
+                    observation["uploaded_mip_count"] = images
+                        .get(&handle)
+                        .unwrap()
+                        .texture_descriptor
+                        .mip_level_count
+                        .into();
+                    texture_handle = Some(handle);
+                    rgb = [255; 3];
+                } else {
+                    rgb = [255, 0, 255];
+                }
+            }
+            observation["texture_binding"] = serde_json::to_value(binding).unwrap();
+            observation["rgb"] = serde_json::to_value(rgb).unwrap();
+        }
+        rendered.push(observation);
         let mesh = meshes.add(mesh);
         let material = materials.add(StandardMaterial {
             base_color: Color::srgb_u8(rgb[0], rgb[1], rgb[2]),
+            base_color_texture: texture_handle,
+            alpha_mode: AlphaMode::Opaque,
             unlit: true,
             cull_mode: None,
             ..default()
@@ -381,26 +500,44 @@ fn refresh(
         mesh_handles.push(mesh);
         material_handles.push(material);
     }
-    let metadata = serde_json::json!({"event":"view","step":state.step,"item":state.item,"index":model.index,
+    let mut metadata = serde_json::json!({"event":"view","step":state.step,"item":state.item,"index":model.index,
         "ordinal":model.ordinal,"bar_ordinal":model.bar_ordinal,"pose_profile":pose.profile,
         "arithmetic_profile":pose.arithmetic_profile,"runtime_verified":false,"excluded_linked_groups":model.excluded_linked_groups,
         "source_position_bits":pose.position_bits,"center":center,"radius":radius,"part":state.part,
         "direction":state.direction.to_array(),"up":state.up.to_array(),"zoom":state.zoom,"rendered":rendered});
+    if model.textures.is_some() {
+        metadata["texture_mode"] = serde_json::to_value(mode).unwrap();
+        metadata["uv_profile"] =
+            serde_json::to_value(model.texture_routes[state.uv].profile).unwrap();
+    }
     let (mut transform, mut projection) = cameras.single_mut().expect("research model camera");
     *transform =
         Transform::from_translation(state.direction * 4.0).looking_at(Vec3::ZERO, state.up);
     if let Projection::Orthographic(p) = &mut *projection {
         p.scale = state.zoom;
     }
-    windows.single_mut().expect("research model window").title = format!(
-        "QUARANTINED model {}/{} | {:?} | part {:?} | arrows; P pose; Space part; 1/2/3 axes; I/J/K/L orbit; +/-; F fit; Esc",
-        state.item + 1,
-        state.models.len(),
-        pose.profile,
-        state.part
-    );
+    windows.single_mut().expect("research model window").title = if model.textures.is_some() {
+        format!(
+            "QUARANTINED model {}/{} | {:?} | T texture {:?}; U UV {:?} | part {:?} | P pose; Space part; 1/2/3 axes; I/J/K/L orbit; +/-; F fit; Esc",
+            state.item + 1,
+            state.models.len(),
+            pose.profile,
+            mode,
+            model.texture_routes[state.uv].profile,
+            state.part
+        )
+    } else {
+        format!(
+            "QUARANTINED model {}/{} | {:?} | part {:?} | arrows; P pose; Space part; 1/2/3 axes; I/J/K/L orbit; +/-; F fit; Esc",
+            state.item + 1,
+            state.models.len(),
+            pose.profile,
+            state.part
+        )
+    };
     state.mesh_handles = mesh_handles;
     state.material_handles = material_handles;
+    state.image_handles = image_handles.into_values().collect();
     state.event(metadata);
     state.dirty = false;
     state.dwell = 0;
@@ -487,6 +624,8 @@ mod tests {
             excluded_linked_groups: 0,
             parts: Vec::new(),
             poses,
+            textures: None,
+            texture_routes: Vec::new(),
         };
         let (center, radius) = frame(&model);
         assert_eq!(center, [0.0; 3]);

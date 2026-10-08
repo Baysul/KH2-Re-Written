@@ -2,6 +2,7 @@
 //! public profiles; no installed material, normal, shadow or animation claim.
 use crate::{
     model_geometry::Geometry,
+    model_inspection_textures::{InspectionTextures, TextureMode, UvProfile, UvRoutes},
     model_pose::{ModelPose, PoseProfile},
     probe::ProbeSource,
 };
@@ -11,6 +12,7 @@ use std::{
     fs::File,
     io::{self, Read},
     path::Path,
+    sync::Arc,
 };
 
 #[derive(Deserialize)]
@@ -20,6 +22,12 @@ struct SelectionFile {
     selections: Vec<Selection>,
     inspect_model_geometry: bool,
     model_pose_profiles: Vec<PoseProfile>,
+    #[serde(default)]
+    inspect_model_textures: bool,
+    #[serde(default)]
+    model_texture_modes: Vec<TextureMode>,
+    #[serde(default)]
+    model_uv_profiles: Vec<UvProfile>,
 }
 #[derive(Deserialize)]
 struct Selection {
@@ -43,6 +51,18 @@ pub struct InspectionModel {
     pub excluded_linked_groups: usize,
     pub parts: Vec<InspectionPart>,
     pub poses: Vec<ModelPose>,
+    pub textures: Option<Arc<InspectionTextures>>,
+    pub texture_routes: Vec<UvRoutes>,
+}
+impl InspectionModel {
+    pub fn texture_modes(&self) -> &[TextureMode] {
+        self.textures
+            .as_ref()
+            .map_or(&[TextureMode::PartColors], |t| t.modes.as_slice())
+    }
+    pub fn uv_profile_count(&self) -> usize {
+        self.texture_routes.len().max(1)
+    }
 }
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -134,6 +154,24 @@ pub fn read_selected_models(
     {
         return Err("model selection identity/schema/count/explicit profiles invalid".into());
     }
+    if selection.inspect_model_textures {
+        if selection.model_texture_modes.is_empty()
+            || selection.model_texture_modes.len() > 3
+            || selection.model_uv_profiles.is_empty()
+            || selection.model_uv_profiles.len() > 2
+            || selection
+                .model_texture_modes
+                .iter()
+                .enumerate()
+                .any(|(i, m)| selection.model_texture_modes[..i].contains(m))
+            || (selection.model_uv_profiles.len() == 2
+                && selection.model_uv_profiles[0] == selection.model_uv_profiles[1])
+        {
+            return Err("texture inspection requires distinct explicit texture/UV choices".into());
+        }
+    } else if !selection.model_texture_modes.is_empty() || !selection.model_uv_profiles.is_empty() {
+        return Err("texture/UV choices require explicit model texture inspection".into());
+    }
     let mut seen = HashSet::new();
     for item in &selection.selections {
         if !source_identity::required_files()
@@ -149,6 +187,9 @@ pub fn read_selected_models(
     let mut storage_bytes = 0usize;
     let mut position_words = 0usize;
     let mut index_words = 0usize;
+    let mut texture_rgba = 0usize;
+    let mut texture_images = 0usize;
+    let mut uv_corners = 0usize;
     for (relative, _) in source_identity::required_files()
         .into_iter()
         .filter(|(name, _)| name.ends_with(".hed"))
@@ -175,6 +216,47 @@ pub fn read_selected_models(
                 return Err("model storage exceeds 128 MiB".into());
             }
             let bar = crate::bar::read_bar(&original.bytes)?;
+            let textures = if selection.inspect_model_textures {
+                let replacements =
+                    crate::replacement::read_all_replacements(&mut checked.reader, entry)?;
+                storage_bytes += replacements.iter().map(|r| r.bytes.len()).sum::<usize>();
+                if storage_bytes > 128 * 1024 * 1024 {
+                    return Err("model/replacement storage exceeds 128 MiB".into());
+                }
+                let entries: Vec<_> = bar
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.entry_type == 7)
+                    .collect();
+                if entries.len() != 1
+                    || entries[0].1.name_bytes != *b"tim_"
+                    || entries[0].1.offset < 0
+                    || entries[0].1.size == 0
+                {
+                    return Err(
+                        "textured inspection requires exactly one nonempty tim_ BAR/type-7 entry"
+                            .into(),
+                    );
+                }
+                let (ordinal, record) = entries[0];
+                let start = record.offset as usize;
+                let set = crate::model_inspection_textures::read_textures(
+                    &original.bytes[start..start + record.size as usize],
+                    start,
+                    ordinal,
+                    &replacements,
+                    &selection.model_texture_modes,
+                    &mut texture_rgba,
+                )?;
+                texture_images += set.images.len();
+                if texture_images > 64 {
+                    return Err("cumulative inspection texture count exceeds 64".into());
+                }
+                Some(Arc::new(set))
+            } else {
+                None
+            };
             let before = models.len();
             for (bar_ordinal, entry) in bar
                 .entries
@@ -194,6 +276,35 @@ pub fn read_selected_models(
                     .map(|&profile| crate::model_pose::read_pose(payload, profile))
                     .collect::<io::Result<_>>()?;
                 let mesh_parts = parts(&geometry, &poses)?;
+                let texture_routes = if let Some(set) = &textures {
+                    let environments = set
+                        .images
+                        .iter()
+                        .filter(|i| {
+                            matches!(
+                                i.identity,
+                                crate::model_inspection_textures::ImageIdentity::Original { .. }
+                            )
+                        })
+                        .count();
+                    let routes = crate::model_inspection_textures::read_uv_routes(
+                        payload,
+                        &geometry,
+                        environments,
+                        &selection.model_uv_profiles,
+                    )?;
+                    uv_corners += routes
+                        .iter()
+                        .flat_map(|r| &r.parts)
+                        .map(|p| p.expanded_uv_bits.len())
+                        .sum::<usize>();
+                    if uv_corners > 2 * 524_288 * 3 {
+                        return Err("cumulative inspection UV corner budget exceeded".into());
+                    }
+                    routes
+                } else {
+                    Vec::new()
+                };
                 position_words += poses
                     .iter()
                     .map(|pose| pose.position_bits.len() * 3)
@@ -215,6 +326,8 @@ pub fn read_selected_models(
                     excluded_linked_groups: geometry.excluded_linked_groups,
                     parts: mesh_parts,
                     poses,
+                    textures: textures.clone(),
+                    texture_routes,
                 });
             }
             if models.len() == before {

@@ -8,7 +8,8 @@ param(
     [Parameter(Mandatory)][string]$GeometryReference,
     [Parameter(Mandatory)][string]$CaptureDirectory,
     [Parameter(Mandatory)][string]$OraclePath,
-    [Parameter(Mandatory)][string]$OutputDirectory
+    [Parameter(Mandatory)][string]$OutputDirectory,
+    [switch]$Textured
 )
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'ManagedReader.ps1')
@@ -18,7 +19,7 @@ foreach($path in @($InspectorLog,$ProbePath,$BindReference,$GeometryReference,$O
 }
 $null=Assert-PrivateResearchDirectory $CaptureDirectory $InstallRoot
 foreach($path in @($ProbePath,$BindReference,$GeometryReference)){if((Get-Item $path).Length -gt 33554432){throw 'Reference exceeds 32 MiB'}}
-if((Get-Item $InspectorLog).Length -gt 67108864){throw 'Inspector log exceeds 64 MiB'}
+if((Get-Item $InspectorLog).Length -gt $(if($Textured){134217728}else{67108864})){throw 'Inspector log exceeds finite tour bound'}
 Add-Type -TypeDefinition @'
 using System;
 public static class ModelInspectorReference {
@@ -107,6 +108,7 @@ if($admission.Count -ne 1 -or $admission[0].source_content_identity -ne $probe.s
     $admission[0].qualification -ne 'quarantined_model_research_only' -or $admission[0].models -ne $bind.samples.Count -or
     $exits.Count -ne 1 -or !$exits[0].complete){throw 'Unbound/incomplete research tour'}
 $expected=$bind.samples.Count*2*4
+if($Textured){$expected*=4}
 if($admission[0].expected_captures -ne $expected -or $exits[0].captures -ne $expected){throw 'Tour denominator differs'}
 $seen=@{};$states=@{};$results=@();$view=$null;$positionWords=0;$cornerWords=0;$crossCorners=0
 foreach($event in $events){
@@ -122,6 +124,10 @@ foreach($event in $events){
     $route=switch($view.pose_profile){'openkh_legacy_bind_fma_v1'{'legacy'};'openkh_modern_bind_fma_v1'{'modern'};default{throw 'Unknown pose profile'}}
     if($view.arithmetic_profile -ne 'dotnet10_fma_order_std_sincos_candidate_v1' -or $view.runtime_verified){throw 'Pose qualification differs'}
     $stateKey="$($view.index)|$($view.ordinal)|$($view.bar_ordinal)|$route|$([int]$event.step%4)"
+    if($Textured){
+        if($view.texture_mode -notin @('original_indexed','exact_hd_base') -or $view.uv_profile -notin @('openkh_kkdf2_integer_truncated_uv_v1','openkh_legacy_signed16_uv_on_kkdf2_topology_v1')){throw 'Textured tour mode/profile differs'}
+        $stateKey+="|$($view.texture_mode)|$($view.uv_profile)"
+    }
     if($states.ContainsKey($stateKey)){throw 'Duplicate model/profile/axis tour state'};$states[$stateKey]=$true
     $positions=$model[0].comparison."${route}_position_bits"
     if($view.source_position_bits.Count -ne $positions.Count){throw 'Position count differs'}
@@ -153,7 +159,7 @@ foreach($event in $events){
         if($render.source.source_is_opaque -ne $part.is_opaque){throw 'Source opacity metadata differs'}
         $cross=0;foreach($index in $indices){if($index -lt $part.vertex_base -or $index -ge $part.vertex_base+$part.assignments.Count){$cross++}}
         if($render.source.cross_part_corners -ne $cross){throw 'Cross-part references differ'};$crossCorners+=$cross
-        $rgb=@(53,97,29|ForEach-Object{64+$p*$_%128});Assert-ExactWords $render.rgb $rgb "part $p color"
+        $rgb=@(53,97,29|ForEach-Object{64+$p*$_%128});if(!$Textured){Assert-ExactWords $render.rgb $rgb "part $p color"}
         if($render.mesh_position_bits.Count -ne $indices.Count){throw 'Mesh corner count differs'}
         $corners=@();for($i=0;$i -lt $indices.Count;$i++){
             $words=$normalized[$indices[$i]];Assert-ExactWords $render.mesh_position_bits[$i] $words "part $p mesh corner $i"
@@ -172,15 +178,15 @@ foreach($event in $events){
     $stream=[IO.MemoryStream]::new($bytes,12,$bytes.Length-12,$false)
     try{$hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant()}finally{$stream.Dispose()}
     if($hash -ne $event.pixels_sha256 -or $event.width -ne 900 -or $event.height -ne 900){throw 'GPU readback/PNG identity differs'}
-    $comparison=[ModelInspectorReference]::Compare([uint32[][][]]$screenParts,[byte[][]]$screenColors,$axis,$bytes)
+    $comparison=if($Textured){@{screen_verdict='NOT RUN';reason='Textured raster/material reference is not this untextured oracle'}}else{[ModelInspectorReference]::Compare([uint32[][][]]$screenParts,[byte[][]]$screenColors,$axis,$bytes)}
     $results+=@{step=$event.step;item=$view.item;profile=$view.pose_profile;part=$view.part;file=$event.file;comparison=$comparison}
 }
 if($seen.Count -ne $expected){throw 'Capture count differs'}
 $different=($results|ForEach-Object{$_.comparison.different_pixels}|Measure-Object -Sum).Sum
 $coverageDifferent=($results|ForEach-Object{$_.comparison.coverage_different_pixels}|Measure-Object -Sum).Sum
 $output=@{mesh_inputs_verdict='PASS';source_position_words=$positionWords;mesh_corner_words=$cornerWords;
-    cross_part_corners=$crossCorners;states=$seen.Count;screen_verdict=$(if($different -eq 0){'PASS'}else{'FAIL'});
-    compared_screen_pixels=$seen.Count*900*900;different_screen_pixels=$different;coverage_different_screen_pixels=$coverageDifferent;
+    cross_part_corners=$crossCorners;states=$seen.Count;screen_verdict=$(if($Textured){'NOT RUN'}elseif($different -eq 0){'PASS'}else{'FAIL'});
+    compared_screen_pixels=$(if($Textured){0}else{$seen.Count*900*900});different_screen_pixels=$(if($Textured){$null}else{$different});coverage_different_screen_pixels=$(if($Textured){$null}else{$coverageDifferent});
     tolerance_selected=$false;installed_renderer_verified=$false;samples=$results}
 Write-NewResearchFile (Join-Path $OutputDirectory 'model-inspector-comparison.json') ([Text.Encoding]::UTF8.GetBytes(($output|ConvertTo-Json -Depth 10)))
-Write-Output "Mesh inputs PASS; screen $($output.screen_verdict), $different differing pixels, no tolerance."
+Write-Output "Mesh inputs PASS; screen $($output.screen_verdict), no tolerance."
