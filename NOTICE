@@ -17,6 +17,13 @@ unchanged private DirectXTex LoadScanline BGRA/StoreScanline RGBA case statement
 at 1acf4ebe6330e06b7eb52e8db63d4f824ad77427 (Microsoft, MIT). Public source and
 compiled research adapters remain outside Git/distribution; row/pitch/surface
 exclusions are owned inspection bounds, not a complete DDS format claim.
+The explicit legacy BC3 mip-chain inspection profile follows the standard DDS
+surface layout, checked against unchanged DirectXTex ComputePitch BC3 normal
+branch and MulOverflow at the same Microsoft pin. Pixel arithmetic retains the
+explicit normalized CPU profile checked against unchanged DecodeBC1/D3DXDecodeBC3
+and DirectXMath UNORM8 storage. Private public extracts/binaries remain external;
+complete-chain bounds and output envelopes are owned. This does not qualify
+installed filtering, material routing, hardware rounding or runtime behavior.
 Candidate name generation in tools/Compare-CandidateNames.ps1 follows
 the KH2-only EgsTools rules at the same pin; upstream catalogs are
 referenced privately and are not included in this repository.

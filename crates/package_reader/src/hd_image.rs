@@ -38,6 +38,31 @@ pub struct DecodedHdImage {
     pub pixels_rgba: Vec<u8>,
 }
 
+pub const BC3_MIP_LAYOUT_PROFILE: &str = "legacy_dds_bc3_mip_chain_v1";
+#[derive(Debug, Clone, Serialize)]
+pub struct Bc3MipLevelLayout {
+    pub ordinal: u32,
+    pub width: u32,
+    pub height: u32,
+    pub encoded_offset: usize,
+    pub encoded_length: usize,
+}
+#[derive(Debug, Serialize)]
+pub struct Bc3MipLayout {
+    pub profile: &'static str,
+    pub header_words: [u32; 31],
+    pub encoded_length: usize,
+    pub storage_padding: usize,
+    pub rgba_byte_count: usize,
+    pub levels: Vec<Bc3MipLevelLayout>,
+    pub runtime_verified: bool,
+}
+pub struct DecodedBc3MipChain {
+    pub layout: Bc3MipLayout,
+    pub pixel_decode_profile: HdPixelDecodeProfile,
+    pub levels_rgba: Vec<Vec<u8>>,
+}
+
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -200,6 +225,26 @@ pub fn decode_hd_image_with_profile(
     declared_length: usize,
     dds_profile: HdPixelDecodeProfile,
 ) -> io::Result<DecodedHdImage> {
+    let (bytes, storage_padding) = logical_hd_input(bytes, declared_length)?;
+    let (format, codec, encoded_length) = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        (HdImageFormat::Png, ImageFormat::Png, png_length(bytes)?)
+    } else if bytes.starts_with(b"DDS ") {
+        let (format, length) = dds_layout(bytes)?;
+        (format, ImageFormat::Dds, length)
+    } else {
+        return Err(unsupported("unknown HD image signature"));
+    };
+    decode_single_hd_image(
+        bytes,
+        storage_padding,
+        format,
+        codec,
+        encoded_length,
+        dds_profile,
+    )
+}
+
+fn logical_hd_input(bytes: &[u8], declared_length: usize) -> io::Result<(&[u8], usize)> {
     if bytes.len() > MAX_INPUT {
         return Err(invalid("HD image exceeds 32 MiB input limit"));
     }
@@ -212,16 +257,17 @@ pub fn decode_hd_image_with_profile(
             "HD image logical length/padded storage range is inconsistent",
         ));
     }
-    let storage_padding = bytes.len() - declared_length;
-    let bytes = &bytes[..declared_length];
-    let (format, codec, encoded_length) = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        (HdImageFormat::Png, ImageFormat::Png, png_length(bytes)?)
-    } else if bytes.starts_with(b"DDS ") {
-        let (format, length) = dds_layout(bytes)?;
-        (format, ImageFormat::Dds, length)
-    } else {
-        return Err(unsupported("unknown HD image signature"));
-    };
+    Ok((&bytes[..declared_length], bytes.len() - declared_length))
+}
+
+fn decode_single_hd_image(
+    bytes: &[u8],
+    storage_padding: usize,
+    format: HdImageFormat,
+    codec: ImageFormat,
+    encoded_length: usize,
+    dds_profile: HdPixelDecodeProfile,
+) -> io::Result<DecodedHdImage> {
     if format == HdImageFormat::DdsBgra8 {
         let width = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
         let height = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
@@ -258,7 +304,7 @@ pub fn decode_hd_image_with_profile(
             height,
             encoded_length,
             storage_padding,
-            pixels_rgba: normalized_bc3(bytes, width as usize, height as usize),
+            pixels_rgba: normalized_bc3_blocks(&bytes[128..], width as usize, height as usize),
         });
     }
     let mut limits = Limits::default();
@@ -283,14 +329,108 @@ pub fn decode_hd_image_with_profile(
     })
 }
 
+/// Explicit full-chain admission; the ordinary single-image route still rejects
+/// mip chains. Raw count/header words are retained; excessive counts never clamp.
+pub fn read_bc3_mip_layout(bytes: &[u8], declared_length: usize) -> io::Result<Bc3MipLayout> {
+    let (bytes, storage_padding) = logical_hd_input(bytes, declared_length)?;
+    if bytes.len() < 128 || !bytes.starts_with(b"DDS ") {
+        return Err(invalid("BC3 mip chain requires a complete DDS header"));
+    }
+    let header_words = std::array::from_fn(|i| {
+        u32::from_le_bytes(bytes[4 + i * 4..8 + i * 4].try_into().unwrap())
+    });
+    let word = |offset: usize| header_words[offset / 4 - 1];
+    let (mut width, mut height) = (word(16), word(12));
+    dimensions(width, height)?;
+    let count = word(28).max(1);
+    let maximum = u32::BITS - width.max(height).leading_zeros();
+    if word(4) != 124
+        || word(76) != 32
+        || word(80) != 4
+        || &bytes[84..88] != b"DXT5"
+        || word(8) & 0x81007 != 0x81007
+        || word(8) & !0xa1007 != 0
+        || word(24) > 1
+        || word(112) != 0
+        || word(116) != 0
+        || word(120) != 0
+        || count > maximum
+        || (count > 1 && (word(8) & 0x20000 == 0 || word(108) != 0x401008))
+        || (count == 1 && word(108) != 0x1000)
+    {
+        return Err(unsupported(
+            "BC3 mip header outside bounded legacy 2D profile",
+        ));
+    }
+    let mut layout = Bc3MipLayout {
+        profile: BC3_MIP_LAYOUT_PROFILE,
+        header_words,
+        encoded_length: bytes.len(),
+        storage_padding,
+        rgba_byte_count: 0,
+        levels: Vec::new(),
+        runtime_verified: false,
+    };
+    let mut offset = 128;
+    for ordinal in 0..count {
+        let length = width.div_ceil(4) as usize * height.div_ceil(4) as usize * 16;
+        if ordinal == 0 && word(20) as usize != length {
+            return Err(invalid("BC3 mip base linear size differs"));
+        }
+        layout.rgba_byte_count += width as usize * height as usize * 4;
+        if layout.rgba_byte_count > MAX_RGBA as usize {
+            return Err(invalid("BC3 mip cumulative RGBA exceeds 64 MiB"));
+        }
+        layout.levels.push(Bc3MipLevelLayout {
+            ordinal,
+            width,
+            height,
+            encoded_offset: offset,
+            encoded_length: length,
+        });
+        offset += length;
+        width = (width / 2).max(1);
+        height = (height / 2).max(1);
+    }
+    if offset != bytes.len() {
+        return Err(invalid(
+            "BC3 mip chain length differs or extra surfaces exist",
+        ));
+    }
+    Ok(layout)
+}
+
+pub fn decode_bc3_mip_chain(
+    bytes: &[u8],
+    declared_length: usize,
+) -> io::Result<DecodedBc3MipChain> {
+    let layout = read_bc3_mip_layout(bytes, declared_length)?;
+    let levels_rgba = layout
+        .levels
+        .iter()
+        .map(|level| {
+            normalized_bc3_blocks(
+                &bytes[level.encoded_offset..level.encoded_offset + level.encoded_length],
+                level.width as usize,
+                level.height as usize,
+            )
+        })
+        .collect();
+    Ok(DecodedBc3MipChain {
+        layout,
+        pixel_decode_profile: HdPixelDecodeProfile::Bc3NormalizedNearestRgba8V1,
+        levels_rgba,
+    })
+}
+
 // Public BC3 layout/normalized interpolation, followed by nearest UNORM8.
 // Qualification: T024 pinned DirectXTex methods + WIC, finite scalar corpus.
-// Called only after strict single-level DDS admission above, preserving hidden
+// Called only after bounded single-level or complete-chain admission, preserving hidden
 // RGB and straight alpha. No gamma transform, premultiplication or filtering.
-fn normalized_bc3(bytes: &[u8], width: usize, height: usize) -> Vec<u8> {
+fn normalized_bc3_blocks(bytes: &[u8], width: usize, height: usize) -> Vec<u8> {
     let nearest = |value: u32, divisor: u32| ((value + divisor / 2) / divisor) as u8;
     let mut rgba = vec![0; width * height * 4];
-    for (block_index, block) in bytes[128..].as_chunks::<16>().0.iter().enumerate() {
+    for (block_index, block) in bytes.as_chunks::<16>().0.iter().enumerate() {
         let first = u16::from_le_bytes(block[8..10].try_into().unwrap()) as u32;
         let second = u16::from_le_bytes(block[10..12].try_into().unwrap()) as u32;
         let mut colors = [[0u8; 3]; 4];
@@ -321,8 +461,11 @@ fn normalized_bc3(bytes: &[u8], width: usize, height: usize) -> Vec<u8> {
         alpha_bytes[..6].copy_from_slice(&block[2..8]);
         let alphas_index = u64::from_le_bytes(alpha_bytes);
         for p in 0..16 {
-            let x = (block_index % (width / 4)) * 4 + p % 4;
-            let y = (block_index / (width / 4)) * 4 + p / 4;
+            let x = (block_index % width.div_ceil(4)) * 4 + p % 4;
+            let y = (block_index / width.div_ceil(4)) * 4 + p / 4;
+            if x >= width || y >= height {
+                continue;
+            }
             let position = (y * width + x) * 4;
             rgba[position..position + 3]
                 .copy_from_slice(&colors[((colors_index >> (p * 2)) & 3) as usize]);
@@ -416,6 +559,156 @@ mod tests {
             140, 150, 255,
         ]);
         bytes
+    }
+
+    fn mip_dds(mut width: u32, mut height: u32, count: u32) -> Vec<u8> {
+        let mut bytes = dds();
+        for (offset, value) in [
+            (8, if count > 1 { 0xa1007 } else { 0x81007 }),
+            (12, height),
+            (16, width),
+            (20, width.div_ceil(4) * height.div_ceil(4) * 16),
+            (28, count),
+            (108, if count > 1 { 0x401008 } else { 0x1000 }),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes.truncate(128);
+        for ordinal in 0..count.max(1) {
+            for block in 0..width.div_ceil(4) * height.div_ceil(4) {
+                let mut data = [0u8; 16];
+                data[0] = 255;
+                let color = if (block + ordinal).is_multiple_of(2) {
+                    0xf800u16
+                } else {
+                    0x07e0
+                };
+                data[8..10].copy_from_slice(&color.to_le_bytes());
+                // Alternating endpoint colors across columns exposes clipping/row stride.
+                data[10..12].copy_from_slice(&0x001fu16.to_le_bytes());
+                data[12..16].copy_from_slice(&0x44444444u32.to_le_bytes());
+                bytes.extend(data);
+            }
+            width = (width / 2).max(1);
+            height = (height / 2).max(1);
+        }
+        bytes
+    }
+
+    #[test]
+    fn bc3_complete_chain_retains_layout_and_clips_partial_blocks() {
+        let source = mip_dds(5, 7, 3);
+        let chain = decode_bc3_mip_chain(&source, source.len()).unwrap();
+        assert_eq!(chain.layout.rgba_byte_count, (35 + 6 + 1) * 4);
+        assert_eq!(chain.layout.header_words[6], 3);
+        assert!(!chain.layout.runtime_verified);
+        assert_eq!(
+            chain.pixel_decode_profile,
+            HdPixelDecodeProfile::Bc3NormalizedNearestRgba8V1
+        );
+        let shapes: Vec<_> = chain
+            .layout
+            .levels
+            .iter()
+            .map(|m| {
+                (
+                    m.ordinal,
+                    m.width,
+                    m.height,
+                    m.encoded_offset,
+                    m.encoded_length,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            [(0, 5, 7, 128, 64), (1, 2, 3, 192, 16), (2, 1, 1, 208, 16)]
+        );
+        for (mip, pixels) in chain.layout.levels.iter().zip(&chain.levels_rgba) {
+            assert_eq!(pixels.len(), mip.width as usize * mip.height as usize * 4);
+            for y in 0..mip.height {
+                for x in 0..mip.width {
+                    let block = y / 4 * mip.width.div_ceil(4) + x / 4;
+                    let expected = if x % 2 == 1 {
+                        [0, 0, 255, 255]
+                    } else if (block + mip.ordinal).is_multiple_of(2) {
+                        [255, 0, 0, 255]
+                    } else {
+                        [0, 255, 0, 255]
+                    };
+                    let position = (y * mip.width + x) as usize * 4;
+                    assert_eq!(&pixels[position..position + 4], &expected);
+                }
+            }
+        }
+        assert!(decode(&source).is_err());
+    }
+
+    #[test]
+    fn bc3_mip_header_counts_lengths_surfaces_and_padding_are_strict() {
+        let source = mip_dds(4, 4, 3);
+        assert_eq!(
+            read_bc3_mip_layout(&source, source.len())
+                .unwrap()
+                .levels
+                .len(),
+            3
+        );
+        for (offset, word) in [
+            (4, 123u32),
+            (76, 31),
+            (80, 5),
+            (8, 0x81007),
+            (8, 0x8a1007),
+            (20, 32),
+            (24, 2),
+            (28, 4),
+            (28, 2),
+            (108, 0x1000),
+            (112, 0x200),
+            (116, 1),
+            (120, 1),
+            (16, 4097),
+            (12, 0),
+        ] {
+            let mut changed = source.clone();
+            changed[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+            assert!(
+                read_bc3_mip_layout(&changed, changed.len()).is_err(),
+                "offset {offset}, word {word}"
+            );
+        }
+        for length in [0, 127, source.len() - 1, source.len() + 1] {
+            assert!(read_bc3_mip_layout(&source, length).is_err());
+        }
+        let mut extra = source.clone();
+        extra.push(0);
+        assert!(read_bc3_mip_layout(&extra, extra.len()).is_err());
+        let mut single = mip_dds(1, 1, 0);
+        let layout = read_bc3_mip_layout(&single, single.len()).unwrap();
+        assert_eq!(layout.header_words[6], 0);
+        assert_eq!(layout.levels.len(), 1);
+        let logical = single.len();
+        single.resize(logical + 16, 0xa5);
+        assert!(read_bc3_mip_layout(&single, logical).is_err());
+        let mut misaligned = source.clone();
+        misaligned.truncate(source.len() - 1);
+        misaligned.resize(source.len(), 0xa5);
+        assert!(read_bc3_mip_layout(&misaligned, source.len() - 1).is_err());
+    }
+
+    #[test]
+    fn bc3_mip_cumulative_budget_rejects_before_pixel_decode() {
+        // A valid compressed chain fits the source bound but RGBA expansion does not.
+        let source = mip_dds(4096, 4096, 13);
+        assert!(source.len() < MAX_INPUT);
+        assert_eq!(
+            decode_bc3_mip_chain(&source, source.len())
+                .err()
+                .unwrap()
+                .to_string(),
+            "BC3 mip cumulative RGBA exceeds 64 MiB"
+        );
     }
 
     #[test]

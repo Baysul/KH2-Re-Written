@@ -16,6 +16,8 @@ struct SelectionFile {
     #[serde(default)]
     inspect_hd_images: bool,
     #[serde(default)]
+    inspect_hd_mip_chains: bool,
+    #[serde(default)]
     inspect_model_skeletons: bool,
     #[serde(default)]
     inspect_model_packets: bool,
@@ -52,6 +54,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (
         selections,
         inspect_images,
+        inspect_mips,
         dds_profile,
         inspect_models,
         inspect_packets,
@@ -94,6 +97,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         {
             return Err("DDS decoding profile requires explicit HD image inspection".into());
         }
+        if selection.inspect_hd_mip_chains
+            && (!selection.inspect_hd_images
+                || selection.dds_pixel_decode_profile
+                    != package_reader::hd_image::HdPixelDecodeProfile::Bc3NormalizedNearestRgba8V1)
+        {
+            return Err(
+                "mip chains require explicit HD inspection and normalized BC3 profile".into(),
+            );
+        }
         if selection.inspect_model_packets && !selection.inspect_model_skeletons {
             return Err("packet inspection requires explicit model structure inspection".into());
         }
@@ -121,6 +133,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         (
             Some(selection.selections),
             selection.inspect_hd_images,
+            selection.inspect_hd_mip_chains,
             selection.dds_pixel_decode_profile,
             selection.inspect_model_skeletons,
             selection.inspect_model_packets,
@@ -134,6 +147,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         (
             None,
             false,
+            false,
             package_reader::hd_image::HdPixelDecodeProfile::default(),
             false,
             false,
@@ -144,7 +158,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             false,
         )
     };
-    if inspect_models || inspect_textures {
+    if inspect_models || inspect_textures || inspect_mips {
         source.verify_full_source()?;
     }
     let preview_dir = args.get(4).map(PathBuf::from);
@@ -238,15 +252,84 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             for sample in replacement_samples {
                 let decoded_image = if inspect_images {
-                    let image = package_reader::hd_image::decode_hd_image_with_profile(
-                        &sample.bytes,
-                        sample.metadata.declared_decompressed_length as usize,
-                        dds_profile,
-                    )?;
-                    image_bytes += image.pixels_rgba.len();
-                    if image_bytes > 128 * 1024 * 1024 {
-                        return Err("HD image probe exceeds 128 MiB cumulative RGBA limit".into());
-                    }
+                    let is_chain = inspect_mips
+                        && sample.bytes.starts_with(b"DDS ")
+                        && sample
+                            .bytes
+                            .get(28..32)
+                            .is_some_and(|v| u32::from_le_bytes(v.try_into().unwrap()) > 1);
+                    let (image, mip_observation) = if is_chain {
+                        let layout = package_reader::hd_image::read_bc3_mip_layout(
+                            &sample.bytes,
+                            sample.metadata.declared_decompressed_length as usize,
+                        )?;
+                        image_bytes += layout.rgba_byte_count;
+                        if image_bytes > 128 * 1024 * 1024 {
+                            return Err(
+                                "HD image probe exceeds 128 MiB cumulative RGBA limit".into()
+                            );
+                        }
+                        let chain = package_reader::hd_image::decode_bc3_mip_chain(
+                            &sample.bytes,
+                            sample.metadata.declared_decompressed_length as usize,
+                        )?;
+                        let mut levels = Vec::new();
+                        let mip_file = if let Some(directory) = &preview_dir {
+                            let name = format!(
+                                "sample-{:02}-replacement-{:02}.mips",
+                                samples.len(),
+                                sample.metadata.ordinal
+                            );
+                            let path = source.output_path(&directory.join(&name))?;
+                            let mut file =
+                                OpenOptions::new().write(true).create_new(true).open(path)?;
+                            file.write_all(b"MIPS")?;
+                            file.write_all(&(chain.layout.levels.len() as u32).to_le_bytes())?;
+                            for (level, pixels) in
+                                chain.layout.levels.iter().zip(&chain.levels_rgba)
+                            {
+                                file.write_all(&level.width.to_le_bytes())?;
+                                file.write_all(&level.height.to_le_bytes())?;
+                                file.write_all(&(level.encoded_offset as u64).to_le_bytes())?;
+                                file.write_all(&(level.encoded_length as u64).to_le_bytes())?;
+                                file.write_all(pixels)?;
+                            }
+                            file.sync_all()?;
+                            Some(name)
+                        } else {
+                            None
+                        };
+                        for (level, pixels) in chain.layout.levels.iter().zip(&chain.levels_rgba) {
+                            levels.push(serde_json::json!({"ordinal":level.ordinal,
+                                "rgba_byte_count":pixels.len(),"pixels_rgba_sha256":format!("{:x}",Sha256::digest(pixels))}));
+                        }
+                        let observation = serde_json::json!({"layout":chain.layout,"levels":levels,"mip_file":mip_file,
+                            "pixel_decode_profile":chain.pixel_decode_profile,"independent_pixel_check":"NOT RUN","runtime_verified":false});
+                        let base = &chain.layout.levels[0];
+                        let image = package_reader::hd_image::DecodedHdImage {
+                            format: package_reader::hd_image::HdImageFormat::DdsBc3,
+                            pixel_decode_profile: chain.pixel_decode_profile,
+                            width: base.width,
+                            height: base.height,
+                            encoded_length: chain.layout.encoded_length,
+                            storage_padding: chain.layout.storage_padding,
+                            pixels_rgba: chain.levels_rgba.into_iter().next().unwrap(),
+                        };
+                        (image, Some(observation))
+                    } else {
+                        let image = package_reader::hd_image::decode_hd_image_with_profile(
+                            &sample.bytes,
+                            sample.metadata.declared_decompressed_length as usize,
+                            dds_profile,
+                        )?;
+                        image_bytes += image.pixels_rgba.len();
+                        if image_bytes > 128 * 1024 * 1024 {
+                            return Err(
+                                "HD image probe exceeds 128 MiB cumulative RGBA limit".into()
+                            );
+                        }
+                        (image, None)
+                    };
                     let preview = if let Some(directory) = &preview_dir {
                         let name = format!(
                             "sample-{:02}-replacement-{:02}.bmp",
@@ -273,14 +356,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         None
                     };
-                    Some(
-                        serde_json::json!({"format":image.format,"width":image.width,"height":image.height,
+                    let mut observation = serde_json::json!({"format":image.format,"width":image.width,"height":image.height,
                         "encoded_length":image.encoded_length,"storage_padding":image.storage_padding,
                         "rgba_byte_count":image.pixels_rgba.len(),
                         "pixels_rgba_sha256":format!("{:x}",Sha256::digest(&image.pixels_rgba)),
                         "preview_file":preview,"pixel_decode_profile":image.pixel_decode_profile,
-                        "color_profile_transform_applied":false,"independent_pixel_check":"NOT RUN","runtime_verified":false}),
-                    )
+                        "color_profile_transform_applied":false,"independent_pixel_check":"NOT RUN","runtime_verified":false});
+                    if let Some(mips) = mip_observation {
+                        observation["mip_chain"] = mips;
+                    }
+                    Some(observation)
                 } else {
                     None
                 };
@@ -500,6 +585,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if inspect_models {
         result["model_skeleton_inspection_requested"] = true.into();
         result["source_check"] = "fresh full bound-source hashes before model inspection; HED content hashes and package size/mtime during reads; final rescan remains required".into();
+    }
+    if inspect_mips {
+        result["hd_mip_chain_inspection_requested"] = true.into();
+        result["source_check"] = "fresh full bound-source hashes before mip inspection; HED content hashes and package size/mtime during reads; final rescan remains required".into();
     }
     if inspect_textures {
         result["model_texture_inspection_requested"] = true.into();
