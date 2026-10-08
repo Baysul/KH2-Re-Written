@@ -11,6 +11,12 @@ HD image decoding uses image 0.25.10/png 0.18.1 and crc32fast 1.5.2
 uses zlib-rs 0.6.8 (Zlib); its unchanged notice is retained in
 docs/release/zlib-rs-LICENSE.txt. Full dependency attribution remains a release
 qualification requirement.
+The bounded legacy DDS BGRA8 route preserves byte channels using the standard
+32-bit A8R8G8B8 masks. Its explicit straight-RGBA profile is checked against
+unchanged private DirectXTex LoadScanline BGRA/StoreScanline RGBA case statements
+at 1acf4ebe6330e06b7eb52e8db63d4f824ad77427 (Microsoft, MIT). Public source and
+compiled research adapters remain outside Git/distribution; row/pitch/surface
+exclusions are owned inspection bounds, not a complete DDS format claim.
 Candidate name generation in tools/Compare-CandidateNames.ps1 follows
 the KH2-only EgsTools rules at the same pin; upstream catalogs are
 referenced privately and are not included in this repository.

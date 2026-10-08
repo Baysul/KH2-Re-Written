@@ -4,11 +4,15 @@ param(
     [Parameter(Mandatory)][string]$ProbePath,
     [Parameter(Mandatory)][string]$OpenKhRoot,
     [string]$ReplacementPreviewDirectory,
+    [string]$ReplacementInspectionDirectory,
     [string]$HdImageOraclePath,
     [string]$HdImageOracleDirectory
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ManagedReader.ps1')
+if ($ReplacementInspectionDirectory) {
+    $ReplacementInspectionDirectory = Assert-PrivateResearchDirectory -Directory $ReplacementInspectionDirectory -SourceRoot $InstallRoot
+}
 if ($ReplacementPreviewDirectory) {
     $ReplacementPreviewDirectory = Assert-PrivateResearchDirectory -Directory $ReplacementPreviewDirectory -SourceRoot $InstallRoot
 }
@@ -584,6 +588,10 @@ foreach ($sample in $report.samples) {
                     if ($bitmap) {$bitmap.Dispose()}
                     $pngStream.Dispose()
                 }
+            }
+            if ($ReplacementInspectionDirectory) {
+                $inspectionName = 'sample-{0:D2}-replacement-{1:D2}.image' -f $report.samples.IndexOf($sample),[int]$meta.ordinal
+                Write-NewResearchFile -Path (Join-Path $ReplacementInspectionDirectory $inspectionName) -Bytes $replacementData
             }
             $replacementBytes += $replacementData.Length
             $replacementVerified++

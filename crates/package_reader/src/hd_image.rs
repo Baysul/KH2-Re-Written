@@ -12,10 +12,11 @@ const MAX_RGBA: u64 = 64 * 1024 * 1024;
 pub enum HdImageFormat {
     Png,
     DdsBc3,
+    DdsBgra8,
 }
 
 /// Explicit CPU arithmetic; neither profile qualifies installed GPU behavior.
-/// PNG always uses the pinned image codec, even when the BC3 override is chosen.
+/// PNG uses the pinned image codec; BGRA8 always records its byte-swap profile.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HdPixelDecodeProfile {
     #[default]
@@ -23,6 +24,8 @@ pub enum HdPixelDecodeProfile {
     Image02510StoredRgba8,
     #[serde(rename = "bc3_normalized_nearest_rgba8_v1")]
     Bc3NormalizedNearestRgba8V1,
+    #[serde(rename = "legacy_dds_bgra8_straight_rgba8_v1")]
+    LegacyDdsBgra8StraightRgba8V1,
 }
 
 pub struct DecodedHdImage {
@@ -131,7 +134,7 @@ fn png_length(bytes: &[u8]) -> io::Result<usize> {
     Err(invalid("PNG end chunk is missing"))
 }
 
-fn dds_length(bytes: &[u8]) -> io::Result<usize> {
+fn dds_layout(bytes: &[u8]) -> io::Result<(HdImageFormat, usize)> {
     if bytes.len() < 128 {
         return Err(invalid("truncated DDS header"));
     }
@@ -141,16 +144,34 @@ fn dds_length(bytes: &[u8]) -> io::Result<usize> {
     }
     let (width, height) = (value(16), value(12));
     dimensions(width, height)?;
-    if value(80) & 4 == 0
-        || &bytes[84..88] != b"DXT5"
-        || value(112) != 0
-        || value(24) > 1
-        || value(28) > 1
-        || value(108) & 0x1000 == 0
-    {
+    if value(112) != 0 || value(24) > 1 || value(28) > 1 || value(108) & 0x1000 == 0 {
         return Err(unsupported(
-            "HD inspection currently admits only single-level 2D legacy BC3 DDS",
+            "HD inspection requires single-level 2D legacy DDS",
         ));
+    }
+    if value(80) == 0x41 && value(84) == 0 {
+        if value(88) != 32
+            || [value(92), value(96), value(100), value(104)]
+                != [0x00ff_0000, 0x0000_ff00, 0x0000_00ff, 0xff00_0000]
+            || value(8) & 0x100f != 0x100f
+            || value(8) & !0x2100f != 0
+            || value(20) != width * 4
+            || value(108) != 0x1000
+            || value(116) != 0
+            || value(120) != 0
+        {
+            return Err(unsupported(
+                "BGRA8 DDS inspection requires exact masks and tightly packed rows",
+            ));
+        }
+        let expected = 128 + width as usize * height as usize * 4;
+        if bytes.len() != expected {
+            return Err(invalid("BGRA8 DDS base-level length differs"));
+        }
+        return Ok((HdImageFormat::DdsBgra8, expected));
+    }
+    if value(80) & 4 == 0 || &bytes[84..88] != b"DXT5" {
+        return Err(unsupported("DDS pixel format outside BC3/BGRA8 profile"));
     }
     if !width.is_multiple_of(4) || !height.is_multiple_of(4) {
         return Err(unsupported(
@@ -163,7 +184,7 @@ fn dds_length(bytes: &[u8]) -> io::Result<usize> {
             "DDS base-level length differs or extra surfaces are present",
         ));
     }
-    Ok(expected)
+    Ok((HdImageFormat::DdsBc3, expected))
 }
 
 /// `declared_length` comes from validated replacement metadata. Uncompressed
@@ -196,10 +217,35 @@ pub fn decode_hd_image_with_profile(
     let (format, codec, encoded_length) = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         (HdImageFormat::Png, ImageFormat::Png, png_length(bytes)?)
     } else if bytes.starts_with(b"DDS ") {
-        (HdImageFormat::DdsBc3, ImageFormat::Dds, dds_length(bytes)?)
+        let (format, length) = dds_layout(bytes)?;
+        (format, ImageFormat::Dds, length)
     } else {
         return Err(unsupported("unknown HD image signature"));
     };
+    if format == HdImageFormat::DdsBgra8 {
+        let width = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        let height = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        let pixels_rgba = bytes[128..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|&[b, g, r, a]| [r, g, b, a])
+            .collect();
+        return Ok(DecodedHdImage {
+            format,
+            pixel_decode_profile: HdPixelDecodeProfile::LegacyDdsBgra8StraightRgba8V1,
+            width,
+            height,
+            encoded_length,
+            storage_padding,
+            pixels_rgba,
+        });
+    }
+    if format == HdImageFormat::DdsBc3
+        && dds_profile == HdPixelDecodeProfile::LegacyDdsBgra8StraightRgba8V1
+    {
+        return Err(unsupported("BGRA8 profile cannot select a BC3 decoder"));
+    }
     if format == HdImageFormat::DdsBc3
         && dds_profile == HdPixelDecodeProfile::Bc3NormalizedNearestRgba8V1
     {
@@ -345,6 +391,122 @@ mod tests {
         bytes[128] = 255;
         bytes[136..138].copy_from_slice(&0xf800u16.to_le_bytes());
         bytes
+    }
+
+    fn bgra() -> Vec<u8> {
+        let mut bytes = dds();
+        for (offset, value) in [
+            (8, 0x2100fu32),
+            (12, 2),
+            (16, 3),
+            (20, 12),
+            (80, 0x41),
+            (84, 0),
+            (88, 32),
+            (92, 0x00ff_0000),
+            (96, 0x0000_ff00),
+            (100, 0xff),
+            (104, 0xff00_0000),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes.truncate(128);
+        bytes.extend([
+            3, 6, 9, 0, 10, 20, 30, 1, 40, 50, 60, 127, 70, 80, 90, 128, 100, 110, 120, 254, 130,
+            140, 150, 255,
+        ]);
+        bytes
+    }
+
+    #[test]
+    fn bgra_rows_preserve_channels_hidden_rgb_and_storage_padding() {
+        let mut source = bgra();
+        let length = source.len();
+        source.resize(length.next_multiple_of(16), 0xa5);
+        for requested in [
+            HdPixelDecodeProfile::default(),
+            HdPixelDecodeProfile::Bc3NormalizedNearestRgba8V1,
+            HdPixelDecodeProfile::LegacyDdsBgra8StraightRgba8V1,
+        ] {
+            let image = decode_hd_image_with_profile(&source, length, requested).unwrap();
+            assert_eq!(image.format, HdImageFormat::DdsBgra8);
+            assert_eq!(
+                image.pixel_decode_profile,
+                HdPixelDecodeProfile::LegacyDdsBgra8StraightRgba8V1
+            );
+            assert_eq!(
+                (
+                    image.width,
+                    image.height,
+                    image.encoded_length,
+                    image.storage_padding
+                ),
+                (3, 2, length, 8)
+            );
+            assert_eq!(
+                image.pixels_rgba,
+                [
+                    9, 6, 3, 0, 30, 20, 10, 1, 60, 50, 40, 127, 90, 80, 70, 128, 120, 110, 100,
+                    254, 150, 140, 130, 255
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn bgra_rejects_unknown_masks_pitch_flags_levels_surfaces_and_lengths() {
+        let source = bgra();
+        for (offset, value) in [
+            (4, 123u32),
+            (76, 31),
+            (80, 0x40),
+            (80, 0x45),
+            (84, 1),
+            (88, 24),
+            (92, 0xff),
+            (96, 0xff),
+            (100, 0xff0000),
+            (104, 0),
+            (8, 0x21007),
+            (8, 0x82100f),
+            (20, 16),
+            (24, 2),
+            (28, 2),
+            (108, 0x401008),
+            (112, 0x200),
+            (116, 1),
+            (120, 1),
+            (16, 4097),
+            (12, 0),
+        ] {
+            let mut data = source.clone();
+            data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            assert!(decode(&data).is_err(), "offset {offset}, word {value}");
+        }
+        assert!(decode(&source[..source.len() - 1]).is_err());
+        let mut extra = source;
+        extra.push(0);
+        assert!(decode(&extra).is_err());
+    }
+
+    #[test]
+    fn bgra_selection_cannot_silently_choose_bc3_arithmetic() {
+        let requested = HdPixelDecodeProfile::LegacyDdsBgra8StraightRgba8V1;
+        let source = dds();
+        assert_eq!(
+            decode_hd_image_with_profile(&source, source.len(), requested)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        let source = png();
+        assert_eq!(
+            decode_hd_image_with_profile(&source, source.len(), requested)
+                .unwrap()
+                .pixel_decode_profile,
+            HdPixelDecodeProfile::default()
+        );
     }
 
     #[test]
