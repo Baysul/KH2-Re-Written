@@ -22,6 +22,8 @@ struct SelectionFile {
     #[serde(default)]
     inspect_model_geometry: bool,
     #[serde(default)]
+    inspect_model_textures: bool,
+    #[serde(default)]
     model_pose_profile: Option<package_reader::model_pose::PoseProfile>,
     #[serde(default)]
     dds_pixel_decode_profile: package_reader::hd_image::HdPixelDecodeProfile,
@@ -51,6 +53,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         inspect_packets,
         inspect_geometry,
         pose_profile,
+        inspect_textures,
     ) = if let Some(path) = args.get(3) {
         let mut bytes = Vec::new();
         File::open(path)?
@@ -102,6 +105,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             selection.inspect_model_packets,
             selection.inspect_model_geometry,
             selection.model_pose_profile,
+            selection.inspect_model_textures,
         )
     } else {
         (
@@ -112,9 +116,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             false,
             false,
             None,
+            false,
         )
     };
-    if inspect_models {
+    if inspect_models || inspect_textures {
         source.verify_full_source()?;
     }
     let preview_dir = args.get(4).map(PathBuf::from);
@@ -317,6 +322,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 sample_report["model_skeletons"] = serde_json::to_value(models)?;
             }
+            if inspect_textures {
+                let inventory = bar
+                    .as_ref()
+                    .ok_or("model texture inspection requires BAR original")?;
+                let mut textures = Vec::new();
+                for (bar_ordinal, entry) in inventory
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.entry_type == 7)
+                {
+                    if entry.offset < 0 || entry.size == 0 {
+                        return Err("model texture entry has no payload".into());
+                    }
+                    let start = entry.offset as usize;
+                    let layout = package_reader::model_texture::read_layout(
+                        &original.bytes[start..start + entry.size as usize],
+                    )?;
+                    textures.push(serde_json::json!({"bar_ordinal":bar_ordinal,"layout":layout}));
+                }
+                if textures.is_empty() {
+                    return Err("model texture inspection requires type-7 BAR entry".into());
+                }
+                sample_report["model_texture_layouts"] = serde_json::to_value(textures)?;
+            }
             samples.push(sample_report);
         }
         checked.verify_unchanged()?;
@@ -330,6 +360,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "original_asset_files_exported":false,"samples":samples});
     if inspect_models {
         result["model_skeleton_inspection_requested"] = true.into();
+        result["source_check"] = "fresh full bound-source hashes before model inspection; HED content hashes and package size/mtime during reads; final rescan remains required".into();
+    }
+    if inspect_textures {
+        result["model_texture_inspection_requested"] = true.into();
+        result["model_texture_profile"] = package_reader::model_texture::PROFILE.into();
         result["source_check"] = "fresh full bound-source hashes before model inspection; HED content hashes and package size/mtime during reads; final rescan remains required".into();
     }
     if inspect_packets {
