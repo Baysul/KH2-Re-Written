@@ -19,6 +19,7 @@ pub mod model_packets;
 pub mod model_pose;
 pub mod model_skeleton;
 pub mod model_texture;
+pub mod model_texture_pixels;
 pub mod original;
 pub mod plain;
 pub mod probe;

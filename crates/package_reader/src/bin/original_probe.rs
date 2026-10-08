@@ -24,6 +24,8 @@ struct SelectionFile {
     #[serde(default)]
     inspect_model_textures: bool,
     #[serde(default)]
+    inspect_model_texture_pixels: bool,
+    #[serde(default)]
     model_pose_profile: Option<package_reader::model_pose::PoseProfile>,
     #[serde(default)]
     dds_pixel_decode_profile: package_reader::hd_image::HdPixelDecodeProfile,
@@ -54,6 +56,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         inspect_geometry,
         pose_profile,
         inspect_textures,
+        inspect_texture_pixels,
     ) = if let Some(path) = args.get(3) {
         let mut bytes = Vec::new();
         File::open(path)?
@@ -97,6 +100,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if selection.model_pose_profile.is_some() && !selection.inspect_model_geometry {
             return Err("pose profile requires explicit geometry inspection".into());
         }
+        if selection.inspect_model_texture_pixels
+            && (!selection.inspect_model_textures || args.get(4).is_none())
+        {
+            return Err(
+                "model texture pixels require layout opt-in and existing private pixel directory"
+                    .into(),
+            );
+        }
         (
             Some(selection.selections),
             selection.inspect_hd_images,
@@ -106,6 +117,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             selection.inspect_model_geometry,
             selection.model_pose_profile,
             selection.inspect_model_textures,
+            selection.inspect_model_texture_pixels,
         )
     } else {
         (
@@ -117,6 +129,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             false,
             None,
             false,
+            false,
         )
     };
     if inspect_models || inspect_textures {
@@ -125,10 +138,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let preview_dir = args.get(4).map(PathBuf::from);
     if preview_dir
         .as_ref()
-        .is_some_and(|p| !inspect_images || !p.is_dir())
+        .is_some_and(|p| (!inspect_images && !inspect_texture_pixels) || !p.is_dir())
     {
         return Err(
-            "HD previews require explicit image inspection and an existing private directory"
+            "Previews require explicit HD/model pixel inspection and an existing private directory"
                 .into(),
         );
     }
@@ -138,6 +151,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut samples = Vec::new();
     let mut total_bytes = 0usize;
     let mut image_bytes = 0usize;
+    let mut texture_rgba_bytes = 0usize;
+    let mut texture_image_count = 0usize;
     for (relative, _) in source_identity::required_files()
         .into_iter()
         .filter(|(name, _)| name.ends_with(".hed"))
@@ -327,6 +342,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .as_ref()
                     .ok_or("model texture inspection requires BAR original")?;
                 let mut textures = Vec::new();
+                let mut texture_pixels = Vec::new();
                 for (bar_ordinal, entry) in inventory
                     .entries
                     .iter()
@@ -341,11 +357,72 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         &original.bytes[start..start + entry.size as usize],
                     )?;
                     textures.push(serde_json::json!({"bar_ordinal":bar_ordinal,"layout":layout}));
+                    if inspect_texture_pixels {
+                        let decoded = package_reader::model_texture_pixels::decode_images(
+                            &original.bytes[start..start + entry.size as usize],
+                        )?;
+                        for image in decoded {
+                            texture_rgba_bytes += image.pixels_rgba.len();
+                            texture_image_count += 1;
+                            if texture_rgba_bytes > 128 * 1024 * 1024 || texture_image_count > 64 {
+                                return Err(
+                                    "model texture pixel probe exceeds 128 MiB/64 image budget"
+                                        .into(),
+                                );
+                            }
+                            let stem = format!(
+                                "model-texture-{:02}-{bar_ordinal:02}-{:03}",
+                                samples.len(),
+                                image.environment_ordinal
+                            );
+                            let names = ["bmp", "rgba", "indices", "clut"]
+                                .map(|extension| format!("{stem}.{extension}"));
+                            let directory = preview_dir.as_ref().unwrap();
+                            let paths = names
+                                .iter()
+                                .map(|name| source.output_path(&directory.join(name)))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            let create =
+                                |path| OpenOptions::new().write(true).create_new(true).open(path);
+                            let mut preview = create(&paths[0])?;
+                            package_reader::font::write_rgba_preview(
+                                &mut preview,
+                                image.width as usize,
+                                image.height as usize,
+                                &image.pixels_rgba,
+                            )?;
+                            preview.sync_all()?;
+                            for (path, content) in [
+                                (&paths[1], image.pixels_rgba.as_slice()),
+                                (&paths[2], image.packed_indices.as_slice()),
+                                (&paths[3], image.clut_rgba.as_slice()),
+                            ] {
+                                let mut file = create(path)?;
+                                if path == &paths[1] {
+                                    file.write_all(b"RGBA")?;
+                                    file.write_all(&image.width.to_le_bytes())?;
+                                    file.write_all(&image.height.to_le_bytes())?;
+                                }
+                                file.write_all(content)?;
+                                file.sync_all()?;
+                            }
+                            let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+                            texture_pixels.push(serde_json::json!({"bar_ordinal":bar_ordinal,"environment_ordinal":image.environment_ordinal,
+                                "pixel_decode_profile":package_reader::model_texture_pixels::PROFILE,"width":image.width,"height":image.height,
+                                "indexed_bits_per_pixel":image.indexed_bits_per_pixel,"upload_psm":image.upload_psm,
+                                "packed_indices_sha256":hash(&image.packed_indices),"clut_rgba_sha256":hash(&image.clut_rgba),
+                                "pixels_rgba_sha256":hash(&image.pixels_rgba),"rgba_byte_count":image.pixels_rgba.len(),
+                                "preview_file":names[0],"rgba_file":names[1],"indices_file":names[2],"clut_file":names[3],"runtime_verified":false}));
+                        }
+                    }
                 }
                 if textures.is_empty() {
                     return Err("model texture inspection requires type-7 BAR entry".into());
                 }
                 sample_report["model_texture_layouts"] = serde_json::to_value(textures)?;
+                if inspect_texture_pixels {
+                    sample_report["model_texture_pixels"] = serde_json::to_value(texture_pixels)?;
+                }
             }
             samples.push(sample_report);
         }
@@ -366,6 +443,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         result["model_texture_inspection_requested"] = true.into();
         result["model_texture_profile"] = package_reader::model_texture::PROFILE.into();
         result["source_check"] = "fresh full bound-source hashes before model inspection; HED content hashes and package size/mtime during reads; final rescan remains required".into();
+    }
+    if inspect_texture_pixels {
+        result["model_texture_pixel_inspection_requested"] = true.into();
+        result["model_texture_pixel_profile"] =
+            package_reader::model_texture_pixels::PROFILE.into();
+        result["model_texture_pixel_files_exported"] = true.into();
     }
     if inspect_packets {
         result["model_packet_inspection_requested"] = true.into();

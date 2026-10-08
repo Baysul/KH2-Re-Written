@@ -56,6 +56,12 @@ indexed image spans, palette addressing and alpha conversion remain separate
 from pixel swizzle, HD replacement routing, footer animation and installed GS
 behavior. Footer spans follow TextureFooterData.cs/UvScroll.cs without decoding
 animation or assigning unknown payload meaning.
+The explicit indexed model-texture pixel profile additionally adapts
+Texture.GetData and Ps2.Reform32.cs/Ps2.Reform8.cs/Ps2.Reform4.cs at that pin.
+Encode32 is a pure memory byte rearrangement in this route. Complete page,
+dimension, length and allocation bounds are added; indexed4 output preserves
+the public high-nibble-first packing. CPU equality does not qualify installed
+GS sampling, HD material routing, texture animation or shader behavior.
 
 OpenKH - Open Kingdom Hearts Research and Development
 Copyright 2019-2022 OpenKH Team and Contributors
