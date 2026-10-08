@@ -1,0 +1,26 @@
+[workspace]
+members = ["crates/source_identity", "crates/windows_shell", "crates/package_reader"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Full selected-source hashing is required even for development inspection.
+# Optimize only this measured startup path; simulation/presentation stays on
+# the ordinary development profile.
+[profile.dev.package.source_identity]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

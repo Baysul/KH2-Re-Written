@@ -1,0 +1,21 @@
+# T003 — unencrypted original and BAR evidence
+
+Owner Codex, 2026-10-03. Gates P05/P07 source inspection; P12 table-structure lead only. Authority: continue the full roadmap; P00 expressly permits source inspection while final scope/reference choices remain unresolved. Prerequisite foundation code `3135a95`, pinned OpenKH `7a3b945c538d32c6a285128c98aefba093f52ceb`, candidate source manifest from T001. Source/build identity is bound privately in each probe report; no gameplay-supported edition is asserted.
+
+Previous goal turn classification: PROGRESS (foundation implementation, source evidence and recovery). This turn initially found no KH2FM process; a later check found the user's normally launched Steam reference. A fresh window observation showed a running English credits video. T002 records this new evidence and the save/config backup; title/menu and gameplay scenarios remain unverified. The earlier Escape stop was honored for the prior turn.
+
+## New implementation and evidence
+
+- `package_reader::plain` reads only originals explicitly tagged -2 (unencrypted, uncompressed). It validates the whole indexed range against package length, the replacement table/original placement, and a 32 MiB payload ceiling before allocating. Other storage tags remain rejected.
+- `plain_probe` binds a selected canonical source to a consistent schema-v1 manifest, rechecks HED content hashes and package size/mtime, retains index ordinal/name hash/source offset, then saves private hashes and structure metadata. It does not write original asset files. All raw BAR types, signed indices and name bytes remain uninterpreted.
+- `package_reader::bar` validates signature, signed count, table size and entry ranges; retains opaque header fields and absent offsets; reports table overlaps instead of treating unusual metadata as a confirmed semantic rule.
+
+Private evidence root remains `%LOCALAPPDATA%/KH2FinalRewrite/research/foundation-20261003/`. `plain-original-probe.json` was the initial fingerprint probe; `plain-original-probe-final.json` removed raw prefix snippets. `plain-bar-probe.json` adds BAR table evidence; the final report uses the precise `original_asset_files_exported` field. Independent comparison records are `independent-plain-originals.json` and `independent-bar-tables.json`. Actual original data is read into bounded memory only, not persisted as an extracted asset.
+
+Results PASS: all 47 tag -2 originals / 22,622,432 bytes agree between independently authored Rust and PowerShell readers in ordinal, package position, length, replacement count and SHA-256. Of those, 34 have BAR signatures; their 23 table records agree in every header/name/type/index/offset/size field between the two implementations. No absent offsets, table overlap or out-of-range BAR entry was observed. The remaining 13 originals retain unknown format status. This does not validate encrypted/compressed originals or replacement payload decoding.
+
+PASS: full 13-file source scan after inspections equals `source-manifest-post-inspection.json` in content identity, size, SHA-256 and modification times; new record `source-manifest-post-plain-probe.json`. PASS: workspace formatting, warnings-denied Clippy, build and 15 synthetic tests (including new placement/tag/size-limit and BAR malformed-count/range/unknown-field regressions). Tests contain authored synthetic bytes only.
+
+Reproduce the independent comparison with PowerShell 7: `./tools/Verify-PlainProbe.ps1 -InstallRoot '<selected-install-root>' -ProbePath '<private-directory>/plain-bar-probe-final.json'`. The script reads scalar fields and payload hashes independently of Rust and writes no data files; retain its aggregate output in private evidence records.
+
+Verdict: measurable source-format progress; P05/P07 remain incomplete, P12 has no qualified model/text decoder. Next available source task: audit and independently compare a bounded encrypted/compressed original and HD replacement sample against pinned OpenKH's package implementation (no Steam/platform checks are disabled). A decoded asset is still not gameplay/reference evidence. T002 reference boot, edition/mod history and display/controller baseline remain outstanding.

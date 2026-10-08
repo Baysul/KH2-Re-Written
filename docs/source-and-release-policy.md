@@ -1,0 +1,15 @@
+# P01 source and release policy
+
+Status: IMPLEMENTED POLICY; runtime enforcement and complete qualification remain pending. This work is independent policy preparation while P00 is draft.
+
+The program reads a user-selected local Steam installation. It never downloads game data or repairs/updates the source. It never writes into the install tree. Hashes identify bytes, not account ownership, vendor authenticity, clean/modded status or permission to distribute. Steam metadata is supporting evidence, not a supported-build whitelist.
+
+On first gameplay launch choose the collection install root with a native picker. Validate KH2 edition/build and every required language/shared dependency against a qualified profile before import or play. Repeat validation for every session, including a warm cache. Wrong parent/nested folders, incomplete installs, denied reads, changed packages, disconnected drives, unsupported editions and missing languages must block gameplay with the specific repair/reselection action. Canceled selection leaves gameplay disabled. Explicit user reselection is required after relocation; do not silently adopt another edition.
+
+Settings store the canonical source path and immutable content identity privately. Cache is source/build/schema/decoder bound, versioned and committed atomically outside the installation. Incomplete/corrupt caches do not erase working caches or saves. Native saves have their own location and version; originals are backed up before save-affecting reference work. Cache-only use without source is forbidden. Source mutation during play stops at a safe checkpoint preserving native progress; precise checkpoint behavior awaits simulation design.
+
+Private local roots are under `%LOCALAPPDATA%/KH2FinalRewrite/` with distinct `research`, `cache`, `saves`, `logs`, and `backups` directories. The checkout contains code, synthetic fixtures and sanitized evidence summaries. No original archives, executables, assets, translated game text, audio, videos, saves, dumps or private captures go into Git, CI uploads or distribution. Repo visibility is to be checked before any push; no push is part of this foundation run.
+
+The scanner streams hashes, compares source metadata before/after reading, and rejects output under the selected install or any Git checkout, as well as source links escaping the installation. Full repeated manifests establish content identity stability. Metadata stability is a limited check, not protection against an adversarial concurrent rewrite; scan only an idle installation. Complete required-file closure and runtime support validation remain unimplemented, so candidates are always quarantined.
+
+Package preparation uses an explicit allowlist plus dependency/file provenance and manual review. Publication requires the user's separate decision. Applicable source terms and third-party licenses must be reviewed before code/data reuse; source validation is not a legal clearance claim. Preserve source/platform protections; pause any extraction operation requiring circumvention.
