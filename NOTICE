@@ -62,6 +62,13 @@ Encode32 is a pure memory byte rearrangement in this route. Complete page,
 dimension, length and allocation bounds are added; indexed4 output preserves
 the public high-nibble-first packing. CPU equality does not qualify installed
 GS sampling, HD material routing, texture animation or shader behavior.
+The explicit model texture-link inspection profile adapts EgsTools.RAW offset
+formulas and TextureAnimation header/stride at the same OpenKH pin. It reads
+only bounded recognized footer chunks instead of the public whole-payload
+signature scan. Exact replacement offsets remain raw; unmatched or ambiguous
+links are retained. Geometry associations retain Kkdf2 global UV references
+and the GraphicsDeviceExtensions 16-bit texture-index mask. This does not
+select the installed UV route or interpret high replacement-offset flags.
 
 OpenKH - Open Kingdom Hearts Research and Development
 Copyright 2019-2022 OpenKH Team and Contributors

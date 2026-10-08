@@ -26,6 +26,8 @@ struct SelectionFile {
     #[serde(default)]
     inspect_model_texture_pixels: bool,
     #[serde(default)]
+    inspect_model_texture_routing: bool,
+    #[serde(default)]
     model_pose_profile: Option<package_reader::model_pose::PoseProfile>,
     #[serde(default)]
     dds_pixel_decode_profile: package_reader::hd_image::HdPixelDecodeProfile,
@@ -57,6 +59,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         pose_profile,
         inspect_textures,
         inspect_texture_pixels,
+        inspect_texture_routing,
     ) = if let Some(path) = args.get(3) {
         let mut bytes = Vec::new();
         File::open(path)?
@@ -108,6 +111,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .into(),
             );
         }
+        if selection.inspect_model_texture_routing
+            && (!selection.inspect_model_textures || !selection.inspect_model_geometry)
+        {
+            return Err(
+                "texture routing requires explicit texture layout and geometry inspection".into(),
+            );
+        }
         (
             Some(selection.selections),
             selection.inspect_hd_images,
@@ -118,6 +128,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             selection.model_pose_profile,
             selection.inspect_model_textures,
             selection.inspect_model_texture_pixels,
+            selection.inspect_model_texture_routing,
         )
     } else {
         (
@@ -128,6 +139,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             false,
             false,
             None,
+            false,
             false,
             false,
         )
@@ -216,6 +228,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("original probe exceeds 128 MiB cumulative decoded limit".into());
             }
             let mut replacements = Vec::new();
+            let replacement_metadata: Vec<_> = if inspect_texture_routing {
+                replacement_samples
+                    .iter()
+                    .map(|s| s.metadata.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             for sample in replacement_samples {
                 let decoded_image = if inspect_images {
                     let image = package_reader::hd_image::decode_hd_image_with_profile(
@@ -423,6 +443,48 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if inspect_texture_pixels {
                     sample_report["model_texture_pixels"] = serde_json::to_value(texture_pixels)?;
                 }
+                if inspect_texture_routing {
+                    let named: Vec<_> = inventory
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, entry)| entry.entry_type == 7 && &entry.name_bytes == b"tim_")
+                        .collect();
+                    if named.len() != 1 {
+                        return Err(
+                            "texture routing requires exactly one named tim_ type-7 BAR entry"
+                                .into(),
+                        );
+                    }
+                    let (texture_bar_ordinal, texture_entry) = named[0];
+                    let start = texture_entry.offset as usize;
+                    let texture_bytes = &original.bytes[start..start + texture_entry.size as usize];
+                    let links = package_reader::model_texture_routing::read_links(
+                        texture_bytes,
+                        start,
+                        &replacement_metadata,
+                    )?;
+                    let layout = package_reader::model_texture::read_layout(texture_bytes)?;
+                    let mut models = Vec::new();
+                    for (bar_ordinal, record) in inventory
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| e.entry_type == 4)
+                    {
+                        let offset = usize::try_from(record.offset)
+                            .map_err(|_| "missing model payload for texture routing")?;
+                        let geometry = package_reader::model_geometry::read_geometry(
+                            &original.bytes[offset..offset + record.size as usize],
+                        )?;
+                        let routes = package_reader::model_texture_routing::associate_geometry(
+                            &geometry,
+                            layout.images.len(),
+                        )?;
+                        models.push(serde_json::json!({"model_bar_ordinal":bar_ordinal,"geometry_profile":geometry.profile,"part_routes":routes}));
+                    }
+                    sample_report["model_texture_routing"] = serde_json::json!({"texture_bar_ordinal":texture_bar_ordinal,"links":links,"models":models});
+                }
             }
             samples.push(sample_report);
         }
@@ -449,6 +511,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         result["model_texture_pixel_profile"] =
             package_reader::model_texture_pixels::PROFILE.into();
         result["model_texture_pixel_files_exported"] = true.into();
+    }
+    if inspect_texture_routing {
+        result["model_texture_routing_requested"] = true.into();
+        result["model_texture_routing_profile"] =
+            package_reader::model_texture_routing::PROFILE.into();
     }
     if inspect_packets {
         result["model_packet_inspection_requested"] = true.into();

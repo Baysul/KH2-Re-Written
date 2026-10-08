@@ -8,7 +8,7 @@ use crate::{
 use serde::Serialize;
 use std::io::{self, Read, Seek, SeekFrom};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ReplacementMetadata {
     pub ordinal: u32,
     pub name_bytes: [u8; 32],
