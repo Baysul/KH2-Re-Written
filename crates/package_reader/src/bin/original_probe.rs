@@ -22,6 +22,8 @@ struct SelectionFile {
     #[serde(default)]
     inspect_model_geometry: bool,
     #[serde(default)]
+    model_pose_profile: Option<package_reader::model_pose::PoseProfile>,
+    #[serde(default)]
     dds_pixel_decode_profile: package_reader::hd_image::HdPixelDecodeProfile,
 }
 #[derive(Deserialize)]
@@ -48,6 +50,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         inspect_models,
         inspect_packets,
         inspect_geometry,
+        pose_profile,
     ) = if let Some(path) = args.get(3) {
         let mut bytes = Vec::new();
         File::open(path)?
@@ -88,6 +91,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if selection.inspect_model_geometry && !selection.inspect_model_packets {
             return Err("geometry inspection requires explicit packet inspection".into());
         }
+        if selection.model_pose_profile.is_some() && !selection.inspect_model_geometry {
+            return Err("pose profile requires explicit geometry inspection".into());
+        }
         (
             Some(selection.selections),
             selection.inspect_hd_images,
@@ -95,6 +101,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             selection.inspect_model_skeletons,
             selection.inspect_model_packets,
             selection.inspect_model_geometry,
+            selection.model_pose_profile,
         )
     } else {
         (
@@ -104,6 +111,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             false,
             false,
             false,
+            None,
         )
     };
     if inspect_models {
@@ -297,6 +305,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             package_reader::model_geometry::read_geometry(payload)?,
                         )?;
                     }
+                    if let Some(profile) = pose_profile {
+                        model["pose"] = serde_json::to_value(
+                            package_reader::model_pose::read_pose(payload, profile)?,
+                        )?;
+                    }
                     models.push(model);
                 }
                 if models.is_empty() {
@@ -327,6 +340,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if inspect_geometry {
         result["model_geometry_inspection_requested"] = true.into();
         result["model_geometry_profile"] = package_reader::model_geometry::PROFILE.into();
+    }
+    if let Some(profile) = pose_profile {
+        result["model_pose_profile"] = serde_json::to_value(profile)?;
     }
     let report_bytes = serde_json::to_vec_pretty(&result)?;
     if report_bytes.len() > 32 * 1024 * 1024 {

@@ -15,6 +15,7 @@ pub mod message;
 pub mod message_text;
 pub mod model_geometry;
 pub mod model_packets;
+pub mod model_pose;
 pub mod model_skeleton;
 pub mod original;
 pub mod plain;

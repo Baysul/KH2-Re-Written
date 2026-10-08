@@ -41,7 +41,13 @@ and format exclusions are added. The explicit type-1 topology profile follows
 VpuPacketExtensions.cs and
 Kkdf2MdlxParser.cs at that pin, adding association/index/ring/allocation checks.
 Topology retains the public integer UV truncation and first-submodel scope;
-bind matrices, numerical skinning, materials and installed rendering stay open.
+Installed bind matrices, skinning, materials and rendering stay open.
+Explicit inspection bind routes in model_pose.rs follow the public
+BuildTPoseMatrices/GetBoneMatrices and Kkdf2 single/multi expressions.
+Numerical FMA ordering and quaternion/matrix formulas adapt .NET runtime
+60629d14374c56f1cb51819049ad1fa529307f8d under MIT; its notice is retained in
+docs/release/dotnet-runtime-LICENSE.txt. Rust sin/cos and finite comparisons
+do not select installed rendering, authoritative simulation or a tolerance.
 Neither CPU profile nor model observations
 assert PS2 hardware, installed transforms, shadow geometry or gameplay fidelity.
 
