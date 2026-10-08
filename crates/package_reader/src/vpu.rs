@@ -51,11 +51,20 @@ fn bits(words: Vec<i32>) -> Vec<[u32; 4]> {
         .collect()
 }
 pub fn read_type1_data(memory: &[u8]) -> io::Result<Option<VpuData>> {
+    read_data(memory, false)
+}
+
+/// Includes the pinned map packet layout (type zero) when explicitly requested.
+pub fn read_map_data(memory: &[u8]) -> io::Result<Option<VpuData>> {
+    read_data(memory, true)
+}
+
+fn read_data(memory: &[u8], map: bool) -> io::Result<Option<VpuData>> {
     if memory.len() > crate::vif::MEMORY_BYTES {
         return Err(invalid("VU input exceeds 16 KiB"));
     }
     let header = scalar_words(memory, 0, 16)?;
-    if header[0] != 1 {
+    if header[0] != if map { 0 } else { 1 } {
         return Ok(None);
     }
     let has_normals =

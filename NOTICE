@@ -28,6 +28,10 @@ The room COCT v1 raw-record reader adapts Coct.cs at the OpenKH pin above,
 preserving float bits, flags and table/graph indices with added bounds checks.
 Its explicit polygon display topology follows MapStudio CollisionModel.cs;
 it does not define installed movement or collision response rules.
+Room visual geometry follows Model.cs, ModelBackground.cs and MdlxParser.cs
+at the same OpenKH pin. Stateful VIF upload observation preserves memory/mask
+between microprogram stops; it does not execute VU code. Map packet views
+follow VpuPacket.cs. Added limits/rejection paths and Bevy scene code are owned.
 Candidate name generation in tools/Compare-CandidateNames.ps1 follows
 the KH2-only EgsTools rules at the same pin; upstream catalogs are
 referenced privately and are not included in this repository.

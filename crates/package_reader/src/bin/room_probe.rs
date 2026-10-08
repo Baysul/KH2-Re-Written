@@ -1,4 +1,6 @@
-use package_reader::{bar::read_bar, original::read_original, probe::ProbeSource, room_collision};
+use package_reader::{
+    bar::read_bar, original::read_original, probe::ProbeSource, room_collision, room_geometry,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -24,7 +26,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .skip(1)
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    if args.len() != 5 {
+    if args.len() != 5 && !(args.len() == 6 && args[5].as_os_str() == "--geometry") {
         return Err("usage: room_probe <Steam-root> <manifest> <selection> <new-report> <private-payload-directory>".into());
     }
     let source = ProbeSource::bind(&args[0], &args[1])?;
@@ -59,8 +61,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         let original = read_original(&mut checked.reader, entry)?;
         let bar = read_bar(&original.bytes)?;
+        let mut visual_models = Vec::new();
         let mut collisions = Vec::new();
         for (ordinal, record) in bar.entries.iter().enumerate() {
+            if args.len() == 6 && record.entry_type == 4 && record.offset > 0 {
+                let payload = original
+                    .bytes
+                    .get(record.offset as usize..record.offset as usize + record.size as usize)
+                    .ok_or("visual model span outside BAR")?;
+                let model_type = payload
+                    .get(0x90..0x94)
+                    .map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+                let model = if model_type == Some(2) {
+                    Some(room_geometry::read(payload)?)
+                } else {
+                    None
+                };
+                visual_models.push(serde_json::json!({"bar_ordinal":ordinal,"model_type":model_type,"model":model}));
+            }
             if record.entry_type != 6 || record.offset <= 0 || record.size == 0 {
                 continue;
             }
@@ -88,8 +106,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         file.write_all(&original.bytes)?;
         file.sync_all()?;
         checked.verify_unchanged()?;
-        samples.push(serde_json::json!({"index":item.index,"ordinal":item.ordinal,"name_hash":item.name_hash,
-            "original_sha256":format!("{:x}",Sha256::digest(&original.bytes)),"bar":bar,"collisions":collisions}));
+        let mut sample = serde_json::json!({"index":item.index,"ordinal":item.ordinal,"name_hash":item.name_hash,
+            "original_sha256":format!("{:x}",Sha256::digest(&original.bytes)),"bar":bar,"collisions":collisions});
+        if args.len() == 6 {
+            sample["visual_models"] = serde_json::to_value(visual_models)?;
+        }
+        samples.push(sample);
     }
     let mut file = OpenOptions::new()
         .write(true)

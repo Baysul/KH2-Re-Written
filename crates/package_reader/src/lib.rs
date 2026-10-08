@@ -28,6 +28,7 @@ pub mod plain;
 pub mod probe;
 pub mod replacement;
 pub mod room_collision;
+pub mod room_geometry;
 pub mod vif;
 pub mod vpu;
 
