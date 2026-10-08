@@ -10,7 +10,10 @@ use bevy::{
     prelude::*,
     render::{
         render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat},
-        view::screenshot::{Screenshot, ScreenshotCaptured},
+        view::{
+            NoIndirectDrawing,
+            screenshot::{Screenshot, ScreenshotCaptured},
+        },
     },
     window::PrimaryWindow,
 };
@@ -56,6 +59,7 @@ struct Inspector {
     settled_at: f64,
     exit_after: Option<u64>,
     tour: bool,
+    direct_draw: bool,
     step: usize,
     paths: Vec<PathBuf>,
     pending: bool,
@@ -137,11 +141,13 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
     let selection = PathBuf::from(args.next().ok_or("explicit model selection required")?);
     let output = PathBuf::from(args.next().ok_or("new private JSONL log required")?);
     let mut tour = false;
+    let mut direct_draw = false;
     let mut capture_dir = None;
     let mut exit_after = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--tour") => tour = true,
+            Some("--direct-draw") => direct_draw = true,
             Some("--capture-dir") => {
                 capture_dir = Some(PathBuf::from(
                     args.next().ok_or("capture directory required")?,
@@ -210,6 +216,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         settled_at: 0.0,
         exit_after,
         tour,
+        direct_draw,
         step: 0,
         paths,
         pending: false,
@@ -219,6 +226,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
     state.event(serde_json::json!({"event":"admitted","qualification":"quarantined_model_research_only",
         "source_content_identity":source.content_identity(),"fresh_full_scan":true,"models":state.models.len(),
         "tour":tour,"expected_captures":count,"gameplay_enabled":false,
+        "drawing_profile":if direct_draw {"bevy_no_indirect_drawing_v1"} else {"bevy_default_drawing_v1"},
         "presentation":if textured {"common fit; orthographic; explicit texture/UV choices; base mip zero; nearest clamp; SRGB texture; fixed opaque/unlit/double-sided; missing or ambiguous HD is magenta; no installed material/animation/filtering claim"} else {"common fit; orthographic; unlit part colors; double-sided opaque triangles; no source material, normal or renderer claim"}}));
     if textured {
         let details:Vec<_>=state.models.iter().enumerate().map(|(item,m)|serde_json::json!({"item":item,"index":m.index,"ordinal":m.ordinal,
@@ -244,22 +252,27 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         .add_systems(Update, (controls, refresh, finish).chain());
     Ok(app.run())
 }
-fn setup(mut commands: Commands) {
-    commands.spawn((
-        Camera3d::default(),
-        Projection::Orthographic(OrthographicProjection {
-            near: 0.1,
-            far: 10.0,
-            scaling_mode: ScalingMode::FixedVertical {
-                viewport_height: 2.6,
-            },
-            ..OrthographicProjection::default_3d()
-        }),
-        Transform::from_xyz(0.0, 0.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
-        Msaa::Off,
-        Tonemapping::None,
-        DebandDither::Disabled,
-    ));
+fn setup(mut commands: Commands, state: Res<Inspector>) {
+    let camera = commands
+        .spawn((
+            Camera3d::default(),
+            Projection::Orthographic(OrthographicProjection {
+                near: 0.1,
+                far: 10.0,
+                scaling_mode: ScalingMode::FixedVertical {
+                    viewport_height: 2.6,
+                },
+                ..OrthographicProjection::default_3d()
+            }),
+            Transform::from_xyz(0.0, 0.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
+            Msaa::Off,
+            Tonemapping::None,
+            DebandDither::Disabled,
+        ))
+        .id();
+    if state.direct_draw {
+        commands.entity(camera).insert(NoIndirectDrawing);
+    }
 }
 fn controls(
     keys: Res<ButtonInput<KeyCode>>,
@@ -347,7 +360,7 @@ fn refresh(
     mut state: ResMut<Inspector>,
     assets: InspectorAssets,
     parts: Query<Entity, With<ModelPart>>,
-    mut cameras: Query<(&mut Transform, &mut Projection), With<Camera3d>>,
+    mut cameras: Query<(&mut Transform, &mut Projection, Has<NoIndirectDrawing>), With<Camera3d>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     time: Res<Time<Real>>,
 ) {
@@ -510,7 +523,12 @@ fn refresh(
         metadata["uv_profile"] =
             serde_json::to_value(model.texture_routes[state.uv].profile).unwrap();
     }
-    let (mut transform, mut projection) = cameras.single_mut().expect("research model camera");
+    let (mut transform, mut projection, no_indirect_drawing) =
+        cameras.single_mut().expect("research model camera");
+    assert_eq!(
+        no_indirect_drawing, state.direct_draw,
+        "inspection camera drawing mode"
+    );
     *transform =
         Transform::from_translation(state.direction * 4.0).looking_at(Vec3::ZERO, state.up);
     if let Projection::Orthographic(p) = &mut *projection {
@@ -538,6 +556,9 @@ fn refresh(
     state.mesh_handles = mesh_handles;
     state.material_handles = material_handles;
     state.image_handles = image_handles.into_values().collect();
+    let camera_metadata = serde_json::json!({"event":"camera_drawing","step":state.step,
+        "no_indirect_drawing":no_indirect_drawing,"installed_drawing_mode_verified":false});
+    state.event(camera_metadata);
     state.event(metadata);
     state.dirty = false;
     state.dwell = 0;
