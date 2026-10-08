@@ -1,4 +1,4 @@
-use package_reader::{bar, motion, original, probe::ProbeSource};
+use package_reader::{bar, motion, motion_trigger, original, probe::ProbeSource};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -82,7 +82,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         file.write_all(bytes)?;
         file.sync_all()?;
         let motion = motion::read_interpolated(bytes)?;
-        motions.push(serde_json::json!({"slot":slot,"bar":nested,"motion_bar_ordinal":bar_ordinal,"sha256":format!("{:x}",Sha256::digest(bytes)),"motion":motion}));
+        let triggers = motion_trigger::inspect_anb(anb)?;
+        motions.push(serde_json::json!({"slot":slot,"bar":nested,"motion_bar_ordinal":bar_ordinal,"sha256":format!("{:x}",Sha256::digest(bytes)),"motion":motion,"triggers":triggers}));
     }
     checked.verify_unchanged()?;
     let mut file = OpenOptions::new()

@@ -373,6 +373,7 @@ pub struct SelectedMotion {
     pub slot: usize,
     pub sha256: String,
     pub motion: InterpolatedMotion,
+    pub triggers: Vec<crate::motion_trigger::SelectedTriggers>,
 }
 /// Fresh source-bound inspection admission; selections are locators, not proof
 /// of installed action routing or supported gameplay.
@@ -442,6 +443,7 @@ pub fn read_selected(
             slot,
             sha256: format!("{:x}", Sha256::digest(payload)),
             motion: read_interpolated(payload)?,
+            triggers: crate::motion_trigger::inspect_anb(anb)?,
         });
     }
     checked.verify_unchanged()?;

@@ -44,6 +44,10 @@ It ignores scale, inverse curves, IK, constraints, expressions, root motion and
 triggers just as the selected basic consumer does; no installed clock is chosen.
 Retained skin bindings reuse the explicit public pose arithmetic above. Native
 preview frame stepping, mesh updates and finite capture tours are owned code.
+The explicit sequential trigger-record profile additionally follows the
+MotionTrigger.cs constructor at the same pin. Declared offsets, signed frames,
+unknown IDs and trailing bytes are retained; widths beyond four parameters
+reject rather than truncating. No installed event behavior is inferred.
 The bounded message-record reader follows Msg.Read/GetMsgData at the
 same OpenKH pin, retaining encoded spans without a glyph dictionary.
 System-message token boundaries additionally follow the pinned system decoder
