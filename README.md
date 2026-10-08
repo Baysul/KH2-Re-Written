@@ -2,14 +2,25 @@
 
 Native Windows Rust/Bevy research project for **Kingdom Hearts II Final Mix only**, using a user-selected local Steam installation. No game assets are distributed. This is a foundation under development; it cannot play KH2 yet.
 
-Current implementation priority is a test room with controllable Sora, walking, jumping and attacking. A source-bound Bevy scene displays an actual textured room and a character with an explicit basic skeletal motion preview, reading their data from the selected Steam installation. Placement, materials and animation frames are inspection choices; it cannot play KH2 yet. See [T053](docs/tasks/T053-character-motion.md) and [T054](docs/tasks/T054-test-room-controls.md).
+Current implementation priority is a test room with controllable Sora. **A playable test room now runs**: Sora walks, runs, jumps, lands and attacks (3-hit ground combo, 3-hit air combo) with his own animations and Kingdom Key, in a Twilight Town map, all read from the selected Steam installation at startup. Movement numbers come from Sora's installed parameter records; several values (gravity, step height, combo order, body size) are explicit test-room choices, and it is not a measured reproduction of KH2's rules. See [T056](docs/tasks/T056-playable-test-room.md).
 
 | Works now | Still missing |
 |---|---|
-| Checked package, model, texture and room collision readers | Complete source/build/language support |
-| Room visual geometry with independently compared packet and mesh inputs | Installed rendering, culling, skeletal room props and HD material routing |
-| Textured room and character with basic FK motion and retained skin bindings | Complete animation/IK, action selection, movement, camera rules and collision response |
+| Checked package, model, texture, motion and room collision readers | Complete source/build/language support |
+| Playable test room: walk/run by stick or Shift, jump/fall/land, ground and air combos, follow camera, wall/floor collision from the map's own surface flags | Enemies, hit detection, damage, sounds/effects, root motion during attacks, IK |
+| Sora's walk/run speed, jump height, turn rate (PRTY), fall cap (SSTM), combo motions (PTYA), combo windows (ANB triggers), weapon joint (objentry) | Measured installed timing/physics; reference comparison (no Sora save yet) |
+| Textured room and character, basic FK motion, Keyblade on the hand joint | Installed materials/lighting, culling, skeletal room props, HD routing |
 | Synthetic platform window and repeatable checks | Combat, scripts, progression, saves and the full campaign/optional content |
+
+### Playing the test room
+
+Each launch rehashes the selected Steam files (about a minute), then decodes everything it needs. Selections and logs are private files outside Steam and Git; the configuration schema is in [T056](docs/tasks/T056-playable-test-room.md).
+
+```powershell
+cargo run -p windows_shell --bin test_room --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/test-room.json'
+```
+
+Controls: WASD or arrows move (hold Shift to walk), Space jumps, Enter / K / left mouse attacks (press again during a swing to continue the combo; attack in the air for the air combo), Q/E or right-mouse drag turns the camera, +/- zoom, F1 shows collision, Esc exits. Add `--gamepad` for a controller (left stick move, A attack, B jump, right stick camera), `--log '<new.jsonl>'` for an action log, or `--autoplay '<empty-private-dir>'` for an unattended scripted run with captures.
 
 Developer room preview (each launch revalidates the selected Steam files; all selections and outputs remain private):
 
@@ -17,7 +28,7 @@ Developer room preview (each launch revalidates the selected Steam files; all se
 cargo run -p windows_shell --bin room_scene --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/room-selection.json' '<private-directory>/actor-selection.json' '<private-directory>/new-scene.jsonl' '<private-directory>/new-scene.png'
 ```
 
-The preview supports J/L camera orbit, +/- zoom and Escape. It captures a private PNG after settling. Its source remains quarantined, and these inspection controls do not implement KH2 gameplay. Use `--frames 900` after the arguments for a bounded capture run. Add `--motion '<private-directory>/motion-selection.json'` for the checked basic FK profile: Space pauses, N advances a paused frame, B steps back and M cycles selected motion slots. `--tour motion` captures two explicit frames per selected slot. Missing IK, inverse curves, scale, constraints, expressions, root motion, triggers and installed cadence remain recorded. Movement, jumping and attacks require further reference work.
+The preview supports J/L camera orbit, +/- zoom and Escape, and captures a private PNG after settling. Use `--frames 900` for a bounded capture run and `--motion '<private-directory>/motion-selection.json'` for the basic FK motion preview (Space pause, N/B step, M next slot; `--tour motion` captures two frames per slot).
 
 Start with [scope](docs/fidelity-contract.md), [milestones](docs/milestones.md), [unknowns](docs/unknowns.md), and [source policy](docs/source-and-release-policy.md). The external [roadmap](https://docs.google.com/document/d/1lewKD-h2ZVOOES1qugUgj82QVMybWwb8sqK3ed-4wPI/edit?tab=t.0) is the execution plan.
 

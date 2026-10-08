@@ -130,3 +130,9 @@ The native mesh inspection dependency bevy_mikktspace 1.0.0 includes
 Copyright (C) 2011 by Morten S. Mikkelsen and
 Copyright (c) 2017 The mikktspace Library Developers.
 See docs/release/bevy-mikktspace-Zlib.txt and bevy-mikktspace-MIT.txt.
+The PTYA attack-set and 00objentry readers follow the public layouts in
+OpenKH docs/kh2/file/type/00battle.md and Objentry.cs at the pin above; the
+motion slot chooser follows MotionSet.GetMotionSetIndex. Range-trigger IDs
+honoured by the test room follow docs/kh2/file/anb/anb.md and COCT surface
+flag bits follow docs/kh2/file/type/coct.md. These are public labels; the
+test-room controller does not claim installed movement or combat rules.

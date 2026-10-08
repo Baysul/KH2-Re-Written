@@ -2991,6 +2991,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "player_sim"
+version = "0.1.0"
+
+[[package]]
 name = "png"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4219,6 +4223,8 @@ dependencies = [
  "bevy",
  "image",
  "package_reader",
+ "player_sim",
+ "serde",
  "serde_json",
  "sha2",
 ]

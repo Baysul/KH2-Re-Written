@@ -13,6 +13,9 @@ type ProbeResult<T> = Result<T, Box<dyn std::error::Error>>;
 pub struct ProbeSource {
     root: PathBuf,
     manifest: SourceManifest,
+    // Set only by `bind_session`: one complete scan admits a single play
+    // session instead of rescanning for every selected asset.
+    session: Option<std::sync::OnceLock<()>>,
 }
 
 pub struct CheckedIndex {
@@ -52,7 +55,20 @@ impl ProbeSource {
                 "source manifest identity/path/schema/candidate layout is inconsistent".into(),
             );
         }
-        Ok(Self { root, manifest })
+        Ok(Self {
+            root,
+            manifest,
+            session: None,
+        })
+    }
+
+    /// Binds one interactive session. The first `verify_full_source` still
+    /// rehashes every candidate file; later admissions in the same process
+    /// reuse that result, and per-index metadata checks still run.
+    pub fn bind_session(root: &Path, manifest_path: &Path) -> ProbeResult<Self> {
+        let mut source = Self::bind(root, manifest_path)?;
+        source.session = Some(std::sync::OnceLock::new());
+        Ok(source)
     }
 
     pub fn content_identity(&self) -> &str {
@@ -62,6 +78,9 @@ impl ProbeSource {
     /// Rehash the selected candidate, retaining quarantine. Research viewers
     /// must call this at startup; matching cached metadata is insufficient.
     pub fn verify_full_source(&self) -> ProbeResult<()> {
+        if self.session.as_ref().is_some_and(|s| s.get().is_some()) {
+            return Ok(());
+        }
         let fresh = source_identity::scan(&self.root)?;
         if fresh.content_identity != self.manifest.content_identity
             || fresh.files.iter().any(|observed| {
@@ -79,6 +98,9 @@ impl ProbeSource {
             return Err(
                 "selected source differs from the bound manifest; full scan rejected".into(),
             );
+        }
+        if let Some(session) = &self.session {
+            let _ = session.set(());
         }
         Ok(())
     }
