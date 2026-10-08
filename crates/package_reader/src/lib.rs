@@ -27,6 +27,7 @@ pub mod original;
 pub mod plain;
 pub mod probe;
 pub mod replacement;
+pub mod room_collision;
 pub mod vif;
 pub mod vpu;
 

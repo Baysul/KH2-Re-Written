@@ -2,6 +2,8 @@
 
 Native Windows Rust/Bevy research project for **Kingdom Hearts II Final Mix only**, using a user-selected local Steam installation. No game assets are distributed. This is a foundation under development; it cannot play KH2 yet.
 
+Current implementation priority is a first playable room. The Rust room collision reader now supplies checked COCT vertices, polygons, planes and octree/mesh links, with explicit triangle topology for scene integration. Visible room geometry, character animation, measured movement/camera and collision response are still required. See [T051](docs/tasks/T051-first-room-collision.md); the development smoke window remains a platform test.
+
 Start with [scope](docs/fidelity-contract.md), [milestones](docs/milestones.md), [unknowns](docs/unknowns.md), and [source policy](docs/source-and-release-policy.md). The external [roadmap](https://docs.google.com/document/d/1lewKD-h2ZVOOES1qugUgj82QVMybWwb8sqK3ed-4wPI/edit?tab=t.0) is the execution plan.
 
 Install the pinned Rust toolchain via rustup and the Visual Studio C++ build tools/Windows SDK, as in [Bevy setup](https://bevy.org/learn/quick-start/getting-started/setup/). Ensure `%USERPROFILE%/.cargo/bin` is on PATH.

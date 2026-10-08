@@ -24,6 +24,10 @@ explicit normalized CPU profile checked against unchanged DecodeBC1/D3DXDecodeBC
 and DirectXMath UNORM8 storage. Private public extracts/binaries remain external;
 complete-chain bounds and output envelopes are owned. This does not qualify
 installed filtering, material routing, hardware rounding or runtime behavior.
+The room COCT v1 raw-record reader adapts Coct.cs at the OpenKH pin above,
+preserving float bits, flags and table/graph indices with added bounds checks.
+Its explicit polygon display topology follows MapStudio CollisionModel.cs;
+it does not define installed movement or collision response rules.
 Candidate name generation in tools/Compare-CandidateNames.ps1 follows
 the KH2-only EgsTools rules at the same pin; upstream catalogs are
 referenced privately and are not included in this repository.
