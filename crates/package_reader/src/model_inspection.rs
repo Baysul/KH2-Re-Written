@@ -1,0 +1,311 @@
+//! Fresh source-bound research meshes. Positions/indices retain the explicit
+//! public profiles; no installed material, normal, shadow or animation claim.
+use crate::{
+    model_geometry::Geometry,
+    model_pose::{ModelPose, PoseProfile},
+    probe::ProbeSource,
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashSet,
+    fs::File,
+    io::{self, Read},
+    path::Path,
+};
+
+#[derive(Deserialize)]
+struct SelectionFile {
+    schema_version: u32,
+    source_content_identity: String,
+    selections: Vec<Selection>,
+    inspect_model_geometry: bool,
+    model_pose_profiles: Vec<PoseProfile>,
+}
+#[derive(Deserialize)]
+struct Selection {
+    index: String,
+    ordinal: usize,
+    name_hash: [u8; 16],
+}
+#[derive(Serialize)]
+pub struct InspectionPart {
+    pub group_ordinal: usize,
+    pub packet_ordinal: usize,
+    pub texture_index: i32,
+    pub source_is_opaque: bool,
+    pub indices: Vec<u32>,
+    pub cross_part_corners: usize,
+}
+pub struct InspectionModel {
+    pub index: String,
+    pub ordinal: usize,
+    pub bar_ordinal: usize,
+    pub excluded_linked_groups: usize,
+    pub parts: Vec<InspectionPart>,
+    pub poses: Vec<ModelPose>,
+}
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+fn parts(geometry: &Geometry, poses: &[ModelPose]) -> io::Result<Vec<InspectionPart>> {
+    if geometry.parts.is_empty() || poses.is_empty() || poses.len() > 2 {
+        return Err(invalid("empty mesh or invalid explicit pose count"));
+    }
+    let count: usize = geometry
+        .parts
+        .iter()
+        .map(|part| part.assignments.len())
+        .sum();
+    if count == 0
+        || count > 262_144
+        || poses.iter().any(|pose| {
+            pose.position_bits.len() != count
+                || pose
+                    .position_bits
+                    .iter()
+                    .flatten()
+                    .any(|&word| !f32::from_bits(word).is_finite())
+        })
+    {
+        return Err(invalid("mesh/pose positions disagree or are nonfinite"));
+    }
+    let mut result = Vec::new();
+    let mut vertex_base = 0;
+    let mut corners = 0;
+    for part in &geometry.parts {
+        if part.vertex_base != vertex_base {
+            return Err(invalid("noncontiguous global vertex bases"));
+        }
+        let end = vertex_base + part.assignments.len();
+        let mut indices = Vec::new();
+        let mut cross_part_corners = 0;
+        for triangle in &part.triangles {
+            for vertex in triangle {
+                if vertex.vertex_index >= count {
+                    return Err(invalid("global triangle position out of range"));
+                }
+                indices.push(vertex.vertex_index as u32);
+                cross_part_corners +=
+                    usize::from(!(vertex_base..end).contains(&vertex.vertex_index));
+            }
+        }
+        corners += indices.len();
+        if corners > 524_288 * 3 {
+            return Err(invalid("inspection triangle budget exceeded"));
+        }
+        result.push(InspectionPart {
+            group_ordinal: part.group_ordinal,
+            packet_ordinal: part.packet_ordinal,
+            texture_index: part.texture_index,
+            source_is_opaque: part.is_opaque,
+            indices,
+            cross_part_corners,
+        });
+        vertex_base = end;
+    }
+    if corners == 0 {
+        return Err(invalid("inspection model has no triangles"));
+    }
+    Ok(result)
+}
+/// Decode selected original BAR models only after a complete fresh source
+/// scan. HD replacements and prior derived reports are not mesh inputs.
+pub fn read_selected_models(
+    source: &ProbeSource,
+    path: &Path,
+) -> Result<Vec<InspectionModel>, Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("model selection exceeds 1 MiB".into());
+    }
+    let selection: SelectionFile = serde_json::from_slice(&bytes)?;
+    if selection.schema_version != 1
+        || selection.source_content_identity != source.content_identity()
+        || !selection.inspect_model_geometry
+        || selection.selections.is_empty()
+        || selection.selections.len() > 64
+        || selection.model_pose_profiles.is_empty()
+        || selection.model_pose_profiles.len() > 2
+        || (selection.model_pose_profiles.len() == 2
+            && selection.model_pose_profiles[0] == selection.model_pose_profiles[1])
+    {
+        return Err("model selection identity/schema/count/explicit profiles invalid".into());
+    }
+    let mut seen = HashSet::new();
+    for item in &selection.selections {
+        if !source_identity::required_files()
+            .iter()
+            .any(|(name, _)| name == &item.index && name.ends_with(".hed"))
+            || !seen.insert((&item.index, item.ordinal))
+        {
+            return Err("invalid/duplicate model source identity".into());
+        }
+    }
+    source.verify_full_source()?;
+    let mut models = Vec::new();
+    let mut storage_bytes = 0usize;
+    let mut position_words = 0usize;
+    let mut index_words = 0usize;
+    for (relative, _) in source_identity::required_files()
+        .into_iter()
+        .filter(|(name, _)| name.ends_with(".hed"))
+    {
+        let selected: Vec<_> = selection
+            .selections
+            .iter()
+            .filter(|item| item.index == relative)
+            .collect();
+        if selected.is_empty() {
+            continue;
+        }
+        let mut checked = source.open_index(&relative)?;
+        for item in selected {
+            let entry = checked
+                .inventory
+                .entries
+                .get(item.ordinal)
+                .filter(|entry| entry.name_hash == item.name_hash)
+                .ok_or("model entry identity differs from HED")?;
+            let original = crate::original::read_original(&mut checked.reader, entry)?;
+            storage_bytes += original.bytes.len();
+            if storage_bytes > 128 * 1024 * 1024 {
+                return Err("model storage exceeds 128 MiB".into());
+            }
+            let bar = crate::bar::read_bar(&original.bytes)?;
+            let before = models.len();
+            for (bar_ordinal, entry) in bar
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.entry_type == 4)
+            {
+                if entry.offset < 0 || entry.size == 0 {
+                    return Err("model BAR entry has no payload".into());
+                }
+                let start = entry.offset as usize;
+                let payload = &original.bytes[start..start + entry.size as usize];
+                let geometry = crate::model_geometry::read_geometry(payload)?;
+                let poses: Vec<_> = selection
+                    .model_pose_profiles
+                    .iter()
+                    .map(|&profile| crate::model_pose::read_pose(payload, profile))
+                    .collect::<io::Result<_>>()?;
+                let mesh_parts = parts(&geometry, &poses)?;
+                position_words += poses
+                    .iter()
+                    .map(|pose| pose.position_bits.len() * 3)
+                    .sum::<usize>();
+                index_words += mesh_parts
+                    .iter()
+                    .map(|part| part.indices.len())
+                    .sum::<usize>();
+                if position_words > 2 * 262_144 * 3
+                    || index_words > 524_288 * 3
+                    || models.len() >= 64
+                {
+                    return Err("cumulative inspection mesh budget exceeded".into());
+                }
+                models.push(InspectionModel {
+                    index: relative.clone(),
+                    ordinal: item.ordinal,
+                    bar_ordinal,
+                    excluded_linked_groups: geometry.excluded_linked_groups,
+                    parts: mesh_parts,
+                    poses,
+                });
+            }
+            if models.len() == before {
+                return Err("selected original has no model BAR entry".into());
+            }
+        }
+        checked.verify_unchanged()?;
+    }
+    if models.is_empty() {
+        return Err("no admitted inspection models".into());
+    }
+    Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model_geometry::{GeometryPart, PositionBinding, VertexRef};
+    fn fixture() -> (Geometry, Vec<ModelPose>) {
+        let mut result = Geometry {
+            profile: crate::model_geometry::PROFILE,
+            block_offset: 0x90,
+            excluded_linked_groups: 0,
+            parts: Vec::new(),
+            runtime_verified: false,
+        };
+        for base in [0, 2] {
+            result.parts.push(GeometryPart {
+                group_ordinal: base / 2,
+                packet_ordinal: 0,
+                texture_index: 0,
+                is_opaque: false,
+                vertex_base: base,
+                uv_base: 0,
+                assignments: vec![
+                    vec![PositionBinding {
+                        matrix_index: 0,
+                        vertex_index: 0
+                    }];
+                    2
+                ],
+                uv_bits: Vec::new(),
+                triangles: vec![[
+                    VertexRef {
+                        vertex_index: 0,
+                        uv_index: 0,
+                    },
+                    VertexRef {
+                        vertex_index: 1,
+                        uv_index: 0,
+                    },
+                    VertexRef {
+                        vertex_index: 2,
+                        uv_index: 0,
+                    },
+                ]],
+            });
+        }
+        (
+            result,
+            vec![ModelPose {
+                profile: PoseProfile::Legacy,
+                arithmetic_profile: "authored",
+                matrix_bits: Vec::new(),
+                position_bits: vec![[0; 3]; 4],
+                runtime_verified: false,
+            }],
+        )
+    }
+    #[test]
+    fn global_cross_part_corners_are_not_rebased_or_dropped() {
+        let (geometry, poses) = fixture();
+        let mesh = parts(&geometry, &poses).unwrap();
+        assert_eq!(mesh[0].indices, [0, 1, 2]);
+        assert_eq!(mesh[1].indices, [0, 1, 2]);
+        assert_eq!(mesh[0].cross_part_corners, 1);
+        assert_eq!(mesh[1].cross_part_corners, 2);
+    }
+    #[test]
+    fn rejects_nonfinite_mismatched_positions_bad_bases_and_global_indices() {
+        let (mut geometry, mut poses) = fixture();
+        poses[0].position_bits[0][0] = f32::INFINITY.to_bits();
+        assert!(parts(&geometry, &poses).is_err());
+        poses[0].position_bits[0][0] = 0;
+        poses[0].position_bits.pop();
+        assert!(parts(&geometry, &poses).is_err());
+        poses[0].position_bits.push([0; 3]);
+        geometry.parts[1].vertex_base = 0;
+        assert!(parts(&geometry, &poses).is_err());
+        geometry.parts[1].vertex_base = 2;
+        geometry.parts[1].triangles[0][0].vertex_index = 4;
+        assert!(parts(&geometry, &poses).is_err());
+    }
+}

@@ -56,3 +56,8 @@ Copyright 2019-2022 OpenKH Team and Contributors
 
 This product includes software developed at
 The OpenKH GitHub Repository (https://git.openkh.dev/).
+
+The native mesh inspection dependency bevy_mikktspace 1.0.0 includes
+Copyright (C) 2011 by Morten S. Mikkelsen and
+Copyright (c) 2017 The mikktspace Library Developers.
+See docs/release/bevy-mikktspace-Zlib.txt and bevy-mikktspace-MIT.txt.

@@ -48,6 +48,8 @@
 "bevy_material_macros","0.19.1","MIT OR Apache-2.0","registry+https://github.com/rust-lang/crates.io-index"
 "bevy_math","0.19.1","MIT OR Apache-2.0","registry+https://github.com/rust-lang/crates.io-index"
 "bevy_mesh","0.19.1","MIT OR Apache-2.0","registry+https://github.com/rust-lang/crates.io-index"
+"bevy_mikktspace","1.0.0","Zlib AND (MIT OR Apache-2.0)","registry+https://github.com/rust-lang/crates.io-index"
+"bevy_pbr","0.19.1","MIT OR Apache-2.0","registry+https://github.com/rust-lang/crates.io-index"
 "bevy_platform","0.19.1","MIT OR Apache-2.0","registry+https://github.com/rust-lang/crates.io-index"
 "bevy_ptr","0.19.1","MIT OR Apache-2.0","registry+https://github.com/rust-lang/crates.io-index"
 "bevy_reflect","0.19.1","MIT OR Apache-2.0","registry+https://github.com/rust-lang/crates.io-index"

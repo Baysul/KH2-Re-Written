@@ -268,4 +268,50 @@ mod tests {
         fs::write(fixture.root.join(source_identity::KH2_EXECUTABLE), [1; 16]).unwrap();
         assert!(source.verify_full_source().is_err());
     }
+
+    #[test]
+    fn model_inspection_rejects_stale_unselected_executable_before_decoding() {
+        let fixture = Fixture::new();
+        let mut plain_empty_header = [0u8; 16];
+        plain_empty_header[8..12].copy_from_slice(&(-2i32).to_le_bytes());
+        fs::write(
+            fixture.root.join("Image/dt/kh2_first.pkg"),
+            plain_empty_header,
+        )
+        .unwrap();
+        fs::write(
+            &fixture.manifest,
+            serde_json::to_vec(&source_identity::scan(&fixture.root).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let source = ProbeSource::bind(&fixture.root, &fixture.manifest).unwrap();
+        let path = fixture.base.join("selection.json");
+        let mut selection = serde_json::json!({"schema_version":1,
+            "source_content_identity":source.content_identity(),"inspect_model_geometry":true,
+            "model_pose_profiles":["openkh_legacy_bind_fma_v1"],
+            "selections":[{"index":"Image/dt/kh2_first.hed","ordinal":0,"name_hash":vec![0u8;16]}]});
+        fs::write(&path, serde_json::to_vec(&selection).unwrap()).unwrap();
+        let decoding_error = crate::model_inspection::read_selected_models(&source, &path)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(decoding_error.contains("invalid BAR"), "{decoding_error}");
+        fs::write(fixture.root.join(source_identity::KH2_EXECUTABLE), [1; 16]).unwrap();
+        assert!(
+            crate::model_inspection::read_selected_models(&source, &path)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("full scan rejected")
+        );
+        selection["model_pose_profiles"] = serde_json::json!([]);
+        fs::write(&path, serde_json::to_vec(&selection).unwrap()).unwrap();
+        assert!(
+            crate::model_inspection::read_selected_models(&source, &path)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("explicit profiles invalid")
+        );
+    }
 }
