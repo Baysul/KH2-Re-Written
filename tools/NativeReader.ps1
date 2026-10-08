@@ -1,4 +1,35 @@
 # Authored helpers for source-bound static native inspection.
+function Get-NativeRuntimeFunctionRecords([byte[]]$Bytes, $Sections, $Directory, [long]$ImageSize) {
+    # AMD64 PE32+ triples only. An unwind range is not a whole logical function.
+    $rva=[long]$Directory.RelativeVirtualAddress;$size=[long]$Directory.Size
+    if ($ImageSize -le 0 -or $ImageSize -gt [uint32]::MaxValue -or $rva -lt 0 -or $size -lt 0) {
+        throw 'Invalid runtime-function image/directory bounds'
+    }
+    if ($rva -eq 0 -and $size -eq 0) {return}
+    if ($rva -eq 0 -or $rva%4 -ne 0 -or $size -eq 0 -or $size%12 -ne 0 -or
+        $size -gt 4096*12 -or $rva+$size -gt $ImageSize) {throw 'Invalid bounded AMD64 runtime-function directory'}
+    $last=-1L
+    for ($i=0;$i -lt $size/12;$i++) {
+        $offset=Get-NativePeOffset $Sections ($rva+$i*12) 12 $Bytes.LongLength
+        $begin=[long][BitConverter]::ToUInt32($Bytes,[int]$offset)
+        $end=[long][BitConverter]::ToUInt32($Bytes,[int]$offset+4)
+        $unwind=[long][BitConverter]::ToUInt32($Bytes,[int]$offset+8)
+        if ($begin -le $last -or $begin -eq 0 -or $begin -ge $end -or $end -gt $ImageSize -or
+            $unwind -eq 0 -or $unwind%4 -ne 0 -or $unwind+4 -gt $ImageSize) {throw 'Invalid ordered runtime-function triple'}
+        $code=@($Sections | Where-Object {$begin -ge $_.VirtualAddress -and
+            $end -le [long]$_.VirtualAddress+$_.SizeOfRawData})
+        if ($code.Count -ne 1 -or !($code[0].SectionCharacteristics -band 0x20000000)) {
+            throw 'Runtime-function range lacks a unique raw executable section'
+        }
+        $first=Get-NativePeOffset $Sections $begin 1 $Bytes.LongLength
+        [void](Get-NativePeOffset $Sections ($end-1) 1 $Bytes.LongLength)
+        [void](Get-NativePeOffset $Sections $unwind 4 $Bytes.LongLength)
+        [pscustomobject]@{begin_rva=$begin;end_rva=$end;unwind_rva=$unwind;
+            record_file_offset=$offset;code_file_offset=$first}
+        $last=$begin
+    }
+}
+
 function Assert-NativeSharedModuleEvidence($Manifest, $Runtime, [string]$SourceRoot,
     [string]$RelativePath, [long]$Size, [string]$Hash, [string]$SelectedIdentity) {
     if ($RelativePath -cnotin @('KINGDOM HEARTS HD 1.5+2.5 ReMIX.exe','steam_api64.dll') -or
