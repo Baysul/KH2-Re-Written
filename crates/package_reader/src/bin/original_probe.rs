@@ -30,6 +30,8 @@ struct SelectionFile {
     #[serde(default)]
     inspect_model_texture_routing: bool,
     #[serde(default)]
+    inspect_model_texture_animations: bool,
+    #[serde(default)]
     model_pose_profile: Option<package_reader::model_pose::PoseProfile>,
     #[serde(default)]
     dds_pixel_decode_profile: package_reader::hd_image::HdPixelDecodeProfile,
@@ -63,6 +65,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         inspect_textures,
         inspect_texture_pixels,
         inspect_texture_routing,
+        inspect_texture_animations,
     ) = if let Some(path) = args.get(3) {
         let mut bytes = Vec::new();
         File::open(path)?
@@ -130,6 +133,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "texture routing requires explicit texture layout and geometry inspection".into(),
             );
         }
+        if selection.inspect_model_texture_animations && !selection.inspect_model_textures {
+            return Err("TEXA records require explicit model texture layout inspection".into());
+        }
         (
             Some(selection.selections),
             selection.inspect_hd_images,
@@ -142,6 +148,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             selection.inspect_model_textures,
             selection.inspect_model_texture_pixels,
             selection.inspect_model_texture_routing,
+            selection.inspect_model_texture_animations,
         )
     } else {
         (
@@ -153,6 +160,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             false,
             false,
             None,
+            false,
             false,
             false,
             false,
@@ -179,6 +187,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut image_bytes = 0usize;
     let mut texture_rgba_bytes = 0usize;
     let mut texture_image_count = 0usize;
+    let (mut animation_slots, mut animation_groups, mut animation_frames) =
+        (0usize, 0usize, 0usize);
     for (relative, _) in source_identity::required_files()
         .into_iter()
         .filter(|(name, _)| name.ends_with(".hed"))
@@ -448,6 +458,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or("model texture inspection requires BAR original")?;
                 let mut textures = Vec::new();
                 let mut texture_pixels = Vec::new();
+                let mut texture_animations = Vec::new();
                 for (bar_ordinal, entry) in inventory
                     .entries
                     .iter()
@@ -462,6 +473,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         &original.bytes[start..start + entry.size as usize],
                     )?;
                     textures.push(serde_json::json!({"bar_ordinal":bar_ordinal,"layout":layout}));
+                    if inspect_texture_animations {
+                        let records = package_reader::model_texture_animation::read_records(
+                            &original.bytes[start..start + entry.size as usize],
+                        )?;
+                        for animation in &records.animations {
+                            animation_slots += animation.slot_table.len();
+                            animation_groups += animation.frame_groups.len();
+                            animation_frames += animation
+                                .frame_groups
+                                .iter()
+                                .map(|g| g.records.len())
+                                .sum::<usize>();
+                        }
+                        if animation_slots > 262_144
+                            || animation_groups > 4096
+                            || animation_frames > 65_536
+                        {
+                            return Err(
+                                "probe cumulative TEXA slot/group/frame budget exceeded".into()
+                            );
+                        }
+                        texture_animations
+                            .push(serde_json::json!({"bar_ordinal":bar_ordinal,"records":records}));
+                    }
                     if inspect_texture_pixels {
                         let decoded = package_reader::model_texture_pixels::decode_images(
                             &original.bytes[start..start + entry.size as usize],
@@ -525,6 +560,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     return Err("model texture inspection requires type-7 BAR entry".into());
                 }
                 sample_report["model_texture_layouts"] = serde_json::to_value(textures)?;
+                if inspect_texture_animations {
+                    sample_report["model_texture_animation_records"] =
+                        serde_json::to_value(texture_animations)?;
+                }
                 if inspect_texture_pixels {
                     sample_report["model_texture_pixels"] = serde_json::to_value(texture_pixels)?;
                 }
@@ -605,6 +644,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         result["model_texture_routing_requested"] = true.into();
         result["model_texture_routing_profile"] =
             package_reader::model_texture_routing::PROFILE.into();
+    }
+    if inspect_texture_animations {
+        result["model_texture_animation_records_requested"] = true.into();
+        result["model_texture_animation_profile"] =
+            package_reader::model_texture_animation::PROFILE.into();
     }
     if inspect_packets {
         result["model_packet_inspection_requested"] = true.into();

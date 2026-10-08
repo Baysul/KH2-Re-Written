@@ -87,6 +87,12 @@ retaining Kkdf2 topology. The signed16 expression does not incorporate the
 whole legacy parser. Original/exact HD bindings and diagnostic presentation
 choices remain explicit; source mip levels and TEXA metadata are retained
 without inferred sampling, material or animation behavior.
+The explicit bounded TEXA record profile additionally adapts the read-only
+TextureFooterData constructor, TextureFrame getters and BitsUtil.SignExtend
+at the same OpenKH pin. Fixed-size frame graphs and signed slots remain
+observations; body/allocation/visit bounds are added. Unknown controls and raw
+duration/sprite/header values remain retained. No playback, timer, slot or
+installed animation behavior is inferred.
 
 OpenKH - Open Kingdom Hearts Research and Development
 Copyright 2019-2022 OpenKH Team and Contributors
