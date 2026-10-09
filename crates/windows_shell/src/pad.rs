@@ -207,9 +207,21 @@ pub struct Pad {
     pub released: u64,
     pub repeat: u64,
     timer: f32,
+    /// The raw bits of the last update, so a mode change re-reads what is
+    /// already held in the new mode instead of reporting it as pressed.
+    raw: u64,
 }
 
 impl Pad {
+    /// One frame from raw PADDATA bits in pad `mode`: presses are edges of
+    /// the raw buttons, so switching modes (field START opening the camp,
+    /// menu START closing it) does not turn a held button into a new press.
+    pub fn update_raw(&mut self, raw: u64, mode: &[(u64, u64)], step: f32) {
+        self.held = logical(self.raw, mode);
+        self.raw = raw;
+        self.update(logical(raw, mode), step);
+    }
+
     pub fn update(&mut self, bits: u64, step: f32) {
         let previous = self.held;
         self.held = bits;
@@ -232,6 +244,21 @@ impl Pad {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_button_is_not_a_new_press_after_a_mode_change() {
+        let start = PadData {
+            buttons: button::START,
+            ..PadData::default()
+        };
+        let mut pad = Pad::default();
+        pad.update_raw(raw(&start), MODE_FIELD, 1.);
+        assert_ne!(pad.pressed, 0);
+        // Still held on the next frame, now read in the menu's mode 7.
+        pad.update_raw(raw(&start), MODE_TITLE, 1.);
+        assert_eq!(pad.pressed, 0);
+        assert_ne!(pad.held & 0x100, 0);
+    }
 
     #[test]
     fn cross_decides_and_start_skips_on_the_title() {

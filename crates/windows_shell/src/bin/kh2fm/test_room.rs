@@ -2703,7 +2703,7 @@ fn read_pad(
         pad::MODE_FIELD
     };
     game.pad_data = data;
-    game.pad.update(pad::logical(pad::raw(&data), mode), 1.);
+    game.pad.update_raw(pad::raw(&data), mode, 1.);
     if menu {
         return;
     }
@@ -4501,8 +4501,8 @@ fn camp_tick(
         pad::MODE_FIELD
     };
     let tick = game.tick;
-    let logical = if game.autoplay.is_some() {
-        AUTOPLAY_CAMP
+    if game.autoplay.is_some() {
+        let logical = AUTOPLAY_CAMP
             .iter()
             .filter(|(at, _)| *at == tick)
             .fold(0, |acc, &(_, b)| {
@@ -4512,11 +4512,11 @@ fn camp_tick(
                 } else {
                     b
                 }
-            })
+            });
+        c.pad.update(logical, 1.);
     } else {
-        pad::logical(pad::raw(&data), mode)
-    };
-    c.pad.update(logical, 1.);
+        c.pad.update_raw(pad::raw(&data), mode, 1.);
+    }
     let mut sounds = Vec::new();
     let layout = &c.source.menu.layout;
     // Test-room values: no munny, level 1, the room's HP/MP; the clock is
