@@ -36,6 +36,10 @@ PASS fmt; PASS clippy; PASS tests; PASS build; PASS smoke; PASS autoplay-52/53.
 - The 3D pass itself still blends in linear space: effect quads and transparent model parts. Bevy's PBR pipeline has no gamma-compositing mode.
 - The HUD canvas is still rasterised on the CPU: gauge masks need its depth trick.
 
+## Addendum: font shading on the CPU canvas
+
+The HUD canvas (command menu labels, talk text) now applies the font pixel shader rule too: RGB = texel weights (0.299, 0.596, 0.211) × colour (camp-text-spec §1.4). `autoplay-59` (talk-03) passes; its capture 04 shows the talk text shaded this way.
+
 ## Verdict / next
 
 PROGRESS: all 2D now composes like the exe's framebuffer. Next: music (a Vorbis decoder), the camp's party models, sub-screens.

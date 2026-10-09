@@ -471,6 +471,9 @@ pub struct Texture<'a> {
     pub size: [usize; 2],
     /// Texture texels per sequence texel.
     pub texel_scale: f32,
+    /// A font sheet: the exe's font pixel shader (ps 029) takes the texel's
+    /// weighted sum (0.299, 0.596, 0.211) as grey before the colour.
+    pub luminance: bool,
 }
 
 impl Texture<'_> {
@@ -625,7 +628,11 @@ impl Canvas {
                 }
                 let mix =
                     |f: &dyn Fn(usize) -> f32| f(t[0]) * w[0] + f(t[1]) * w[1] + f(t[2]) * w[2];
-                let tex = texture.sample(mix(&|j| uv[j][0]), mix(&|j| uv[j][1]));
+                let mut tex = texture.sample(mix(&|j| uv[j][0]), mix(&|j| uv[j][1]));
+                if texture.luminance {
+                    let l = tex[0] * 0.299 + tex[1] * 0.596 + tex[2] * 0.211;
+                    tex = [l, l, l, tex[3]];
+                }
                 let vc: [f32; 4] = std::array::from_fn(|ch| mix(&|j| quad.colors[j][ch]));
                 let a = (tex[3] * vc[3]).clamp(0., 1.);
                 if a <= 0. {
@@ -669,6 +676,7 @@ mod tests {
             rgba: &white,
             size: [2, 2],
             texel_scale: 1.,
+            luminance: false,
         };
         let square = |x: f32| Quad {
             corners: [[x, 0.], [x + 4., 0.], [x, 4.], [x + 4., 4.]],

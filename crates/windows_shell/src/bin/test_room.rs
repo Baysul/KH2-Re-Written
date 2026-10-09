@@ -3242,6 +3242,7 @@ fn hud_present(
             rgba: &s.texture_rgba,
             size: s.texture_size.map(|v| v as usize),
             texel_scale: s.texel_scale as f32,
+            luminance: false,
         })
         .collect();
     // The command menu (priorities 0x14b5..0x14b7) draws before the gauge
@@ -3253,11 +3254,13 @@ fn hud_present(
             rgba: &m.sheet.texture_rgba,
             size: m.sheet.texture_size.map(|v| v as usize),
             texel_scale: m.sheet.texel_scale as f32,
+            luminance: false,
         });
         textures.push(Texture {
             rgba: &m.font.rgba,
             size: m.font.size.map(|v| v as usize),
             texel_scale: m.font.texel_scale as f32,
+            luminance: true,
         });
         draws = m.menu.draw(
             &m.sheet.sequence,
@@ -3276,11 +3279,13 @@ fn hud_present(
             rgba: &t.sheet.texture_rgba,
             size: t.sheet.texture_size.map(|v| v as usize),
             texel_scale: t.sheet.texel_scale as f32,
+            luminance: false,
         });
         textures.push(Texture {
             rgba: &t.font.rgba,
             size: t.font.size.map(|v| v as usize),
             texel_scale: t.font.texel_scale as f32,
+            luminance: true,
         });
         for w in t.closing.iter().chain(&t.current) {
             draws.extend(w.draw(first, first + 1));
