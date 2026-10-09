@@ -179,13 +179,15 @@ Each phase is a separate commit. Any phase that touches code passes `cargo fmt -
 - **Phase 4 (only when a tested behavior needs it).** M8. Creates `crates/game_core`. Not scaffolded before then (AGENTS.md).
 - **Phase 5 (after phase 4 and after the owning threads finish their branches).** M11 and M12. Pure moves with `use` path updates, no logic changes. One commit per crate. Each commit's checks must pass before the next.
 
-## Decisions for the user
+## Decisions
 
-- **D-1: `package_reader::effect` vs `effect_vm`.** Keep both names and document the split (recommended), or rename the decoder to `effect_data`.
-- **D-2: `tools/` flat or grouped.** Keep flat with the A3 index (recommended now), or group later in one link-sweep commit.
-- **D-3: Research binaries.** A `research_tools` crate (recommended; keeps the player crate small) or keep them in `windows_shell`.
-- **D-4: `glurbus-splash.png`.** Track it after a provenance check, or load it from a private path (G5).
-- **D-5: Probe split (M7).** Move the nine probes now, or leave them in `package_reader/src/bin/` until the crate is regrouped in phase 5.
+Status: the recommendations below are recorded as the working decisions. Recording them does not approve any move, deletion or new file. Those still need item approval.
+
+- **D-1: `package_reader::effect` vs `effect_vm`.** Keep both names. Document the split in `ARCHITECTURE.md` (recorded).
+- **D-2: `tools/` layout.** Keep flat, with the A3 index. No link-sweep grouping now (recorded).
+- **D-3: Research binaries.** Move them to a `research_tools` crate in phase 3 (recorded; needs M6 approval).
+- **D-4: `glurbus-splash.png`.** Stays git-ignored until the title thread completes a provenance review. No action in any phase before that (recorded).
+- **D-5: Package probes (M7).** Leave them in `package_reader/src/bin/` until phase 5 (recorded; M7 not approved).
 
 ## Gaps this plan does not fix (listed for decision)
 
