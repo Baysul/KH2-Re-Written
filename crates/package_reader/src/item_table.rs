@@ -27,6 +27,8 @@ pub struct Item {
     pub buy: u16,
     /// +0xe: non-zero when it can be thrown away.
     pub sell: u16,
+    /// +0x10: the command a consumable runs (FUN_1403c41c0).
+    pub command: u16,
     /// +0x12: the count byte / flag bit index.
     pub slot: u16,
     /// +0x14: `itempic/item-%03d.imd`.
@@ -66,6 +68,7 @@ pub fn read(bytes: &[u8]) -> io::Result<Vec<Item>> {
                 description: h(0xa),
                 buy: h(0xc),
                 sell: h(0xe),
+                command: h(0x10),
                 slot: h(0x12),
                 picture: h(0x14),
                 icon: r[0x17],

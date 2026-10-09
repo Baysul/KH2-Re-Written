@@ -12,6 +12,7 @@
 //! the decide sound only. The 3D party models are pasted from off-screen
 //! renders the caller makes (Tz::MenuObj).
 pub mod abilities;
+pub mod customize;
 pub mod items;
 pub mod party;
 
@@ -209,6 +210,7 @@ pub struct Data {
     /// Party help: 0xbb88 "There are no Party Members to switch.", 0x846b
     /// "Select Party Member.", 0x846c "Switch Party Member."
     pub party_help: [Vec<u8>; 3],
+    pub customize: customize::CustomizeData,
 }
 
 /// Cursor memory kept between camp openings (DAT_140beec30 / 7c).
@@ -226,6 +228,10 @@ pub struct Memory {
     /// list's cursor and scroll.
     pub ability_char: usize,
     pub ability_list: (usize, usize),
+    /// mem[0x19] / mem[0x1a]: the Customize character row; the settings
+    /// list's cursor and scroll.
+    pub customize_char: usize,
+    pub customize_list: (usize, usize),
 }
 
 /// Tz::MenuObj's pastes: priority and (member, layout offset, alpha).
@@ -282,6 +288,13 @@ pub enum State {
     /// 0x14: pick a member; 0x16: pick the one to swap with.
     Party,
     PartySwap,
+    /// 0x19 characters, 0x1a Sora's settings, 0x1d–0x1f a choice popup of
+    /// category 0 shortcut / 1 MP Charge / 2 Auto-Reload, 0x1c the
+    /// Auto-Reload warning.
+    CustomizeChars,
+    CustomizeList,
+    CustomizePopup(u8),
+    CustomizeConfirm,
     StatusList,
     StatusBrowse,
     Config,
@@ -559,6 +572,8 @@ pub struct Camp {
     ability_ui: abilities::Ui,
     // Party.
     party_ui: party::Ui,
+    // Customize.
+    custom_ui: customize::Ui,
 }
 
 impl Camp {
@@ -611,6 +626,7 @@ impl Camp {
             item_ui: items::Ui::default(),
             ability_ui: abilities::Ui::default(),
             party_ui: party::Ui::default(),
+            custom_ui: customize::Ui::default(),
         };
         camp.build_top(seq);
         camp.munny_digits = digits(seq, &munny_groups(camp.data.panels.munny), Vec::new());
@@ -792,6 +808,10 @@ impl Camp {
                     State::AbilityPopup(_) => self.ability_popup(seq, &pad, &mut sounds),
                     State::Party => self.party(seq, &pad, &mut sounds),
                     State::PartySwap => self.party_swap(seq, &pad, &mut sounds),
+                    State::CustomizeChars => self.customize_chars(seq, &pad, &mut sounds),
+                    State::CustomizeList => self.customize_list(seq, &pad, &mut sounds),
+                    State::CustomizePopup(_) => self.customize_popup(seq, &pad, &mut sounds),
+                    State::CustomizeConfirm => self.customize_confirm(seq, &pad, &mut sounds),
                     State::StatusList => self.status_list(seq, &pad, &mut sounds),
                     State::StatusBrowse => self.status_browse(seq, &pad, &mut sounds),
                     State::Config => self.config(seq, &pad, &mut sounds),
@@ -842,6 +862,10 @@ impl Camp {
             State::AbilityPopup(_) => (&self.ability_ui.popup, RowGroupsFor::None),
             State::Party => (&self.party_ui.cards, RowGroupsFor::None),
             State::PartySwap => (&self.party_ui.swap, RowGroupsFor::None),
+            State::CustomizeChars => (&self.custom_ui.chars, RowGroupsFor::Top),
+            State::CustomizeList => (&self.custom_ui.list.list, RowGroupsFor::None),
+            State::CustomizePopup(_) => (&self.custom_ui.popup.list, RowGroupsFor::None),
+            State::CustomizeConfirm => (&ui.choices, RowGroupsFor::Fixed(items::CHOICE_ROWS)),
             State::StatusList => (&self.status_list, RowGroupsFor::Status),
             State::StatusBrowse => (&self.columns[self.column], RowGroupsFor::None),
             State::Config => (&self.config_list, RowGroupsFor::None),
@@ -891,7 +915,10 @@ impl Camp {
             }
             let row = rows[cursor];
             // States of list 0x1405baf20 (the stock list here) use G22.
-            let group = if matches!(state, State::Stock | State::AbilityPopup(_)) {
+            let group = if matches!(
+                state,
+                State::Stock | State::AbilityPopup(_) | State::CustomizePopup(_)
+            ) {
                 22
             } else {
                 GLOVE
@@ -1012,6 +1039,7 @@ impl Camp {
                 let pending = match entry.id {
                     0 => Some(State::Items),
                     1 => Some(State::AbilityChars),
+                    2 => Some(State::CustomizeChars),
                     3 => Some(State::Party),
                     4 => Some(State::StatusList),
                     7 => Some(State::Config),
@@ -1056,6 +1084,7 @@ impl Camp {
                 Some(State::Items) => self.enter_items(seq, None),
                 Some(State::AbilityChars) => self.enter_ability_chars(seq, None),
                 Some(State::Party) => self.enter_party(seq),
+                Some(State::CustomizeChars) => self.enter_customize_chars(seq),
                 Some(State::StatusList) => self.enter_status(seq),
                 Some(State::Config) => self.enter_config(seq),
                 _ => {}

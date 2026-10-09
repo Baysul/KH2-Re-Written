@@ -7,6 +7,7 @@ use std::{collections::HashSet, io};
 
 pub mod bar;
 pub mod battle_tables;
+pub mod command_table;
 pub mod effect;
 pub mod font;
 pub mod font_cell;

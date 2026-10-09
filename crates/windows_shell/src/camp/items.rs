@@ -99,6 +99,10 @@ pub struct ItemInfo {
     /// +6: an ability's kind (low byte) and AP cost (high byte); a
     /// weapon's stat entry.
     pub param: u16,
+    /// +0x10 (consumables): the command it runs, and that command's name
+    /// (03system `cmd` +8; FUN_1403c41c0 / FUN_1403b68b0).
+    pub command: u16,
+    pub command_name: Vec<u8>,
     pub name: Vec<u8>,
     pub description: Vec<u8>,
 }
@@ -459,6 +463,11 @@ pub(super) struct Ui {
 }
 
 impl Ui {
+    /// The dialog box (DAT_140beed08) while one is up.
+    pub(super) fn dialog_box(&self) -> Option<Id> {
+        self.dialog
+    }
+
     pub(super) fn kill_dim(&mut self, sp: &mut Sprites) {
         for g in self.dim.drain(..) {
             sp.kill(g);
