@@ -301,7 +301,8 @@ const LOCOMOTION: [(&str, u16); 6] = [
 /// Test-room choices, recorded in the startup log.
 const GRAVITY: f32 = 0.8;
 const STEP_HEIGHT: f32 = 24.;
-const WALK_THRESHOLD: f32 = 0.6;
+/// Run at stick magnitude 0.8 (DAT_140585c7c).
+const WALK_THRESHOLD: f32 = 0.8;
 const BODY_RADIUS: f32 = 30.;
 const BODY_HEIGHT: f32 = 140.;
 const FLOOR_MIN_NORMAL_Y: f32 = 0.5;
@@ -378,7 +379,10 @@ struct Game {
     autoplay: Option<PathBuf>,
     captures_taken: usize,
     capture_pending: bool,
-    gamepad: bool,
+    /// The room's pad record (logical bits, pad mode 1 in the field) and
+    /// this tick's PADDATA (stick bytes).
+    pad: Pad,
+    pad_data: pad::PadData,
     jump_queued: bool,
     attack_queued: bool,
     guard_queued: bool,
@@ -2153,59 +2157,42 @@ fn setup(
     ));
 }
 
-fn gather_input(
+/// The exe's pad pipeline for the room (bgm-input-01 Part B): PADDATA,
+/// raw word, logical bits through pad mode 1 (field) or 7 (a menu). New
+/// presses queue the field actions: jump 0x100 (back button), decide 0x4,
+/// guard 0x200 (Square), reaction 0x400 (Triangle), talk advance 0x40c and
+/// the command menu's up/down 0x4000/0x8000.
+fn read_pad(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    pads: Query<&Gamepad>,
+    pads: Query<(&Gamepad, Option<&Name>)>,
+    camp: Option<Res<CampRes>>,
     mut game: ResMut<Game>,
 ) {
     if game.autoplay.is_some() {
         return;
     }
-    let mut jump = keys.just_pressed(KeyCode::Space);
-    let mut attack = keys.just_pressed(KeyCode::Enter)
-        || keys.just_pressed(KeyCode::KeyK)
-        || mouse.just_pressed(MouseButton::Left);
-    if game.gamepad {
-        for pad in &pads {
-            jump |= pad.just_pressed(GamepadButton::East);
-            attack |= pad.just_pressed(GamepadButton::South);
-        }
+    let (data, _, _) = input::read_devices(&keys, &mouse, 0., &pads);
+    let menu = camp.is_some_and(|c| c.open.is_some());
+    let mode = if menu {
+        pad::MODE_TITLE
+    } else {
+        pad::MODE_FIELD
+    };
+    game.pad_data = data;
+    game.pad.update(pad::logical(pad::raw(&data), mode), 1.);
+    if menu {
+        return;
     }
-    let mut up = keys.just_pressed(KeyCode::ArrowUp);
-    let mut down = keys.just_pressed(KeyCode::ArrowDown);
-    if game.gamepad {
-        for pad in &pads {
-            up |= pad.just_pressed(GamepadButton::DPadUp);
-            down |= pad.just_pressed(GamepadButton::DPadDown);
-        }
-    }
-    let mut guard = keys.just_pressed(KeyCode::KeyF);
-    if game.gamepad {
-        for pad in &pads {
-            guard |= pad.just_pressed(GamepadButton::West);
-        }
-    }
-    game.guard_queued |= guard;
-    // Reaction command (Triangle: T or the pad's north button); a page
-    // advances on decide, back or Triangle (trigger mask 0x40c).
-    let mut rc = keys.just_pressed(KeyCode::KeyT);
-    let mut advance = attack || keys.just_pressed(KeyCode::Backspace) || rc;
-    if game.gamepad {
-        for pad in &pads {
-            rc |= pad.just_pressed(GamepadButton::North);
-            advance |=
-                pad.just_pressed(GamepadButton::East) || pad.just_pressed(GamepadButton::North);
-        }
-    }
-    game.rc_queued |= rc;
-    game.advance_queued |= advance;
-    game.jump_queued |= jump;
-    game.attack_queued |= attack;
-    game.menu_up_queued |= up;
-    game.menu_down_queued |= down;
+    let p = game.pad.pressed;
+    game.jump_queued |= p & 0x100 != 0;
+    game.attack_queued |= p & 0x4 != 0;
+    game.guard_queued |= p & 0x200 != 0;
+    game.rc_queued |= p & 0x400 != 0;
+    game.advance_queued |= p & 0x40c != 0;
+    game.menu_up_queued |= p & 0x4000 != 0;
+    game.menu_down_queued |= p & 0x8000 != 0;
 }
-
 /// Scripted input for unattended verification runs.
 fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     let stick = match tick {
@@ -2235,13 +2222,7 @@ const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 const AUTOPLAY_END: u64 = 2000;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
-fn simulate(
-    keys: Res<ButtonInput<KeyCode>>,
-    pads: Query<&Gamepad>,
-    mut rig: ResMut<CameraRig>,
-    mut game: ResMut<Game>,
-    hud: Option<ResMut<Hud>>,
-) {
+fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
     let tick = game.tick;
     let (up, down) = if game.autoplay.is_some() {
         (false, tick == 980)
@@ -2259,31 +2240,10 @@ fn simulate(
             autoplay_input(tick)
         }
     } else {
-        let mut stick = Vec2::ZERO;
-        for (key, delta) in [
-            (KeyCode::KeyW, Vec2::Y),
-            (KeyCode::KeyS, Vec2::NEG_Y),
-            (KeyCode::KeyA, Vec2::NEG_X),
-            (KeyCode::ArrowLeft, Vec2::NEG_X),
-            (KeyCode::KeyD, Vec2::X),
-            (KeyCode::ArrowRight, Vec2::X),
-        ] {
-            if keys.pressed(key) {
-                stick += delta;
-            }
-        }
-        stick = stick.clamp_length_max(1.);
-        if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
-            stick *= 0.4;
-        }
-        if game.gamepad {
-            for pad in &pads {
-                let s = pad.left_stick();
-                if s.length() > 0.2 {
-                    stick = s.clamp_length_max(1.);
-                }
-            }
-        }
+        // The left-stick vector past the game's 60-unit dead zone (up is
+        // negative in PADDATA), magnitude capped at 1.
+        let [x, y, magnitude] = pad::analog(game.pad_data.left);
+        let stick = Vec2::new(x, -y).normalize_or_zero() * magnitude;
         let queued = (game.jump_queued, game.attack_queued);
         game.jump_queued = false;
         game.attack_queued = false;
@@ -2364,26 +2324,19 @@ fn simulate(
             turn = 1.;
         }
     } else {
-        if keys.pressed(KeyCode::KeyQ) || keys.pressed(KeyCode::KeyJ) {
-            turn -= 1.;
-        }
-        if keys.pressed(KeyCode::KeyE) || keys.pressed(KeyCode::KeyL) {
-            turn += 1.;
-        }
-        if keys.pressed(KeyCode::Minus) {
-            zoom += 1.;
-        }
-        if keys.pressed(KeyCode::Equal) {
-            zoom -= 1.;
-        }
-        if game.gamepad {
-            for pad in &pads {
-                let s = pad.right_stick();
-                if s.length() > 0.2 {
-                    turn = s.x;
-                    zoom = -s.y;
-                }
-            }
+        // Camera bits (mode "A", right stick): yaw right 21 / left 20 and
+        // height down 19 / up 18 scaled by the right stick's magnitude;
+        // R3 (bit 17) recentres. Height drives the follow camera's radius
+        // here [test-room mapping of the original height adjust].
+        let held = game.pad.held;
+        let [_, _, magnitude] = pad::analog(game.pad_data.right);
+        let axis = |pos: u64, neg: u64| {
+            ((held & pos != 0) as i32 - (held & neg != 0) as i32) as f32 * magnitude
+        };
+        turn = axis(0x20_0000, 0x10_0000);
+        zoom = axis(0x8_0000, 0x4_0000);
+        if game.pad.pressed & 0x2_0000 != 0 {
+            rig.recenter_queued = true;
         }
         let pending = rig.pending_turn.clamp(-1., 1.);
         if turn == 0. && pending != 0. {
@@ -3119,14 +3072,14 @@ fn play_sounds(mut game: ResMut<Game>, mut audio: ResMut<Audio>, hud: Option<Res
     }
 }
 
-/// HUD frame: test-room debug keys (H/G HP -/+2, M/N MP -/+10, B drive +10)
+/// HUD frame: test-room debug keys (F5/F6 HP -/+2, F7/F8 MP -/+10, F9 drive +10)
 /// or the unattended script change stats, then the gauge logic runs.
 fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
     let Some(mut hud) = hud else { return };
     let mut s = hud.stats;
     if let Some(rt) = game.enemy.as_mut() {
         // Combat drives HP; G refills it.
-        if keys.just_pressed(KeyCode::KeyG) {
+        if keys.just_pressed(KeyCode::F6) {
             rt.sora_hp = rt.sora_target.max_hp;
         }
         s.hp = rt.sora_hp;
@@ -3143,19 +3096,19 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
             _ => {}
         }
     } else {
-        if keys.just_pressed(KeyCode::KeyH) {
+        if keys.just_pressed(KeyCode::F5) {
             s.hp = (s.hp - 2).max(0);
         }
-        if keys.just_pressed(KeyCode::KeyG) {
+        if keys.just_pressed(KeyCode::F6) {
             s.hp = (s.hp + 2).min(s.max_hp);
         }
-        if keys.just_pressed(KeyCode::KeyM) {
+        if keys.just_pressed(KeyCode::F7) {
             s.mp = (s.mp - 10).max(0);
         }
-        if keys.just_pressed(KeyCode::KeyN) {
+        if keys.just_pressed(KeyCode::F8) {
             s.mp = (s.mp + 10).min(s.max_mp);
         }
-        if keys.just_pressed(KeyCode::KeyB) {
+        if keys.just_pressed(KeyCode::F9) {
             s.drive = (s.drive + 10).min(100);
         }
     }
@@ -3641,19 +3594,14 @@ type CameraOnly = (
 );
 
 fn camera_control(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
     mut rig: ResMut<CameraRig>,
     mut camera: Query<(&mut Transform, &mut Projection), CameraOnly>,
     talk: Option<Res<Talk>>,
 ) {
-    if mouse.pressed(MouseButton::Right) {
-        rig.pending_turn = (rig.pending_turn + motion.delta.x * 0.1).clamp(-30., 30.);
-    }
-    if keys.just_pressed(KeyCode::KeyC) {
-        rig.recenter_queued = true;
-    }
+    // Mouse-look turns the camera (the PC layer feeds mouse motion to the
+    // right stick; its sensitivity is unresolved).
+    rig.pending_turn = (rig.pending_turn + motion.delta.x * 0.1).clamp(-30., 30.);
     let (eye, look_at, fov) = match talk.as_ref().and_then(|t| t.camera) {
         // The talk camera (FUN_140175e50): 60° in the game's horizontal
         // 4:3 sense, converted like the follow camera's.
@@ -4122,13 +4070,13 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut log_path = None;
     let mut limit = None;
     let mut autoplay = None;
-    let mut gamepad = false;
     let mut show_collision = false;
     let mut basic_fk = false;
     let mut options = args[3..].iter();
     while let Some(option) = options.next() {
         match option.to_str() {
-            Some("--gamepad") => gamepad = true,
+            // Pads are always read now; the flag is accepted for old launch files.
+            Some("--gamepad") => {}
             Some("--show-collision") => show_collision = true,
             Some("--basic-fk") => basic_fk = true,
             Some("--log") if log_path.is_none() => log_path = options.next().cloned(),
@@ -4193,7 +4141,8 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         autoplay,
         captures_taken: 0,
         capture_pending: false,
-        gamepad,
+        pad: Pad::default(),
+        pad_data: pad::PadData::default(),
         jump_queued: false,
         attack_queued: false,
         guard_queued: false,
@@ -4384,7 +4333,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             .collect(),
     };
     eprintln!(
-        "Test room ready. WASD moves (Shift walks), Up/Down choose a command, Space jumps, Enter/K/left-click attacks, Q/E or right-drag turns the camera, -/= zoom, C recenters, Esc exits."
+        "Test room ready (the original PC bindings). WASD moves (Left Alt walks), Space/Backspace jump, Enter/left-click decides (Attack), Up/Down choose a command, right-click/Right Shift guards, F/Right Ctrl reacts (Talk), M opens the menu, the mouse turns the camera, middle-click/Right Alt recentres, Esc exits."
     );
     let mut app = App::new();
     if let Some(talk) = talk {
@@ -4429,7 +4378,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         .insert_resource(ClearColor(Color::srgb(0.06, 0.07, 0.09)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "KH2FM test room (quarantined source) | WASD move, Shift walk, Space jump, Enter/K/LMB attack, F guard, T talk, Q/E camera, Esc".into(),
+                title: "KH2FM test room (quarantined source) | WASD move, Space jump, Enter/LMB attack, RMB guard, F talk, M menu, Esc".into(),
                 resolution: (1280, 720).into(),
                 ..default()
             }),
@@ -4444,10 +4393,10 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             overlay: true,
         })
         .add_systems(Startup, (setup, pause_for_autoplay, camp_setup))
-        .add_systems(PreUpdate, gather_input.after(bevy::input::InputSystems))
         .add_systems(
             FixedUpdate,
             (
+                read_pad,
                 camp_tick,
                 (simulate, talk_tick, effects_tick, hud_tick, play_sounds)
                     .chain()
