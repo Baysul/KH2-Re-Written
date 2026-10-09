@@ -13,6 +13,7 @@
 !/.github/workflows/*.yml
 !/crates/*/Cargo.toml
 !/crates/*/src/**/*.rs
+!/crates/*/src/**/*.wgsl
 !/crates/*/examples/*.rs
 !/crates/windows_shell/assets/development-checker.bmp
 !/docs/**/*.md
