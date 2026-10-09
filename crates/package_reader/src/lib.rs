@@ -31,6 +31,7 @@ pub mod motion_eval;
 pub mod motion_trigger;
 pub mod object_collision;
 pub mod objentry;
+pub mod ogg;
 pub mod original;
 pub mod plain;
 pub mod preferences;
@@ -43,6 +44,7 @@ pub mod scd;
 pub mod sequence;
 pub mod sklt;
 pub mod vif;
+pub mod vorbis;
 pub mod vpu;
 
 pub const RECORD_SIZE: usize = 32;

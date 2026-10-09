@@ -1,11 +1,14 @@
 //! PC sound banks ("SEDBSSCF" SCD), as the installed exe loads them from
 //! `se/se%03d.win32.scd` and from the `se/obj/seNNN` replacement assets of
 //! object archives. Sound `no` of a bank lists {track, audio} layers; each
-//! audio stream here is MS-ADPCM (codec 12), decoded to interleaved i16 PCM.
+//! audio stream here is MS-ADPCM (codec 12) or, for music, Ogg Vorbis
+//! (codec 6), decoded to interleaved i16 PCM.
+use crate::{ogg, vorbis};
 use std::io;
 
 const MAGIC: &[u8; 8] = b"SEDBSSCF";
 const CODEC_MS_ADPCM: i32 = 12;
+const CODEC_VORBIS: i32 = 6;
 const MAX_FRAMES: usize = 48_000 * 600;
 const ADAPT: [i32; 16] = [
     230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230,
@@ -147,6 +150,9 @@ impl Bank<'_> {
         if codec == -1 {
             return Ok(None);
         }
+        if codec == CODEC_VORBIS {
+            return self.vorbis(index)?.map(|v| decode_vorbis(&v)).transpose();
+        }
         if codec != CODEC_MS_ADPCM {
             return Err(invalid("SCD codec other than MS-ADPCM"));
         }
@@ -168,6 +174,135 @@ impl Bank<'_> {
             loop_end,
         }))
     }
+}
+
+/// A codec-6 stream: the de-obfuscated Vorbis header pages, the Ogg data
+/// and the loop values (FUN_1400ce8a0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VorbisStream<'a> {
+    pub channels: u32,
+    pub rate: u32,
+    /// Page-aligned byte offset of the loop start in `data`; 0 with
+    /// `looped` false for one-shots.
+    pub loop_start_byte: u32,
+    pub looped: bool,
+    /// Samples dropped after a loop seek (miniheader +0x08).
+    pub skip: u32,
+    pub header: Vec<u8>,
+    pub data: &'a [u8],
+}
+
+impl<'a> Bank<'a> {
+    /// Audio stream `index` as a Vorbis stream (codec 6).
+    pub fn vorbis(&self, index: usize) -> io::Result<Option<VorbisStream<'a>>> {
+        let at = *self
+            .audio
+            .get(index)
+            .ok_or_else(|| invalid("SCD audio index outside the bank"))?;
+        let b = self.bytes;
+        let size = u32_at(b, at)? as usize;
+        let codec = u32_at(b, at + 0x0c)? as i32;
+        if codec != CODEC_VORBIS {
+            return Ok(None);
+        }
+        let loop_start = u32_at(b, at + 0x10)?;
+        let loop_end = u32_at(b, at + 0x14)?;
+        let extra = u32_at(b, at + 0x18)? as usize;
+        // Auxiliary chunks (+0x1c bit 0) sit before the miniheader.
+        let mini = if u32_at(b, at + 0x1c)? & 1 != 0 {
+            at + 0x20 + u32_at(b, at + 0x24)? as usize
+        } else {
+            at + 0x20
+        };
+        let head = b
+            .get(mini..mini + 0x20)
+            .ok_or_else(|| invalid("truncated SCD Vorbis miniheader"))?;
+        let (version, mini_size, key) = (head[0], head[1] as usize, head[2]);
+        let skip = u32_at(head, 0x08)?;
+        let seek = u32_at(head, 0x10)? as usize;
+        let header_size = u32_at(head, 0x14)? as usize;
+        let start = mini + mini_size + seek;
+        let mut header = b
+            .get(start..start + header_size)
+            .ok_or_else(|| invalid("truncated SCD Vorbis header"))?
+            .to_vec();
+        if version == 2 && header.get(..4) != Some(b"OggS") {
+            for x in &mut header {
+                *x ^= key;
+            }
+        }
+        let data = b
+            .get(at + 0x20 + extra..at + 0x20 + extra + size)
+            .ok_or_else(|| invalid("truncated SCD Vorbis data"))?;
+        Ok(Some(VorbisStream {
+            channels: u32_at(b, at + 4)?,
+            rate: u32_at(b, at + 8)?,
+            loop_start_byte: loop_start,
+            looped: loop_end != 0,
+            skip,
+            header,
+            data,
+        }))
+    }
+}
+
+/// Decodes a whole codec-6 stream. PCM is `clamp(trunc(f x 32767))`
+/// (FUN_1400af3a0); the loop runs from the granule of the page at the loop
+/// byte offset plus the skip count to the last granule (bgm-input-01
+/// §A2.1), end inclusive.
+pub fn decode_vorbis(v: &VorbisStream) -> io::Result<Pcm> {
+    let mut headers = ogg::Packets::new(&v.header, 0);
+    let mut next = || -> io::Result<Vec<u8>> {
+        Ok(headers
+            .next_packet()?
+            .ok_or_else(|| invalid("Vorbis header packets missing"))?
+            .data)
+    };
+    let identification = next()?;
+    let _comment = next()?;
+    let setup = next()?;
+    let mut decoder = vorbis::Decoder::new(vorbis::Setup::read(&identification, &setup)?);
+    let channels = decoder.setup.channels;
+    if channels as u32 != v.channels || channels > 8 {
+        return Err(invalid("Vorbis channel count differs from the SCD"));
+    }
+    let mut samples: Vec<i16> = Vec::new();
+    let mut packets = ogg::Packets::new(v.data, 0);
+    let mut last_granule = 0i64;
+    while let Some(p) = packets.next_packet()? {
+        let pcm = decoder.decode(&p.data)?;
+        if let Some(first) = pcm.first() {
+            for i in 0..first.len() {
+                for c in pcm.iter() {
+                    samples.push((c[i] * 32767.).trunc().clamp(-32768., 32767.) as i16);
+                }
+            }
+        }
+        if p.granule >= 0 {
+            last_granule = p.granule;
+        }
+        if samples.len() / channels > MAX_FRAMES {
+            return Err(invalid("Vorbis stream exceeds decode bound"));
+        }
+    }
+    // The last page's granule trims the final packet.
+    samples.truncate(last_granule.max(0) as usize * channels);
+    let (loop_start, loop_end) = if v.looped {
+        let page = ogg::page(v.data, v.loop_start_byte as usize)?;
+        (
+            (page.granule.max(0) as u32).saturating_add(v.skip),
+            (last_granule.max(1) - 1) as u32,
+        )
+    } else {
+        (0, 0)
+    };
+    Ok(Pcm {
+        channels: channels as u16,
+        rate: decoder.setup.rate,
+        samples,
+        loop_start,
+        loop_end,
+    })
 }
 
 /// MS-ADPCM with a WAVEFORMATEX + ADPCMWAVEFORMAT `format` block.

@@ -28,7 +28,7 @@ use windows_shell::input;
 use windows_shell::layout2d::{self, Menu2ld};
 use windows_shell::newgame::{self, NewGame, Texts};
 use windows_shell::pad::{self, Pad};
-use windows_shell::sound::{self, Banks};
+use windows_shell::sound::{self, Banks, Music};
 use windows_shell::sprite2d::Sheet;
 use windows_shell::title::{Action, Event, State, Title};
 use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
@@ -57,7 +57,13 @@ struct Config {
     messages: Locator,
     font_image: Locator,
     font_info: Locator,
+    /// vagstream/Title.win32.scd.
+    #[serde(default)]
+    music: Option<Locator>,
 }
+
+/// Mixer key of the title stream (FUN_140537420's single AxaSoundStream).
+const BGM_KEY: u32 = 9_999_000;
 
 /// The dialog's art: title.2ld image 0.
 const DIALOG_IMAGE: usize = 0;
@@ -98,6 +104,11 @@ struct Session {
     first_boot: bool,
     title: Option<Title>,
     dialog: Option<NewGame>,
+    music_rx: Option<sound::MusicSlot>,
+    music: Option<Music>,
+    /// The title asked for its stream (FUN_140537420) and it has started.
+    bgm_wanted: bool,
+    bgm_started: bool,
     texts: Texts,
     font: SystemFont,
     font_sheet: usize,
@@ -281,16 +292,49 @@ fn tick(
         }
     }
 
+    // Music: collect the background decode, then start the stream the
+    // frame after the title asked for it (only when nothing plays).
+    if let Some(slot) = &s.music_rx
+        && let Some(result) = slot.lock().ok().and_then(|mut r| r.take())
+    {
+        s.music_rx = None;
+        match result {
+            Ok(m) => {
+                let stats = m.stats.clone();
+                s.music = Some(m);
+                s.event(serde_json::json!({"event":"music_decoded","tick":tick,"stats":stats}));
+            }
+            Err(e) => s.event(serde_json::json!({"event":"music_failed","tick":tick,"error":e})),
+        }
+    }
+    let mut started = false;
+    if s.bgm_wanted
+        && !s.bgm_started
+        && let (Some(m), Some(o)) = (&s.music, &s.output)
+        && let Ok(mut mixer) = o.mixer.lock()
+    {
+        mixer.play(m.clip.clone(), BGM_KEY, m.volume, 1.);
+        started = true;
+    }
+    if started {
+        s.bgm_started = true;
+        s.event(serde_json::json!({"event":"bgm_start","tick":tick}));
+    }
     // FUN_1402b4590: the layouts start once the opening fade-in is done.
-    if s.title.is_none() && s.handoff.is_none() && s.fade.state == fade::State::Idle {
+    // The decode runs during the opening black; the title waits for it so
+    // the stream starts with the layouts [rebuild: the exe streams].
+    let music_pending = s.music_rx.is_some();
+    if s.title.is_none()
+        && s.handoff.is_none()
+        && s.fade.state == fade::State::Idle
+        && !music_pending
+    {
         let t = Title::new(&s.menu.layout, s.first_boot, false);
         let scene = t.main.scene;
         s.title = Some(t);
         s.event(serde_json::json!({"event":"title_start","tick":tick,"scene":scene}));
-        s.event(
-            serde_json::json!({"event":"bgm","tick":tick,"path":"vagstream/Title.win32.scd",
-            "played":false,"note":"no Vorbis decoder yet"}),
-        );
+        // The stream starts one yield after the main layout (FUN_1402b4590).
+        s.bgm_wanted = true;
     }
     if let Some(mut t) = s.title.take() {
         let before = (
@@ -334,6 +378,16 @@ fn tick(
             match e {
                 Event::Sound(n) => s.play(n, "title"),
                 Event::FadeOut(n) => s.fade.fade_out(n, false),
+                Event::FadeBgm(units) => {
+                    // FUN_1405373e0(720) [inferred: milliseconds].
+                    if let Some(o) = &s.output
+                        && let Ok(mut m) = o.mixer.lock()
+                    {
+                        m.fade(BGM_KEY, 0., units as f32 / 1000., audio_out::FadeEnd::Stop);
+                    }
+                    s.bgm_wanted = false;
+                    s.event(serde_json::json!({"event":"bgm_fade","tick":tick,"units":units}));
+                }
                 Event::Leave(a) => {
                     s.handoff = Some(a);
                     s.event(serde_json::json!({"event":"leave","tick":tick,"action":format!("{a:?}")}));
@@ -577,6 +631,13 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         (&fo.index, fo.ordinal, fo.name_hash),
         b"sys\0",
     )?;
+    let music_rx = match &config.music {
+        Some(l) => {
+            let bytes = sound::load_bank(&source, &l.index, l.ordinal, l.name_hash, None)?;
+            Some(sound::decode_music_in_background(bytes))
+        }
+        None => None,
+    };
     let mut log = match log_path {
         Some(path) => Some(OpenOptions::new().write(true).create_new(true).open(path)?),
         None => None,
@@ -602,6 +663,10 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         first_boot: config.first_boot,
         title: None,
         dialog: None,
+        music_rx,
+        music: None,
+        bgm_wanted: false,
+        bgm_started: false,
         texts,
         font,
         font_sheet: 0,

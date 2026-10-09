@@ -34,6 +34,14 @@ impl Clip {
         } else {
             left
         };
+        if c >= 4 {
+            // Quad (front L/R, rear L/R) folded to stereo [inferred: the
+            // exe hands 4 channels to XAudio2].
+            return [
+                left + self.samples[at + 2] as f32,
+                right + self.samples[at + 3] as f32,
+            ];
+        }
         [left, right]
     }
 }
@@ -44,6 +52,18 @@ struct Voice {
     position: f64,
     step: f64,
     gain: f32,
+    /// Gain change per output frame, the target, and whether reaching it
+    /// stops (or pauses) the voice.
+    fade: Option<(f32, f32, FadeEnd)>,
+    paused: bool,
+}
+
+/// What happens when a fade reaches its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FadeEnd {
+    Hold,
+    Stop,
+    Pause,
 }
 
 #[derive(Default)]
@@ -68,7 +88,29 @@ impl Mixer {
             position: 0.,
             step,
             gain,
+            fade: None,
+            paused: false,
         });
+    }
+
+    /// Ramps the voices of `key` linearly to `target` over `seconds`.
+    pub fn fade(&mut self, key: u32, target: f32, seconds: f32, end: FadeEnd) {
+        let frames = (seconds * RATE as f32).max(1.);
+        for v in self.voices.iter_mut().filter(|v| v.key == key) {
+            v.fade = Some(((target - v.gain) / frames, target, end));
+        }
+    }
+
+    /// Resumes paused voices of `key`, ramping up to `target`.
+    pub fn resume(&mut self, key: u32, target: f32, seconds: f32) {
+        for v in self.voices.iter_mut().filter(|v| v.key == key) {
+            v.paused = false;
+        }
+        self.fade(key, target, seconds, FadeEnd::Hold);
+    }
+
+    pub fn paused(&self, key: u32) -> bool {
+        self.voices.iter().any(|v| v.key == key && v.paused)
     }
 
     pub fn stop(&mut self, key: u32) {
@@ -87,8 +129,20 @@ impl Mixer {
     pub fn mix(&mut self, out: &mut [i16]) {
         let mut sum = vec![0f32; out.len()];
         self.voices.retain_mut(|v| {
+            if v.paused {
+                return true;
+            }
             let frames = v.clip.frames();
             for pair in sum.as_chunks_mut::<2>().0 {
+                let mut ended = None;
+                if let Some((step, target, end)) = v.fade {
+                    v.gain += step;
+                    if (step >= 0. && v.gain >= target) || (step < 0. && v.gain <= target) {
+                        v.gain = target;
+                        v.fade = None;
+                        ended = Some(end);
+                    }
+                }
                 let mut index = v.position as usize;
                 if let Some((start, end)) = v.clip.loop_frames {
                     let end = (end as usize).min(frames - 1);
@@ -110,6 +164,14 @@ impl Mixer {
                 pair[0] += (a[0] + (b[0] - a[0]) * t) * v.gain;
                 pair[1] += (a[1] + (b[1] - a[1]) * t) * v.gain;
                 v.position += v.step;
+                match ended {
+                    Some(FadeEnd::Stop) => return false,
+                    Some(FadeEnd::Pause) => {
+                        v.paused = true;
+                        return true;
+                    }
+                    _ => {}
+                }
             }
             true
         });
@@ -204,5 +266,24 @@ mod tests {
         m.mix(&mut out);
         let left: Vec<i16> = out.iter().step_by(2).copied().collect();
         assert_eq!(left, [1, 2, 3, 2, 3, 2]);
+    }
+
+    #[test]
+    fn fades_pause_resume_and_stop() {
+        let mut m = Mixer::default();
+        m.play(clip(&[1000; 64], 1, RATE), 5, 1., 1.);
+        // Two output frames to half gain, then pause.
+        m.fade(5, 0.5, 2. / RATE as f32, FadeEnd::Pause);
+        let mut out = [0i16; 6];
+        m.mix(&mut out);
+        assert_eq!(&out[..4], &[750, 750, 500, 500]);
+        assert!(m.paused(5));
+        m.resume(5, 1., 1. / RATE as f32);
+        let mut out = [0i16; 2];
+        m.mix(&mut out);
+        assert_eq!(out, [1000, 1000]);
+        m.fade(5, 0., 1. / RATE as f32, FadeEnd::Stop);
+        m.mix(&mut out);
+        assert_eq!(m.voices(), 0);
     }
 }

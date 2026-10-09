@@ -122,6 +122,16 @@ struct Config {
     /// The camp (pause) menu: menu/<lang>/camp.2ld (needs `menu`).
     #[serde(default)]
     camp: Option<Locator>,
+    /// The room's field and battle music (03system 'arif': tt08 set 0 =
+    /// bgm/music118 and music119).
+    #[serde(default)]
+    music: Option<RoomMusic>,
+}
+
+#[derive(Deserialize)]
+struct RoomMusic {
+    field: Locator,
+    battle: Locator,
 }
 
 /// Field-talk test NPC. In vanilla no field talk has Axel speaking, so
@@ -605,6 +615,8 @@ struct Loaded {
     effects: Option<EffectSources>,
     npc: Option<NpcSource>,
     camp: Option<CampSource>,
+    /// Field and battle music SCD bytes.
+    music: Option<[Vec<u8>; 2]>,
 }
 
 /// Camp (pause) menu sources: camp.2ld, the entries' labels and help
@@ -1383,6 +1395,25 @@ fn load(
         }
         _ => None,
     };
+    let music = match &config.music {
+        Some(m) => Some([
+            sound::load_bank(
+                source,
+                &m.field.index,
+                m.field.ordinal,
+                m.field.name_hash,
+                None,
+            )?,
+            sound::load_bank(
+                source,
+                &m.battle.index,
+                m.battle.ordinal,
+                m.battle.name_hash,
+                None,
+            )?,
+        ]),
+        None => None,
+    };
     let enemy = match &config.enemy {
         Some(e) => Some(load_enemy(
             source,
@@ -1412,6 +1443,7 @@ fn load(
         effects,
         npc,
         camp,
+        music,
     })
 }
 
@@ -1766,6 +1798,7 @@ fn setup(
         scene_sheet: 0,
         snapshot_sheet: None,
         hud_sheet: None,
+        stable_frames: 0,
     };
     let enemy_model = startup.enemy_model.take();
     if let Some(HudSource {
@@ -2176,22 +2209,27 @@ struct Compose {
     scene_sheet: usize,
     snapshot_sheet: Option<usize>,
     hud_sheet: Option<usize>,
+    /// Frames since the scene image last changed size (unattended
+    /// captures wait for a settled target).
+    stable_frames: u64,
 }
 
 /// The scene image follows the window's size.
 fn resize_scene(
-    compose: Option<Res<Compose>>,
+    compose: Option<ResMut<Compose>>,
     windows: Query<&Window>,
     mut images: ResMut<Assets<Image>>,
     mut frame: ResMut<Ui2dFrame>,
 ) {
-    let (Some(c), Ok(w)) = (compose, windows.single()) else {
+    let (Some(mut c), Ok(w)) = (compose, windows.single()) else {
         return;
     };
     let size = [w.physical_width().max(1), w.physical_height().max(1)];
+    c.stable_frames += 1;
     if frame.sheets[c.scene_sheet].size == size {
         return;
     }
+    c.stable_frames = 0;
     if let Some(mut image) = images.get_mut(&c.scene) {
         image.resize(Extent3d {
             width: size[0],
@@ -3774,8 +3812,21 @@ fn finish(
     mut time: ResMut<Time<Virtual>>,
     mut closed: MessageReader<bevy::window::WindowCloseRequested>,
     mut exit: MessageWriter<AppExit>,
+    music: Option<Res<MusicRes>>,
+    compose: Option<Res<Compose>>,
 ) {
-    game.rendered_frames += 1;
+    // Unattended runs warm up once the music decodes have finished (they
+    // compete with the first pipeline compiles).
+    let music_ready = music.is_none_or(|m| {
+        m.pending
+            .iter()
+            .flatten()
+            .all(|slot| slot.lock().map_or(true, |r| r.is_some()))
+    });
+    let settled = compose.is_none_or(|c| c.stable_frames >= AUTOPLAY_WARMUP_FRAMES);
+    if music_ready && settled {
+        game.rendered_frames += 1;
+    }
     if game.autoplay.is_some()
         && time.is_paused()
         && !game.capture_pending
@@ -4047,6 +4098,108 @@ fn camp_present(camp: Option<ResMut<CampRes>>, mut frame: ResMut<Ui2dFrame>) {
             camp::Sheet::Font => c.font_sheet,
         };
         frame.draws.push((slot, quads));
+    }
+}
+/// Field (slot 0) and battle (slot 1) music (FUN_140155840 / FUN_140155c30)
+/// and the battle state (FUN_1403ab6f0, DAT_142a11404) driving the switch.
+#[derive(Resource)]
+struct MusicRes {
+    pending: [Option<sound::MusicSlot>; 2],
+    clips: [Option<sound::Music>; 2],
+    started: bool,
+    battle: bool,
+    counter: u32,
+    since_reset: u32,
+}
+
+const MUSIC_KEYS: [u32; 2] = [9_000_000, 9_000_001];
+/// BGM slot level 0x3000 / 16383.
+const BGM_LEVEL: f32 = 0x3000 as f32 / 16383.;
+/// Fade units are 1/240 s: 0xf0 = 1 s, 0x1e0 = 2 s, 0x2d0 = 3 s.
+const BATTLE_IN: f32 = 1.;
+const FIELD_PAUSE: f32 = 2.;
+const BATTLE_OUT: f32 = 3.;
+const FIELD_RESUME: f32 = 2.;
+/// Battle when an enemy is within this horizontal distance; switch after
+/// the target differs 45 frames (to battle) or 120 (to field), at once
+/// in the first 30 frames after a reset.
+const BATTLE_DISTANCE: f32 = 1200.;
+
+fn music_tick(music: Option<ResMut<MusicRes>>, mut game: ResMut<Game>, audio: Res<Audio>) {
+    let Some(mut m) = music else { return };
+    let m = &mut *m;
+    let tick = game.tick;
+    for k in 0..2 {
+        if let Some(slot) = &m.pending[k]
+            && let Some(result) = slot.lock().ok().and_then(|mut r| r.take())
+        {
+            m.pending[k] = None;
+            match result {
+                Ok(music) => {
+                    game.event(serde_json::json!({"event":"music_decoded","slot":k,"tick":tick,"stats":music.stats}));
+                    m.clips[k] = Some(music);
+                }
+                Err(e) => game.event(
+                    serde_json::json!({"event":"music_failed","slot":k,"tick":tick,"error":e}),
+                ),
+            }
+        }
+    }
+    let Some(output) = &audio.output else { return };
+    // Room entry: the field track at full level, no fade.
+    if !m.started
+        && let Some(field) = &m.clips[0]
+    {
+        if let Ok(mut mixer) = output.mixer.lock() {
+            mixer.play(
+                field.clip.clone(),
+                MUSIC_KEYS[0],
+                BGM_LEVEL * field.volume,
+                1.,
+            );
+        }
+        m.started = true;
+        game.event(serde_json::json!({"event":"bgm_start","slot":0,"tick":tick}));
+    }
+    // FUN_1403ab6f0: the target state and its hysteresis.
+    let p = game.player.position;
+    let target = game.enemy.as_ref().is_some_and(|rt| {
+        let e = rt.enemy.position;
+        !matches!(
+            rt.enemy.current_act(),
+            Some(shadow::ActKind::Leave | shadow::ActKind::Dead)
+        ) && ((e[0] - p[0]).powi(2) + (e[2] - p[2]).powi(2)).sqrt() < BATTLE_DISTANCE
+    });
+    m.since_reset = m.since_reset.saturating_add(1);
+    if target != m.battle {
+        m.counter += 1;
+        let need = if target { 45 } else { 120 };
+        if m.since_reset <= 30 || m.counter >= need {
+            m.battle = target;
+            m.counter = 0;
+            let (Some(field), Some(battle)) = (&m.clips[0], &m.clips[1]) else {
+                return;
+            };
+            if let Ok(mut mixer) = output.mixer.lock() {
+                if target {
+                    mixer.fade(MUSIC_KEYS[0], 0., FIELD_PAUSE, audio_out::FadeEnd::Pause);
+                    mixer.stop(MUSIC_KEYS[1]);
+                    mixer.play(battle.clip.clone(), MUSIC_KEYS[1], 0., 1.);
+                    mixer.fade(
+                        MUSIC_KEYS[1],
+                        BGM_LEVEL * battle.volume,
+                        BATTLE_IN,
+                        audio_out::FadeEnd::Hold,
+                    );
+                } else {
+                    mixer.fade(MUSIC_KEYS[1], 0., BATTLE_OUT, audio_out::FadeEnd::Stop);
+                    mixer.resume(MUSIC_KEYS[0], BGM_LEVEL * field.volume, FIELD_RESUME);
+                }
+            }
+            game.event(serde_json::json!({"event":"battle_music","tick":tick,"battle":target}));
+        }
+    } else {
+        m.counter = 0;
     }
 }
 /// Double-click launch: with no arguments, read the three required paths
@@ -4371,6 +4524,17 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
     if let Some(talk) = talk {
         app.insert_resource(talk);
     }
+    if let Some(music) = loaded.music {
+        let pending = music.map(|bytes| Some(sound::decode_music_in_background(bytes)));
+        app.insert_resource(MusicRes {
+            pending,
+            clips: [None, None],
+            started: false,
+            battle: false,
+            counter: 0,
+            since_reset: 0,
+        });
+    }
     if let Some(c) = loaded.camp {
         game.event(serde_json::json!({"event":"camp_loaded","props":c.menu.layout.props.len(),
             "scenes":c.menu.layout.scenes.len(),"sequences":c.menu.layout.sequences.len(),
@@ -4430,7 +4594,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             (
                 read_pad,
                 camp_tick,
-                (simulate, talk_tick, effects_tick, hud_tick, play_sounds)
+                (simulate, talk_tick, effects_tick, hud_tick, play_sounds, music_tick)
                     .chain()
                     .run_if(field_running),
             )

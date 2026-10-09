@@ -106,3 +106,67 @@ impl Banks {
         }))
     }
 }
+
+/// A decoded music clip with its level and decode statistics.
+pub struct Music {
+    pub clip: audio_out::Clip,
+    pub volume: f32,
+    pub stats: serde_json::Value,
+}
+
+/// Decodes a music SCD (sound 0, codec 6) with level statistics.
+pub fn decode_music(bytes: Vec<u8>) -> Result<Music, String> {
+    let started = std::time::Instant::now();
+    let bank = package_reader::scd::read(&bytes).map_err(|e| e.to_string())?;
+    let sound = bank
+        .sound(0)
+        .map_err(|e| e.to_string())?
+        .ok_or("music sound absent")?;
+    let audio = *sound.audio.first().ok_or("music audio absent")?;
+    let pcm = bank
+        .decode(audio as usize)
+        .map_err(|e| e.to_string())?
+        .ok_or("empty music stream")?;
+    let ch = pcm.channels as usize;
+    let mut peak = vec![0i32; ch];
+    let mut energy = vec![0f64; ch];
+    for (i, &v) in pcm.samples.iter().enumerate() {
+        peak[i % ch] = peak[i % ch].max((v as i32).abs());
+        energy[i % ch] += (v as f64) * (v as f64);
+    }
+    let frames = pcm.frames();
+    let rms: Vec<f64> = energy
+        .iter()
+        .map(|e| (e / frames.max(1) as f64).sqrt())
+        .collect();
+    let stats = serde_json::json!({"channels":ch,"rate":pcm.rate,"frames":frames,
+        "loop":[pcm.loop_start,pcm.loop_end],"looped":sound.looped,"volume":sound.volume,
+        "peak":peak,"rms":rms,"decode_ms":started.elapsed().as_millis() as u64});
+    Ok(Music {
+        clip: audio_out::Clip {
+            channels: pcm.channels,
+            rate: pcm.rate,
+            loop_frames: sound.looped.then_some((pcm.loop_start, pcm.loop_end)),
+            samples: pcm.samples.into(),
+        },
+        volume: sound.volume,
+        stats,
+    })
+}
+
+/// Where a background music decode leaves its result.
+pub type MusicSlot = std::sync::Arc<std::sync::Mutex<Option<Result<Music, String>>>>;
+
+/// Decodes `bytes` on its own thread (the exe streams; a whole-track
+/// decode takes about a second here).
+pub fn decode_music_in_background(bytes: Vec<u8>) -> MusicSlot {
+    let slot = MusicSlot::default();
+    let out = slot.clone();
+    std::thread::spawn(move || {
+        let decoded = decode_music(bytes);
+        if let Ok(mut r) = out.lock() {
+            *r = Some(decoded);
+        }
+    });
+    slot
+}
