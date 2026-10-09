@@ -4,7 +4,7 @@
 //! context alpha), and an optional text drawn by FUN_14016ae30 in font 1
 //! (sys). Sprites update and draw in ascending priority, then creation
 //! order.
-use crate::command::{self, Font};
+use crate::command::Font;
 use crate::dialogue;
 use package_reader::sequence::{Modifiers, Player, Quad, Sequence, color};
 
@@ -69,6 +69,8 @@ pub struct Sprite {
     pub dead: bool,
     /// Set by a close: the sprite dies when its play-once group ends.
     pub die_when_done: bool,
+    /// Player scale multipliers (+0x178 / +0x17c; gauge fills).
+    pub scale: [f32; 2],
 }
 
 #[derive(Default)]
@@ -128,6 +130,7 @@ impl Sprites {
             text,
             dead: false,
             die_when_done: false,
+            scale: [1.; 2],
         });
         Id(self.list.len() - 1)
     }
@@ -210,6 +213,8 @@ impl Sprites {
         let s = &self.list[i];
         let mut m = Modifiers {
             color: s.multiplier,
+            scale_x: s.scale[0],
+            scale_y: s.scale[1],
             ..Modifiers::default()
         };
         if s.inherit_alpha
@@ -218,7 +223,7 @@ impl Sprites {
             let pm = self.modifiers(seq, p.0);
             let ps = &self.list[p.0];
             let a = seq.context_color(&ps.player, &pm).map_or(1., |c| c[3]);
-            m.color = [1., 1., 1., a];
+            m.color = [s.multiplier[0], s.multiplier[1], s.multiplier[2], a];
         }
         m
     }
@@ -251,10 +256,20 @@ impl Sprites {
 
     /// The draw list: art, then text, per sprite in priority order.
     pub fn draw(&self, seq: &Sequence, font: &Font) -> Vec<(Sheet, Vec<Quad>)> {
+        self.draw_where(seq, font, |_| true)
+    }
+
+    /// `draw` for the sprites whose priority passes `keep`.
+    pub fn draw_where(
+        &self,
+        seq: &Sequence,
+        font: &Font,
+        keep: impl Fn(u32) -> bool,
+    ) -> Vec<(Sheet, Vec<Quad>)> {
         let mut out = Vec::new();
         for i in self.order() {
             let s = &self.list[i];
-            if s.dead || s.parent.is_some_and(|p| self.list[p.0].dead) {
+            if !keep(s.prio) || s.dead || s.parent.is_some_and(|p| self.list[p.0].dead) {
                 continue;
             }
             let id = Id(i);
@@ -286,27 +301,106 @@ impl Sprites {
                 };
                 rgba = std::array::from_fn(|k| (rgba[k] * m.color[k]).min(255. / 128.));
             }
-            let scale = t.size / FONT_REFERENCE;
-            let pitch = (FONT_REFERENCE * scale).floor() + LINE_SPACING + g.ui_padding as f32;
-            let x = t.offset[0].trunc() + b[0] + c[0];
-            let y = t.offset[1].trunc() + b[1] + c[1];
-            for (k, line) in lines(&t.bytes).iter().enumerate() {
-                let w = command::text_width(line, font, t.size);
-                let lx = match t.align {
-                    1 => x - w,
-                    2 => x - w / 2.,
-                    _ => x,
-                };
-                out.push((
-                    Sheet::Font,
-                    command::text_quads_sized(line, [lx, y + pitch * k as f32], rgba, font, t.size),
-                ));
-            }
+            let x = (t.offset[0].trunc() + b[0] + c[0]).trunc();
+            let y = (t.offset[1].trunc() + b[1] + c[1]).trunc();
+            out.push((
+                Sheet::Font,
+                text_quads(
+                    &t.bytes,
+                    [x, y],
+                    t.size,
+                    t.align,
+                    g.ui_padding as f32,
+                    rgba,
+                    true,
+                    font,
+                ),
+            ));
         }
         out
     }
 }
 
+/// System font text as FUN_1403aed80 / FUN_1403afd90 / FUN_1403b0280 /
+/// FUN_1404070f0 lay it out (fonts 0..2 share the sys glyphs, cell 18x24,
+/// reference 18, spacing 5): `origin` is the top of the first line; each
+/// glyph's cell bottom sits at line top + lineH + 2. Alignment 1 / 2 moves
+/// left by the widest line's width / half of it. Font 1 (`shadow`) draws a
+/// black glyph at (+2, +1) with half alpha under each glyph.
+#[allow(clippy::too_many_arguments)]
+pub fn text_quads(
+    bytes: &[u8],
+    origin: [f32; 2],
+    size: f32,
+    align: u8,
+    extra: f32,
+    rgba: [f32; 4],
+    shadow: bool,
+    font: &Font,
+) -> Vec<Quad> {
+    let k = size / FONT_REFERENCE;
+    let line_h = ((FONT_REFERENCE * k + 0.5) as i32).max((FONT_REFERENCE * k) as i32) as f32;
+    let (qw, qh) = (
+        ((18. * 16. * k) as i32) as f32 / 16.,
+        ((24. * 16. * k) as i32) as f32 / 16.,
+    );
+    let narrow = (k * 6. + 0.5) as i32 as f32;
+    let advance = |w: u8| (w as f64 * k as f64 + 0.5) as i32 as f32;
+    let text: Vec<u8> = bytes.iter().copied().take_while(|&b| b != 0x10).collect();
+    let lines = lines(&text);
+    let width = |line: &[u8]| -> f32 {
+        (0..line.len())
+            .map(|i| match line[i] {
+                0x01 | 0x20 => narrow,
+                _ => dialogue::glyph_index(line, i)
+                    .and_then(|g| font.widths.get(g))
+                    .map_or(0., |&w| advance(w)),
+            })
+            .sum()
+    };
+    let w = lines.iter().map(|l| width(l)).fold(0., f32::max);
+    let x0 = match align {
+        1 => origin[0] - w,
+        2 => origin[0] - (w as i32 >> 1) as f32,
+        _ => origin[0],
+    };
+    let shadow_rgba = [0., 0., 0., ((rgba[3] * 128.) as i32 >> 1) as f32 / 128.];
+    let mut out = Vec::new();
+    for (j, line) in lines.iter().enumerate() {
+        let top = origin[1] + j as f32 * (line_h + LINE_SPACING + extra) + line_h + 2. - qh;
+        let mut x = x0;
+        for i in 0..line.len() {
+            if matches!(line[i], 0x01 | 0x20) {
+                x += narrow;
+                continue;
+            }
+            let Some(g) = dialogue::glyph_index(line, i) else {
+                continue;
+            };
+            let Some(&gw) = font.widths.get(g) else {
+                continue;
+            };
+            let (u, v) = (((g % 280) % 28) as i32 * 18, ((g % 280) / 28) as i32 * 24);
+            let quad = |dx: f32, dy: f32, colour: [f32; 4]| Quad {
+                corners: [
+                    [x + dx, top + dy],
+                    [x + dx + qw, top + dy],
+                    [x + dx, top + dy + qh],
+                    [x + dx + qw, top + dy + qh],
+                ],
+                uv: [u, v, u + 18, v + 24],
+                colors: [colour; 4],
+                blend: 0,
+            };
+            if shadow {
+                out.push(quad(2., 1., shadow_rgba));
+            }
+            out.push(quad(0., 0., rgba));
+            x += advance(gw);
+        }
+    }
+    out
+}
 /// Tz::LightCur's motion (FUN_1402faf40 / FUN_1402fb3f0 / FUN_14034b890):
 /// the first attach snaps; a re-target glides from the last drawn position
 /// over 30 ticks with f(s) = 2.74981(s^3 - 2s^2 + s) + (3s^2 - 2s^3).
@@ -323,25 +417,34 @@ pub fn glide(s: f32) -> f32 {
 }
 
 impl LightCur {
+    pub fn new(id: Id) -> Self {
+        Self {
+            id: Some(id),
+            ..Self::default()
+        }
+    }
+
     pub fn retarget(&mut self) {
         self.from = self.drawn;
         self.tick = 0.;
     }
 
-    /// Places the orb for this frame toward `target`.
+    /// Places the orb for this frame toward `target`: the glide clock
+    /// advances (clamped at 30) before the draw, and each axis moves by
+    /// (int)(f(t/30) x distance).
     pub fn place(&mut self, sprites: &mut Sprites, target: [f32; 2]) {
         let Some(id) = self.id else { return };
+        self.tick = (self.tick + 1.).min(30.);
         let at = match self.from {
-            Some(from) if self.tick < 30. => {
+            Some(from) => {
                 let f = glide(self.tick / 30.);
                 [
-                    from[0] + (target[0] - from[0]) * f,
-                    from[1] + (target[1] - from[1]) * f,
+                    from[0] + ((target[0] - from[0]) * f).trunc(),
+                    from[1] + ((target[1] - from[1]) * f).trunc(),
                 ]
             }
-            _ => target,
+            None => target,
         };
-        self.tick += 1.;
         self.drawn = Some(at);
         sprites.get_mut(id).base = at;
     }

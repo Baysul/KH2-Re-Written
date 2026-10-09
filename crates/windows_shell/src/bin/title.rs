@@ -186,7 +186,7 @@ fn setup(
         }
     }
     s.white = frame.add_sheet(&mut images, vec![255; 4], [1, 1], 1.);
-    s.font_sheet = frame.add_sheet(
+    s.font_sheet = frame.add_font_sheet(
         &mut images,
         std::mem::take(&mut s.font.rgba),
         s.font.size,

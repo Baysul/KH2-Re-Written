@@ -61,7 +61,7 @@ fn next(bytes: &[u8], i: usize) -> usize {
 
 /// International glyph index (FUN_1403ae520): byte − 0x20, with 0x46 read
 /// as 0x34 unless a neighbour is 0x66.
-fn glyph_index(bytes: &[u8], i: usize) -> Option<usize> {
+pub(crate) fn glyph_index(bytes: &[u8], i: usize) -> Option<usize> {
     let b = *bytes.get(i)?;
     if b < 0x20 {
         return None;

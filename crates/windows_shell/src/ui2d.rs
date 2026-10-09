@@ -9,7 +9,7 @@
 //! canvas.
 use bevy::{
     asset::{AssetPath, RenderAssetUsages, embedded_asset, embedded_path},
-    camera::{CompositingSpace, ScalingMode},
+    camera::{CameraOutputMode, CompositingSpace, ScalingMode, visibility::RenderLayers},
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
     image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology},
@@ -31,7 +31,10 @@ pub const HEIGHT: f32 = 416.;
 const CENTRE_X: f32 = 256.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct BlendKey(u8);
+pub struct BlendKey {
+    blend: u8,
+    luminance: bool,
+}
 
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
 #[bind_group_data(BlendKey)]
@@ -40,11 +43,16 @@ pub struct LayoutMaterial {
     #[sampler(1)]
     pub texture: Handle<Image>,
     pub blend: u8,
+    /// Font pixel shader (ps 029): RGB = luminance of the texel x colour.
+    pub luminance: bool,
 }
 
 impl From<&LayoutMaterial> for BlendKey {
     fn from(m: &LayoutMaterial) -> Self {
-        BlendKey(m.blend)
+        BlendKey {
+            blend: m.blend,
+            luminance: m.luminance,
+        }
     }
 }
 
@@ -64,7 +72,7 @@ impl Material2d for LayoutMaterial {
         _layout: &MeshVertexBufferLayoutRef,
         key: Material2dKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        let color = match key.bind_group_data.0 {
+        let color = match key.bind_group_data.blend {
             1 => BlendComponent {
                 src_factor: BlendFactor::SrcAlpha,
                 dst_factor: BlendFactor::One,
@@ -81,12 +89,25 @@ impl Material2d for LayoutMaterial {
                 operation: BlendOperation::Add,
             },
         };
-        let alpha = BlendComponent {
-            src_factor: BlendFactor::Zero,
-            dst_factor: BlendFactor::One,
-            operation: BlendOperation::Add,
+        // Coverage for overlay layers (premultiplied "over"); additive and
+        // subtractive draws leave it unchanged.
+        let alpha = if key.bind_group_data.blend == 0 {
+            BlendComponent {
+                src_factor: BlendFactor::One,
+                dst_factor: BlendFactor::OneMinusSrcAlpha,
+                operation: BlendOperation::Add,
+            }
+        } else {
+            BlendComponent {
+                src_factor: BlendFactor::Zero,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Add,
+            }
         };
         if let Some(fragment) = descriptor.fragment.as_mut() {
+            if key.bind_group_data.luminance {
+                fragment.shader_defs.push("LUMINANCE".into());
+            }
             for target in fragment.targets.iter_mut().flatten() {
                 target.blend = Some(BlendState { color, alpha });
             }
@@ -129,6 +150,7 @@ pub struct Sheet {
     pub image: Handle<Image>,
     pub size: [u32; 2],
     pub texel_scale: f32,
+    pub luminance: bool,
 }
 
 /// The sheets and this frame's draw list, in draw order.
@@ -170,8 +192,22 @@ impl Ui2dFrame {
             image: images.add(image),
             size,
             texel_scale,
+            luminance: false,
         });
         self.sheets.len() - 1
+    }
+
+    /// A system-font sheet, drawn with the font pixel shader.
+    pub fn add_font_sheet(
+        &mut self,
+        images: &mut Assets<Image>,
+        rgba: Vec<u8>,
+        size: [u32; 2],
+        texel_scale: f32,
+    ) -> usize {
+        let slot = self.add_sheet(images, rgba, size, texel_scale);
+        self.sheets[slot].luminance = true;
+        slot
     }
 
     /// Re-points a sheet slot at another upload (e.g. a device-glyph swap).
@@ -203,22 +239,37 @@ impl Ui2dFrame {
 #[derive(Component)]
 struct Slot;
 
+/// The layer only the 2D layout camera renders, so other 2D cameras (the
+/// test room's HUD) do not draw these meshes at their own scale.
+const LAYER: usize = 7;
+
 fn spawn_camera(mut commands: Commands, settings: Res<CameraSettings>) {
     commands.spawn((
         Camera2d,
-        Camera {
-            order: settings.order,
-            clear_color: if settings.overlay {
-                ClearColorConfig::None
-            } else {
-                ClearColorConfig::Default
-            },
-            ..default()
+        if settings.overlay {
+            // A gamma-space layer cleared transparent, laid over the
+            // earlier cameras as premultiplied colour [approximation: the
+            // exe blends 2D straight onto the gamma framebuffer].
+            Camera {
+                order: settings.order,
+                clear_color: ClearColorConfig::Custom(Color::NONE),
+                output_mode: CameraOutputMode::Write {
+                    blend_state: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    clear_color: ClearColorConfig::None,
+                },
+                ..default()
+            }
+        } else {
+            Camera {
+                order: settings.order,
+                ..default()
+            }
         },
         Msaa::Off,
         Tonemapping::None,
         DebandDither::Disabled,
         CompositingSpace::Srgb,
+        RenderLayers::layer(LAYER),
         Projection::Orthographic(OrthographicProjection {
             // Layout units are not square: 682.67 x 416 fills the 16:9
             // window (title-01 §3.1).
@@ -299,6 +350,7 @@ fn present(
                 materials.add(LayoutMaterial {
                     texture: frame.sheets[*sheet].image.clone(),
                     blend: *blend,
+                    luminance: frame.sheets[*sheet].luminance,
                 })
             })
             .clone();
@@ -321,6 +373,7 @@ fn present(
                     MeshMaterial2d(material),
                     Transform::from_xyz(0., 0., z),
                     Visibility::Visible,
+                    RenderLayers::layer(LAYER),
                 ));
             }
         }

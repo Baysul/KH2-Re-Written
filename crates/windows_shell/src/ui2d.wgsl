@@ -9,6 +9,10 @@
 @fragment
 fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     var c = textureSample(sheet, sheet_sampler, mesh.uv);
+#ifdef LUMINANCE
+    // Font pixel shader (ps 029): grey from the texel's weighted sum.
+    c = vec4(vec3(dot(c.rgb, vec3(0.299, 0.596, 0.211))), c.a);
+#endif
 #ifdef VERTEX_COLORS
     c = c * mesh.color;
 #endif

@@ -37,11 +37,16 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use windows_shell::camp::{self, Camp};
 use windows_shell::command::{self, CommandMenu, Decision, Item};
 use windows_shell::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
 use windows_shell::hud::{self, Sheet, SystemFont};
+use windows_shell::input;
+use windows_shell::layout2d::{self, Menu2ld};
+use windows_shell::pad::{self, Pad};
 use windows_shell::room::{CollisionTriangle, LoadedRoom, load_rooms, mesh, rgba_image, upload};
 use windows_shell::sound::{self, Banks};
+use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
 
 #[derive(Deserialize)]
 struct Locator {
@@ -114,6 +119,9 @@ struct Config {
     /// `system` for the text colour).
     #[serde(default)]
     npc: Option<NpcConfig>,
+    /// The camp (pause) menu: menu/<lang>/camp.2ld (needs `menu`).
+    #[serde(default)]
+    camp: Option<Locator>,
 }
 
 /// Field-talk test NPC. In vanilla no field talk has Axel speaking, so
@@ -595,7 +603,32 @@ struct Loaded {
     banks: Banks,
     effects: Option<EffectSources>,
     npc: Option<NpcSource>,
+    camp: Option<CampSource>,
 }
+
+/// Camp (pause) menu sources: camp.2ld, the entries' labels and help
+/// lines (sys.bar), and the system font.
+struct CampSource {
+    menu: Menu2ld,
+    entries: Vec<camp::Entry>,
+    font: SystemFont,
+    /// "LV", "HP", "MP" and Sora's name (0xb9fc..0xb9fe, 0x851f).
+    labels: [Vec<u8>; 3],
+    name: Vec<u8>,
+}
+
+/// Camp entries (table 0x1405badb0): id, label and help ids. The test
+/// room offers Items, Abilities, Customize, Party, Status, Jiminy's
+/// Journal and Config [test-room choice: the menu flags come from a save].
+const CAMP_ENTRIES: [(u8, u32, u32); 7] = [
+    (0, 0x844b, 0xb70d),
+    (1, 0x844d, 0xb70f),
+    (2, 0x8451, 0xb713),
+    (3, 0x844e, 0xb710),
+    (4, 0x844f, 0xb711),
+    (5, 0x8450, 0xb712),
+    (7, 0xb617, 0xb715),
+];
 
 /// One enemy clip: skinned positions, HIT-bone matrices and root
 /// translation per tick, plus its loop start.
@@ -1294,6 +1327,61 @@ fn load(
         }
         None => None,
     };
+    let camp = match (&config.camp, &config.menu) {
+        (Some(l), Some(m)) => {
+            let menu = layout2d::load(source, &l.index, l.ordinal, l.name_hash)?;
+            let ids: Vec<u32> = CAMP_ENTRIES
+                .iter()
+                .flat_map(|&(_, label, help)| [label, help])
+                .collect();
+            let texts = hud::load_messages(
+                source,
+                &m.messages.index,
+                m.messages.ordinal,
+                m.messages.name_hash,
+                &ids,
+            )?;
+            let entries = CAMP_ENTRIES
+                .iter()
+                .zip(texts.chunks(2))
+                .map(|(&(id, _, _), t)| camp::Entry {
+                    id,
+                    label: t[0].clone(),
+                    help: t[1].clone(),
+                })
+                .collect();
+            let font = hud::load_system_font(
+                source,
+                (
+                    &m.font_image.index,
+                    m.font_image.ordinal,
+                    m.font_image.name_hash,
+                ),
+                (
+                    &m.font_info.index,
+                    m.font_info.ordinal,
+                    m.font_info.name_hash,
+                ),
+            )?;
+            let mut status = hud::load_messages(
+                source,
+                &m.messages.index,
+                m.messages.ordinal,
+                m.messages.name_hash,
+                &[0xb9fc, 0xb9fd, 0xb9fe, 0x851f],
+            )?;
+            let name = status.pop().unwrap_or_default();
+            let labels = [status[0].clone(), status[1].clone(), status[2].clone()];
+            Some(CampSource {
+                menu,
+                entries,
+                font,
+                labels,
+                name,
+            })
+        }
+        _ => None,
+    };
     let enemy = match &config.enemy {
         Some(e) => Some(load_enemy(
             source,
@@ -1322,6 +1410,7 @@ fn load(
         banks,
         effects,
         npc,
+        camp,
     })
 }
 
@@ -2129,9 +2218,9 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 19] = [
+const AUTOPLAY_CAPTURES: [u64; 26] = [
     90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1198, 1300, 1500,
-    1700,
+    1700, 1815, 1830, 1845, 1880, 1925, 1940, 1985,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -2143,7 +2232,7 @@ const AUTOPLAY_TALK_END: u64 = 260;
 /// in earlier unattended runs.
 const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 /// The last stretch leaves Sora standing so an enemy can attack him.
-const AUTOPLAY_END: u64 = 1800;
+const AUTOPLAY_END: u64 = 2000;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(
@@ -3784,6 +3873,202 @@ fn finish(
     }
 }
 
+/// The camp (pause) menu: its sources, the open menu and the menu pad.
+#[derive(Resource)]
+struct CampRes {
+    menu: Menu2ld,
+    entries: Vec<camp::Entry>,
+    font: SystemFont,
+    labels: [Vec<u8>; 3],
+    name: Vec<u8>,
+    open: Option<Camp>,
+    /// Remembered entry (DAT_140beec30).
+    cursor: usize,
+    pad: Pad,
+    /// Sheet slots: camp art per glyph variant, then the font.
+    art: [Option<usize>; 4],
+    font_sheet: usize,
+    glyph: usize,
+    keyboard_last: bool,
+}
+
+/// Unattended camp check after the combat plan: open, move, close.
+const AUTOPLAY_CAMP: [(u64, u64); 5] = [
+    (1810, 0x2),
+    (1840, 0x20),
+    (1870, 0x20),
+    (1890, 0x10),
+    (1920, 0x8),
+];
+
+fn camp_setup(
+    camp: Option<ResMut<CampRes>>,
+    mut frame: ResMut<Ui2dFrame>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(mut c) = camp else { return };
+    let c = &mut *c;
+    for n in 0..4 {
+        if let Some((t, scale)) = c.menu.texture_for(0, n) {
+            let (rgba, size) = (t.rgba.clone(), t.size);
+            c.art[n] = Some(frame.add_sheet(&mut images, rgba, size, scale));
+        }
+    }
+    c.font_sheet = frame.add_font_sheet(
+        &mut images,
+        std::mem::take(&mut c.font.rgba),
+        c.font.size,
+        c.font.texel_scale as f32,
+    );
+}
+
+fn field_running(camp: Option<Res<CampRes>>) -> bool {
+    camp.is_none_or(|c| c.open.is_none())
+}
+
+/// START (logical 0x2 in the field's pad mode) opens the camp
+/// (FUN_1401572b0 → FUN_1402e4950(0)); while it runs the field is not
+/// stepped, the menu reads pad mode 7 and the frame counter keeps going.
+fn camp_tick(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    pads: Query<(&Gamepad, Option<&Name>)>,
+    camp: Option<ResMut<CampRes>>,
+    mut game: ResMut<Game>,
+    mut audio: ResMut<Audio>,
+    hud: Option<Res<Hud>>,
+) {
+    let Some(mut c) = camp else { return };
+    let c = &mut *c;
+    let (data, keyboard, glyph) = input::read_devices(&keys, &mouse, 0., &pads);
+    if keyboard {
+        c.keyboard_last = true;
+    } else if glyph.is_some() {
+        c.keyboard_last = false;
+    }
+    let g = if c.keyboard_last {
+        0
+    } else {
+        glyph.map_or(c.glyph, usize::from)
+    };
+    if c.art[g].is_some() {
+        c.glyph = g;
+    }
+    let mode = if c.open.is_some() {
+        pad::MODE_TITLE
+    } else {
+        pad::MODE_FIELD
+    };
+    let tick = game.tick;
+    let logical = if game.autoplay.is_some() {
+        AUTOPLAY_CAMP
+            .iter()
+            .filter(|(at, _)| *at == tick)
+            .fold(0, |acc, &(_, b)| {
+                // Menu START is 0x100 in mode 7.
+                acc | if c.open.is_some() && b == 0x2 {
+                    0x100
+                } else {
+                    b
+                }
+            })
+    } else {
+        pad::logical(pad::raw(&data), mode)
+    };
+    c.pad.update(logical, 1.);
+    let mut sounds = Vec::new();
+    let layout = &c.menu.layout;
+    // Test-room values: no munny, level 1, the room's HP/MP; the clock is
+    // the room's frame count.
+    let (hp, max_hp, mp, max_mp) = match (&game.enemy, &hud) {
+        (Some(rt), Some(h)) => (
+            rt.sora_hp,
+            rt.sora_target.max_hp,
+            h.stats.mp,
+            h.stats.max_mp,
+        ),
+        (None, Some(h)) => (h.stats.hp, h.stats.max_hp, h.stats.mp, h.stats.max_mp),
+        _ => (1, 1, 0, 1),
+    };
+    let panels = camp::Panels {
+        munny: 0,
+        time_frames: tick as u32,
+        members: vec![camp::Member {
+            name: c.name.clone(),
+            level: 1,
+            hp,
+            max_hp,
+            mp,
+            max_mp,
+        }],
+        labels: c.labels.clone(),
+    };
+    match c.open.as_mut() {
+        None => {
+            if c.pad.pressed & 0x2 != 0 && !game.talking {
+                let (menu, s) = Camp::open(layout, c.entries.clone(), c.cursor, &panels);
+                c.open = Some(menu);
+                sounds = s;
+                game.tick += 1;
+                game.event(serde_json::json!({"event":"camp_open","tick":tick}));
+            }
+        }
+        Some(menu) => {
+            sounds = menu.frame(layout, c.pad.pressed, c.pad.repeat, &panels);
+            game.tick += 1;
+            if menu.closed {
+                c.cursor = menu.cursor;
+                c.open = None;
+                game.event(serde_json::json!({"event":"camp_close","tick":tick}));
+            }
+        }
+    }
+    for n in sounds {
+        game.event(serde_json::json!({"event":"sound","tick":tick,"id":n,"cause":"camp"}));
+        let Audio { output, banks, .. } = &mut *audio;
+        if let (Some(output), Ok(Some(r))) = (output.as_ref(), banks.request(n))
+            && let Ok(mut mixer) = output.mixer.lock()
+        {
+            for layer in r.layers {
+                mixer.play(layer, n, r.volume, 1.);
+            }
+        }
+    }
+}
+
+/// The camp over the frozen field; the field HUD is hidden meanwhile
+/// [inferred].
+fn camp_present(
+    camp: Option<ResMut<CampRes>>,
+    mut frame: ResMut<Ui2dFrame>,
+    mut overlay: Query<&mut Visibility, With<HudOverlay>>,
+) {
+    let Some(mut c) = camp else { return };
+    let c = &mut *c;
+    let hidden = c.open.is_some();
+    for mut v in &mut overlay {
+        let want = if hidden {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if *v != want {
+            *v = want;
+        }
+    }
+    let Some(menu) = c.open.as_mut() else { return };
+    let font = command::Font {
+        widths: &c.font.widths,
+    };
+    let art = c.art[c.glyph].or(c.art[0]).expect("camp art");
+    for (sheet, quads) in menu.draw(&c.menu.layout, &font) {
+        let slot = match sheet {
+            camp::Sheet::Art => art,
+            camp::Sheet::Font => c.font_sheet,
+        };
+        frame.draws.push((slot, quads));
+    }
+}
 /// Double-click launch: with no arguments, read the three required paths
 /// (and optional extra options) from a private launch file outside Git.
 fn launch_file_args(name: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
@@ -4105,6 +4390,26 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
     if let Some(talk) = talk {
         app.insert_resource(talk);
     }
+    if let Some(c) = loaded.camp {
+        game.event(serde_json::json!({"event":"camp_loaded","props":c.menu.layout.props.len(),
+            "scenes":c.menu.layout.scenes.len(),"sequences":c.menu.layout.sequences.len(),
+            "replacements":c.menu.replacements.iter().map(|r| r.as_ref().map(|t| t.size)).collect::<Vec<_>>(),
+            "entries":c.entries.len()}));
+        app.insert_resource(CampRes {
+            menu: c.menu,
+            entries: c.entries,
+            font: c.font,
+            labels: c.labels,
+            name: c.name,
+            open: None,
+            cursor: 0,
+            pad: Pad::default(),
+            art: [None; 4],
+            font_sheet: 0,
+            glyph: 0,
+            keyboard_last: true,
+        });
+    }
     Ok(app
         .insert_resource(game)
         .insert_resource(Startup {
@@ -4134,11 +4439,21 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             close_when_requested: false,
             ..default()
         }))
-        .add_systems(Startup, (setup, pause_for_autoplay))
+        .add_plugins(Ui2dPlugin {
+            order: 2,
+            overlay: true,
+        })
+        .add_systems(Startup, (setup, pause_for_autoplay, camp_setup))
         .add_systems(PreUpdate, gather_input.after(bevy::input::InputSystems))
         .add_systems(
             FixedUpdate,
-            (simulate, talk_tick, effects_tick, hud_tick, play_sounds).chain(),
+            (
+                camp_tick,
+                (simulate, talk_tick, effects_tick, hud_tick, play_sounds)
+                    .chain()
+                    .run_if(field_running),
+            )
+                .chain(),
         )
         .add_systems(
             Update,
@@ -4150,6 +4465,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
                 present_npc,
                 present_effects,
                 hud_present,
+                camp_present,
                 finish,
             )
                 .chain(),
