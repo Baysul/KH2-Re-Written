@@ -40,6 +40,7 @@ use windows_shell::command::{self, CommandMenu, Decision, Item};
 use windows_shell::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
 use windows_shell::hud::{self, Sheet, SystemFont};
 use windows_shell::room::{CollisionTriangle, LoadedRoom, load_rooms, mesh, rgba_image, upload};
+use windows_shell::sound::{self, Banks};
 
 #[derive(Deserialize)]
 struct Locator {
@@ -100,6 +101,18 @@ struct Config {
     /// Optional spawn (x, probe height, z) in scene coordinates.
     #[serde(default)]
     spawn: Option<[f32; 3]>,
+    /// Sound banks: `se/seNNN.win32.scd` entries, or object archives with
+    /// the name of their `se/obj/seNNN` replacement asset.
+    #[serde(default)]
+    sounds: Vec<BankSource>,
+}
+
+#[derive(Deserialize)]
+struct BankSource {
+    #[serde(flatten)]
+    locator: Locator,
+    #[serde(default)]
+    replacement: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -196,7 +209,36 @@ struct ClipPoses {
     hits: Vec<(u32, u32, u16, u8)>,
     /// Sora's HIT-bone matrices per frame (model space, root removed).
     body: Vec<HashMap<usize, Mat4>>,
+    /// Weapon motion frame trigger 8 ("play SE"): (clip tick, sound id).
+    sounds: Vec<(u32, u32)>,
 }
+
+/// Frame trigger 8 (FUN_14040dd70): id = p0·1000 + p1; with more than
+/// three parameters and p3 set, only when p0 is the equipped weapon's bank.
+fn sound_triggers(selected: &motion::SelectedMotion, weapon_bank: i16) -> Vec<(u32, u32)> {
+    selected
+        .triggers
+        .iter()
+        .flat_map(|t| &t.records.frames)
+        .filter(|f| f.trigger == 8 && f.parameters.len() >= 2)
+        .filter(|f| {
+            f.parameters.len() <= 3 || f.parameters[3] == 0 || f.parameters[0] == weapon_bank
+        })
+        .filter(|f| f.parameters[0] >= 0 && f.parameters[1] >= 0)
+        .map(|f| {
+            (
+                f.frame.max(0) as u32,
+                f.parameters[0] as u32 * 1000 + f.parameters[1] as u32,
+            )
+        })
+        .collect()
+}
+
+/// Kingdom Key sound bank (its SEB stub's bank number, sound-01 §1.1).
+const WEAPON_BANK: i16 = 500;
+/// System bank (se000, engine slot 2) sounds: cursor move, low-HP alarm.
+const SE_CURSOR: u32 = 1;
+const SE_LOW_HP: u32 = 9;
 
 #[derive(Resource)]
 struct Game {
@@ -231,6 +273,18 @@ struct Game {
     show_collision: bool,
     rendered_frames: u64,
     autoplay_failed: bool,
+    /// Sound requests raised this tick: (id, cause).
+    sound_queue: Vec<(u32, &'static str)>,
+    /// Action start tick and clip tick already scanned for sound triggers.
+    sound_frame: Option<(u64, u32)>,
+}
+
+/// Sound output and banks; requests resolve by id (bank·1000 + sound).
+#[derive(Resource)]
+struct Audio {
+    output: Option<audio_out::Output>,
+    banks: Banks,
+    alarm: bool,
 }
 
 #[derive(Component)]
@@ -413,6 +467,7 @@ struct Loaded {
     summary: serde_json::Value,
     hud: Option<HudSource>,
     enemy: Option<EnemySource>,
+    banks: Banks,
 }
 
 /// One enemy clip: skinned positions, HIT-bone matrices and root
@@ -424,6 +479,8 @@ struct EnemyClip {
     loop_start: u32,
     /// Attack windows (range trigger 10): start, end, ATKP id, group.
     windows: Vec<(u32, u32, u16, u8)>,
+    /// Frame trigger 8 sounds: (tick, sound id).
+    sounds: Vec<(u32, u32)>,
 }
 
 struct EnemyClips(HashMap<usize, EnemyClip>);
@@ -472,6 +529,10 @@ struct EnemyRuntime {
     /// Last frame's attack sphere centres by (window instance, sphere).
     previous: HashMap<(u64, usize), Vec3>,
     indices: Vec<Vec<u32>>,
+    /// ATKP HitSound by id (Keyblade, then claws).
+    hit_sounds: HashMap<u16, i32>,
+    /// Motion serial and tick already scanned for sound triggers.
+    sound_tick: Option<(u32, u32)>,
 }
 
 #[derive(Component)]
@@ -495,6 +556,7 @@ struct EnemySource {
     shadow_attacker: combat::AttackerStats,
     sora_target: combat::TargetStats,
     sora_body: Vec<(usize, Vec3, f32, bool)>,
+    hit_sounds: HashMap<u16, i32>,
 }
 
 /// Walkable collision levels (8-unit height bins) by XZ area, largest first,
@@ -894,6 +956,10 @@ fn load(
                     blade,
                     hits,
                     body,
+                    sounds: weapon_motions
+                        .get(&selected.slot)
+                        .map(|own| sound_triggers(own, WEAPON_BANK))
+                        .unwrap_or_default(),
                 });
                 by_slot.insert(selected.slot, clip_poses.len() - 1);
                 clip_poses.len() - 1
@@ -1042,6 +1108,17 @@ fn load(
         "missing":["scale channels","up-vector/path/camera constraint types","limiter damping","root rotation","weapon constraint motion","hit detection","enemies","measured installed timing"],
         "inferred_rules":["direction constraints aim local +X","two-joint IK bends the middle joint about local Z","expression list/condition semantics","Hermite tangents scaled by key span","field/battle mode switch with 6 s disarm timeout"],
         "gameplay_verified":false});
+    let mut banks = Banks::default();
+    for b in &config.sounds {
+        let l = &b.locator;
+        banks.insert(sound::load_bank(
+            source,
+            &l.index,
+            l.ordinal,
+            l.name_hash,
+            b.replacement.as_deref(),
+        )?)?;
+    }
     let enemy = match &config.enemy {
         Some(e) => Some(load_enemy(
             source,
@@ -1067,6 +1144,7 @@ fn load(
         summary,
         hud,
         enemy,
+        banks,
     })
 }
 
@@ -1208,13 +1286,16 @@ fn load_enemy(
                 root,
                 loop_start: clip.loop_start,
                 windows,
+                sounds: sound_triggers(sel, -1),
             },
         );
     }
     let atkp = bar_entry(battle, b"atkp")?;
     let mut attacks = HashMap::new();
+    let mut hit_sounds = HashMap::new();
     for (_, _, id, _) in clip_poses.iter().flat_map(|c| &c.hits) {
         let a = battle_tables::attack(atkp, *id)?;
+        hit_sounds.insert(*id, a.hit_sound);
         attacks.insert(
             *id,
             combat::AttackParams {
@@ -1229,6 +1310,7 @@ fn load_enemy(
     let mut claw_attacks = HashMap::new();
     for (_, _, id, _) in clips.values().flat_map(|c: &EnemyClip| &c.windows) {
         let a = battle_tables::attack(atkp, *id)?;
+        hit_sounds.insert(*id, a.hit_sound);
         claw_attacks.insert(
             *id,
             combat::AttackParams {
@@ -1299,6 +1381,7 @@ fn load_enemy(
         shadow_attacker,
         sora_target,
         sora_body,
+        hit_sounds,
     })
 }
 
@@ -1818,15 +1901,22 @@ fn simulate(
     let direction = (forward * stick.y + right * stick.x) * MIRROR.xz();
     // The decide button executes the command under the cursor; Attack
     // (icon 1) is the only command this room implements.
+    let mut cursor_moved = false;
     let attack = match hud.and_then(|h| {
         h.into_inner().menu.as_mut().map(|m| {
-            m.menu.input(up, down, decide) == Decision::Execute(0)
-                && m.menu.items.first().is_some_and(|i| i.icon == 1)
+            let before = m.menu.cursor;
+            let decision = m.menu.input(up, down, decide);
+            cursor_moved = m.menu.cursor != before;
+            decision == Decision::Execute(0) && m.menu.items.first().is_some_and(|i| i.icon == 1)
         })
     }) {
         Some(execute) => execute,
         None => decide,
     };
+    // Cursor moves play system sound 1 (FUN_1403bc640/FUN_1403b11e0).
+    if cursor_moved {
+        game.sound_queue.push((SE_CURSOR, "menu_cursor"));
+    }
     let input = Input {
         direction: direction.to_array(),
         jump,
@@ -1908,6 +1998,7 @@ fn simulate(
             "position":position,"landed":step.landed}),
         );
     }
+    sora_sounds(&mut game);
     if tick.is_multiple_of(60) {
         let (position, yaw, action) = (game.player.position, game.player.yaw, game.player.action);
         let enemy = game.enemy.as_ref().map(|e| {
@@ -1920,6 +2011,67 @@ fn simulate(
             "camera_collision_triangles":rig.collision.len(),"camera_collision_hits":rig.collision_hits,
             "enemy":enemy}),
         );
+    }
+}
+
+/// Frame-8 sound triggers of Sora's current clip (the Keyblade's motion)
+/// reached since the last scan; a new action or a loop rescans from 0.
+fn sora_sounds(game: &mut Game) {
+    let clip = game.poses[&(game.player.action, game.player.armed)];
+    let frame = game.player.motion_frame(&game.clips);
+    let started = game.action_started;
+    let from = match game.sound_frame {
+        Some((s, f)) if s == started && f <= frame => Some(f),
+        _ => None,
+    };
+    for &(at, id) in &game.clip_poses[clip].sounds {
+        if from.is_none_or(|f| at > f) && at <= frame {
+            game.sound_queue.push((id, "swing"));
+        }
+    }
+    game.sound_frame = Some((started, frame));
+}
+
+/// Plays this tick's requests and keeps the low-HP alarm (system sound 9,
+/// looped) in step with the gauge's low-HP state: started when HP <= max/4
+/// and stopped when HP recovers or Sora is KO (FUN_14017f050).
+fn play_sounds(mut game: ResMut<Game>, mut audio: ResMut<Audio>, hud: Option<Res<Hud>>) {
+    let tick = game.tick;
+    let mut requests = std::mem::take(&mut game.sound_queue);
+    if let Some(hud) = hud {
+        let s = hud.stats;
+        let low = s.hp > 0 && s.hp <= s.max_hp / 4;
+        if low && !audio.alarm {
+            requests.push((SE_LOW_HP, "low_hp_alarm"));
+        } else if !low && audio.alarm {
+            if let Some(output) = &audio.output
+                && let Ok(mut mixer) = output.mixer.lock()
+            {
+                mixer.stop(SE_LOW_HP);
+            }
+            game.event(serde_json::json!({"event":"sound_stop","tick":tick,"id":SE_LOW_HP}));
+        }
+        audio.alarm = low;
+    }
+    for (id, cause) in requests {
+        let Audio { output, banks, .. } = &mut *audio;
+        let resolved = match banks.request(id) {
+            Ok(r) => r,
+            Err(error) => {
+                eprintln!("Sound {id} failed to decode: {error}");
+                None
+            }
+        };
+        game.event(serde_json::json!({"event":"sound","tick":tick,"id":id,"cause":cause,
+            "layers":resolved.as_ref().map(|r| r.layers.len()),
+            "volume":resolved.as_ref().map(|r| r.volume),"looped":resolved.as_ref().map(|r| r.looped)}));
+        if let (Some(output), Some(r)) = (output.as_ref(), resolved)
+            && let Ok(mut mixer) = output.mixer.lock()
+        {
+            for layer in r.layers {
+                mixer.play(layer, id, r.volume, 1.);
+            }
+        }
     }
 }
 
@@ -2056,6 +2208,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
         action_started,
         autoplay,
         log,
+        sound_queue,
         ..
     } = game;
     let Some(rt) = enemy.as_mut() else { return };
@@ -2118,6 +2271,13 @@ fn combat_tick(game: &mut Game, tick: u64) {
             .enemy
             .hit(instance, dir.to_array(), high, attack, &rt.sora)
         {
+            // ATKP HitSound (FUN_1403d12c0 → FUN_1403dadf0); 500xxx ids
+            // resolve to the equipped weapon's bank, 500 for this Keyblade.
+            if let Some(&id) = rt.hit_sounds.get(&atkp)
+                && id >= 0
+            {
+                sound_queue.push((id as u32, "hit"));
+            }
             let record = serde_json::json!({"event":"hit","tick":tick,"atkp":atkp,"damage":damage,
                 "enemy_hp":rt.enemy.hp,"reaction":format!("{:?}", rt.enemy.reaction),
                 "act":format!("{:?}", rt.enemy.current_act()),"high":high});
@@ -2174,6 +2334,11 @@ fn combat_tick(game: &mut Game, tick: u64) {
         && rt.sora_hp > 0
     {
         rt.sora_hit_by.push(instance);
+        if let Some(&id) = rt.hit_sounds.get(&atkp)
+            && id >= 0
+        {
+            sound_queue.push((id as u32, "sora_hit"));
+        }
         let damage = combat::damage(&rt.shadow_attacker, attack, &rt.sora_target);
         rt.sora_hp = (rt.sora_hp - damage).max(0);
         let d = (sora_at - enemy_at) * Vec3::new(1., 0., 1.);
@@ -2213,6 +2378,22 @@ fn combat_tick(game: &mut Game, tick: u64) {
         player.position,
         player.position,
     );
+    // The enemy motion's frame-8 sounds reached this tick.
+    let e = &rt.enemy;
+    let from = match rt.sound_tick {
+        Some((serial, t)) if serial == e.motion_serial && t <= e.motion_tick => Some(t),
+        _ => None,
+    };
+    if !e.gone
+        && let Some(c) = rt.clips.0.get(&e.motion)
+    {
+        for &(at, id) in &c.sounds {
+            if from.is_none_or(|t| at > t) && at <= e.motion_tick {
+                sound_queue.push((id, "enemy"));
+            }
+        }
+    }
+    rt.sound_tick = Some((e.motion_serial, e.motion_tick));
     let after = rt.enemy.current_act();
     if before != after
         && let Some(file) = log.as_mut()
@@ -2612,8 +2793,30 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         show_collision,
         rendered_frames: 0,
         autoplay_failed: false,
+        sound_queue: Vec::new(),
+        sound_frame: None,
     };
     game.event(loaded.summary);
+    let output = if loaded.banks.numbers().is_empty() {
+        None
+    } else {
+        match audio_out::Output::open() {
+            Ok(output) => Some(output),
+            Err(error) => {
+                eprintln!("Sound output unavailable: {error}");
+                None
+            }
+        }
+    };
+    game.event(
+        serde_json::json!({"event":"audio","banks":loaded.banks.numbers(),
+        "output":output.is_some(),"rate":audio_out::RATE}),
+    );
+    let audio = Audio {
+        output,
+        banks: loaded.banks,
+        alarm: false,
+    };
     let mut enemy_model = None;
     if let Some(e) = loaded.enemy {
         let spawn = loaded.spawn + e.offset;
@@ -2645,6 +2848,8 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             ko_ticks: 0,
             previous: HashMap::new(),
             indices: Vec::new(),
+            hit_sounds: e.hit_sounds,
+            sound_tick: None,
         });
     }
     let rig = CameraRig {
@@ -2677,6 +2882,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             enemy_model,
         })
         .insert_resource(rig)
+        .insert_resource(audio)
         .insert_resource(Time::<Fixed>::from_hz(60.))
         .insert_resource(ClearColor(Color::srgb(0.06, 0.07, 0.09)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -2693,7 +2899,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         }))
         .add_systems(Startup, (setup, pause_for_autoplay))
         .add_systems(PreUpdate, gather_input.after(bevy::input::InputSystems))
-        .add_systems(FixedUpdate, (simulate, hud_tick).chain())
+        .add_systems(FixedUpdate, (simulate, hud_tick, play_sounds).chain())
         .add_systems(
             Update,
             (camera_control, present, present_enemy, hud_present, finish).chain(),

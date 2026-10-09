@@ -275,6 +275,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio_out"
+version = "0.1.0"
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4220,6 +4224,7 @@ checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 name = "windows_shell"
 version = "0.1.0"
 dependencies = [
+ "audio_out",
  "bevy",
  "image",
  "package_reader",

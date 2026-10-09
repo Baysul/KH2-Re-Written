@@ -37,6 +37,7 @@ pub mod ptya;
 pub mod replacement;
 pub mod room_collision;
 pub mod room_geometry;
+pub mod scd;
 pub mod sequence;
 pub mod sklt;
 pub mod vif;

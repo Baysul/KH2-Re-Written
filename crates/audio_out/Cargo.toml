@@ -1,0 +1,12 @@
+[package]
+name = "audio_out"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# The workspace forbids unsafe code. This crate only denies it: the one
+# module that calls the Windows waveOut API allows it, and nothing else may.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"

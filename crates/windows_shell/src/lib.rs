@@ -3,3 +3,4 @@ pub mod command;
 pub mod gauge;
 pub mod hud;
 pub mod room;
+pub mod sound;
