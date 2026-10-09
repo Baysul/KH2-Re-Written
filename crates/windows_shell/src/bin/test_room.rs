@@ -1249,12 +1249,28 @@ fn launch_file_args() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
         #[serde(default)]
         options: Vec<String>,
     }
-    let path = PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA absent")?)
-        .join("KH2FinalRewrite/test-room-launch.json");
-    let launch: Launch = serde_json::from_slice(
-        &read_limited(&path)
-            .map_err(|e| format!("no arguments and no launch file at {}: {e}", path.display()))?,
-    )?;
+    // Search next to the checkout first (`.local/test-room/launch.json`, found
+    // from the executable in `target/<profile>/`), then LOCALAPPDATA.
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        for up in exe.ancestors().skip(1).take(4) {
+            candidates.push(up.join(".local/test-room/launch.json"));
+        }
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local).join("KH2FinalRewrite/test-room-launch.json"));
+    }
+    let path = candidates.iter().find(|p| p.is_file()).ok_or_else(|| {
+        format!(
+            "no arguments and no launch file; looked in: {}",
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    let launch: Launch = serde_json::from_slice(&read_limited(path)?)?;
     let mut args = vec![launch.steam_root, launch.manifest, launch.config];
     args.extend(launch.options.into_iter().map(PathBuf::from));
     Ok(args)

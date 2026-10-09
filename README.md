@@ -20,7 +20,7 @@ Each launch rehashes the selected Steam files (about a minute), then decodes eve
 cargo run -p windows_shell --bin test_room --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/test-room.json'
 ```
 
-To launch by double-clicking, build `cargo build --release -p windows_shell --bin test_room --locked` and create `%LOCALAPPDATA%/KH2FinalRewrite/test-room-launch.json` with `steam_root`, `manifest`, `config` (and optional `options`, e.g. `["--gamepad"]`); `target/release/test_room.exe` then starts without arguments. `--basic-fk` selects the older T053 FK-only poses for comparison.
+To launch by double-clicking, build `cargo build --release -p windows_shell --bin test_room --locked` and create `.local/test-room/launch.json` in the checkout (the exe also checks `%LOCALAPPDATA%/KH2FinalRewrite/test-room-launch.json`; the desktop app can virtualize that folder) with `steam_root`, `manifest`, `config` (and optional `options`, e.g. `["--gamepad"]`); `target/release/test_room.exe` then starts without arguments. `--basic-fk` selects the older T053 FK-only poses for comparison.
 
 Controls: WASD or arrows move (hold Shift to walk), Space jumps, Enter / K / left mouse attacks (press again during a swing to continue the combo; attack in the air for the air combo), Q/E or right-mouse drag turns the camera, +/- zoom, F1 shows collision, Esc exits. Add `--gamepad` for a controller (left stick move, A attack, B jump, right stick camera), `--log '<new.jsonl>'` for an action log, or `--autoplay '<empty-private-dir>'` for an unattended scripted run with captures.
 
