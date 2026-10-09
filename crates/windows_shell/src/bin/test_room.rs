@@ -18,7 +18,7 @@ use bevy::{
 };
 use package_reader::{
     bar, model_inspection, model_inspection_textures::TextureMode, motion, objentry, original,
-    preferences, probe::ProbeSource, ptya,
+    preferences, probe::ProbeSource, ptya, sklt,
 };
 use player_sim::{Action, AttackStep, Clip, Clips, Input, Params, Player, TriangleWorld, World};
 use serde::Deserialize;
@@ -59,6 +59,15 @@ struct Config {
     objentry: Locator,
     object_model_name: String,
     weapon_selection: PathBuf,
+    /// The weapon's own motion set (W_EX010.mset); its clips share Sora's
+    /// slot numbers and pose the weapon in the hand joint's space.
+    #[serde(default)]
+    weapon_motion_set: Option<Locator>,
+    /// Character id (public dictionary: 1 = Sora) whose SKLT primary bone
+    /// in the system archive carries the weapon. Without it the objentry
+    /// byte above is used.
+    #[serde(default)]
+    sklt_character_id: Option<u32>,
     /// Optional spawn (x, probe height, z) in scene coordinates.
     #[serde(default)]
     spawn: Option<[f32; 3]>,
@@ -95,6 +104,9 @@ struct ClipPoses {
     frames: Vec<Vec<Vec3>>,
     /// Model-space matrix of the objentry weapon joint for each frame.
     weapon: Vec<Mat4>,
+    /// Weapon vertices in hand-joint space per frame, from the weapon's own
+    /// motion at the same slot and key time (empty when it has none).
+    weapon_frames: Vec<Vec<Vec3>>,
     /// Root-position curve translation for each frame (model space).
     root: Vec<Vec3>,
 }
@@ -121,6 +133,8 @@ struct Game {
     /// Pose, Keyblade transform and start tick of the active crossfade.
     blend_from: Option<(Vec<Vec3>, Transform, u64)>,
     display_hand: Transform,
+    weapon_indices: Vec<Vec<u32>>,
+    weapon_display: Vec<Vec3>,
     shown_action: Option<(Action, u64)>,
     action_started: u64,
     exit_code: Option<u8>,
@@ -141,6 +155,8 @@ struct CameraRig {
 struct SoraRoot;
 #[derive(Component)]
 struct SoraPart(usize);
+#[derive(Component)]
+struct WeaponPart(usize);
 #[derive(Component)]
 struct WeaponRoot;
 #[derive(Component)]
@@ -320,20 +336,31 @@ fn load(
         .iter()
         .find(|o| o.model_name == config.object_model_name.as_bytes())
         .ok_or("weapon object entry absent")?;
-    let weapon_joint = object.weapon_joint as usize;
+    let objentry_joint = object.weapon_joint as usize;
     let object_candidates: Vec<_> = objects
         .iter()
         .filter(|o| o.model_name.starts_with(b"P_EX100") || o.model_name.starts_with(b"W_EX010"))
         .map(|o| serde_json::json!({"id":o.object_id,"type":o.object_type,"joint":o.weapon_joint,
             "model":String::from_utf8_lossy(&o.model_name),"motion":String::from_utf8_lossy(&o.animation_name)}))
         .collect();
+    // PRTY walk/run/jump/turn and SSTM fall max (public labels).
+    let system = read_archive(source, &config.system)?;
+    let weapon_joint = match config.sklt_character_id {
+        Some(id) => {
+            let entries = sklt::read(bar_entry(&system, b"sklt")?)?;
+            let entry = entries
+                .iter()
+                .find(|e| e.character_id == id)
+                .ok_or("SKLT entry for the character absent")?;
+            usize::try_from(entry.primary_bone).map_err(|_| "SKLT primary bone negative")?
+        }
+        None => objentry_joint,
+    };
     if weapon_joint >= actor.skinning.bones.len() {
-        return Err("objentry weapon joint outside the actor skeleton".into());
+        return Err("weapon joint outside the actor skeleton".into());
     }
     let room = load_rooms(source, &base.join(&config.room_selection))?;
 
-    // PRTY walk/run/jump/turn and SSTM fall max (public labels).
-    let system = read_archive(source, &config.system)?;
     let pref = bar_entry(&system, b"pref")?;
     let prty_bytes = bar_entry(pref, b"prty")?;
     let prty = preferences::read_prty(prty_bytes)?;
@@ -410,6 +437,21 @@ fn load(
         &[0, 1, 2],
     )?);
     ids.extend([0, 1, 2]);
+    let battle_count = ids.len() - 3;
+    let mut weapon_motions: HashMap<usize, motion::SelectedMotion> = HashMap::new();
+    if let Some(set) = &config.weapon_motion_set {
+        let weapon_selection = motion::MotionSetSelection {
+            index: set.index.clone(),
+            ordinal: set.ordinal,
+            name_hash: set.name_hash,
+            battle: config.battle_mode,
+            has_weapon: config.has_weapon,
+        };
+        let found = motion::read_motion_ids(source, &weapon_selection, &ids[..battle_count])?;
+        for (selected, own) in found.into_iter().zip(&motions) {
+            weapon_motions.insert(own.slot, selected);
+        }
+    }
 
     // Precompute every frame of every clip; undefined basic-FK frames reject
     // the session instead of substituting a pose.
@@ -424,10 +466,22 @@ fn load(
             Some(&i) => i,
             None => {
                 let mut frames = Vec::with_capacity(clip.end as usize);
-                let mut weapon = Vec::with_capacity(clip.end as usize);
+                let mut hand = Vec::with_capacity(clip.end as usize);
                 let mut root = Vec::with_capacity(clip.end as usize);
+                let mut weapon_frames = Vec::new();
                 for offset in 0..=clip.end {
                     let frame = key_start + offset;
+                    if let Some(own) = weapon_motions.get(&selected.slot) {
+                        let (pose, _) = weapon
+                            .skinning
+                            .sample_evaluated(&own.motion, frame as f32)?;
+                        weapon_frames.push(
+                            pose.position_bits
+                                .iter()
+                                .map(|p| Vec3::from_array(p.map(f32::from_bits)))
+                                .collect(),
+                        );
+                    }
                     let pose = if basic_fk {
                         root.push(Vec3::ZERO);
                         actor.skinning.sample_fk(&selected.motion, frame)?
@@ -456,7 +510,7 @@ fn load(
                     };
                     // Row-vector matrices: the row-major words are Bevy's
                     // column-major layout of the same transform.
-                    weapon.push(Mat4::from_cols_array(
+                    hand.push(Mat4::from_cols_array(
                         &pose.matrix_bits[weapon_joint].map(f32::from_bits),
                     ));
                     frames.push(
@@ -468,7 +522,8 @@ fn load(
                 }
                 clip_poses.push(ClipPoses {
                     frames,
-                    weapon,
+                    weapon: hand,
+                    weapon_frames,
                     root,
                 });
                 by_slot.insert(selected.slot, clip_poses.len() - 1);
@@ -606,7 +661,7 @@ fn load(
         "motions":slots,"collision":{"floors":floors,"walls":walls,"surface_flags":flag_counts,"bounds":[low.to_array(),high.to_array()],
             "largest_levels":levels.iter().take(8).map(|(area,p)| serde_json::json!({"area":area,"point":p})).collect::<Vec<_>>()},
         "spawn":spawn.to_array(),"pose_evaluator":if basic_fk {"basic public FK (T053)"} else {"motion_eval IK/constraints (T057)"},
-        "evaluation_totals":{"constraints":eval_totals[0],"ik_chains":eval_totals[1],"expressions":eval_totals[2],"unsupported_constraints":eval_totals[3]},"weapon_joint":weapon_joint,"weapon_bounds":weapon_bounds,"idle_hand_matrix":idle_hand,"weapon_root_matrix":weapon_root,"weapon_bones":weapon.skinning.bones.len(),"object_candidates":object_candidates,
+        "evaluation_totals":{"constraints":eval_totals[0],"ik_chains":eval_totals[1],"expressions":eval_totals[2],"unsupported_constraints":eval_totals[3]},"weapon_joint":weapon_joint,"objentry_joint":objentry_joint,"weapon_bounds":weapon_bounds,"idle_hand_matrix":idle_hand,"weapon_root_matrix":weapon_root,"weapon_bones":weapon.skinning.bones.len(),"object_candidates":object_candidates,
         "object_count":objects.len(),
         "missing":["scale channels","up-vector/path/camera constraint types","limiter damping","root rotation","weapon constraint motion","hit detection","enemies","measured installed timing"],
         "inferred_rules":["direction constraints aim local +X","two-joint IK bends the middle joint about local Z","expression list/condition semantics","Hermite tangents scaled by key span","field/battle mode switch with 6 s disarm timeout"],
@@ -849,7 +904,17 @@ fn setup(
                 .transform_point3(Vec3::from_array(p.map(f32::from_bits)))
         })
         .collect();
-    spawn_model(
+    // With the weapon's own motion, its posed vertices are already in the
+    // hand joint's space; otherwise fall back to the bind pose above.
+    let battle_idle = &game.clip_poses[game.poses[&(Action::Idle, true)]];
+    let animated = !battle_idle.weapon_frames.is_empty();
+    let weapon_pose = if animated {
+        battle_idle.weapon_frames[0].clone()
+    } else {
+        weapon_pose
+    };
+    let mut weapon_indices = Vec::new();
+    for (ordinal, entity) in spawn_model(
         &mut commands,
         &weapon,
         &weapon_pose,
@@ -857,7 +922,14 @@ fn setup(
         &mut meshes,
         &mut materials,
         &mut images,
-    );
+    ) {
+        weapon_indices.push(weapon.parts[ordinal].indices.clone());
+        if let Some(entity) = entity {
+            commands.entity(entity).insert(WeaponPart(ordinal));
+        }
+    }
+    game.weapon_indices = weapon_indices;
+    game.weapon_display = weapon_pose;
     game.part_indices = part_indices;
     game.display = pose;
     commands.spawn((
@@ -1065,6 +1137,7 @@ fn present(
     mut roots: Query<&mut Transform, (With<SoraRoot>, Without<WeaponRoot>)>,
     mut hands: Query<(&mut Transform, &mut Visibility), WeaponOnly>,
     parts: Query<(&SoraPart, &Mesh3d)>,
+    weapon_parts: Query<(&WeaponPart, &Mesh3d)>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let action = game.player.action;
@@ -1120,6 +1193,21 @@ fn present(
         }
     }
     game.display = display;
+    // The Keyblade's own motion (key chain and blade) at the same frame.
+    let weapon_frames = &game.clip_poses[clip].weapon_frames;
+    if !weapon_frames.is_empty() {
+        let pose = weapon_frames[frame.min(weapon_frames.len() - 1)].clone();
+        for (part, handle) in &weapon_parts {
+            let positions: Vec<[f32; 3]> = game.weapon_indices[part.0]
+                .iter()
+                .map(|&i| pose[i as usize].to_array())
+                .collect();
+            if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+            }
+        }
+        game.weapon_display = pose;
+    }
     if let Ok(mut root) = roots.single_mut() {
         root.translation = Vec3::from_array(game.player.position);
         root.rotation = Quat::from_rotation_y(game.player.yaw);
@@ -1363,6 +1451,8 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         display: Vec::new(),
         blend_from: None,
         display_hand: Transform::IDENTITY,
+        weapon_indices: Vec::new(),
+        weapon_display: Vec::new(),
         shown_action: None,
         action_started: 0,
         exit_code: None,
