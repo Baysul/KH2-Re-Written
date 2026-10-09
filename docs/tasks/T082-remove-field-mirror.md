@@ -41,3 +41,7 @@ NOT RUN: a side-by-side capture against the installed game.
 ## Verdict / next
 
 PASS for the report. Next: Party / Customize / Equip screens.
+
+## Addendum: the camp closing as it opens (2026-10-09)
+
+User report: "menu instantly closes when opening". Cause: the room computed pad presses on *logical* bits, so the START held from the field (mode 1 logical 0x2) read as a new menu START (mode 7 logical 0x100) on the next frame and closed the camp. `Pad::update_raw` now takes presses as edges of the raw buttons, re-reading the previous raw state in the current mode, for both the camp pad and the field pad. New test: a held button is not a new press after a mode change. Unattended runs inject logical bits and are unaffected. PASS fmt, clippy, tests, smoke. NOT RUN: an interactive keyboard check by me (the fix is the input-edge rule above).
