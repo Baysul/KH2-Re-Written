@@ -2233,12 +2233,25 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
         reported,
         ..
     } = &mut *fx;
+    let mut spread: Vec<(&'static str, f32)> = Vec::new();
     quads.clear();
     for r in running.iter_mut() {
         if let (Some(element), Some((position, yaw))) = (&r.bound, enemy) {
             r.instance.world = bound_world(position, yaw, element);
         }
-        quads.extend(r.instance.frame(&view, rng));
+        let drawn = r.instance.frame(&view, rng);
+        // Farthest quad centre from the instance origin (view space).
+        let o = effect_vm::math::apply(&view, r.instance.world[3]);
+        let far = drawn
+            .iter()
+            .map(|q| {
+                let c: [f32; 3] =
+                    std::array::from_fn(|i| q.corners.iter().map(|p| p[i]).sum::<f32>() / 4.);
+                ((c[0] - o[0]).powi(2) + (c[1] - o[1]).powi(2) + (c[2] - o[2]).powi(2)).sqrt()
+            })
+            .fold(0f32, f32::max);
+        spread.push((r.label, far));
+        quads.extend(drawn);
         for &kind in &r.instance.unsupported {
             if !reported.contains(&kind) {
                 reported.push(kind);
@@ -2250,7 +2263,8 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
     *view_inverse = Mat4::from_cols_array_2d(&view).inverse();
     if tick.is_multiple_of(10) && !running.is_empty() {
         game.event(serde_json::json!({"event":"effects_state","tick":tick,"running":running.len(),
-            "parts":running.iter().map(|r| r.instance.live_parts()).sum::<usize>(),"quads":quads.len()}));
+            "parts":running.iter().map(|r| r.instance.live_parts()).sum::<usize>(),"quads":quads.len(),
+            "spread":spread}));
     }
 }
 

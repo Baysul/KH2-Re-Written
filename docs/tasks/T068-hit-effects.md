@@ -62,11 +62,16 @@ PASS fmt; PASS clippy (warnings denied); PASS `cargo test --workspace --locked`;
   - Additive blending happens in linear space.
   - The hit contact uses height = radius for sphere hit shapes.
 - **Not yet implemented:**
-  - pppRyjMegaBirth (201): the glow and ring particles of the sparks and the Shadow's death smoke. A translation is in progress.
   - pppDrawMdl3 (137): model layers; the model renderer FUN_1404dc760 is not decoded.
   - Loop ranges and catch-up ticks.
   - The random hit-effect pick (no Sora row uses it).
   - The 0x80 depth-sorted flag.
+
+## Addendum: MegaBirth
+
+- **Translated:** `effect_vm::mega_birth` covers pppRyjMegaBirth (201) from FUN_1404bc3b0, FUN_1404bbbe0, FUN_1404bac40, FUN_1404bb8b0, FUN_1404bc710 and FUN_1404bbdb0: the slot pool, births per tick, emit modes, motion, fades, the slot matrix and the draws. Its uncertain points are listed in its module doc.
+- **Evidence:** `autoplay-38` shows the hit effects drawing their glow and streak layers, and the Shadow's death smoke drawing from tick 487.
+- **Spread:** the logged spread reaches about 440 units. That matches the keyframes: the E3 streaks start at 20–40 units per tick and slow by 1.2 per tick, so they travel up to about 375 units over their 24-tick life.
 
 ## Verdict / next
 
