@@ -321,10 +321,6 @@ const FLOOR_MIN_NORMAL_Y: f32 = 0.5;
 const BLEND_TICKS: u32 = 6;
 /// Test-room choice: put the weapon away after 6 s without attacking.
 const DISARM_TICKS: u32 = 360;
-/// Presentation mirror. Raw source coordinates render with the objentry
-/// weapon joint (25) as Sora's left hand; mirroring X puts the Kingdom Key
-/// in his right hand. Inferred handedness, not an observed render matrix.
-const MIRROR: Vec3 = Vec3::new(-1., 1., 1.);
 const PARTY_STAND: u32 = 1 << 0;
 const PARTY_COLLIDE: u32 = 1 << 4;
 
@@ -2163,10 +2159,11 @@ fn setup(
             updated: true,
         });
     }
-    // Scene data stays in source coordinates under one X-mirrored root; see
-    // MIRROR. The simulation never sees the mirror.
+    // Scene data stays in source coordinates under one root. The exe maps
+    // them to the screen without a mirror (model +X on screen right,
+    // camp-03 §1.4), as the rotation from_world does.
     let world = commands
-        .spawn((Transform::from_scale(MIRROR), Visibility::default()))
+        .spawn((Transform::default(), Visibility::default()))
         .id();
     if let Some(arena) = startup.arena_mesh.take() {
         let (w, h, rgba) = arena.texture;
@@ -2785,13 +2782,13 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
         (stick, jump, decide)
     };
     let (up, down) = if talking { (false, false) } else { (up, down) };
-    // Camera-relative stick in displayed (mirrored) space: forward is the
-    // view direction on the ground, right is screen right.
-    let eye = from_world(rig.camera.eye) * MIRROR;
-    let look_at = from_world(rig.camera.look_at) * MIRROR;
+    // Camera-relative stick: forward is the view direction on the ground,
+    // right is screen right.
+    let eye = from_world(rig.camera.eye);
+    let look_at = from_world(rig.camera.look_at);
     let forward = (look_at - eye).xz().normalize_or(Vec2::NEG_Y);
     let right = Vec2::new(-forward.y, forward.x);
-    let direction = (forward * stick.y + right * stick.x) * MIRROR.xz();
+    let direction = forward * stick.y + right * stick.x;
     // The decide button executes the command under the cursor; Attack
     // (icon 1) is the only command this room implements.
     let mut cursor_moved = false;
@@ -4116,13 +4113,13 @@ fn camera_control(
         // The talk camera (FUN_140175e50): 60° in the game's horizontal
         // 4:3 sense, converted like the follow camera's.
         Some((eye, target)) => (
-            eye * MIRROR,
-            target * MIRROR,
+            eye,
+            target,
             2. * (240. / (320. / (TALK_FOV / 2.).tan())).atan(),
         ),
         None => (
-            from_world(rig.camera.eye) * MIRROR,
-            from_world(rig.camera.look_at) * MIRROR,
+            from_world(rig.camera.eye),
+            from_world(rig.camera.look_at),
             rig.camera.vertical_fov(),
         ),
     };
