@@ -118,11 +118,15 @@ struct EffectConfig {
     #[serde(default)]
     enemy: Option<Locator>,
     atlas: Locator,
+    /// 00effect.bar (the system PAX: guard and clash sparks).
+    #[serde(default)]
+    system: Option<Locator>,
 }
 
 struct EffectSources {
     weapon: effect::Pax,
     enemy: Option<effect::Pax>,
+    system: Option<effect::Pax>,
     atlas: windows_shell::effects::Atlas,
 }
 
@@ -138,6 +142,9 @@ enum EffectRequest {
     },
     /// The enemy's `dead` act: effect_start_bind(obj, 2).
     EnemyDead,
+    /// A system (00effect) element at a point, unrotated
+    /// (FUN_1403d0f00 clash effects).
+    System { id: u16, at: Vec3 },
 }
 
 struct RunningEffect {
@@ -152,6 +159,7 @@ struct RunningEffect {
 struct Effects {
     weapon: Option<Arc<effect::Pax>>,
     enemy: Option<Arc<effect::Pax>>,
+    system: Option<Arc<effect::Pax>>,
     running: Vec<RunningEffect>,
     rng: effect_vm::Rng,
     quads: Vec<effect_vm::Quad>,
@@ -224,6 +232,9 @@ const MENU_MESSAGES: [u32; 4] = [0x81e0, 0x81e1, 0x81e2, 0x81e3];
 /// Sora's grounded damage motions: front-high, front-low, back-high,
 /// back-low (motion ids 10..13).
 const SORA_HURT: [u16; 4] = [10, 11, 12, 13];
+
+/// Guard (PTYA 0x0b) and its success recoil (guard-01).
+const SORA_GUARD: [u16; 2] = [173, 42];
 
 /// Public MotionSet names for the locomotion IDs used here.
 const LOCOMOTION: [(&str, u16); 6] = [
@@ -317,6 +328,7 @@ struct Game {
     gamepad: bool,
     jump_queued: bool,
     attack_queued: bool,
+    guard_queued: bool,
     menu_up_queued: bool,
     menu_down_queued: bool,
     enemy: Option<EnemyRuntime>,
@@ -594,6 +606,10 @@ struct EnemyRuntime {
     hit_sounds: HashMap<u16, i32>,
     /// ATKP hit effect and its random count by id (Keyblade).
     hit_effects: HashMap<u16, (u8, u8)>,
+    /// Full ATKP rows (Keyblade, guard and claws) for the clash rules.
+    rows: HashMap<u16, package_reader::battle_tables::Attack>,
+    /// Sora's invulnerability after a guard (+0xd70), in ticks.
+    sora_invulnerable: f32,
     /// Motion serial and tick already scanned for sound triggers.
     sound_tick: Option<(u32, u32)>,
 }
@@ -621,6 +637,7 @@ struct EnemySource {
     sora_body: Vec<(usize, Vec3, f32, bool)>,
     hit_sounds: HashMap<u16, i32>,
     hit_effects: HashMap<u16, (u8, u8)>,
+    rows: HashMap<u16, package_reader::battle_tables::Attack>,
 }
 
 /// Walkable collision levels (8-unit height bins) by XZ area, largest first,
@@ -872,6 +889,20 @@ fn load(
     } else {
         0
     };
+    // Guard (PTYA 0x0b → motion 173) and its success recoil (motion 42).
+    let guard_selection = motion::MotionSetSelection {
+        index: config.motion_set.index.clone(),
+        ordinal: config.motion_set.ordinal,
+        name_hash: config.motion_set.name_hash,
+        battle: config.battle_mode,
+        has_weapon: config.has_weapon,
+    };
+    motions.extend(motion::read_motion_ids(
+        source,
+        &guard_selection,
+        &SORA_GUARD,
+    )?);
+    ids.extend(SORA_GUARD);
     // Sora's HIT spheres (object collision type 2), for enemy attacks.
     let sora_body: Vec<(usize, Vec3, f32, bool)> = match &config.enemy {
         Some(e) => {
@@ -905,6 +936,11 @@ fn load(
         };
         let found = motion::read_motion_ids(source, &weapon_selection, &ids[..battle_count])?;
         for (selected, own) in found.into_iter().zip(&motions) {
+            weapon_motions.insert(own.slot, selected);
+        }
+        // The guard volumes (ATKP 161/162) live in the weapon's motions.
+        let found = motion::read_motion_ids(source, &weapon_selection, &SORA_GUARD)?;
+        for (selected, own) in found.into_iter().zip(&motions[motions.len() - 2..]) {
             weapon_motions.insert(own.slot, selected);
         }
     }
@@ -1069,6 +1105,8 @@ fn load(
             .iter()
             .map(|c| c.0.clone())
             .collect(),
+        guard: Some(clip_list[field + 3 + hurt_count].0.clone()),
+        guard_recoil: Some(clip_list[field + 4 + hurt_count].0.clone()),
     };
     // Pose clip per (action, weapon drawn).
     let mut actions = vec![
@@ -1093,6 +1131,8 @@ fn load(
     for i in 0..hurt_count {
         both.push((Action::Hurt(i), clip_list[field + 3 + i].1));
     }
+    both.push((Action::Guard, clip_list[field + 3 + hurt_count].1));
+    both.push((Action::GuardRecoil, clip_list[field + 4 + hurt_count].1));
     for (action, clip) in both {
         actions.push(((action, true), clip));
         actions.push(((action, false), clip));
@@ -1190,6 +1230,7 @@ fn load(
             Some(EffectSources {
                 weapon: pax(&e.weapon)?,
                 enemy: e.enemy.as_ref().map(pax).transpose()?,
+                system: e.system.as_ref().map(pax).transpose()?,
                 atlas: load_atlas(source, &e.atlas.index, e.atlas.ordinal, e.atlas.name_hash)?,
             })
         }
@@ -1371,8 +1412,10 @@ fn load_enemy(
     let mut attacks = HashMap::new();
     let mut hit_sounds = HashMap::new();
     let mut hit_effects = HashMap::new();
+    let mut rows = HashMap::new();
     for (_, _, id, _) in clip_poses.iter().flat_map(|c| &c.hits) {
         let a = battle_tables::attack(atkp, *id)?;
+        rows.insert(*id, a);
         hit_sounds.insert(*id, a.hit_sound);
         hit_effects.insert(*id, (a.hit_effect, a.hit_effect_random));
         attacks.insert(
@@ -1390,6 +1433,7 @@ fn load_enemy(
     for (_, _, id, _) in clips.values().flat_map(|c: &EnemyClip| &c.windows) {
         let a = battle_tables::attack(atkp, *id)?;
         hit_sounds.insert(*id, a.hit_sound);
+        rows.insert(*id, a);
         claw_attacks.insert(
             *id,
             combat::AttackParams {
@@ -1462,6 +1506,7 @@ fn load_enemy(
         sora_body,
         hit_sounds,
         hit_effects,
+        rows,
     })
 }
 
@@ -1926,6 +1971,13 @@ fn gather_input(
             down |= pad.just_pressed(GamepadButton::DPadDown);
         }
     }
+    let mut guard = keys.just_pressed(KeyCode::KeyF);
+    if game.gamepad {
+        for pad in &pads {
+            guard |= pad.just_pressed(GamepadButton::West);
+        }
+    }
+    game.guard_queued |= guard;
     game.jump_queued |= jump;
     game.attack_queued |= attack;
     game.menu_up_queued |= up;
@@ -1944,9 +1996,13 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 18] = [
-    90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1300, 1500, 1700,
+const AUTOPLAY_CAPTURES: [u64; 19] = [
+    90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1198, 1300, 1500,
+    1700,
 ];
+/// Guard presses ahead of the Shadow's claws seen at ticks 1194 and 1361
+/// in earlier unattended runs.
+const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 /// The last stretch leaves Sora standing so an enemy can attack him.
 const AUTOPLAY_END: u64 = 1800;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
@@ -2025,10 +2081,28 @@ fn simulate(
     if cursor_moved {
         game.sound_queue.push((SE_CURSOR, "menu_cursor"));
     }
+    // Guard (Square): F or the pad's west button; unattended runs guard
+    // just before two of the Shadow's claws.
+    let guard = if game.autoplay.is_some() {
+        AUTOPLAY_GUARDS.contains(&tick)
+    } else {
+        std::mem::take(&mut game.guard_queued)
+    };
+    // The current target: the enemy while it can be hit.
+    let target = game
+        .enemy
+        .as_ref()
+        .filter(|rt| rt.enemy.targetable())
+        .map(|rt| {
+            let p = game.player.position;
+            [rt.enemy.position[0] - p[0], rt.enemy.position[2] - p[2]]
+        });
     let input = Input {
         direction: direction.to_array(),
         jump,
         attack,
+        guard,
+        target,
     };
     let Game {
         player,
@@ -2193,7 +2267,25 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
                 let world = bound_world(rt.enemy.position, rt.enemy.yaw, &element);
                 (pax, element.clone(), world, "enemy_dead", Some(element))
             }
+            EffectRequest::System { id, at } => {
+                let Some(pax) = fx.system.clone() else {
+                    continue;
+                };
+                let Some(element) = pax.by_id(id).cloned() else {
+                    continue;
+                };
+                let world = effect_vm::instance_matrix(
+                    to_world(at.to_array()),
+                    element.rotation,
+                    element.scale,
+                );
+                (pax, element, world, "system", None)
+            }
         };
+        // The element's own sound [inferred: played as a plain request id].
+        if element.sound >= 0 {
+            game.sound_queue.push((element.sound as u32, "effect_se"));
+        }
         let Some(dpx) = pax.effect(element.effect_number) else {
             continue;
         };
@@ -2544,7 +2636,9 @@ fn combat_tick(game: &mut Game, tick: u64) {
         })
         .collect();
     let mut hit = None;
-    if targetable && !cp.blade.is_empty() {
+    // Live guard (ATKP Type 2/3) spheres: centre, radius, ATKP.
+    let mut guards: Vec<(Vec3, f32, u16)> = Vec::new();
+    if !cp.blade.is_empty() {
         let f = frame.min(cp.blade.len() - 1);
         let to_model = cp.weapon[f.min(cp.weapon.len() - 1)] * cp.blade[f];
         for (w, &(start, end, atkp, group)) in cp.hits.iter().enumerate() {
@@ -2552,9 +2646,18 @@ fn combat_tick(game: &mut Game, tick: u64) {
                 continue;
             }
             let instance = (*action_started << 4) | w as u64;
+            // Guard types never test bodies (FUN_1403cff40).
+            let guard = rt.rows.get(&atkp).is_some_and(|r| matches!(r.kind, 2 | 3));
             for (i, &(offset, radius)) in rt.blade.get(&group).into_iter().flatten().enumerate() {
                 let centre = sora_at + sora_turn * to_model.transform_point3(offset);
                 let previous = rt.previous.insert((instance, i), centre);
+                if guard {
+                    guards.push((centre, radius, atkp));
+                    continue;
+                }
+                if !targetable {
+                    continue;
+                }
                 for c in combat::swept(centre.to_array(), previous.map(|p| p.to_array()), radius) {
                     if hit.is_none()
                         && let Some(&(target, target_radius, high)) = body
@@ -2617,6 +2720,30 @@ fn combat_tick(game: &mut Game, tick: u64) {
     let ec = &rt.clips.0[&e.motion];
     let tick_in = e.motion_tick;
     let mut sora_hit = None;
+    let mut clash = None;
+    // FUN_1403d1f40: R = ReflectRange (0: no test); the attacker of the
+    // other attack must lie within R° of this attack's owner's facing.
+    let cone = |row: &package_reader::battle_tables::Attack, facing: Vec3, v: Vec3| {
+        if row.reflect_range == 0 {
+            return true;
+        }
+        let turn = Quat::from_rotation_y((row.reflect_angle as f32 * 2.).to_radians());
+        let f = turn * facing;
+        v.dot(f) < -(row.reflect_range as f32).to_radians().cos()
+    };
+    let sora_facing = Vec3::new(player.yaw.sin(), 0., player.yaw.cos());
+    let shadow_facing = Vec3::new(e.yaw.sin(), 0., e.yaw.cos());
+    let from_shadow = ((sora_at - enemy_at) * Vec3::new(1., 0., 1.)).normalize_or_zero();
+    let clashes = |guard: u16, claw: u16| {
+        let (Some(g), Some(c)) = (rt.rows.get(&guard), rt.rows.get(&claw)) else {
+            return false;
+        };
+        // DAT_1405c5e98: the symmetric clash pairs 0-0, 0-2, 0-3, 1-3.
+        let pair = (g.kind.min(c.kind), g.kind.max(c.kind));
+        matches!(pair, (0, 0) | (0, 2) | (0, 3) | (1, 3))
+            && cone(g, sora_facing, from_shadow)
+            && cone(c, shadow_facing, -from_shadow)
+    };
     if e.alive() && !e.sunk {
         let bones = &ec.bones[(tick_in as usize).min(ec.bones.len() - 1)];
         let sora_bones = &cp.body[frame.min(cp.body.len().saturating_sub(1))];
@@ -2642,7 +2769,17 @@ fn combat_tick(game: &mut Game, tick: u64) {
                 let centre = enemy_at + enemy_turn * m.transform_point3(offset);
                 let previous = rt.claw_previous.insert((instance, i), centre);
                 for c in combat::swept(centre.to_array(), previous.map(|p| p.to_array()), radius) {
+                    // Attack-vs-attack clashes run before the body pass.
+                    if clash.is_none()
+                        && let Some(&(g, gr, guard)) = guards.iter().find(|(g, gr, guard)| {
+                            combat::spheres_overlap(c, radius, g.to_array(), *gr)
+                                && clashes(*guard, atkp)
+                        })
+                    {
+                        clash = Some((instance, atkp, guard, Vec3::from_array(c), g, gr));
+                    }
                     if sora_hit.is_none()
+                        && clash.is_none_or(|k| k.0 != instance)
                         && let Some(&(_, _, high)) = sora_spheres
                             .iter()
                             .find(|(b, r, _)| combat::spheres_overlap(c, radius, b.to_array(), *r))
@@ -2653,7 +2790,69 @@ fn combat_tick(game: &mut Game, tick: u64) {
             }
         }
     }
-    if let Some((instance, atkp, high)) = sora_hit
+    // A guarded claw: FUN_1403d2140 both ways, Sora's FUN_1403d61d0 and the
+    // Shadow's FUN_140411060.
+    if let Some((instance, claw, guard, claw_at, g, gr)) = clash
+        && let (Some(&gr_row), Some(&claw_row)) = (rt.rows.get(&guard), rt.rows.get(&claw))
+    {
+        rt.sora_hit_by.push(instance);
+        // FUN_1403d0f00: at the guard sphere's surface toward the claw.
+        let contact = g + (claw_at - g).normalize_or_zero() * gr;
+        let (s, t) = (gr_row.refact_self, claw_row.refact_other);
+        let outcome = if s == 2 || t == 2 {
+            effect_queue.push(EffectRequest::System {
+                id: 13,
+                at: contact,
+            });
+            "pass"
+        } else if !player.action.airborne() && (s != 0 || t != 0) {
+            // Sora is the player character (0x6c8 bit 7): effect 11.
+            effect_queue.push(EffectRequest::System {
+                id: 11,
+                at: contact,
+            });
+            if player
+                .guard_recoil([from_shadow.x, from_shadow.z], clips)
+                .is_some()
+            {
+                *action_started = tick;
+            }
+            rt.sora_invulnerable = 80.;
+            "guard"
+        } else {
+            // Bounce (motion 41 + slide 50) is not loaded in this room.
+            effect_queue.push(EffectRequest::System {
+                id: 13,
+                at: contact,
+            });
+            "bounce"
+        };
+        if claw_row.refact_self != 2 && claw_row.reflect_motion != 0 {
+            rt.enemy.reflect(
+                claw_row.reflect_motion as usize,
+                claw_row.reflect_hit_back as f32,
+            );
+        }
+        let record = serde_json::json!({"event":"guard","tick":tick,"outcome":outcome,
+            "guard_atkp":guard,"claw_atkp":claw,"reflect_motion":claw_row.reflect_motion,
+            "contact":contact.to_array()});
+        if let Some(file) = log.as_mut() {
+            let _ = serde_json::to_writer(&mut *file, &record);
+            let _ = std::io::Write::write_all(file, b"\n");
+        }
+    }
+    rt.sora_invulnerable = (rt.sora_invulnerable - 1.).max(0.);
+    if let Some((instance, atkp, _)) = sora_hit
+        && rt.sora_invulnerable > 0.
+    {
+        // FUN_1403d65a0: no damage while +0xd70 runs.
+        rt.sora_hit_by.push(instance);
+        let record = serde_json::json!({"event":"sora_hit_invulnerable","tick":tick,"atkp":atkp});
+        if let Some(file) = log.as_mut() {
+            let _ = serde_json::to_writer(&mut *file, &record);
+            let _ = std::io::Write::write_all(file, b"\n");
+        }
+    } else if let Some((instance, atkp, high)) = sora_hit
         && let Some(attack) = rt.claw_attacks.get(&atkp)
         && rt.sora_hp > 0
     {
@@ -3106,6 +3305,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         gamepad,
         jump_queued: false,
         attack_queued: false,
+        guard_queued: false,
         menu_up_queued: false,
         menu_down_queued: false,
         enemy: None,
@@ -3160,6 +3360,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
                 Effects {
                     weapon: Some(Arc::new(e.weapon)),
                     enemy: e.enemy.map(Arc::new),
+                    system: e.system.map(Arc::new),
                     running: Vec::new(),
                     rng: effect_vm::Rng::default(),
                     quads: Vec::new(),
@@ -3174,6 +3375,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             Effects {
                 weapon: None,
                 enemy: None,
+                system: None,
                 running: Vec::new(),
                 rng: effect_vm::Rng::default(),
                 quads: Vec::new(),
@@ -3217,6 +3419,8 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             indices: Vec::new(),
             hit_sounds: e.hit_sounds,
             hit_effects: e.hit_effects,
+            rows: e.rows,
+            sora_invulnerable: 0.,
             sound_tick: None,
         });
     }

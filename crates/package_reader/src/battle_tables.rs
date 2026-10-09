@@ -40,6 +40,16 @@ pub struct Attack {
     /// (executable: FUN_1403d1b40).
     pub hit_effect: u8,
     pub hit_effect_random: u8,
+    /// Clash fields (executable: FUN_1403d2140, FUN_1403d61d0,
+    /// FUN_140411060, FUN_1403d1f40): RefactSelf +0x13, RefactOther +0x14,
+    /// ReflectMotion +0x15, ReflectHitBack +0x16 (i8), ReflectRange +0x22
+    /// (degrees, 0 = no cone), ReflectAngle +0x23 (i8).
+    pub refact_self: u8,
+    pub refact_other: u8,
+    pub reflect_motion: u8,
+    pub reflect_hit_back: i8,
+    pub reflect_range: u8,
+    pub reflect_angle: i8,
 }
 
 /// The ATKP row for `id` at sub-table 0, hit step 0 (record bytes 0 and 1
@@ -64,6 +74,12 @@ pub fn attack(atkp: &[u8], id: u16) -> io::Result<Attack> {
                 hit_sound: u32_at(rec, 0x1c)? as i32,
                 hit_effect: rec[0xb],
                 hit_effect_random: rec[0x2d],
+                refact_self: rec[0x13],
+                refact_other: rec[0x14],
+                reflect_motion: rec[0x15],
+                reflect_hit_back: rec[0x16] as i8,
+                reflect_range: rec[0x22],
+                reflect_angle: rec[0x23] as i8,
             });
         }
     }

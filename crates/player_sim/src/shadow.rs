@@ -68,9 +68,11 @@ pub mod motion {
     pub const CLAW_L: usize = 201;
     pub const CLAW_R: usize = 202;
     pub const CLAW_F: usize = 203;
-    pub const ALL: [usize; 20] = [
+    /// ATKP ReflectMotion of the claws: 140 (ATKP 9/10), 141 (ATKP 11).
+    pub const REFLECT: [usize; 2] = [140, 141];
+    pub const ALL: [usize; 22] = [
         IDLE, WALK, JUMP, FALL, LAND, 10, 11, 12, 13, 16, 17, 18, 19, LEAVE, FOOTWORK, SINK, RISE,
-        CLAW_L, CLAW_R, CLAW_F,
+        CLAW_L, CLAW_R, CLAW_F, 140, 141,
     ];
 }
 
@@ -100,6 +102,10 @@ pub const BLOW_BRAKE_XZ: f32 = 0.8;
 pub const BLOW_MIN_XZ: f32 = 0.1;
 /// Respawn delay after leaving/dying (test room only).
 pub const RESPAWN_TICKS: u32 = 120;
+/// Knock-slide decay per tick (DAT_1405aaa40) and the ReflectHitBack used
+/// when the ATKP field is −1 (DAT_1405b532c).
+pub const KNOCK_DECAY: f32 = 0.9;
+pub const DEFAULT_HIT_BACK: f32 = 50.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActKind {
@@ -197,6 +203,8 @@ pub struct Shadow {
     pub motion_serial: u32,
     velocity: Vec3,
     slide: Vec3,
+    /// Knock-slide (FUN_1403d4960): unit direction and speed.
+    knock: Option<(Vec3, f32)>,
     airborne: bool,
     /// Weave phase in degrees (W4).
     weave: f32,
@@ -227,6 +235,7 @@ impl Shadow {
             motion_serial: 0,
             velocity: [0.; 3],
             slide: [0.; 3],
+            knock: None,
             airborne: false,
             weave: 0.,
             act: None,
@@ -351,6 +360,29 @@ impl Shadow {
         Some(dmg)
     }
 
+    /// The claw was guarded (FUN_140411060 → FUN_1403d4650, ground): play
+    /// the ATKP's ReflectMotion, knock-slide back from the facing at
+    /// hit_back × 0.1, clear the acts and start ReflectAction
+    /// (`mode_revenge`). The air variant is not decoded.
+    pub fn reflect(&mut self, reflect_motion: usize, hit_back: f32) {
+        if !self.alive() {
+            return;
+        }
+        self.motion_start(reflect_motion);
+        self.reaction = Reaction::Flinch;
+        let hb = if hit_back < 0. {
+            DEFAULT_HIT_BACK
+        } else {
+            hit_back
+        };
+        if hb > 0. {
+            let f = self.forward();
+            self.knock = Some(([-f[0], 0., -f[2]], hb * 0.1));
+        }
+        self.act_clear();
+        self.act_start(ActKind::ModeRevenge);
+    }
+
     /// One tick: engine reactions and physics, then the act manager.
     pub fn tick(
         &mut self,
@@ -394,6 +426,14 @@ impl Shadow {
             Reaction::BlowLand if finished => self.reaction = Reaction::None,
             _ => {}
         }
+        if let Some((dir, v)) = self.knock {
+            if v < 1. {
+                self.knock = None;
+            } else {
+                self.position = add(self.position, dir.map(|c| c * v));
+                self.knock = Some((dir, v * KNOCK_DECAY));
+            }
+        }
         if self.slide.iter().any(|v| v.abs() > 1e-3) {
             self.position = add(self.position, self.slide);
             self.slide = self.slide.map(|v| v * SLIDE_BRAKE);
@@ -432,7 +472,9 @@ impl Shadow {
             self.act_start(ActKind::ModeBattle);
         }
         // Hit-stun: acts below priority 300 wait while a damage motion plays.
-        let stunned = (10..=39).contains(&self.motion) || (140..=150).contains(&self.motion);
+        // `plays` = the damage or reflect motion has not ended yet.
+        let stunned = ((10..=39).contains(&self.motion) || (140..=150).contains(&self.motion))
+            && self.motion_tick < length;
         let mut budget = 8;
         loop {
             if self.act.is_none() {

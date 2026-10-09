@@ -140,6 +140,9 @@ pub struct Clips {
     /// Grounded damage reactions (front-high, front-low, back-high,
     /// back-low; motion ids 10..13). Empty when not loaded.
     pub hurt: Vec<Clip>,
+    /// Guard (motion 173) and its success recoil (motion 42), when loaded.
+    pub guard: Option<Clip>,
+    pub guard_recoil: Option<Clip>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -154,6 +157,11 @@ pub enum Action {
     AirAttack(usize),
     /// A damage reaction (index into `Clips::hurt`).
     Hurt(usize),
+    /// Guard (PTYA 0x0b, motion 173): one press, actionable from its
+    /// range-2 tick.
+    Guard,
+    /// Guard success recoil (motion 42).
+    GuardRecoil,
 }
 
 impl Action {
@@ -169,6 +177,10 @@ pub struct Input {
     pub direction: [f32; 2],
     pub jump: bool,
     pub attack: bool,
+    pub guard: bool,
+    /// XZ direction toward the current target, if any (Guard turns to it
+    /// at its first tick: frame trigger 21, up to 360°).
+    pub target: Option<[f32; 2]>,
 }
 
 /// Room collision as used by the controller.
@@ -195,10 +207,16 @@ pub struct Player {
     air_combo_spent: bool,
     /// Knock-back slide per tick while hurt.
     slide: [f32; 2],
+    /// Knock-slide (FUN_1403d4960/FUN_1403d4570): unit direction and speed.
+    knock: Option<([f32; 2], f32)>,
 }
 
 /// Knock-back slide brake per tick [test-room choice; SSTM brake 0.8].
 pub const HURT_SLIDE_BRAKE: f32 = 0.8;
+/// Guard recoil knock strength (DAT_140585efc) and knock-slide decay
+/// (DAT_1405aaa40).
+pub const GUARD_KNOCK: f32 = 200.;
+pub const KNOCK_DECAY: f32 = 0.9;
 
 /// What changed during one tick, for logging and presentation.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -229,6 +247,7 @@ impl Player {
             queued_attack: false,
             air_combo_spent: false,
             slide: [0.; 2],
+            knock: None,
         }
     }
 
@@ -240,6 +259,22 @@ impl Player {
             return None;
         }
         self.action = Action::Hurt(index);
+        self.frame = 0;
+        self.queued_attack = false;
+        self.arm();
+        Some(self.action)
+    }
+
+    /// Guard success (FUN_1403d61d0, grounded): face the attacker, play the
+    /// recoil and knock-slide away at 200 × 0.1 per tick (×0.9 per tick,
+    /// stopping below 1). `away` is the XZ unit vector from the attacker.
+    pub fn guard_recoil(&mut self, away: [f32; 2], clips: &Clips) -> Option<Action> {
+        if self.action.airborne() || clips.guard_recoil.is_none() {
+            return None;
+        }
+        self.yaw = (-away[0]).atan2(-away[1]);
+        self.knock = Some((away, GUARD_KNOCK * 0.1));
+        self.action = Action::GuardRecoil;
         self.frame = 0;
         self.queued_attack = false;
         self.arm();
@@ -267,6 +302,8 @@ impl Player {
             (Action::Attack(i), _) => &clips.ground_combo[i].clip,
             (Action::AirAttack(i), _) => &clips.air_combo[i].clip,
             (Action::Hurt(i), _) => &clips.hurt[i],
+            (Action::Guard, _) => clips.guard.as_ref().unwrap_or(&clips.idle),
+            (Action::GuardRecoil, _) => clips.guard_recoil.as_ref().unwrap_or(&clips.idle),
         }
     }
 
@@ -356,7 +393,9 @@ impl Player {
         };
         match self.action {
             Action::Idle | Action::Walk | Action::Run | Action::Land => {
-                if input.attack && !clips.ground_combo.is_empty() {
+                if input.guard && !input.attack && clips.guard.is_some() {
+                    self.start_guard(input, &mut step);
+                } else if input.attack && !clips.ground_combo.is_empty() {
                     if moving {
                         self.yaw = direction[0].atan2(direction[1]);
                     }
@@ -453,6 +492,37 @@ impl Player {
                     self.start(Action::Idle, &mut step);
                 }
             }
+            Action::Guard | Action::GuardRecoil => {
+                // Locked until the clip's range-2 tick, then input is taken
+                // again (FUN_1401b15f0 actionable bits).
+                let clip = self.clip(clips);
+                let (end, ready) = (clip.end, clip.blend_to_idle.unwrap_or(clip.end));
+                if self.frame >= ready {
+                    if input.attack && !clips.ground_combo.is_empty() {
+                        if moving {
+                            self.yaw = direction[0].atan2(direction[1]);
+                        }
+                        self.start(Action::Attack(0), &mut step);
+                    } else if input.guard && clips.guard.is_some() {
+                        self.start_guard(input, &mut step);
+                    } else if input.jump {
+                        self.vertical_speed = p.jump_speed();
+                        self.air_combo_spent = false;
+                        self.start(Action::Jump, &mut step);
+                    } else if moving || self.frame >= end {
+                        self.start(Action::Idle, &mut step);
+                    }
+                }
+            }
+        }
+        if let Some((dir, v)) = self.knock {
+            if v < 1. {
+                self.knock = None;
+            } else {
+                let grounded = !self.action.airborne();
+                self.travel([dir[0] * v, dir[1] * v], p, world, grounded);
+                self.knock = Some((dir, v * KNOCK_DECAY));
+            }
         }
         if self.slide[0].hypot(self.slide[1]) > 1e-3 {
             let grounded = !self.action.airborne();
@@ -461,6 +531,17 @@ impl Player {
             self.slide = slide.map(|v| v * HURT_SLIDE_BRAKE);
         }
         step
+    }
+
+    /// PTYA 0x0b: the guard motion, turning to the target at once.
+    fn start_guard(&mut self, input: &Input, step: &mut Step) {
+        if let Some(t) = input.target
+            && t[0].hypot(t[1]) > 1e-4
+        {
+            self.yaw = t[0].atan2(t[1]);
+        }
+        self.arm();
+        self.start(Action::Guard, step);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -720,6 +801,16 @@ mod tests {
                 };
                 4
             ],
+            guard: Some(Clip {
+                end: 60,
+                blend_to_idle: Some(52),
+                ..Clip::default()
+            }),
+            guard_recoil: Some(Clip {
+                end: 80,
+                blend_to_idle: Some(40),
+                ..Clip::default()
+            }),
         }
     }
     /// A flat 2000-unit square floor with one wall along x = 500.
@@ -1002,6 +1093,44 @@ mod tests {
         assert!(p.validate().is_ok());
         p.run_speed = f32::NAN;
         assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn guard_turns_to_target_locks_and_recoils_with_a_knock_slide() {
+        let (p, c, world) = (params(), clips(), room());
+        let mut player = Player::new([0., 0., 0.], 0.);
+        let press = Input {
+            guard: true,
+            target: Some([1., 0.]),
+            ..Input::default()
+        };
+        let step = player.tick(&press, &p, &c, &world);
+        assert_eq!(step.started, Some(Action::Guard));
+        assert!((player.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        // Locked: moving does nothing until tick 52.
+        let stick = Input {
+            direction: [0., 1.],
+            ..Input::default()
+        };
+        for _ in 1..52 {
+            player.tick(&stick, &p, &c, &world);
+        }
+        assert_eq!(player.action, Action::Guard);
+        player.tick(&stick, &p, &c, &world);
+        assert_eq!(player.action, Action::Idle);
+        // Recoil: face the attacker and slide away 20, ×0.9, until below 1.
+        assert_eq!(
+            player.guard_recoil([0., -1.], &c),
+            Some(Action::GuardRecoil)
+        );
+        assert!(player.yaw.abs() < 1e-5);
+        let start = player.position[2];
+        for _ in 0..60 {
+            player.tick(&Input::default(), &p, &c, &world);
+        }
+        let moved = start - player.position[2];
+        let expected: f32 = (0..29).map(|k| 20. * 0.9f32.powi(k)).sum();
+        assert!((moved - expected).abs() < 1e-2, "{moved} vs {expected}");
     }
 
     #[test]
