@@ -51,7 +51,12 @@ struct Config {
     schema_version: u32,
     source_content_identity: String,
     /// Paths relative to this configuration file.
-    room_selection: PathBuf,
+    /// A game room (map) selection; omitted when `arena` is used.
+    #[serde(default)]
+    room_selection: Option<PathBuf>,
+    /// A generated test arena instead of a game room.
+    #[serde(default)]
+    arena: Option<ArenaConfig>,
     actor_selection: PathBuf,
     motion_set: Locator,
     battle_mode: bool,
@@ -94,6 +99,13 @@ struct Config {
     /// Optional spawn (x, probe height, z) in scene coordinates.
     #[serde(default)]
     spawn: Option<[f32; 3]>,
+}
+
+#[derive(Deserialize)]
+struct ArenaConfig {
+    half_size: f32,
+    wall_height: f32,
+    tile: f32,
 }
 
 #[derive(Deserialize)]
@@ -380,6 +392,7 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
 
 struct Loaded {
     room: LoadedRoom,
+    arena_mesh: Option<windows_shell::room::ArenaMesh>,
     actor: model_inspection::InspectionModel,
     weapon: model_inspection::InspectionModel,
     params: Params,
@@ -535,7 +548,14 @@ fn load(
     if weapon_joint >= actor.skinning.bones.len() {
         return Err("weapon joint outside the actor skeleton".into());
     }
-    let room = load_rooms(source, &base.join(&config.room_selection))?;
+    let (room, arena_mesh) = match (&config.arena, &config.room_selection) {
+        (Some(a), _) => {
+            let (room, mesh) = windows_shell::room::arena(a.half_size, a.wall_height, a.tile);
+            (room, Some(mesh))
+        }
+        (None, Some(path)) => (load_rooms(source, &base.join(path))?, None),
+        (None, None) => return Err("configuration needs a room selection or an arena".into()),
+    };
 
     let pref = bar_entry(&system, b"pref")?;
     let prty_bytes = bar_entry(pref, b"prty")?;
@@ -934,6 +954,7 @@ fn load(
     };
     Ok(Loaded {
         room,
+        arena_mesh,
         actor,
         weapon,
         params,
@@ -1115,6 +1136,7 @@ fn bar_entry_typed(bytes: &[u8], kind: u16) -> Result<&[u8], Box<dyn std::error:
 #[derive(Resource)]
 struct Startup {
     room: Option<LoadedRoom>,
+    arena_mesh: Option<windows_shell::room::ArenaMesh>,
     actor: Option<model_inspection::InspectionModel>,
     weapon: Option<model_inspection::InspectionModel>,
     hud: Option<HudSource>,
@@ -1275,6 +1297,22 @@ fn setup(
     let world = commands
         .spawn((Transform::from_scale(MIRROR), Visibility::default()))
         .id();
+    if let Some(arena) = startup.arena_mesh.take() {
+        let (w, h, rgba) = arena.texture;
+        let texture = rgba_image(w, h, rgba, &mut images);
+        commands.spawn((
+            ChildOf(world),
+            Mesh3d(meshes.add(mesh(arena.positions, arena.uvs, arena.colors))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                base_color_texture: Some(texture),
+                unlit: true,
+                cull_mode: None,
+                ..default()
+            })),
+            Transform::default(),
+        ));
+    }
     for room in &room.rooms {
         let handles: Vec<_> = room
             .textures
@@ -2345,6 +2383,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         .insert_resource(game)
         .insert_resource(Startup {
             room: Some(loaded.room),
+            arena_mesh: loaded.arena_mesh,
             actor: Some(loaded.actor),
             weapon: Some(loaded.weapon),
             hud: loaded.hud,

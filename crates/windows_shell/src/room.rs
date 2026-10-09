@@ -232,3 +232,120 @@ pub fn mesh(positions: Vec<[f32; 3]>, uvs: Vec<[f32; 2]>, colors: Vec<[f32; 4]>)
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
 }
+
+/// Generated arena geometry (not game data): textured triangles in scene
+/// coordinates with a tiling texture.
+pub struct ArenaMesh {
+    pub positions: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub colors: Vec<[f32; 4]>,
+    pub texture: (u32, u32, Vec<u8>),
+}
+
+/// COCT-style surface flags used by the controller (public labels).
+pub const ARENA_FLOOR: u32 = 1;
+pub const ARENA_WALL: u32 = 1 << 4;
+
+/// A square test arena centred on the origin: a tiled floor at y = 0 and
+/// four walls. Collision and camera collision come from the same triangles.
+pub fn arena(half_size: f32, wall_height: f32, tile: f32) -> (LoadedRoom, ArenaMesh) {
+    let mut collision_triangles = Vec::new();
+    let mut camera_triangles = Vec::new();
+    let mut positions = Vec::new();
+    let mut uvs = Vec::new();
+    let mut colors = Vec::new();
+    let mut quad = |c: [Vec3; 4], uv: [[f32; 2]; 4], shade: f32, flags: u32, camera: bool| {
+        for tri in [[0usize, 1, 2], [0, 2, 3]] {
+            for &i in &tri {
+                positions.push(c[i].to_array());
+                uvs.push(uv[i]);
+                colors.push([shade, shade, shade, 1.]);
+            }
+            let corners = tri.map(|i| c[i]);
+            collision_triangles.push(CollisionTriangle {
+                polygon: collision_triangles.len(),
+                surface_flags: flags,
+                corners,
+            });
+            if camera {
+                camera_triangles.push(corners);
+            }
+        }
+    };
+    let n = (2. * half_size / tile).round().max(1.) as i32;
+    for ix in 0..n {
+        for iz in 0..n {
+            let (x0, z0) = (-half_size + ix as f32 * tile, -half_size + iz as f32 * tile);
+            let (x1, z1) = (x0 + tile, z0 + tile);
+            let shade = if (ix + iz) % 2 == 0 { 1. } else { 0.92 };
+            quad(
+                [
+                    Vec3::new(x0, 0., z0),
+                    Vec3::new(x0, 0., z1),
+                    Vec3::new(x1, 0., z1),
+                    Vec3::new(x1, 0., z0),
+                ],
+                [[0., 0.], [0., 1.], [1., 1.], [1., 0.]],
+                shade,
+                ARENA_FLOOR,
+                false,
+            );
+        }
+    }
+    let h = wall_height;
+    let s = half_size;
+    let walls = [
+        [Vec3::new(-s, 0., -s), Vec3::new(s, 0., -s)],
+        [Vec3::new(s, 0., -s), Vec3::new(s, 0., s)],
+        [Vec3::new(s, 0., s), Vec3::new(-s, 0., s)],
+        [Vec3::new(-s, 0., s), Vec3::new(-s, 0., -s)],
+    ];
+    for [a, b] in walls {
+        let segments = ((b - a).length() / tile).round().max(1.) as i32;
+        for k in 0..segments {
+            let p0 = a.lerp(b, k as f32 / segments as f32);
+            let p1 = a.lerp(b, (k + 1) as f32 / segments as f32);
+            quad(
+                [p0, p0 + Vec3::Y * h, p1 + Vec3::Y * h, p1],
+                [[0., 1.], [0., 0.], [1., 0.], [1., 1.]],
+                0.7,
+                ARENA_WALL,
+                true,
+            );
+        }
+    }
+    // Tile texture: dark slate with a lighter border and centre mark.
+    let size = 128u32;
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let edge = x < 3 || y < 3 || x >= size - 3 || y >= size - 3;
+            let mark = (x as i32 - 64).abs() < 2 && (y as i32 - 64).abs() < 10
+                || (y as i32 - 64).abs() < 2 && (x as i32 - 64).abs() < 10;
+            let c: [u8; 3] = if edge {
+                [150, 170, 200]
+            } else if mark {
+                [110, 125, 150]
+            } else {
+                [58, 66, 84]
+            };
+            rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+    }
+    let frame_points = vec![Vec3::new(-s, 0., -s), Vec3::new(s, h, s)];
+    (
+        LoadedRoom {
+            rooms: Vec::new(),
+            frame_points,
+            inspection_ground: Some(0.),
+            collision_triangles,
+            camera_triangles,
+        },
+        ArenaMesh {
+            positions,
+            uvs,
+            colors,
+            texture: (size, size, rgba),
+        },
+    )
+}
