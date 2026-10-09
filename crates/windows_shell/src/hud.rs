@@ -1,14 +1,14 @@
-//! Source-bound field HUD assets: the gauge sequence from a field 2D sequence
-//! archive (`field2d/<lang>/<world>0field.2dd`) and its HD replacement
-//! texture.
+//! Source-bound HUD sheets: a SEQD sequence and the HD replacement of its
+//! IMGD, e.g. the gauge from `field2d/<lang>/<world>0field.2dd` or a
+//! character face from `obj/<model>.a.<lang>`.
 use package_reader::{
     bar, hd_image, image_structure, original, probe::ProbeSource, replacement, sequence,
 };
 use std::io;
 
-pub struct HudAssets {
-    pub gauge: sequence::Sequence,
-    /// Straight RGBA of the HD replacement for the gauge IMGD.
+pub struct Sheet {
+    pub sequence: sequence::Sequence,
+    /// Straight RGBA of the HD replacement for the IMGD.
     pub texture_rgba: Vec<u8>,
     pub texture_size: [u32; 2],
     /// HD texels per original texel.
@@ -19,15 +19,16 @@ const IMGD: u16 = 24;
 const SEQD: u16 = 25;
 
 /// Reads the named sequence and its IMGD from the archive at
-/// (`index`, `ordinal`, `name_hash`). HD replacements are stored in the
-/// archive's IMGD order; the matching one must be an integer upscale.
+/// (`index`, `ordinal`, `name_hash`). The archive's IMGD replacements are
+/// the last ones, in IMGD order (other textures, such as effect TIM2s, come
+/// first); the matching one must be an integer upscale.
 pub fn load(
     source: &ProbeSource,
     index: &str,
     ordinal: usize,
     name_hash: [u8; 16],
     name: &[u8; 4],
-) -> Result<HudAssets, Box<dyn std::error::Error>> {
+) -> Result<Sheet, Box<dyn std::error::Error>> {
     let invalid = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_owned());
     let mut checked = source.open_index(index)?;
     let entry = checked
@@ -62,12 +63,13 @@ pub fn load(
     let [seq_entry] = sequences.as_slice() else {
         return Err("expected one HUD sequence".into());
     };
-    let gauge = sequence::read(slice(seq_entry)?)?;
+    let sequence = sequence::read(slice(seq_entry)?)?;
     let header = image_structure::read_imgd_header(slice(images[image_slot])?)?;
-    if replacements.len() != images.len() {
-        return Err("HD replacement count differs from IMGD count".into());
-    }
-    let hd = &replacements[image_slot];
+    let first_image = replacements
+        .len()
+        .checked_sub(images.len())
+        .ok_or("fewer HD replacements than IMGDs")?;
+    let hd = &replacements[first_image + image_slot];
     let decoded =
         hd_image::decode_hd_image(&hd.bytes, hd.metadata.declared_decompressed_length as usize)?;
     let (w, h) = (header.width as u32, header.height as u32);
@@ -75,8 +77,8 @@ pub fn load(
     if scale == 0 || decoded.width != w * scale || decoded.height != h * scale {
         return Err("HD replacement is not an integer upscale of the IMGD".into());
     }
-    Ok(HudAssets {
-        gauge,
+    Ok(Sheet {
+        sequence,
         texture_size: [decoded.width, decoded.height],
         texture_rgba: decoded.pixels_rgba,
         texel_scale: scale,

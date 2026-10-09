@@ -35,7 +35,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use windows_shell::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
-use windows_shell::hud::{self, HudAssets};
+use windows_shell::hud::{self, Sheet};
 use windows_shell::room::{CollisionTriangle, LoadedRoom, load_rooms, mesh, rgba_image, upload};
 
 #[derive(Deserialize)]
@@ -80,6 +80,9 @@ struct Config {
     /// (field2d/<lang>/<world>0field.2dd).
     #[serde(default)]
     hud: Option<Locator>,
+    /// Character archive holding the 'face' sequence (obj/P_EX100.a.<lang>).
+    #[serde(default)]
+    face: Option<Locator>,
     /// Optional spawn (x, probe height, z) in scene coordinates.
     #[serde(default)]
     spawn: Option<[f32; 3]>,
@@ -162,7 +165,8 @@ struct HudOverlay;
 /// software canvas shown as a full-window overlay.
 #[derive(Resource)]
 struct Hud {
-    assets: HudAssets,
+    /// Gauge sheet, then the face sheet when configured.
+    sheets: Vec<Sheet>,
     gauge: Gauge,
     stats: GaugeStats,
     canvas: Canvas,
@@ -324,7 +328,7 @@ struct Loaded {
     spawn: Vec3,
     world: TriangleWorld,
     summary: serde_json::Value,
-    hud: Option<(HudAssets, (i32, i32))>,
+    hud: Option<(Vec<Sheet>, (i32, i32))>,
 }
 
 /// Walkable collision levels (8-unit height bins) by XZ area, largest first,
@@ -449,10 +453,25 @@ fn load(
     // PTYA attack entries chosen by ID for the grounded and aerial combos.
     let battle = read_archive(source, &config.battle)?;
     let hud = match &config.hud {
-        Some(l) => Some((
-            hud::load(source, &l.index, l.ordinal, l.name_hash, b"gaug")?,
-            hud::starting_stats(bar_entry(&battle, b"plrp")?)?,
-        )),
+        Some(l) => {
+            let mut sheets = vec![hud::load(
+                source,
+                &l.index,
+                l.ordinal,
+                l.name_hash,
+                b"gaug",
+            )?];
+            if let Some(f) = &config.face {
+                sheets.push(hud::load(
+                    source,
+                    &f.index,
+                    f.ordinal,
+                    f.name_hash,
+                    b"face",
+                )?);
+            }
+            Some((sheets, hud::starting_stats(bar_entry(&battle, b"plrp")?)?))
+        }
         None => None,
     };
     let ptya_bytes = bar_entry(&battle, b"ptya")?;
@@ -747,7 +766,7 @@ struct Startup {
     room: Option<LoadedRoom>,
     actor: Option<model_inspection::InspectionModel>,
     weapon: Option<model_inspection::InspectionModel>,
-    hud: Option<(HudAssets, (i32, i32))>,
+    hud: Option<(Vec<Sheet>, (i32, i32))>,
 }
 
 /// Spawns one textured mesh per model part under `parent`, in part order.
@@ -822,7 +841,7 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
 ) {
     let room = startup.room.take().expect("room retained for setup");
-    if let Some((assets, (hp, mp))) = startup.hud.take() {
+    if let Some((sheets, (hp, mp))) = startup.hud.take() {
         // Test-room choices for values the opening room does not define:
         // full HP/MP from PLRP, normal drive mode with three full bars.
         let stats = GaugeStats {
@@ -835,7 +854,7 @@ fn setup(
             drive_level: 3,
             drive_max: 3,
         };
-        let canvas = Canvas::new(assets.texel_scale as f32);
+        let canvas = Canvas::new(sheets[0].texel_scale as f32);
         let mut image = Image::new(
             Extent3d {
                 width: canvas.width as u32,
@@ -864,8 +883,11 @@ fn setup(
         ));
         commands.spawn((Sprite::from_image(image.clone()), HudOverlay));
         commands.insert_resource(Hud {
-            gauge: Gauge::new(&assets.gauge, &stats),
-            assets,
+            gauge: Gauge::new(
+                &sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(),
+                &stats,
+            ),
+            sheets,
             stats,
             canvas,
             image,
@@ -1272,8 +1294,8 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, game: Res<Game>, hud: Option<ResMut
         }
     }
     hud.stats = s;
-    let Hud { assets, gauge, .. } = &mut *hud;
-    gauge.update(&assets.gauge, &s);
+    let Hud { sheets, gauge, .. } = &mut *hud;
+    gauge.update(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(), &s);
     hud.updated = true;
 }
 
@@ -1294,21 +1316,22 @@ fn hud_present(
         return;
     }
     let Hud {
-        assets,
+        sheets,
         gauge,
         canvas,
         image,
         ..
     } = &mut *hud;
-    let draws: Vec<Draw> = gauge.draw(&assets.gauge);
-    canvas.render(
-        &draws,
-        &Texture {
-            rgba: &assets.texture_rgba,
-            size: assets.texture_size.map(|v| v as usize),
-            texel_scale: assets.texel_scale as f32,
-        },
-    );
+    let draws: Vec<Draw> = gauge.draw(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>());
+    let textures: Vec<Texture> = sheets
+        .iter()
+        .map(|s| Texture {
+            rgba: &s.texture_rgba,
+            size: s.texture_size.map(|v| v as usize),
+            texel_scale: s.texel_scale as f32,
+        })
+        .collect();
+    canvas.render(&draws, &textures);
     if let Some(mut target) = images.get_mut(image.id()) {
         target.data = Some(canvas.rgba.clone());
     }

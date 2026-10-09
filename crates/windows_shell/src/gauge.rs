@@ -30,6 +30,8 @@ const DRIVE_RADIANS_PER_POINT: f32 = 0.004_014_26;
 const ROOT_LOOP: [usize; 3] = [137, 132, 137];
 const MAX_RING: [usize; 3] = [121, 122, 121];
 const MAX_BAR: [usize; 3] = [124, 125, 124];
+/// Face group by state (FUN_14017eba0): normal 3, low HP 0, KO 2.
+const FACE: [usize; 3] = [3, 0, 2];
 /// Drive level digits (0x14071b108).
 const DRIVE_DIGITS: [usize; 10] = [28, 29, 30, 31, 32, 33, 34, 35, 36, 37];
 
@@ -43,6 +45,7 @@ enum Id {
     ShadowBar,
     HpBar,
     EndCap,
+    Face,
     MpCap,
     MpBackground,
     MpFill,
@@ -55,6 +58,8 @@ enum Id {
 
 struct Element {
     id: Id,
+    /// Sheet index: 0 gauge, 1 face.
+    sheet: usize,
     player: Player,
     queued: Option<usize>,
     parent: Option<usize>,
@@ -127,6 +132,7 @@ pub enum Draw {
     Quads {
         quads: Vec<Quad>,
         z: i32,
+        sheet: usize,
     },
     Mask {
         polygons: Vec<[[f32; 2]; 4]>,
@@ -135,7 +141,10 @@ pub enum Draw {
 }
 
 impl Gauge {
-    pub fn new(seq: &Sequence, stats: &GaugeStats) -> Self {
+    /// `sheets[0]` is the gauge sequence; `sheets[1]`, when present, the
+    /// character's face sequence.
+    pub fn new(sheets: &[&Sequence], stats: &GaugeStats) -> Self {
+        let seq = sheets[0];
         let mut g = Gauge {
             elements: Vec::new(),
             masks: Vec::new(),
@@ -158,6 +167,10 @@ impl Gauge {
         g.sprite(seq, Id::ShadowBar, 127, None, Some(root), 0);
         g.sprite(seq, Id::HpBar, 129, None, Some(root), 0);
         g.sprite(seq, Id::EndCap, 123, None, Some(root), 0);
+        if let Some(face) = sheets.get(1) {
+            let i = g.sprite(face, Id::Face, FACE[g.state], None, Some(root), 0);
+            g.elements[i].sheet = 1;
+        }
         let cap = g.sprite(seq, Id::MpCap, 116, Some(117), Some(root), 0);
         g.sprite(seq, Id::MpBackground, 119, None, Some(cap), 0);
         g.sprite(seq, Id::MpFill, 115, None, Some(cap), 0);
@@ -186,6 +199,7 @@ impl Gauge {
     ) -> usize {
         self.elements.push(Element {
             id,
+            sheet: 0,
             player: Player::new(seq, group),
             queued,
             parent,
@@ -222,6 +236,13 @@ impl Gauge {
         let i = self.find(id);
         self.elements[i].player = Player::new(seq, group);
         self.elements[i].queued = None;
+        self.elements[i].hidden = false;
+    }
+
+    fn set_face(&mut self, sheets: &[&Sequence], group: usize) {
+        let Some(face) = sheets.get(1) else { return };
+        let i = self.find(Id::Face);
+        self.elements[i].player = Player::new(face, group);
         self.elements[i].hidden = false;
     }
 
@@ -274,7 +295,8 @@ impl Gauge {
 
     /// One 60 Hz frame of the gauge's own logic (FUN_140181270), then each
     /// element's player in creation order (FUN_14016b3c0).
-    pub fn update(&mut self, seq: &Sequence, stats: &GaugeStats) {
+    pub fn update(&mut self, sheets: &[&Sequence], stats: &GaugeStats) {
+        let seq = sheets[0];
         let state = Self::state_of(stats);
         if state != self.state {
             self.state = state;
@@ -286,6 +308,7 @@ impl Gauge {
             }
             self.set_group(seq, Id::MaxRing, MAX_RING[state]);
             self.set_group(seq, Id::MaxBar, MAX_BAR[state]);
+            self.set_face(sheets, FACE[state]);
         }
         if stats.hp != self.last_hp {
             self.shadow_hp = self.last_hp.max(stats.hp);
@@ -342,6 +365,7 @@ impl Gauge {
         // A finished one-shot group switches to its queued group and
         // advances once, or the sprite hides.
         for e in &mut self.elements {
+            let seq = sheets[e.sheet];
             e.player.update(seq, 1.);
             if seq.groups[e.player.group].play_count != 0 && e.player.finished() {
                 if let Some(next) = e.queued.take() {
@@ -356,7 +380,7 @@ impl Gauge {
 
     /// This frame's drawables in draw order, in canvas layout units (X origin
     /// applied). A child sits at its parent's child context + offset + base.
-    pub fn draw(&mut self, seq: &Sequence) -> Vec<Draw> {
+    pub fn draw(&mut self, sheets: &[&Sequence]) -> Vec<Draw> {
         let mut out = Vec::new();
         for node in &self.order {
             match *node {
@@ -369,6 +393,7 @@ impl Gauge {
                         ]
                     });
                     let e = &mut self.elements[i];
+                    let seq = sheets[e.sheet];
                     e.base = base;
                     e.context = seq
                         .child_context(&e.player, &e.modifiers)
@@ -380,6 +405,7 @@ impl Gauge {
                     out.push(Draw::Quads {
                         quads: seq.quads(&e.player, origin, &e.modifiers),
                         z: e.z,
+                        sheet: e.sheet,
                     });
                 }
                 Node::Mask(m) => {
@@ -544,7 +570,7 @@ impl Canvas {
 
     /// Clears last frame's area and draws this frame; `rgba` then holds
     /// straight-alpha pixels.
-    pub fn render(&mut self, draws: &[Draw], texture: &Texture) {
+    pub fn render(&mut self, draws: &[Draw], textures: &[Texture]) {
         self.clear();
         let k = self.scale;
         for draw in draws {
@@ -557,9 +583,9 @@ impl Canvas {
                         }
                     }
                 }
-                Draw::Quads { quads, z } => {
+                Draw::Quads { quads, z, sheet } => {
                     for quad in quads {
-                        self.quad(quad, *z, texture);
+                        self.quad(quad, *z, &textures[*sheet]);
                     }
                 }
             }
@@ -654,18 +680,20 @@ mod tests {
             Draw::Quads {
                 quads: vec![square(0.), square(8.)],
                 z: 100,
+                sheet: 0,
             },
             Draw::Quads {
                 quads: vec![square(0.)],
                 z: 300,
+                sheet: 0,
             },
         ];
-        canvas.render(&draws, &texture);
+        canvas.render(&draws, std::slice::from_ref(&texture));
         let alpha = |c: &Canvas, x: usize, y: usize| c.rgba[(y * c.width + x) * 4 + 3];
         // z 100 is hidden by the z 200 mask; z 300 shows; unmasked shows.
         assert_eq!(alpha(&canvas, 1, 1), 255);
         assert_eq!(alpha(&canvas, 9, 1), 255);
-        canvas.render(&draws[..2], &texture);
+        canvas.render(&draws[..2], std::slice::from_ref(&texture));
         assert_eq!(alpha(&canvas, 1, 1), 0);
         assert_eq!(alpha(&canvas, 9, 1), 255);
     }
