@@ -36,6 +36,10 @@ pub struct Attack {
     /// Sound id played on a hit when non-negative (executable: +0x1C read
     /// by the hit routine FUN_1403d12c0).
     pub hit_sound: i32,
+    /// Hit effect number (+0xb, 0 = none) and random-pick count (+0x2d)
+    /// (executable: FUN_1403d1b40).
+    pub hit_effect: u8,
+    pub hit_effect_random: u8,
 }
 
 /// The ATKP row for `id` at sub-table 0, hit step 0 (record bytes 0 and 1
@@ -58,6 +62,8 @@ pub fn attack(atkp: &[u8], id: u16) -> io::Result<Attack> {
                 knockback: [i16_at(rec, 12)?, i16_at(rec, 14)?],
                 flags: rec[18],
                 hit_sound: u32_at(rec, 0x1c)? as i32,
+                hit_effect: rec[0xb],
+                hit_effect_random: rec[0x2d],
             });
         }
     }
@@ -173,7 +179,7 @@ mod tests {
         atkp.extend(rec);
         let a = attack(&atkp, 126).unwrap();
         assert_eq!((a.power, a.reaction, a.knockback), (100, 3, [125, 0]));
-        assert_eq!(a.hit_sound, -1);
+        assert_eq!((a.hit_sound, a.hit_effect), (-1, 0));
         assert!(attack(&atkp, 127).is_err());
 
         let mut lvpm = vec![0u8; 24];

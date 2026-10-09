@@ -1756,6 +1756,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
+name = "effect_vm"
+version = "0.1.0"
+dependencies = [
+ "package_reader",
+]
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4226,6 +4233,7 @@ version = "0.1.0"
 dependencies = [
  "audio_out",
  "bevy",
+ "effect_vm",
  "image",
  "package_reader",
  "player_sim",

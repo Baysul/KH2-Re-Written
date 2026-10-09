@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 audio_out = { path = "../audio_out" }
+effect_vm = { path = "../effect_vm" }
 package_reader = { path = "../package_reader" }
 player_sim = { path = "../player_sim" }
 serde.workspace = true

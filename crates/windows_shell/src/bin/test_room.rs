@@ -20,8 +20,8 @@ use bevy::{
     },
 };
 use package_reader::{
-    bar, model_inspection, model_inspection_textures::TextureMode, motion, object_collision,
-    objentry, original, preferences, probe::ProbeSource, ptya, sklt,
+    bar, effect, model_inspection, model_inspection_textures::TextureMode, motion,
+    object_collision, objentry, original, preferences, probe::ProbeSource, ptya, sklt,
 };
 use player_sim::combat;
 use player_sim::shadow::{self, ScriptRandom, Shadow};
@@ -35,6 +35,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use windows_shell::command::{self, CommandMenu, Decision, Item};
 use windows_shell::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
@@ -105,6 +106,64 @@ struct Config {
     /// the name of their `se/obj/seNNN` replacement asset.
     #[serde(default)]
     sounds: Vec<BankSource>,
+    /// Effect sources: object archives holding the Keyblade's and the
+    /// enemy's PAX, and `effect/texcommon.dpd` (the common atlas).
+    #[serde(default)]
+    effects: Option<EffectConfig>,
+}
+
+#[derive(Deserialize)]
+struct EffectConfig {
+    weapon: Locator,
+    #[serde(default)]
+    enemy: Option<Locator>,
+    atlas: Locator,
+}
+
+struct EffectSources {
+    weapon: effect::Pax,
+    enemy: Option<effect::Pax>,
+    atlas: windows_shell::effects::Atlas,
+}
+
+/// Effects raised by combat this tick.
+enum EffectRequest {
+    /// Keyblade hit spark (FUN_1403d1b40): ATKP hit effect and random
+    /// count, contact point and hit direction in scene coordinates.
+    Hit {
+        effect: u8,
+        random: u8,
+        contact: Vec3,
+        direction: Vec3,
+    },
+    /// The enemy's `dead` act: effect_start_bind(obj, 2).
+    EnemyDead,
+}
+
+struct RunningEffect {
+    instance: effect_vm::Instance,
+    label: &'static str,
+    /// Element transform kept for effects bound to the enemy.
+    bound: Option<effect::Element>,
+}
+
+/// Running effect instances and the quads they drew this tick.
+#[derive(Resource)]
+struct Effects {
+    weapon: Option<Arc<effect::Pax>>,
+    enemy: Option<Arc<effect::Pax>>,
+    running: Vec<RunningEffect>,
+    rng: effect_vm::Rng,
+    quads: Vec<effect_vm::Quad>,
+    /// The view matrix the quads were drawn with, and its inverse.
+    view_inverse: Mat4,
+    uv_scale: [f32; 2],
+    reported: Vec<u32>,
+}
+
+#[derive(Component)]
+struct EffectMesh {
+    additive: bool,
 }
 
 #[derive(Deserialize)]
@@ -277,6 +336,7 @@ struct Game {
     sound_queue: Vec<(u32, &'static str)>,
     /// Action start tick and clip tick already scanned for sound triggers.
     sound_frame: Option<(u64, u32)>,
+    effect_queue: Vec<EffectRequest>,
 }
 
 /// Sound output and banks; requests resolve by id (bank·1000 + sound).
@@ -468,6 +528,7 @@ struct Loaded {
     hud: Option<HudSource>,
     enemy: Option<EnemySource>,
     banks: Banks,
+    effects: Option<EffectSources>,
 }
 
 /// One enemy clip: skinned positions, HIT-bone matrices and root
@@ -531,6 +592,8 @@ struct EnemyRuntime {
     indices: Vec<Vec<u32>>,
     /// ATKP HitSound by id (Keyblade, then claws).
     hit_sounds: HashMap<u16, i32>,
+    /// ATKP hit effect and its random count by id (Keyblade).
+    hit_effects: HashMap<u16, (u8, u8)>,
     /// Motion serial and tick already scanned for sound triggers.
     sound_tick: Option<(u32, u32)>,
 }
@@ -557,6 +620,7 @@ struct EnemySource {
     sora_target: combat::TargetStats,
     sora_body: Vec<(usize, Vec3, f32, bool)>,
     hit_sounds: HashMap<u16, i32>,
+    hit_effects: HashMap<u16, (u8, u8)>,
 }
 
 /// Walkable collision levels (8-unit height bins) by XZ area, largest first,
@@ -1119,6 +1183,18 @@ fn load(
             b.replacement.as_deref(),
         )?)?;
     }
+    let effects = match &config.effects {
+        Some(e) => {
+            use windows_shell::effects::{load_atlas, load_pax};
+            let pax = |l: &Locator| load_pax(source, &l.index, l.ordinal, l.name_hash);
+            Some(EffectSources {
+                weapon: pax(&e.weapon)?,
+                enemy: e.enemy.as_ref().map(pax).transpose()?,
+                atlas: load_atlas(source, &e.atlas.index, e.atlas.ordinal, e.atlas.name_hash)?,
+            })
+        }
+        None => None,
+    };
     let enemy = match &config.enemy {
         Some(e) => Some(load_enemy(
             source,
@@ -1145,6 +1221,7 @@ fn load(
         hud,
         enemy,
         banks,
+        effects,
     })
 }
 
@@ -1293,9 +1370,11 @@ fn load_enemy(
     let atkp = bar_entry(battle, b"atkp")?;
     let mut attacks = HashMap::new();
     let mut hit_sounds = HashMap::new();
+    let mut hit_effects = HashMap::new();
     for (_, _, id, _) in clip_poses.iter().flat_map(|c| &c.hits) {
         let a = battle_tables::attack(atkp, *id)?;
         hit_sounds.insert(*id, a.hit_sound);
+        hit_effects.insert(*id, (a.hit_effect, a.hit_effect_random));
         attacks.insert(
             *id,
             combat::AttackParams {
@@ -1382,6 +1461,7 @@ fn load_enemy(
         sora_target,
         sora_body,
         hit_sounds,
+        hit_effects,
     })
 }
 
@@ -1406,6 +1486,7 @@ struct Startup {
     weapon: Option<model_inspection::InspectionModel>,
     hud: Option<HudSource>,
     enemy_model: Option<model_inspection::InspectionModel>,
+    effect_atlas: Option<windows_shell::effects::Atlas>,
 }
 
 /// Spawns one textured mesh per model part under `parent`, in part order.
@@ -1775,6 +1856,33 @@ fn setup(
     game.weapon_display = weapon_pose;
     game.part_indices = part_indices;
     game.display = pose;
+    // Effect quads: one mesh per blend (GS ALPHA 0x44 blend, 0x48 add).
+    if let Some(atlas) = startup.effect_atlas.take() {
+        let image = rgba_image(atlas.size[0], atlas.size[1], atlas.rgba, &mut images);
+        if let Some(mut i) = images.get_mut(&image) {
+            i.sampler = ImageSampler::linear();
+        }
+        for additive in [false, true] {
+            commands.spawn((
+                EffectMesh { additive },
+                ChildOf(world),
+                Mesh3d(meshes.add(mesh(vec![[0.; 3]; 3], vec![[0.; 2]; 3], vec![[0.; 4]; 3]))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    base_color_texture: Some(image.clone()),
+                    unlit: true,
+                    cull_mode: None,
+                    alpha_mode: if additive {
+                        AlphaMode::Add
+                    } else {
+                        AlphaMode::Blend
+                    },
+                    ..default()
+                })),
+                Transform::default(),
+            ));
+        }
+    }
     commands.spawn((
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
@@ -2014,6 +2122,187 @@ fn simulate(
     }
 }
 
+/// The camera's view matrix in game world space (Y down), in the effect
+/// VM's convention: view x right, y down, z forward.
+fn game_view(eye: [f32; 3], look_at: [f32; 3]) -> effect_vm::math::Mat {
+    let e = Vec3::from_array(eye);
+    let f = (Vec3::from_array(look_at) - e).normalize_or(Vec3::Z);
+    let down = (Vec3::Y - f * Vec3::Y.dot(f)).normalize_or(Vec3::Y);
+    let right = down.cross(f);
+    [
+        [right.x, down.x, f.x, 0.],
+        [right.y, down.y, f.y, 0.],
+        [right.z, down.z, f.z, 0.],
+        [-right.dot(e), -down.dot(e), -f.dot(e), 1.],
+    ]
+}
+
+/// The enemy's object matrix in game world space (scene yaw θ is a game
+/// rotation of −θ about Y) composed with a bound element's transform.
+fn bound_world(position: [f32; 3], yaw: f32, element: &effect::Element) -> effect_vm::math::Mat {
+    let object = effect_vm::instance_matrix(to_world(position), [0., -yaw, 0.], [1.; 3]);
+    let local = effect_vm::instance_matrix(element.translation, element.rotation, element.scale);
+    effect_vm::math::mul(&object, &local)
+}
+
+/// Starts requested effects, steps every running instance one game frame
+/// and keeps the quads they drew.
+fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effects>) {
+    let tick = game.tick;
+    let view = game_view(rig.camera.eye, rig.camera.look_at);
+    for request in std::mem::take(&mut game.effect_queue) {
+        let (pax, element, world, label, bound) = match request {
+            EffectRequest::Hit {
+                effect,
+                random,
+                contact,
+                direction,
+            } => {
+                let Some(pax) = fx.weapon.clone() else {
+                    continue;
+                };
+                // mask = (1 << (32 + hitEffect − 1)) | 1. A random count
+                // adds an LCG pick (DAT_140783ca0 × 0x10dcd) whose seed is
+                // untraced; Sora's rows have none, so those hits are exact.
+                if random != 0 {
+                    game.event(serde_json::json!({"event":"effect_random_unmodelled","tick":tick,"count":random}));
+                }
+                let b = effect as u64 - 1;
+                let mask = (1u64 << (32 + b)) | 1;
+                let Some(element) = pax.by_category(mask).cloned() else {
+                    game.event(serde_json::json!({"event":"effect_missing","tick":tick,"mask":format!("{mask:#x}")}));
+                    continue;
+                };
+                let d = to_world(direction.to_array());
+                let pitch = (-d[1]).atan2((d[0] * d[0] + d[2] * d[2]).sqrt());
+                let yaw = d[0].atan2(d[2]);
+                let world = effect_vm::instance_matrix(
+                    to_world(contact.to_array()),
+                    [pitch, yaw, 0.],
+                    element.scale,
+                );
+                (pax, element, world, "hit", None)
+            }
+            EffectRequest::EnemyDead => {
+                let (Some(pax), Some(rt)) = (fx.enemy.clone(), game.enemy.as_ref()) else {
+                    continue;
+                };
+                let Some(element) = pax.by_id(2).cloned() else {
+                    continue;
+                };
+                let world = bound_world(rt.enemy.position, rt.enemy.yaw, &element);
+                (pax, element.clone(), world, "enemy_dead", Some(element))
+            }
+        };
+        let Some(dpx) = pax.effect(element.effect_number) else {
+            continue;
+        };
+        let Some(instance) = effect_vm::Instance::new(
+            pax.dpds[dpx.dpd].clone(),
+            dpx.pdata,
+            world,
+            element.start_wait,
+        ) else {
+            continue;
+        };
+        // At most 8 hit effects live (FUN_1403d9be0 ring).
+        if label == "hit"
+            && fx.running.iter().filter(|r| r.label == "hit").count() >= 8
+            && let Some(oldest) = fx.running.iter().position(|r| r.label == "hit")
+        {
+            fx.running.remove(oldest);
+        }
+        game.event(serde_json::json!({"event":"effect","tick":tick,"kind":label,
+            "element":element.id,"effect_number":element.effect_number,"dpd":dpx.dpd,"pdata":dpx.pdata,
+            "position":[world[3][0],world[3][1],world[3][2]]}));
+        fx.running.push(RunningEffect {
+            instance,
+            label,
+            bound,
+        });
+    }
+    let enemy = game
+        .enemy
+        .as_ref()
+        .map(|rt| (rt.enemy.position, rt.enemy.yaw));
+    let Effects {
+        running,
+        rng,
+        quads,
+        view_inverse,
+        reported,
+        ..
+    } = &mut *fx;
+    quads.clear();
+    for r in running.iter_mut() {
+        if let (Some(element), Some((position, yaw))) = (&r.bound, enemy) {
+            r.instance.world = bound_world(position, yaw, element);
+        }
+        quads.extend(r.instance.frame(&view, rng));
+        for &kind in &r.instance.unsupported {
+            if !reported.contains(&kind) {
+                reported.push(kind);
+                game.event(serde_json::json!({"event":"effect_unsupported","tick":tick,"program":kind,"effect":r.label}));
+            }
+        }
+    }
+    running.retain(|r| !r.instance.finished());
+    *view_inverse = Mat4::from_cols_array_2d(&view).inverse();
+    if tick.is_multiple_of(10) && !running.is_empty() {
+        game.event(serde_json::json!({"event":"effects_state","tick":tick,"running":running.len(),
+            "parts":running.iter().map(|r| r.instance.live_parts()).sum::<usize>(),"quads":quads.len()}));
+    }
+}
+
+/// Rebuilds the effect meshes from the last tick's quads: view space back
+/// to game world through the inverse view, then to scene coordinates.
+/// Colours are PS2 gamma-space multipliers, converted to linear.
+fn present_effects(
+    fx: Res<Effects>,
+    targets: Query<(&EffectMesh, &Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    for (target, handle) in &targets {
+        let mut positions = Vec::new();
+        let mut uvs = Vec::new();
+        let mut colors = Vec::new();
+        for q in fx
+            .quads
+            .iter()
+            .filter(|q| q.tbp == windows_shell::effects::ATLAS_TBP)
+            .filter(|q| (q.blend == 0x48) == target.additive)
+        {
+            let corner = |i: usize| {
+                let p = fx
+                    .view_inverse
+                    .transform_point3(Vec3::from_array(q.corners[i]));
+                from_world(p.to_array()).to_array()
+            };
+            let colour = [
+                q.colour[0].max(0.).powf(2.2),
+                q.colour[1].max(0.).powf(2.2),
+                q.colour[2].max(0.).powf(2.2),
+                q.colour[3].clamp(0., 1.),
+            ];
+            for i in [0, 1, 2, 0, 2, 3] {
+                positions.push(corner(i));
+                uvs.push([q.uv[i][0] * fx.uv_scale[0], q.uv[i][1] * fx.uv_scale[1]]);
+                colors.push(colour);
+            }
+        }
+        if positions.is_empty() {
+            positions = vec![[0.; 3]; 3];
+            uvs = vec![[0.; 2]; 3];
+            colors = vec![[0.; 4]; 3];
+        }
+        if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+        }
+    }
+}
+
 /// Frame-8 sound triggers of Sora's current clip (the Keyblade's motion)
 /// reached since the last scan; a new action or a loop rescans from 0.
 fn sora_sounds(game: &mut Game) {
@@ -2209,9 +2498,11 @@ fn combat_tick(game: &mut Game, tick: u64) {
         autoplay,
         log,
         sound_queue,
+        effect_queue,
         ..
     } = game;
     let Some(rt) = enemy.as_mut() else { return };
+    let act_at_start = rt.enemy.current_act();
     if autoplay.is_some() && tick == 380 {
         // Unattended runs place the target just ahead of Sora.
         let f = Vec3::new(player.yaw.sin(), 0., player.yaw.cos());
@@ -2252,17 +2543,18 @@ fn combat_tick(game: &mut Game, tick: u64) {
                 let previous = rt.previous.insert((instance, i), centre);
                 for c in combat::swept(centre.to_array(), previous.map(|p| p.to_array()), radius) {
                     if hit.is_none()
-                        && let Some(&(_, _, high)) = body
+                        && let Some(&(target, target_radius, high)) = body
                             .iter()
                             .find(|(b, r, _)| combat::spheres_overlap(c, radius, b.to_array(), *r))
                     {
-                        hit = Some((instance as u32, atkp, high));
+                        let at = (Vec3::from_array(c), target, target_radius);
+                        hit = Some((instance as u32, atkp, high, at));
                     }
                 }
             }
         }
     }
-    if let Some((instance, atkp, high)) = hit
+    if let Some((instance, atkp, high, (attack_centre, target, target_radius))) = hit
         && let Some(attack) = rt.attacks.get(&atkp)
     {
         let d = (enemy_at - sora_at) * Vec3::new(1., 0., 1.);
@@ -2277,6 +2569,24 @@ fn combat_tick(game: &mut Game, tick: u64) {
                 && id >= 0
             {
                 sound_queue.push((id as u32, "hit"));
+            }
+            // Spark at the contact point on the target's hit shape
+            // (FUN_1403d1b40; a sphere here, so height = radius).
+            if let Some(&(effect, random)) = rt.hit_effects.get(&atkp)
+                && effect != 0
+            {
+                let v = attack_centre - target;
+                let h = target_radius;
+                let y = v.y.clamp(-h, h);
+                let across = Vec3::new(v.x, 0., v.z).normalize_or_zero()
+                    * target_radius
+                    * (1. - (y / h) * (y / h)).max(0.).sqrt();
+                effect_queue.push(EffectRequest::Hit {
+                    effect,
+                    random,
+                    contact: target + across + Vec3::Y * y,
+                    direction: dir,
+                });
             }
             let record = serde_json::json!({"event":"hit","tick":tick,"atkp":atkp,"damage":damage,
                 "enemy_hp":rt.enemy.hp,"reaction":format!("{:?}", rt.enemy.reaction),
@@ -2395,6 +2705,9 @@ fn combat_tick(game: &mut Game, tick: u64) {
     }
     rt.sound_tick = Some((e.motion_serial, e.motion_tick));
     let after = rt.enemy.current_act();
+    if act_at_start != after && after == Some(shadow::ActKind::Dead) {
+        effect_queue.push(EffectRequest::EnemyDead);
+    }
     if before != after
         && let Some(file) = log.as_mut()
     {
@@ -2795,6 +3108,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         autoplay_failed: false,
         sound_queue: Vec::new(),
         sound_frame: None,
+        effect_queue: Vec::new(),
     };
     game.event(loaded.summary);
     let output = if loaded.banks.numbers().is_empty() {
@@ -2816,6 +3130,45 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         output,
         banks: loaded.banks,
         alarm: false,
+    };
+    let (effects, effect_atlas) = match loaded.effects {
+        Some(e) => {
+            game.event(serde_json::json!({"event":"effects","weapon_pax":e.weapon.name,
+                "weapon_elements":e.weapon.elements.len(),"enemy_pax":e.enemy.as_ref().map(|p| p.name.clone()),
+                "atlas_size":e.atlas.size,"atlas_texels":e.atlas.texel_size,"atlas_hd":e.atlas.hd,
+                "atlas_alignment":e.atlas.alignment}));
+            let size = if e.atlas.hd {
+                e.atlas.size
+            } else {
+                e.atlas.texel_size
+            };
+            (
+                Effects {
+                    weapon: Some(Arc::new(e.weapon)),
+                    enemy: e.enemy.map(Arc::new),
+                    running: Vec::new(),
+                    rng: effect_vm::Rng::default(),
+                    quads: Vec::new(),
+                    view_inverse: Mat4::IDENTITY,
+                    uv_scale: [1. / size[0] as f32, 1. / size[1] as f32],
+                    reported: Vec::new(),
+                },
+                Some(e.atlas),
+            )
+        }
+        None => (
+            Effects {
+                weapon: None,
+                enemy: None,
+                running: Vec::new(),
+                rng: effect_vm::Rng::default(),
+                quads: Vec::new(),
+                view_inverse: Mat4::IDENTITY,
+                uv_scale: [1.; 2],
+                reported: Vec::new(),
+            },
+            None,
+        ),
     };
     let mut enemy_model = None;
     if let Some(e) = loaded.enemy {
@@ -2849,6 +3202,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             previous: HashMap::new(),
             indices: Vec::new(),
             hit_sounds: e.hit_sounds,
+            hit_effects: e.hit_effects,
             sound_tick: None,
         });
     }
@@ -2880,9 +3234,11 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             weapon: Some(loaded.weapon),
             hud: loaded.hud,
             enemy_model,
+            effect_atlas,
         })
         .insert_resource(rig)
         .insert_resource(audio)
+        .insert_resource(effects)
         .insert_resource(Time::<Fixed>::from_hz(60.))
         .insert_resource(ClearColor(Color::srgb(0.06, 0.07, 0.09)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -2899,10 +3255,21 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         }))
         .add_systems(Startup, (setup, pause_for_autoplay))
         .add_systems(PreUpdate, gather_input.after(bevy::input::InputSystems))
-        .add_systems(FixedUpdate, (simulate, hud_tick, play_sounds).chain())
+        .add_systems(
+            FixedUpdate,
+            (simulate, effects_tick, hud_tick, play_sounds).chain(),
+        )
         .add_systems(
             Update,
-            (camera_control, present, present_enemy, hud_present, finish).chain(),
+            (
+                camera_control,
+                present,
+                present_enemy,
+                present_effects,
+                hud_present,
+                finish,
+            )
+                .chain(),
         )
         .run())
 }
