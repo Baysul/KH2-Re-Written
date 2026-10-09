@@ -393,6 +393,27 @@ mod tests {
         assert_eq!(t.main.scene, SCENE_EXIT[1]);
     }
 
+    /// First launch (FUN_14014ed40 sets the first-boot bit once per
+    /// process): scene 8 ignores decide/START and hands straight to the
+    /// intro, without the scene-17 fade.
+    #[test]
+    fn boot_splash_is_unskippable_and_leads_to_the_intro() {
+        let l = layout(30);
+        let mut t = Title::new(&l, true, false);
+        assert_eq!(t.main.scene, SCENE_BOOT);
+        let mut scenes = vec![t.main.scene];
+        for _ in 0..40 {
+            run(&mut t, &l, bits::DECIDE | bits::START);
+            if scenes.last() != Some(&t.main.scene) {
+                scenes.push(t.main.scene);
+            }
+            if t.main.scene != SCENE_BOOT {
+                break;
+            }
+        }
+        assert_eq!(scenes, vec![SCENE_BOOT, SCENE_INTRO[0]]);
+    }
+
     #[test]
     fn idle_demo_after_5100_frames() {
         let l = layout(5);

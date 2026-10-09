@@ -12,6 +12,7 @@ pub mod newgame;
 pub mod pad;
 pub mod room;
 pub mod sound;
+pub mod splash;
 pub mod sprite2d;
 pub mod title;
 pub mod ui2d;

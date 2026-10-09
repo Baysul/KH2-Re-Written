@@ -29,6 +29,7 @@ use windows_shell::layout2d::{self, Menu2ld};
 use windows_shell::newgame::{self, NewGame, Texts};
 use windows_shell::pad::{self, Pad};
 use windows_shell::sound::{self, Banks, Music};
+use windows_shell::splash::{self, Splash};
 use windows_shell::sprite2d::Sheet;
 use windows_shell::title::{Action, Event, State, Title};
 use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
@@ -49,8 +50,10 @@ struct Config {
     /// se/se000.win32.scd (system sounds).
     #[serde(default)]
     system_sounds: Option<Locator>,
-    /// Play the first-boot splash (scene 8) before the title.
-    #[serde(default)]
+    /// Play the first-boot splash (scene 8: Disney, Square Enix, copyright)
+    /// before the title. The exe plays it on every process start
+    /// (FUN_14014ed40 → FUN_140150870, boot-01), so it defaults on.
+    #[serde(default = "yes")]
     first_boot: bool,
     /// msg/us/sys.bar, msg/us/fontimage.bar and msg/us/fontinfo.bar for the
     /// New Game dialog.
@@ -60,6 +63,10 @@ struct Config {
     /// vagstream/Title.win32.scd.
     #[serde(default)]
     music: Option<Locator>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// Mixer key of the title stream (FUN_140537420's single AxaSoundStream).
@@ -102,6 +109,11 @@ mod pad_bits {
 struct Session {
     menu: Menu2ld,
     first_boot: bool,
+    /// The rewrite's own studio splash, before everything else (not in the
+    /// original game); `None` once played, and for unattended runs.
+    studio: Option<Splash>,
+    studio_image: Option<splash::Image>,
+    studio_sheet: usize,
     title: Option<Title>,
     dialog: Option<NewGame>,
     music_rx: Option<sound::MusicSlot>,
@@ -200,6 +212,9 @@ fn setup(
         }
     }
     s.white = frame.add_sheet(&mut images, vec![255; 4], [1, 1], 1.);
+    if let Some(i) = s.studio_image.take() {
+        s.studio_sheet = frame.add_sheet(&mut images, i.rgba, i.size, 1.);
+    }
     s.font_sheet = frame.add_sheet(
         &mut images,
         std::mem::take(&mut s.font.rgba),
@@ -303,6 +318,25 @@ fn tick(
         }
     }
 
+    // The studio splash plays once the opening fade-in is done, before the
+    // title task starts [rebuild addition].
+    if s.title.is_none()
+        && s.handoff.is_none()
+        && s.fade.state == fade::State::Idle
+        && let Some(mut sp) = s.studio.take()
+    {
+        if sp.frame == 0 {
+            s.event(serde_json::json!({"event":"studio_splash","tick":tick}));
+        }
+        let (backdrop, logo, overlay) = sp.quads();
+        s.snapshot.push((s.white, backdrop));
+        s.snapshot.extend(logo.map(|q| (s.studio_sheet, vec![q])));
+        s.snapshot.extend(overlay.map(|q| (s.white, vec![q])));
+        if !sp.update() {
+            s.studio = Some(sp);
+        }
+    }
+
     // Music: collect the background decode, then start the stream the
     // frame after the title asked for it (only when nothing plays).
     if let Some(slot) = &s.music_rx
@@ -337,6 +371,7 @@ fn tick(
     let music_pending = s.music_rx.is_some();
     if s.title.is_none()
         && s.handoff.is_none()
+        && s.studio.is_none()
         && s.fade.state == fade::State::Idle
         && !music_pending
     {
@@ -675,9 +710,19 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             None
         }
     };
+    // Unattended plans press at fixed ticks from the scene-17 start, so they
+    // skip both splashes.
+    let (studio, studio_image) = if autoplay.is_none() {
+        (Some(Splash::default()), Some(splash::load()?))
+    } else {
+        (None, None)
+    };
     let session = Session {
         menu,
-        first_boot: config.first_boot,
+        first_boot: config.first_boot && autoplay.is_none(),
+        studio,
+        studio_image,
+        studio_sheet: 0,
         title: None,
         dialog: None,
         music_rx,

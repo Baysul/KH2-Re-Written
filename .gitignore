@@ -17,6 +17,8 @@
 !/crates/*/src/**/*.wgsl
 !/crates/*/examples/*.rs
 !/crates/windows_shell/assets/development-checker.bmp
+# The project owner's own studio splash art (not game data).
+!/crates/windows_shell/assets/glurbus-splash.png
 !/docs/**/*.md
 !/docs/*.csv
 !/docs/release/dependency-inventory.csv
