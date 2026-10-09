@@ -642,6 +642,8 @@ struct CampSource {
     weapon_ability: u16,
     party_help: [Vec<u8>; 3],
     customize: camp::customize::CustomizeTexts,
+    equip_texts: camp::equip::EquipTexts,
+    equip_stats: Vec<camp::equip::ItemStats>,
     /// The font image's icon plane (0x09 icons).
     icons: SystemFont,
 }
@@ -656,6 +658,13 @@ const ITEM_MESSAGES: [u32; 19] = [
 /// inventory is not decoded]: 3 Potions, a Hi-Potion, 2 Ethers; the
 /// Kingdom Key with one empty armor, accessory and two item slots.
 const ROOM_STOCK: [(u16, u8); 3] = [(1, 3), (2, 1), (3, 2)];
+
+/// Equip messages (camp-09 §10): sections, None, no items, unequip help,
+/// the two boxes, the info labels.
+const EQUIP_MESSAGES: [u32; 22] = [
+    0x845b, 0x845d, 0x8463, 0x8465, 0x8467, 0x8449, 0x844a, 0xcb8d, 0xcb8e, 0x8469, 0x846a, 0xc22e,
+    0xc648, 0xc649, 0xc64a, 0xc64b, 0xc651, 0xc652, 0xc653, 0xc654, 0xc64c, 0,
+];
 
 /// Customize messages (camp-07 §1.3 / §7): help, category labels,
 /// shortcut headings, remove help, MP Charge and Auto-Reload choices and
@@ -1694,6 +1703,39 @@ fn load(
                 reload_help: [take(), take()],
                 reload_warning: take(),
             };
+            let mut eq = msg(&EQUIP_MESSAGES[..21])?.into_iter();
+            let mut take = || eq.next().unwrap_or_default();
+            let equip_texts = camp::equip::EquipTexts {
+                sections: [take(), take(), take(), take(), take()],
+                none: take(),
+                no_items: take(),
+                unequip_help: [take(), take(), take()],
+                reload_box: take(),
+                accessory_box: take(),
+                stat_labels: [
+                    take(),
+                    take(),
+                    take(),
+                    take(),
+                    take(),
+                    take(),
+                    take(),
+                    take(),
+                    take(),
+                ],
+            };
+            let equip_stats = package_reader::item_table::read_stats(bar_entry(&system, b"item")?)?
+                .into_iter()
+                .map(|s| camp::equip::ItemStats {
+                    id: s.id,
+                    ability: s.ability,
+                    strength: s.strength,
+                    magic: s.magic,
+                    defense: s.defense,
+                    ap: s.ap,
+                    resists: s.resists,
+                })
+                .collect();
             // Party help (party-spec §11).
             let mut party = msg(&[0xbb88, 0x846b, 0x846c])?.into_iter();
             let mut next = || party.next().unwrap_or_default();
@@ -1724,6 +1766,8 @@ fn load(
                 weapon_ability,
                 party_help,
                 customize,
+                equip_texts,
+                equip_stats,
             })
         }
         _ => None,
@@ -2772,11 +2816,12 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 62] = [
+const AUTOPLAY_CAPTURES: [u64; 70] = [
     90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1198, 1300, 1500,
     1700, 1830, 1900, 1930, 1990, 2030, 2050, 2070, 2110, 2230, 2310, 2330, 2390, 2420, 2450, 2520,
     2690, 2715, 2760, 2780, 2840, 2880, 2920, 2970, 3080, 3200, 3220, 3270, 3300, 3560, 3660, 3690,
-    3730, 3800, 3830, 3900, 4060, 4150, 4420, 4450, 4800, 4880, 5000, 5100,
+    3730, 3800, 3830, 3900, 4060, 4150, 4420, 4450, 4800, 4880, 5000, 5100, 5500, 5560, 5650, 5690,
+    5800, 5840, 5940, 6000,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -2788,7 +2833,7 @@ const AUTOPLAY_TALK_END: u64 = 260;
 /// in earlier unattended runs.
 const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 /// The last stretch leaves Sora standing so an enemy can attack him.
-const AUTOPLAY_END: u64 = 5260;
+const AUTOPLAY_END: u64 = 6100;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
@@ -4411,13 +4456,16 @@ struct CampRes {
     /// value]) and the MP-charge bits (save+0x3744).
     shortcuts: [u16; 4],
     no_charge: u8,
+    /// Sora's equipment [test-room values]: the Kingdom Key, one empty
+    /// armor and accessory slot, two empty item slots.
+    equipment: camp::items::Equipment,
 }
 
 /// Unattended camp check after the combat plan: open, down to Status,
 /// the character list, the stat browser (column switch, move), back out,
 /// down to Config, change Field Camera and Summon Effects, jump to the
 /// bottom with R1, back out, close with START.
-const AUTOPLAY_CAMP: [(u64, u64); 77] = [
+const AUTOPLAY_CAMP: [(u64, u64); 92] = [
     (1810, 0x2),
     (1840, 0x20),
     (1850, 0x20),
@@ -4503,6 +4551,23 @@ const AUTOPLAY_CAMP: [(u64, u64); 77] = [
     (5020, 0x8),
     (5120, 0x8),
     (5190, 0x2),
+    // Equip: reopen, up to Items, Sora, item slot 1 → Potion, auto-reload
+    // on with TRIANGLE, back to Items, close.
+    (5260, 0x2),
+    (5300, 0x10),
+    (5310, 0x10),
+    (5330, 0x4),
+    (5410, 0x4),
+    (5520, 0x20),
+    (5530, 0x20),
+    (5540, 0x20),
+    (5580, 0x4),
+    (5670, 0x20),
+    (5710, 0x4),
+    (5820, 0x1000),
+    (5860, 0x8),
+    (5960, 0x8),
+    (6030, 0x2),
 ];
 fn camp_setup(
     camp: Option<ResMut<CampRes>>,
@@ -4664,14 +4729,7 @@ fn camp_tick(
                     game_mode: c.game_mode,
                     items: camp::items::ItemsData {
                         counts: c.stock.clone(),
-                        equipment: vec![camp::items::Equipment {
-                            weapon: 0x29,
-                            armor: vec![0],
-                            accessories: vec![0],
-                            items: vec![0, 0],
-                            originals: vec![0, 0],
-                            ..Default::default()
-                        }],
+                        equipment: vec![c.equipment.clone()],
                         seen: c.seen.clone(),
                         ..c.source.items.clone()
                     },
@@ -4680,6 +4738,17 @@ fn camp_tick(
                         texts: c.source.abilities.clone(),
                     },
                     party_help: c.source.party_help.clone(),
+                    equip: camp::equip::EquipData {
+                        stats: c.source.equip_stats.clone(),
+                        totals: vec![camp::equip::Totals {
+                            ap: n.ap,
+                            strength: n.strength,
+                            magic: n.magic,
+                            defense: n.defense,
+                            resists: [100; 4],
+                        }],
+                        texts: c.source.equip_texts.clone(),
+                    },
                     customize: camp::customize::CustomizeData {
                         shortcuts: c.shortcuts,
                         no_charge: c.no_charge,
@@ -4703,6 +4772,9 @@ fn camp_tick(
                 c.stock = menu.data.items.counts.clone();
                 c.seen = menu.data.items.seen.clone();
                 c.shortcuts = menu.data.customize.shortcuts;
+                if let Some(e) = menu.data.items.equipment.first() {
+                    c.equipment = e.clone();
+                }
                 c.no_charge = menu.data.customize.no_charge;
                 if let Some(m) = menu.data.abilities.members.first() {
                     c.ability_slots = m.slots.clone();
@@ -5230,6 +5302,14 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             seen: Vec::new(),
             shortcuts: [0; 4],
             no_charge: 0,
+            equipment: camp::items::Equipment {
+                weapon: KINGDOM_KEY,
+                armor: vec![0],
+                accessories: vec![0],
+                items: vec![0, 0],
+                originals: vec![0, 0],
+                ..Default::default()
+            },
             ability_slots: {
                 let mut s = ROOM_ABILITIES.to_vec();
                 s.resize(80, 0);

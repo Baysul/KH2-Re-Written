@@ -505,7 +505,7 @@ impl Camp {
         moved
     }
 
-    fn entry_label(&self, id: u8) -> Vec<u8> {
+    pub(super) fn entry_label(&self, id: u8) -> Vec<u8> {
         self.data
             .entries
             .iter()
@@ -521,6 +521,13 @@ impl Camp {
         let label = self.entry_label(1);
         self.tab_text(0, label);
         self.enter_ability_chars(seq, Some(member));
+    }
+
+    /// FUN_140362200(0x10, member): straight into a member's list (from
+    /// Equip's SQUARE).
+    pub(super) fn enter_ability_list_for(&mut self, seq: &Sequence, member: usize) {
+        self.ability_ui.member = member;
+        self.enter_ability_list(seq);
     }
 
     // ---- 0x10 --------------------------------------------------------------
@@ -940,7 +947,7 @@ impl Camp {
         let room = (self.ap_max() - used(&self.ability_ui.entries)).max(0);
         let fits = |e: &Entry| e.equipped || e.cost <= room;
         let valid = match pick {
-            Pick::Next | Pick::Previous => self.ability_ui.chars.rows.len() > 1,
+            Pick::Next | Pick::Previous => self.data.panels.members.len() > 1,
             Pick::Triangle => self.cursor_entry().is_some_and(|e| fits(&e)),
             Pick::Row(r) => self
                 .ability_ui

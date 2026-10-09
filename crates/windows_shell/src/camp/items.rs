@@ -762,8 +762,14 @@ impl Camp {
                 || self.alive_opt(self.item_ui.stock_badge);
             let p = self.pending;
             let leaving = matches!(p, Some(State::Top) | Some(State::AbilityChars));
-            if !busy && !self.alive_opt(self.banner) && (!leaving || !self.tab_alive(0)) {
+            let equip = p == Some(State::Equip);
+            if !busy && (equip || !self.alive_opt(self.banner)) && (!leaving || !self.tab_alive(0))
+            {
                 match self.pending.take() {
+                    Some(State::Equip) => {
+                        self.kill_opt(self.banner);
+                        self.enter_equip(seq);
+                    }
                     Some(State::AbilityChars) => {
                         let m = self.memory.items_row;
                         let member = if m < self.data.panels.members.len() {
@@ -856,7 +862,19 @@ impl Camp {
                 self.pending = Some(State::Stock);
                 self.substate = 2;
             }
-            Pick::Row(_) => self.memory.items_row = cursor,
+            // A member row: Equip (state 2), the banner kept.
+            Pick::Row(r) => {
+                if self.memory.items_row != r {
+                    self.memory.equip = (0, 0);
+                }
+                self.memory.items_row = r;
+                let name = self.data.panels.members[r].name.clone();
+                self.tab_text(1, name);
+                self.hide_help(seq);
+                self.close_items_screen(seq);
+                self.pending = Some(State::Equip);
+                self.substate = 2;
+            }
             _ => {}
         }
         moved

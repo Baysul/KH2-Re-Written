@@ -13,6 +13,7 @@
 //! renders the caller makes (Tz::MenuObj).
 pub mod abilities;
 pub mod customize;
+pub mod equip;
 pub mod items;
 pub mod party;
 
@@ -211,6 +212,7 @@ pub struct Data {
     /// "Select Party Member.", 0x846c "Switch Party Member."
     pub party_help: [Vec<u8>; 3],
     pub customize: customize::CustomizeData,
+    pub equip: equip::EquipData,
 }
 
 /// Cursor memory kept between camp openings (DAT_140beec30 / 7c).
@@ -232,6 +234,8 @@ pub struct Memory {
     /// list's cursor and scroll.
     pub customize_char: usize,
     pub customize_list: (usize, usize),
+    /// mem[2]: the Equip slot list's cursor and scroll.
+    pub equip: (usize, usize),
 }
 
 /// Tz::MenuObj's pastes: priority and (member, layout offset, alpha).
@@ -295,6 +299,13 @@ pub enum State {
     CustomizeList,
     CustomizePopup(u8),
     CustomizeConfirm,
+    /// 2: a member's slot list; 5–9 the pick list of section 0 weapon /
+    /// 1 form / 2 armor / 3 accessory / 4 items; 3 the auto-reload box; 4
+    /// the accessory AP box.
+    Equip,
+    EquipPick(u8),
+    EquipReload,
+    EquipApBox,
     StatusList,
     StatusBrowse,
     Config,
@@ -574,6 +585,8 @@ pub struct Camp {
     party_ui: party::Ui,
     // Customize.
     custom_ui: customize::Ui,
+    // Equip.
+    equip_ui: equip::Ui,
 }
 
 impl Camp {
@@ -627,6 +640,7 @@ impl Camp {
             ability_ui: abilities::Ui::default(),
             party_ui: party::Ui::default(),
             custom_ui: customize::Ui::default(),
+            equip_ui: equip::Ui::default(),
         };
         camp.build_top(seq);
         camp.munny_digits = digits(seq, &munny_groups(camp.data.panels.munny), Vec::new());
@@ -812,6 +826,10 @@ impl Camp {
                     State::CustomizeList => self.customize_list(seq, &pad, &mut sounds),
                     State::CustomizePopup(_) => self.customize_popup(seq, &pad, &mut sounds),
                     State::CustomizeConfirm => self.customize_confirm(seq, &pad, &mut sounds),
+                    State::Equip => self.equip(seq, &pad, &mut sounds),
+                    State::EquipPick(_) => self.equip_pick(seq, &pad, &mut sounds),
+                    State::EquipReload => self.equip_reload_box(seq, &pad, &mut sounds),
+                    State::EquipApBox => self.equip_ap_box(seq, &pad, &mut sounds),
                     State::StatusList => self.status_list(seq, &pad, &mut sounds),
                     State::StatusBrowse => self.status_browse(seq, &pad, &mut sounds),
                     State::Config => self.config(seq, &pad, &mut sounds),
@@ -865,7 +883,11 @@ impl Camp {
             State::CustomizeChars => (&self.custom_ui.chars, RowGroupsFor::Top),
             State::CustomizeList => (&self.custom_ui.list.list, RowGroupsFor::None),
             State::CustomizePopup(_) => (&self.custom_ui.popup.list, RowGroupsFor::None),
-            State::CustomizeConfirm => (&ui.choices, RowGroupsFor::Fixed(items::CHOICE_ROWS)),
+            State::CustomizeConfirm | State::EquipReload | State::EquipApBox => {
+                (&ui.choices, RowGroupsFor::Fixed(items::CHOICE_ROWS))
+            }
+            State::Equip => (&self.equip_ui.list.list, RowGroupsFor::None),
+            State::EquipPick(_) => (&self.equip_ui.pick.list, RowGroupsFor::None),
             State::StatusList => (&self.status_list, RowGroupsFor::Status),
             State::StatusBrowse => (&self.columns[self.column], RowGroupsFor::None),
             State::Config => (&self.config_list, RowGroupsFor::None),
@@ -917,7 +939,10 @@ impl Camp {
             // States of list 0x1405baf20 (the stock list here) use G22.
             let group = if matches!(
                 state,
-                State::Stock | State::AbilityPopup(_) | State::CustomizePopup(_)
+                State::Stock
+                    | State::AbilityPopup(_)
+                    | State::CustomizePopup(_)
+                    | State::EquipPick(_)
             ) {
                 22
             } else {

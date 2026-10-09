@@ -88,6 +88,8 @@ pub struct Stats {
     pub magic: u8,
     pub defense: u8,
     pub ap: u8,
+    /// +9..+0xc: Fire, Blizzard, Thunder, Dark (100 = no resistance).
+    pub resists: [u8; 4],
 }
 
 /// The stat table that follows the item records in the same subfile.
@@ -114,6 +116,7 @@ pub fn read_stats(bytes: &[u8]) -> io::Result<Vec<Stats>> {
             magic: r[5],
             defense: r[6],
             ap: r[7],
+            resists: [r[9], r[10], r[11], r[12]],
         })
         .collect())
 }
