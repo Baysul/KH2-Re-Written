@@ -1576,7 +1576,7 @@ impl Camp {
             rows.push(r);
         }
         let mut list = MenuList::new(rows, 0);
-        list.sideways = true;
+        list.keys = Some((bits::RIGHT, bits::LEFT));
         list.mask &= if ok_only { !0x43 } else { !0x40 };
         self.item_ui.choices = list;
     }

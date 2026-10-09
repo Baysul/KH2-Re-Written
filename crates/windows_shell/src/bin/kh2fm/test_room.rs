@@ -640,6 +640,7 @@ struct CampSource {
     /// The Abilities screens' messages and the Kingdom Key's ability.
     abilities: camp::abilities::AbilityTexts,
     weapon_ability: u16,
+    party_help: [Vec<u8>; 3],
     /// The font image's icon plane (0x09 icons).
     icons: SystemFont,
 }
@@ -1656,6 +1657,10 @@ fn load(
                     ids,
                 )
             })?;
+            // Party help (party-spec §11).
+            let mut party = msg(&[0xbb88, 0x846b, 0x846c])?.into_iter();
+            let mut next = || party.next().unwrap_or_default();
+            let party_help = [next(), next(), next()];
             let items = load_camp_items(&system, |ids| {
                 hud::load_messages_optional(
                     source,
@@ -1680,6 +1685,7 @@ fn load(
                 icons,
                 abilities,
                 weapon_ability,
+                party_help,
             })
         }
         _ => None,
@@ -2728,11 +2734,11 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 56] = [
+const AUTOPLAY_CAPTURES: [u64; 58] = [
     90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1198, 1300, 1500,
     1700, 1830, 1900, 1930, 1990, 2030, 2050, 2070, 2110, 2230, 2310, 2330, 2390, 2420, 2450, 2520,
     2690, 2715, 2760, 2780, 2840, 2880, 2920, 2970, 3080, 3200, 3220, 3270, 3300, 3560, 3660, 3690,
-    3730, 3800, 3830, 3900, 4060, 4150,
+    3730, 3800, 3830, 3900, 4060, 4150, 4420, 4450,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -2744,7 +2750,7 @@ const AUTOPLAY_TALK_END: u64 = 260;
 /// in earlier unattended runs.
 const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 /// The last stretch leaves Sora standing so an enemy can attack him.
-const AUTOPLAY_END: u64 = 4320;
+const AUTOPLAY_END: u64 = 4620;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
@@ -4369,7 +4375,7 @@ struct CampRes {
 /// the character list, the stat browser (column switch, move), back out,
 /// down to Config, change Field Camera and Summon Effects, jump to the
 /// bottom with R1, back out, close with START.
-const AUTOPLAY_CAMP: [(u64, u64); 60] = [
+const AUTOPLAY_CAMP: [(u64, u64); 67] = [
     (1810, 0x2),
     (1840, 0x20),
     (1850, 0x20),
@@ -4435,6 +4441,14 @@ const AUTOPLAY_CAMP: [(u64, u64); 60] = [
     (4080, 0x800),
     (4170, 0x8),
     (4240, 0x2),
+    // Party: reopen, down to Party, the card (nothing to switch), back.
+    (4300, 0x2),
+    (4340, 0x20),
+    (4350, 0x20),
+    (4370, 0x4),
+    (4440, 0x80),
+    (4460, 0x8),
+    (4540, 0x2),
 ];
 fn camp_setup(
     camp: Option<ResMut<CampRes>>,
@@ -4611,6 +4625,7 @@ fn camp_tick(
                         members: vec![sora_abilities.clone()],
                         texts: c.source.abilities.clone(),
                     },
+                    party_help: c.source.party_help.clone(),
                 };
                 let (menu, s) = Camp::open(layout, data, c.memory);
                 c.open = Some(menu);
@@ -4677,7 +4692,6 @@ fn camp_present(
         pad: if c.glyph == 0 { 1 } else { c.glyph as u8 },
     };
     let art = c.art[c.glyph].or(c.art[0]).expect("camp art");
-    let members = menu.data.panels.members.len();
     for (sheet, mut quads) in menu.draw(&c.source.menu.layout, &font) {
         let slot = match sheet {
             camp::Sheet::Art => art,
@@ -4688,12 +4702,7 @@ fn camp_present(
                 let Some(m) = model.as_ref().filter(|_| i == 0) else {
                     continue;
                 };
-                let [dx, dy] = camp::model_offset(i, members);
                 for q in &mut quads {
-                    for c in &mut q.corners {
-                        c[0] += dx;
-                        c[1] += dy;
-                    }
                     q.uv = [0, 0, MENU_TARGET[0] as i32, MENU_TARGET[1] as i32];
                 }
                 m.sheet

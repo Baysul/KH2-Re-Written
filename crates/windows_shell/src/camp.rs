@@ -13,6 +13,7 @@
 //! renders the caller makes (Tz::MenuObj).
 pub mod abilities;
 pub mod items;
+pub mod party;
 
 use crate::command::Font;
 use crate::sprite2d::{self, Id, LightCur, Sprites, Text};
@@ -205,6 +206,9 @@ pub struct Data {
     pub game_mode: u32,
     pub items: items::ItemsData,
     pub abilities: abilities::AbilitiesData,
+    /// Party help: 0xbb88 "There are no Party Members to switch.", 0x846b
+    /// "Select Party Member.", 0x846c "Switch Party Member."
+    pub party_help: [Vec<u8>; 3],
 }
 
 /// Cursor memory kept between camp openings (DAT_140beec30 / 7c).
@@ -223,6 +227,9 @@ pub struct Memory {
     pub ability_char: usize,
     pub ability_list: (usize, usize),
 }
+
+/// Tz::MenuObj's pastes: priority and (member, layout offset, alpha).
+pub type ModelLayer = (u32, Vec<(usize, [f32; 2], f32)>);
 
 /// What a draw item samples: the camp sheet, the system font, or member
 /// `i`'s off-screen model render (Tz::MenuObj's paste, prio 0x7538).
@@ -272,6 +279,9 @@ pub enum State {
     AbilityChars,
     AbilityList,
     AbilityPopup(u8),
+    /// 0x14: pick a member; 0x16: pick the one to swap with.
+    Party,
+    PartySwap,
     StatusList,
     StatusBrowse,
     Config,
@@ -334,9 +344,12 @@ struct MenuList {
     mask: u32,
     /// Page keys (+0x27) with this page size.
     page: Option<usize>,
-    /// FUN_1402f8eb0(list, 0x80, 0x40): RIGHT moves up, LEFT down (the
-    /// dialog choices).
-    sideways: bool,
+    /// FUN_1402f8eb0(list, prev, next): the bits that step back / forward
+    /// (None = UP / DOWN; the dialog choices use RIGHT / LEFT, the Party
+    /// cards LEFT / RIGHT).
+    keys: Option<(u64, u64)>,
+    /// +0x20: rows the cursor steps over.
+    skip: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -369,7 +382,8 @@ impl MenuList {
             cursor: cursor.min(total.saturating_sub(1)),
             mask: 0x73,
             page: None,
-            sideways: false,
+            keys: None,
+            skip: 0,
         }
     }
 
@@ -379,23 +393,36 @@ impl MenuList {
         if n == 0 {
             return (Pick::None, false);
         }
-        let (up, down) = if self.sideways {
-            (RIGHT, LEFT)
-        } else {
-            (UP, DOWN)
-        };
+        let (up, down) = self.keys.unwrap_or((UP, DOWN));
+        let skipped = |c: usize| c < 32 && self.skip >> c & 1 != 0;
         let before = self.cursor;
         if p.repeat & up != 0 && self.mask & 0x1 != 0 {
-            if self.cursor > 0 {
-                self.cursor -= 1;
-            } else if p.trig & up != 0 {
-                self.cursor = n - 1;
+            for _ in 0..n {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                } else if p.trig & up != 0 {
+                    self.cursor = n - 1;
+                } else {
+                    self.cursor = before;
+                    break;
+                }
+                if !skipped(self.cursor) {
+                    break;
+                }
             }
         } else if p.repeat & down != 0 && self.mask & 0x2 != 0 {
-            if self.cursor + 1 < n {
-                self.cursor += 1;
-            } else if p.trig & down != 0 {
-                self.cursor = 0;
+            for _ in 0..n {
+                if self.cursor + 1 < n {
+                    self.cursor += 1;
+                } else if p.trig & down != 0 {
+                    self.cursor = 0;
+                } else {
+                    self.cursor = before;
+                    break;
+                }
+                if !skipped(self.cursor) {
+                    break;
+                }
             }
         } else if let Some(page) = self.page {
             if p.repeat & L1 != 0 && self.mask & 0x2000 != 0 {
@@ -530,6 +557,8 @@ pub struct Camp {
     item_ui: items::Ui,
     // Abilities.
     ability_ui: abilities::Ui,
+    // Party.
+    party_ui: party::Ui,
 }
 
 impl Camp {
@@ -581,6 +610,7 @@ impl Camp {
             config_frame: None,
             item_ui: items::Ui::default(),
             ability_ui: abilities::Ui::default(),
+            party_ui: party::Ui::default(),
         };
         camp.build_top(seq);
         camp.munny_digits = digits(seq, &munny_groups(camp.data.panels.munny), Vec::new());
@@ -760,6 +790,8 @@ impl Camp {
                     State::AbilityChars => self.ability_chars(seq, &pad, &mut sounds),
                     State::AbilityList => self.ability_list(seq, &pad, &mut sounds),
                     State::AbilityPopup(_) => self.ability_popup(seq, &pad, &mut sounds),
+                    State::Party => self.party(seq, &pad, &mut sounds),
+                    State::PartySwap => self.party_swap(seq, &pad, &mut sounds),
                     State::StatusList => self.status_list(seq, &pad, &mut sounds),
                     State::StatusBrowse => self.status_browse(seq, &pad, &mut sounds),
                     State::Config => self.config(seq, &pad, &mut sounds),
@@ -781,12 +813,12 @@ impl Camp {
         }
         self.place_help(layout);
         self.place_lights(seq);
-        // FUN_1403001b0: the walk advances; the models go with the frame.
-        match self.frame_sprite {
-            Some(f) if self.sprites.alive(f) => {
-                self.model_time = self.model_time.map(|t| model_time(t, MODEL_LENGTH));
-            }
-            _ => self.model_time = None,
+        // FUN_1403001b0: the walk advances; the models go with their host
+        // (the party frame, or Party's name cards).
+        if self.models_hosted() {
+            self.model_time = self.model_time.map(|t| model_time(t, MODEL_LENGTH));
+        } else {
+            self.model_time = None;
         }
         if self.exit && self.layout.dead {
             self.closed = true;
@@ -808,6 +840,8 @@ impl Camp {
             State::AbilityChars => (&self.ability_ui.chars, RowGroupsFor::Top),
             State::AbilityList => (&self.ability_ui.list.list, RowGroupsFor::None),
             State::AbilityPopup(_) => (&self.ability_ui.popup, RowGroupsFor::None),
+            State::Party => (&self.party_ui.cards, RowGroupsFor::None),
+            State::PartySwap => (&self.party_ui.swap, RowGroupsFor::None),
             State::StatusList => (&self.status_list, RowGroupsFor::Status),
             State::StatusBrowse => (&self.columns[self.column], RowGroupsFor::None),
             State::Config => (&self.config_list, RowGroupsFor::None),
@@ -978,6 +1012,7 @@ impl Camp {
                 let pending = match entry.id {
                     0 => Some(State::Items),
                     1 => Some(State::AbilityChars),
+                    3 => Some(State::Party),
                     4 => Some(State::StatusList),
                     7 => Some(State::Config),
                     _ => None,
@@ -1020,6 +1055,7 @@ impl Camp {
             match self.pending.take() {
                 Some(State::Items) => self.enter_items(seq, None),
                 Some(State::AbilityChars) => self.enter_ability_chars(seq, None),
+                Some(State::Party) => self.enter_party(seq),
                 Some(State::StatusList) => self.enter_status(seq),
                 Some(State::Config) => self.enter_config(seq),
                 _ => {}
@@ -1922,34 +1958,58 @@ impl Camp {
                 sprite2d::Sheet::Icon => (Sheet::Icon, quads),
             })
         };
-        // The model paste (0x7538), then the panel band; the digit rows
-        // (Tz::MultiSeq, 0x753b) follow their labels.
-        out.extend(convert(
-            self.sprites.draw_where(seq, font, |p| p < PRIO_MODEL),
-        ));
-        if let Some(a) = self.model_alpha() {
-            for i in 0..self.data.panels.members.len().min(3) {
-                out.push((Sheet::Model(i), model_quads(a)));
-            }
+        // The model paste at its priority (0x7538 on the top level, 0x7545
+        // in Party); the digit rows (Tz::MultiSeq) follow the panel band
+        // (0x753b) with their labels.
+        let layer = self.model_layer();
+        let mut cuts: Vec<(u32, bool)> = vec![(PRIO_PANEL + 1, false)];
+        if let Some((prio, _)) = &layer {
+            cuts.push((*prio, true));
         }
-        out.extend(convert(
-            self.sprites
-                .draw_where(seq, font, |p| (PRIO_MODEL..=PRIO_PANEL).contains(&p)),
-        ));
-        out.push((Sheet::Art, self.digit_quads(seq)));
-        out.extend(convert(
-            self.sprites.draw_where(seq, font, |p| p > PRIO_PANEL),
-        ));
+        cuts.sort_by_key(|c| c.0);
+        let mut low = 0;
+        for (cut, models) in cuts {
+            out.extend(convert(
+                self.sprites
+                    .draw_where(seq, font, |p| (low..cut).contains(&p)),
+            ));
+            if models {
+                for &(member, offset, alpha) in &layer.as_ref().unwrap().1 {
+                    out.push((Sheet::Model(member), model_quads(offset, alpha)));
+                }
+            } else {
+                out.push((Sheet::Art, self.digit_quads(seq)));
+            }
+            low = cut;
+        }
+        out.extend(convert(self.sprites.draw_where(seq, font, |p| p >= low)));
         out
     }
 
-    /// The paste alpha: the party frame's colour alpha (FUN_1402ffac0),
-    /// while the frame and the models live.
-    pub fn model_alpha(&self) -> Option<f32> {
+    /// Tz::MenuObj's pastes: (priority, [(member, layout offset, alpha)]).
+    /// The top level pastes at 0x7538 with the party frame's colour alpha
+    /// (FUN_1402ffac0); Party at 0x7545 on each name card, with the card's
+    /// alpha (party-spec §4).
+    pub fn model_layer(&self) -> Option<ModelLayer> {
         self.model_time?;
+        if let Some(layer) = self.party_models() {
+            return Some(layer);
+        }
         let f = self.frame_sprite?;
         let s = self.sprites.get(f);
-        (!s.dead).then_some(s.ctx_color[3])
+        if s.dead {
+            return None;
+        }
+        let n = self.data.panels.members.len();
+        let members = (0..n.min(3))
+            .map(|i| (i, model_offset(i, n), s.ctx_color[3]))
+            .collect();
+        Some((PRIO_MODEL, members))
+    }
+
+    /// Whether a model host lives (the party frame or a Party name card).
+    fn models_hosted(&self) -> bool {
+        self.frame_sprite.is_some_and(|f| self.sprites.alive(f)) || self.party_models().is_some()
     }
 
     /// Tz::MultiSeq: from the label's context + (LightPositionX,
@@ -1989,13 +2049,19 @@ impl Camp {
 /// 64 ticks.
 pub const MODEL_LENGTH: f32 = 64.;
 
-/// One whole-layout quad for a member's render; the caller shifts it by
-/// `model_offset` and samples that member's target (uv in the caller's
-/// texels).
-fn model_quads(alpha: f32) -> Vec<Quad> {
+/// One whole-layout quad for a member's render shifted by `offset` (the
+/// projection centre's shift from the layout centre); the caller samples
+/// that member's target (uv in the caller's texels).
+fn model_quads(offset: [f32; 2], alpha: f32) -> Vec<Quad> {
     let (l, r) = (256. - 512. * 2. / 3., 256. + 512. * 2. / 3.);
+    let [dx, dy] = offset;
     vec![Quad {
-        corners: [[l, 0.], [r, 0.], [l, 416.], [r, 416.]],
+        corners: [
+            [l + dx, dy],
+            [r + dx, dy],
+            [l + dx, 416. + dy],
+            [r + dx, 416. + dy],
+        ],
         uv: [0, 0, 1, 1],
         colors: [[MODEL_TINT, MODEL_TINT, MODEL_TINT, alpha]; 4],
         blend: 0,
