@@ -5,9 +5,8 @@
 //! mapping (pad mode 7).
 //!
 //! Every launch rehashes the complete selected source once. Not built yet:
-//! the title music (needs a Vorbis decoder), the New Game dialog (decide
-//! confirms, back cancels in its place), the file menu, the Theater and the
-//! Game Settings overlay. Esc quits (on PC it opens Game Settings).
+//! the title music (needs a Vorbis decoder), the file menu, the Theater and
+//! the Game Settings overlay. Esc quits (on PC it opens Game Settings).
 use bevy::{
     app::AppExit,
     input::mouse::MouseWheel,
@@ -15,15 +14,22 @@ use bevy::{
     render::view::screenshot::{Screenshot, ScreenshotCaptured},
 };
 use package_reader::probe::ProbeSource;
+use package_reader::sequence::Quad;
 use serde::Deserialize;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+use windows_shell::command::Font;
+use windows_shell::fade::{self, Fade};
+use windows_shell::hud::{self, SystemFont};
+use windows_shell::input;
 use windows_shell::layout2d::{self, Menu2ld};
-use windows_shell::pad::{self, Pad, PadData, button};
+use windows_shell::newgame::{self, NewGame, Texts};
+use windows_shell::pad::{self, Pad};
 use windows_shell::sound::{self, Banks};
+use windows_shell::sprite2d::Sheet;
 use windows_shell::title::{Action, Event, State, Title};
 use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
 
@@ -46,72 +52,44 @@ struct Config {
     /// Play the first-boot splash (scene 8) before the title.
     #[serde(default)]
     first_boot: bool,
+    /// msg/us/sys.bar, msg/us/fontimage.bar and msg/us/fontinfo.bar for the
+    /// New Game dialog.
+    messages: Locator,
+    font_image: Locator,
+    font_info: Locator,
 }
+
+/// The dialog's art: title.2ld image 0.
+const DIALOG_IMAGE: usize = 0;
+/// The fade quad at 16:9 (FUN_140156940: margin 85).
+const FADE_RECT: [f32; 4] = [-86., -1., 598., 417.];
 
 /// Title image 8's device-glyph alternates (FUN_1402b40d0): replacement N
 /// for keyboard, Xbox, PlayStation and other pads.
 const GLYPH_IMAGE: usize = 8;
 const GLYPHS: [usize; 4] = [8, 9, 10, 11];
 
-/// Unattended plan: presses by tick, captures by tick.
+/// Unattended plan: presses by tick, captures by tick. Rows down and up,
+/// New Game, Proud, vibration ON, back out of the confirm page, confirm.
 const AUTOPLAY_PRESSES: &[(u64, u64)] = &[
     (700, pad_bits::DOWN),
-    (760, pad_bits::DOWN),
-    (820, pad_bits::UP),
-    (900, pad_bits::DECIDE),
+    (740, pad_bits::UP),
+    (780, pad_bits::DECIDE),
+    (840, pad_bits::DOWN),
+    (880, pad_bits::DECIDE),
+    (940, pad_bits::DECIDE),
+    (1000, pad_bits::CANCEL),
+    (1060, pad_bits::DECIDE),
+    (1120, pad_bits::DECIDE),
 ];
 const AUTOPLAY_CAPTURES: &[u64] = &[
-    60, 200, 240, 330, 450, 560, 640, 690, 720, 780, 905, 1000, 1150,
+    60, 240, 450, 690, 750, 790, 800, 830, 845, 900, 970, 1010, 1080, 1125, 1135, 1200, 1300,
 ];
-const AUTOPLAY_END: u64 = 1200;
+const AUTOPLAY_END: u64 = 1450;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 mod pad_bits {
     pub use windows_shell::title::bits::*;
-}
-
-/// The global screen fade (DAT_140abb3b0; FUN_140156c90 in, FUN_140156ce0
-/// out, FUN_140156d00 rate): black, alpha 0..128, 2n frames per fade at
-/// 128 / 2n per frame. The per-frame update is inferred.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Fade {
-    /// 0 idle (clear), 1 fading in, 3 fading out, 4 black.
-    state: u8,
-    alpha: f32,
-    step: f32,
-}
-
-impl Fade {
-    fn rate(n: u32) -> f32 {
-        if n == 0 { 64. } else { 128. / (2 * n) as f32 }
-    }
-    fn fade_in(&mut self, n: u32) {
-        self.state = 1;
-        self.step = Self::rate(n);
-    }
-    fn fade_out(&mut self, n: u32) {
-        self.state = 3;
-        self.step = Self::rate(n);
-    }
-    fn update(&mut self) {
-        match self.state {
-            1 => {
-                self.alpha -= self.step;
-                if self.alpha <= 0. {
-                    self.alpha = 0.;
-                    self.state = 0;
-                }
-            }
-            3 => {
-                self.alpha += self.step;
-                if self.alpha >= 128. {
-                    self.alpha = 128.;
-                    self.state = 4;
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 #[derive(Resource)]
@@ -119,7 +97,15 @@ struct Session {
     menu: Menu2ld,
     first_boot: bool,
     title: Option<Title>,
+    dialog: Option<NewGame>,
+    texts: Texts,
+    font: SystemFont,
+    font_sheet: usize,
+    /// This frame's 2D draw (taken before the title task's logic, as the
+    /// sprite draw task runs before it).
+    snapshot: Vec<(usize, Vec<Quad>)>,
     fade: Fade,
+    fade_drawn: bool,
     pad: Pad,
     wheel: f32,
     keyboard_last: bool,
@@ -200,146 +186,25 @@ fn setup(
         }
     }
     s.white = frame.add_sheet(&mut images, vec![255; 4], [1, 1], 1.);
-    // FUN_1402b4c60: near-instant black; the task then fades in over 0x3c.
-    s.fade = Fade {
-        state: 4,
-        alpha: 128.,
-        step: 64.,
-    };
-    s.fade.fade_in(0x3c);
+    s.font_sheet = frame.add_sheet(
+        &mut images,
+        std::mem::take(&mut s.font.rgba),
+        s.font.size,
+        s.font.texel_scale as f32,
+    );
+    // FUN_1402b4c60: fade.out(0), near-instant black; the task then fades
+    // in over 0x3c.
+    s.fade.fade_out(0, false);
+    while s.fade.state != fade::State::Held {
+        s.fade.update(1.);
+    }
+    s.fade.fade_in(0x3c, false);
 }
 
 fn collect_wheel(mut wheel: MessageReader<MouseWheel>, mut session: ResMut<Session>) {
     for w in wheel.read() {
         session.wheel += w.y;
     }
-}
-
-/// Keyboard and mouse (FUN_140102ca0 with the default bindings) plus the
-/// first pad (FUN_140134d10's XInput order) into one PADDATA.
-fn read_devices(
-    keys: &ButtonInput<KeyCode>,
-    mouse: &ButtonInput<MouseButton>,
-    wheel: f32,
-    pads: &Query<(&Gamepad, Option<&Name>)>,
-) -> (PadData, bool, Option<usize>) {
-    let mut p = PadData::default();
-    let key_map: [(&[KeyCode], u16); 15] = [
-        (&[KeyCode::Enter, KeyCode::NumpadEnter], button::CROSS),
-        (&[KeyCode::Space, KeyCode::Backspace], button::CIRCLE),
-        (&[KeyCode::ShiftRight], button::SQUARE),
-        (&[KeyCode::KeyF, KeyCode::ControlRight], button::TRIANGLE),
-        (&[KeyCode::KeyR], button::R1),
-        (&[KeyCode::KeyE], button::R2),
-        (&[KeyCode::ShiftLeft], button::L1),
-        (&[KeyCode::KeyC], button::L2),
-        (&[KeyCode::KeyX], button::L3),
-        (&[KeyCode::AltRight], button::R3),
-        (&[KeyCode::ArrowUp], button::UP),
-        (&[KeyCode::ArrowDown], button::DOWN),
-        (&[KeyCode::ArrowLeft], button::LEFT),
-        (&[KeyCode::ArrowRight], button::RIGHT),
-        (&[KeyCode::KeyM], button::START),
-    ];
-    for (codes, bit) in key_map {
-        if codes.iter().any(|c| keys.pressed(*c)) {
-            p.buttons |= bit;
-        }
-    }
-    if keys.pressed(KeyCode::KeyN) {
-        p.buttons |= button::SELECT;
-    }
-    if mouse.pressed(MouseButton::Left) {
-        p.buttons |= button::CROSS;
-    }
-    if mouse.pressed(MouseButton::Right) {
-        p.buttons |= button::SQUARE;
-    }
-    if wheel > 0. {
-        p.buttons |= button::UP;
-    } else if wheel < 0. {
-        p.buttons |= button::DOWN;
-    }
-    let reach = if keys.pressed(KeyCode::AltLeft) {
-        96
-    } else {
-        127
-    };
-    let axis = |neg: KeyCode, pos: KeyCode| -> u8 {
-        let v = keys.pressed(pos) as i32 - keys.pressed(neg) as i32;
-        (0x80 + v * reach).clamp(0, 255) as u8
-    };
-    p.left = [
-        axis(KeyCode::KeyA, KeyCode::KeyD),
-        axis(KeyCode::KeyW, KeyCode::KeyS),
-    ];
-    let keyboard = p.buttons != 0 || p.left != [0x80; 2];
-    let mut glyph = None;
-    if let Some((g, name)) = pads.iter().next() {
-        let map = [
-            (GamepadButton::DPadUp, button::UP),
-            (GamepadButton::DPadDown, button::DOWN),
-            (GamepadButton::DPadLeft, button::LEFT),
-            (GamepadButton::DPadRight, button::RIGHT),
-            (GamepadButton::Start, button::START),
-            (GamepadButton::Select, button::SELECT),
-            (GamepadButton::LeftThumb, button::L3),
-            (GamepadButton::RightThumb, button::R3),
-            (GamepadButton::LeftTrigger, button::L1),
-            (GamepadButton::RightTrigger, button::R1),
-            (GamepadButton::South, button::CROSS),
-            (GamepadButton::East, button::CIRCLE),
-            (GamepadButton::West, button::SQUARE),
-            (GamepadButton::North, button::TRIANGLE),
-        ];
-        let mut b = 0;
-        for (gb, bit) in map {
-            if g.pressed(gb) {
-                b |= bit;
-            }
-        }
-        for (gb, bit) in [
-            (GamepadButton::LeftTrigger2, button::L2),
-            (GamepadButton::RightTrigger2, button::R2),
-        ] {
-            if g.get(gb).unwrap_or(0.) > 127. / 255. {
-                b |= bit;
-            }
-        }
-        // Gamepad Y is up; PADDATA Y grows down.
-        let (l, r) = (g.left_stick(), g.right_stick());
-        let (ls, rs) = (pad::stick_bytes(l.x, -l.y), pad::stick_bytes(r.x, -r.y));
-        let active = b != 0 || ls != [0x80; 2] || rs != [0x80; 2];
-        p.buttons |= b;
-        if ls != [0x80; 2] {
-            p.left = ls;
-        }
-        p.right = rs;
-        if active {
-            let n = name
-                .map(|n| n.as_str().to_ascii_lowercase())
-                .unwrap_or_default();
-            glyph = Some(
-                if [
-                    "dualsense",
-                    "dualshock",
-                    "ps4",
-                    "ps5",
-                    "wireless controller",
-                ]
-                .iter()
-                .any(|k| n.contains(k))
-                {
-                    2
-                } else if n.contains("xbox") || n.contains("xinput") {
-                    1
-                } else {
-                    3
-                },
-            );
-        }
-    }
-    (p, keyboard, glyph)
 }
 
 /// One 60 Hz title frame: input, the title task, layouts and fade.
@@ -352,7 +217,8 @@ fn tick(
     let s = &mut *session;
     s.tick += 1;
     let tick = s.tick;
-    let (data, keyboard, pad_glyph) = read_devices(&keys, &mouse, s.wheel, &pads);
+    let (data, keyboard, pad_glyph) = input::read_devices(&keys, &mouse, s.wheel, &pads);
+    let pad_glyph = pad_glyph.map(usize::from);
     s.wheel = 0.;
     let mut logical = pad::logical(pad::raw(&data), pad::MODE_TITLE);
     if s.autoplay.is_some() {
@@ -385,8 +251,38 @@ fn tick(
     }
     s.image_sheets[GLYPH_IMAGE] = s.glyph_sheets[s.glyph].expect("glyph sheet");
 
+    // Sprite and layout tasks (priority ~0x7532) run first, then the 2D
+    // draw (103000), then the title task (300000), then the fade (330000).
+    if let Some(t) = s.title.as_mut() {
+        t.update_layouts(&s.menu.layout, 1.);
+    }
+    let dialog_seq = &s.menu.layout.sequences[0];
+    if let Some(d) = s.dialog.as_mut() {
+        d.update_sprites(dialog_seq);
+    }
+    s.snapshot.clear();
+    if let Some(t) = &s.title {
+        for task in std::iter::once(&t.main).chain(t.cursor_layout.as_ref()) {
+            for b in layout2d::draw(&s.menu, task, [0, 0]) {
+                s.snapshot.push((s.image_sheets[b.image], b.quads));
+            }
+        }
+    }
+    if let Some(d) = &s.dialog {
+        let font = Font {
+            widths: &s.font.widths,
+        };
+        for (sheet, quads) in d.sprites.draw(dialog_seq, &font) {
+            let slot = match sheet {
+                Sheet::Art(image) => s.image_sheets[image],
+                Sheet::Font => s.font_sheet,
+            };
+            s.snapshot.push((slot, quads));
+        }
+    }
+
     // FUN_1402b4590: the layouts start once the opening fade-in is done.
-    if s.title.is_none() && s.handoff.is_none() && s.fade.state == 0 {
+    if s.title.is_none() && s.handoff.is_none() && s.fade.state == fade::State::Idle {
         let t = Title::new(&s.menu.layout, s.first_boot, false);
         let scene = t.main.scene;
         s.title = Some(t);
@@ -402,19 +298,42 @@ fn tick(
             t.cursor_layout.as_ref().map(|c| c.scene),
             t.state,
         );
-        let mut events = t.frame(&s.menu.layout, trig, 1.);
-        // The New Game dialog is not built: decide confirms, back cancels.
+        let mut events = Vec::new();
         if t.state == State::NewGameDialog {
-            if trig & pad_bits::DECIDE != 0 && before.2 == State::NewGameDialog {
-                events.extend(t.new_game_result(true));
-            } else if trig & pad_bits::CANCEL != 0 {
-                events.extend(t.new_game_result(false));
+            // FUN_1402b7420 runs inside the title task: the menu frame
+            // pauses until the dialog returns.
+            match s.dialog.as_mut() {
+                None => {
+                    // The modal starts the frame after the decide.
+                    let mode = 1;
+                    let mut d = NewGame::new(s.texts.clone(), DIALOG_IMAGE, mode, true);
+                    let seq = &s.menu.layout.sequences[0];
+                    for n in d.frame(seq, s.pad.pressed, s.pad.repeat) {
+                        events.push(Event::Sound(n));
+                    }
+                    s.dialog = Some(d);
+                }
+                Some(d) => {
+                    let seq = &s.menu.layout.sequences[0];
+                    for n in d.frame(seq, s.pad.pressed, s.pad.repeat) {
+                        events.push(Event::Sound(n));
+                    }
+                    if d.finished {
+                        let (confirmed, values) = (d.confirmed, d.values);
+                        s.dialog = None;
+                        s.event(serde_json::json!({"event":"new_game_dialog","tick":tick,
+                            "confirmed":confirmed,"mode":values[0],"vibration_on":values[1] == 0}));
+                        events.extend(t.new_game_result(confirmed));
+                    }
+                }
             }
+        } else {
+            events = t.frame(&s.menu.layout, trig, 1.);
         }
         for e in events {
             match e {
                 Event::Sound(n) => s.play(n, "title"),
-                Event::FadeOut(n) => s.fade.fade_out(n),
+                Event::FadeOut(n) => s.fade.fade_out(n, false),
                 Event::Leave(a) => {
                     s.handoff = Some(a);
                     s.event(serde_json::json!({"event":"leave","tick":tick,"action":format!("{a:?}")}));
@@ -422,7 +341,6 @@ fn tick(
                 other => s.event(serde_json::json!({"event":"title_event","tick":tick,"what":format!("{other:?}")})),
             }
         }
-        t.update_layouts(&s.menu.layout, 1.);
         let after = (
             t.main.scene,
             t.cursor_layout.as_ref().map(|c| c.scene),
@@ -435,9 +353,10 @@ fn tick(
             );
         }
         // Back (state 3) waits for black, then returns to the launcher.
-        let back_done = t.state == State::Back && s.fade.state == 4;
+        let black = s.fade.state == fade::State::Held;
+        let back_done = t.state == State::Back && black;
         let left = match s.handoff {
-            Some(Action::Demo) => s.fade.state == 4,
+            Some(Action::Demo) => black,
             Some(_) => t.main.dead,
             None => false,
         };
@@ -452,24 +371,26 @@ fn tick(
             s.title = Some(t);
         }
     }
-    s.fade.update();
+    s.fade_drawn = s.fade.update(1.);
 }
 
-/// FUN_1401948c0 for the main then the cursor layout, then the fade.
-fn draw(mut session: ResMut<Session>, mut frame: ResMut<Ui2dFrame>) {
-    let s = &mut *session;
-    if let Some(t) = &s.title {
-        for task in std::iter::once(&t.main).chain(t.cursor_layout.as_ref()) {
-            for b in layout2d::draw(&s.menu, task, [0, 0]) {
-                frame.draws.push((s.image_sheets[b.image], b.quads));
-            }
-        }
-    }
-    if s.fade.alpha > 0. {
-        frame.fill(s.white, [0., 0., 0., s.fade.alpha / 128.]);
+/// This frame's layouts and dialog, then the fade on top.
+fn draw(session: Res<Session>, mut frame: ResMut<Ui2dFrame>) {
+    frame.draws.extend(session.snapshot.iter().cloned());
+    if session.fade_drawn {
+        let ([r, g, b, a], additive) = session.fade.colour();
+        let [x0, y0, x1, y1] = FADE_RECT;
+        frame.draws.push((
+            session.white,
+            vec![Quad {
+                corners: [[x0, y0], [x1, y0], [x0, y1], [x1, y1]],
+                uv: [0, 0, 1, 1],
+                colors: [[r, g, b, a]; 4],
+                blend: additive as i32,
+            }],
+        ));
     }
 }
-
 fn finish(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
@@ -641,6 +562,21 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             None,
         )?)?;
     }
+    let m = &config.messages;
+    let texts = Texts::from_messages(hud::load_messages(
+        &source,
+        &m.index,
+        m.ordinal,
+        m.name_hash,
+        &newgame::message_ids(),
+    )?);
+    let (fi, fo) = (&config.font_image, &config.font_info);
+    let font = hud::load_font(
+        &source,
+        (&fi.index, fi.ordinal, fi.name_hash),
+        (&fo.index, fo.ordinal, fo.name_hash),
+        b"sys\0",
+    )?;
     let mut log = match log_path {
         Some(path) => Some(OpenOptions::new().write(true).create_new(true).open(path)?),
         None => None,
@@ -665,11 +601,13 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         menu,
         first_boot: config.first_boot,
         title: None,
-        fade: Fade {
-            state: 0,
-            alpha: 0.,
-            step: 0.,
-        },
+        dialog: None,
+        texts,
+        font,
+        font_sheet: 0,
+        snapshot: Vec::new(),
+        fade: Fade::default(),
+        fade_drawn: false,
         pad: Pad::default(),
         wheel: 0.,
         keyboard_last: true,
@@ -706,7 +644,10 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             close_when_requested: false,
             ..default()
         }))
-        .add_plugins(Ui2dPlugin)
+        .add_plugins(Ui2dPlugin {
+            order: 0,
+            overlay: false,
+        })
         .add_systems(Startup, (setup, pause_for_autoplay))
         .add_systems(PreUpdate, collect_wheel.after(bevy::input::InputSystems))
         .add_systems(FixedUpdate, tick)

@@ -63,6 +63,11 @@ pub struct AnimationGroup {
     /// message window uses them as the box's interior padding.
     pub light_position_x: i32,
     pub text_position_y: i32,
+    /// +0x18 TextScale (text size; 0 = the caller's default), +0x1c
+    /// UiPadding, +0x20 TextPositionX (the camp lists use it as a pitch).
+    pub text_scale: i32,
+    pub ui_padding: i32,
+    pub text_position_x: i32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -187,6 +192,9 @@ pub fn read(bytes: &[u8]) -> io::Result<Sequence> {
                 loop_frames: [i32_at(bytes, a + 8), i32_at(bytes, a + 12)],
                 light_position_x: i32_at(bytes, a + 16),
                 text_position_y: i32_at(bytes, a + 20),
+                text_scale: i32_at(bytes, a + 24),
+                ui_padding: i32_at(bytes, a + 28),
+                text_position_x: i32_at(bytes, a + 32),
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -456,6 +464,15 @@ impl Sequence {
                 };
                 [f.translate[0] + p[0], f.translate[1] + p[1]]
             })
+    }
+
+    /// Colour of the first active IsActive animation (the one that gives
+    /// the child context, FUN_140192be0), with the modifiers applied.
+    pub fn context_color(&self, player: &Player, m: &Modifiers) -> Option<[f32; 4]> {
+        player
+            .active(self)
+            .find(|(a, _)| a.flags & IS_ACTIVE != 0)
+            .map(|(a, t)| frame(a, t, m).color)
     }
 
     /// Colour of the first active animation (the player's current colour).

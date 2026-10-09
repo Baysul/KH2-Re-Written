@@ -295,6 +295,9 @@ mod tests {
             loop_frames: [0, 0],
             light_position_x: 0,
             text_position_y: 0,
+            text_scale: 0,
+            ui_padding: 0,
+            text_position_x: 0,
         };
         let sequence = Sequence {
             sprites: vec![],
@@ -323,10 +326,10 @@ mod tests {
         }
     }
 
+    /// Layout tasks run before the title task each frame.
     fn run(t: &mut Title, l: &Layout, trig: u64) -> Vec<Event> {
-        let ev = t.frame(l, trig, 1.);
         t.update_layouts(l, 1.);
-        ev
+        t.frame(l, trig, 1.)
     }
 
     #[test]

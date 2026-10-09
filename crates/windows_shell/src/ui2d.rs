@@ -10,6 +10,7 @@
 use bevy::{
     asset::{AssetPath, RenderAssetUsages, embedded_asset, embedded_path},
     camera::{CompositingSpace, ScalingMode},
+    core_pipeline::tonemapping::{DebandDither, Tonemapping},
     image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology},
     prelude::*,
@@ -94,13 +95,28 @@ impl Material2d for LayoutMaterial {
     }
 }
 
-pub struct Ui2dPlugin;
+/// `order` places the 2D camera among the app's cameras; an overlay keeps
+/// what earlier cameras drew instead of clearing.
+pub struct Ui2dPlugin {
+    pub order: isize,
+    pub overlay: bool,
+}
+
+#[derive(Resource, Clone, Copy)]
+struct CameraSettings {
+    order: isize,
+    overlay: bool,
+}
 
 impl Plugin for Ui2dPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "ui2d.wgsl");
         app.add_plugins(Material2dPlugin::<LayoutMaterial>::default())
             .init_resource::<Ui2dFrame>()
+            .insert_resource(CameraSettings {
+                order: self.order,
+                overlay: self.overlay,
+            })
             .add_systems(Startup, spawn_camera)
             .add_systems(PostUpdate, present);
     }
@@ -187,14 +203,28 @@ impl Ui2dFrame {
 #[derive(Component)]
 struct Slot;
 
-fn spawn_camera(mut commands: Commands) {
+fn spawn_camera(mut commands: Commands, settings: Res<CameraSettings>) {
     commands.spawn((
         Camera2d,
+        Camera {
+            order: settings.order,
+            clear_color: if settings.overlay {
+                ClearColorConfig::None
+            } else {
+                ClearColorConfig::Default
+            },
+            ..default()
+        },
+        Msaa::Off,
+        Tonemapping::None,
+        DebandDither::Disabled,
         CompositingSpace::Srgb,
         Projection::Orthographic(OrthographicProjection {
-            scaling_mode: ScalingMode::AutoMin {
-                min_width: WIDE_WIDTH,
-                min_height: HEIGHT,
+            // Layout units are not square: 682.67 x 416 fills the 16:9
+            // window (title-01 §3.1).
+            scaling_mode: ScalingMode::Fixed {
+                width: WIDE_WIDTH,
+                height: HEIGHT,
             },
             ..OrthographicProjection::default_2d()
         }),

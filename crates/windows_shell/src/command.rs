@@ -368,7 +368,36 @@ impl CommandMenu {
 /// (int)(width * scale + 0.5); 0x01 advances a third of a cell
 /// (FUN_1403e2be0).
 pub fn text_quads(text: &[u8], origin: [f32; 2], rgba: [f32; 4], font: &Font) -> Vec<Quad> {
-    let scale = TEXT_SIZE / FONT_REFERENCE;
+    text_quads_sized(text, origin, rgba, font, TEXT_SIZE)
+}
+
+/// Width of a system-font string at `size` (the sum of its advances).
+pub fn text_width(text: &[u8], font: &Font, size: f32) -> f32 {
+    let scale = size / FONT_REFERENCE;
+    text.iter()
+        .map(|&byte| {
+            if byte == 0x01 {
+                ((CELL[0] / 3.) as f64 * scale as f64 + 0.5).floor() as f32
+            } else if byte < 0x20 {
+                0.
+            } else {
+                font.widths
+                    .get((byte - 0x20) as usize)
+                    .map_or(0., |&w| (w as f64 * scale as f64 + 0.5).floor() as f32)
+            }
+        })
+        .sum()
+}
+
+/// `text_quads` at any size (cell 18x24 scaled by size / 18).
+pub fn text_quads_sized(
+    text: &[u8],
+    origin: [f32; 2],
+    rgba: [f32; 4],
+    font: &Font,
+    size: f32,
+) -> Vec<Quad> {
+    let scale = size / FONT_REFERENCE;
     let mut x = origin[0];
     let mut out = Vec::new();
     for &byte in text {
