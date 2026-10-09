@@ -1747,6 +1747,8 @@ fn spawn_model(
     spawned
 }
 
+// Bevy systems take each resource as a parameter.
+#[allow(clippy::too_many_arguments)]
 fn setup(
     mut commands: Commands,
     mut startup: ResMut<Startup>,
