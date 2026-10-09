@@ -74,6 +74,47 @@ pub fn read(bytes: &[u8]) -> io::Result<Vec<Item>> {
         .collect())
 }
 
+/// An equipment stat record (the table after the items; FUN_14041e8f0
+/// binary-searches it by id, 0x10 bytes each).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stats {
+    pub id: u16,
+    /// +2: the ability the equipment gives (0 = none).
+    pub ability: u16,
+    pub strength: u8,
+    pub magic: u8,
+    pub defense: u8,
+    pub ap: u8,
+}
+
+/// The stat table that follows the item records in the same subfile.
+pub fn read_stats(bytes: &[u8]) -> io::Result<Vec<Stats>> {
+    let word = |at: usize| -> io::Result<u32> {
+        bytes
+            .get(at..at + 4)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+            .ok_or_else(|| invalid("item table truncated"))
+    };
+    let start = 8 + word(4)? as usize * RECORD_SIZE;
+    let count = word(start + 4)? as usize;
+    let records = bytes
+        .get(start + 8..start + 8 + count * 0x10)
+        .ok_or_else(|| invalid("stat table truncated"))?;
+    Ok(records
+        .as_chunks::<0x10>()
+        .0
+        .iter()
+        .map(|r| Stats {
+            id: u16::from_le_bytes([r[0], r[1]]),
+            ability: u16::from_le_bytes([r[2], r[3]]),
+            strength: r[4],
+            magic: r[5],
+            defense: r[6],
+            ap: r[7],
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +142,14 @@ mod tests {
         assert_eq!(items[1].kind, 2);
         assert_eq!(items[1].icon, 4);
         assert!(read(&b[..b.len() - 1]).is_err());
+        assert!(read_stats(&b).is_err());
+        b.extend([0, 0, 0, 0, 1, 0, 0, 0]);
+        b.extend([
+            0x50, 0, 0x1e, 0x02, 3, 1, 0, 0, 100, 100, 100, 100, 100, 100, 100, 0,
+        ]);
+        let stats = read_stats(&b).unwrap();
+        assert_eq!(stats[0].id, 0x50);
+        assert_eq!(stats[0].ability, 0x21e);
+        assert_eq!((stats[0].strength, stats[0].magic), (3, 1));
     }
 }

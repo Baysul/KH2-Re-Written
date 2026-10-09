@@ -398,6 +398,8 @@ struct Game {
     jump_queued: bool,
     attack_queued: bool,
     guard_queued: bool,
+    /// Guard's ability is equipped (the camp's Abilities screen sets it).
+    guard_equipped: bool,
     menu_up_queued: bool,
     menu_down_queued: bool,
     enemy: Option<EnemyRuntime>,
@@ -639,6 +641,9 @@ struct CampSource {
     numbers: SoraNumbers,
     /// The item table with its texts and the Items screens' messages.
     items: camp::items::ItemsData,
+    /// The Abilities screens' messages and the Kingdom Key's ability.
+    abilities: camp::abilities::AbilityTexts,
+    weapon_ability: u16,
     /// The font image's icon plane (0x09 icons).
     icons: SystemFont,
 }
@@ -653,6 +658,53 @@ const ITEM_MESSAGES: [u32; 19] = [
 /// inventory is not decoded]: 3 Potions, a Hi-Potion, 2 Ethers; the
 /// Kingdom Key with one empty armor, accessory and two item slots.
 const ROOM_STOCK: [(u16, u8); 3] = [(1, 3), (2, 1), (3, 2)];
+
+/// Abilities screen messages (camp-06 §7).
+const ABILITY_MESSAGES: [u32; 15] = [
+    0xbb8b, 0xbb8c, 0xb2ee, 0xb2ef, 0xb2f0, 0xb2ed, 0xb372, 0xb629, 0xb627, 0xb62a, 0xb628, 0xb373,
+    0xb619, 0xb61a, 0x8454,
+];
+
+/// Sora's abilities [test-room values: a new save's slots are not
+/// decoded]: Guard (0x52) equipped, as the guard-01 recipe asks.
+const ROOM_ABILITIES: [u16; 1] = [0x8052];
+/// Guard's ability item (its bit 1 gates PTYA 0x0b, FUN_140402750).
+const GUARD_ABILITY: u16 = 0x52;
+/// The Kingdom Key (its stat record gives the weapon ability).
+const KINGDOM_KEY: u16 = 0x29;
+
+fn load_camp_abilities(
+    system: &[u8],
+    msg: impl Fn(&[u32]) -> Result<Vec<Option<Vec<u8>>>, Box<dyn std::error::Error>>,
+) -> Result<(camp::abilities::AbilityTexts, u16), Box<dyn std::error::Error>> {
+    let item = bar_entry(system, b"item")?;
+    let table = package_reader::item_table::read(item)?;
+    let stats = package_reader::item_table::read_stats(item)?;
+    // FUN_1403e3ef0: weapons (types 2..13) use the stat entry at +6.
+    let weapon_ability = table
+        .iter()
+        .find(|r| r.id == KINGDOM_KEY)
+        .and_then(|r| stats.iter().find(|s| s.id == r.weapon_stats))
+        .map_or(0, |s| s.ability);
+    let mut t = msg(&ABILITY_MESSAGES)?
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect::<Vec<_>>()
+        .into_iter();
+    let mut take = || t.next().unwrap_or_default();
+    let texts = camp::abilities::AbilityTexts {
+        help: [take(), take()],
+        categories: [take(), take(), take(), take()],
+        empty: take(),
+        choices: [take(), take()],
+        choice_help: [take(), take()],
+        items_banner: take(),
+        abilities_banner: take(),
+        switch: take(),
+        triangle: take(),
+    };
+    Ok((texts, weapon_ability))
+}
 
 /// 03system `item` with names and descriptions, and the screens' texts.
 fn load_camp_items(
@@ -675,6 +727,7 @@ fn load_camp_items(
             amount: r.amount,
             sell: r.sell,
             icon: r.icon,
+            param: r.weapon_stats,
             name: t[0].clone().unwrap_or_default(),
             description: t[1].clone().unwrap_or_default(),
         })
@@ -1598,6 +1651,15 @@ fn load(
                 magic: lv.magic as i32 + byte(7) + 1,
                 defense: lv.defense as i32 + byte(8),
             };
+            let (abilities, weapon_ability) = load_camp_abilities(&system, |ids| {
+                hud::load_messages_optional(
+                    source,
+                    &m.messages.index,
+                    m.messages.ordinal,
+                    m.messages.name_hash,
+                    ids,
+                )
+            })?;
             let items = load_camp_items(&system, |ids| {
                 hud::load_messages_optional(
                     source,
@@ -1620,6 +1682,8 @@ fn load(
                 numbers,
                 items,
                 icons,
+                abilities,
+                weapon_ability,
             })
         }
         _ => None,
@@ -2667,10 +2731,11 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 47] = [
+const AUTOPLAY_CAPTURES: [u64; 56] = [
     90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1198, 1300, 1500,
     1700, 1830, 1900, 1930, 1990, 2030, 2050, 2070, 2110, 2230, 2310, 2330, 2390, 2420, 2450, 2520,
-    2690, 2715, 2760, 2780, 2840, 2880, 2920, 2970, 3080, 3200, 3220, 3270, 3300,
+    2690, 2715, 2760, 2780, 2840, 2880, 2920, 2970, 3080, 3200, 3220, 3270, 3300, 3560, 3660, 3690,
+    3730, 3800, 3830, 3900, 4060, 4150,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -2682,7 +2747,7 @@ const AUTOPLAY_TALK_END: u64 = 260;
 /// in earlier unattended runs.
 const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 /// The last stretch leaves Sora standing so an enemy can attack him.
-const AUTOPLAY_END: u64 = 3480;
+const AUTOPLAY_END: u64 = 4320;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
@@ -2751,7 +2816,8 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
         AUTOPLAY_GUARDS.contains(&tick)
     } else {
         std::mem::take(&mut game.guard_queued)
-    } && !talking;
+    } && !talking
+        && game.guard_equipped;
     // The current target: the enemy while it can be hit.
     let target = game
         .enemy
@@ -4298,13 +4364,15 @@ struct CampRes {
     /// stock list's seen marks.
     stock: std::collections::BTreeMap<u16, u8>,
     seen: Vec<u16>,
+    /// Sora's 80 ability slots (ROOM_ABILITIES, then what the camp leaves).
+    ability_slots: Vec<u16>,
 }
 
 /// Unattended camp check after the combat plan: open, down to Status,
 /// the character list, the stat browser (column switch, move), back out,
 /// down to Config, change Field Camera and Summon Effects, jump to the
 /// bottom with R1, back out, close with START.
-const AUTOPLAY_CAMP: [(u64, u64); 45] = [
+const AUTOPLAY_CAMP: [(u64, u64); 60] = [
     (1810, 0x2),
     (1840, 0x20),
     (1850, 0x20),
@@ -4352,6 +4420,24 @@ const AUTOPLAY_CAMP: [(u64, u64); 45] = [
     (3280, 0x8),
     (3320, 0x8),
     (3400, 0x2),
+    // Abilities: reopen, down to Abilities, Sora, the list; unequip Guard
+    // with TRIANGLE, re-equip it in the popup, back out, SQUARE to Items
+    // and back, close.
+    (3460, 0x2),
+    (3500, 0x20),
+    (3520, 0x4),
+    (3580, 0x4),
+    (3680, 0x20),
+    (3700, 0x10),
+    (3720, 0x1000),
+    (3750, 0x4),
+    (3820, 0x20),
+    (3850, 0x4),
+    (3920, 0x8),
+    (3990, 0x800),
+    (4080, 0x800),
+    (4170, 0x8),
+    (4240, 0x2),
 ];
 fn camp_setup(
     camp: Option<ResMut<CampRes>>,
@@ -4466,6 +4552,15 @@ fn camp_tick(
             if c.pad.pressed & 0x2 != 0 && !game.talking {
                 // Status values are built when the camp opens (FUN_140354340).
                 let n = c.source.numbers;
+                let sora_abilities = camp::abilities::MemberAbilities {
+                    slots: c.ability_slots.clone(),
+                    ap_max: n.ap,
+                    weapon_ability: c.source.weapon_ability,
+                };
+                let ap_used = camp::abilities::used(&camp::abilities::entries(
+                    &c.source.items.table,
+                    &sora_abilities,
+                ));
                 let value = |bit: usize| -> String {
                     match bit {
                         0 => "1".into(),
@@ -4473,7 +4568,7 @@ fn camp_tick(
                         2 => format!("{}", n.next_exp),
                         3 => format!("{hp}/{max_hp}"),
                         4 => format!("{mp}/{max_mp}"),
-                        5 => format!("0/{}", n.ap),
+                        5 => format!("{ap_used}/{}", n.ap),
                         10 => format!("{}", n.strength),
                         11 => format!("{}", n.magic),
                         12 => format!("{}", n.defense),
@@ -4515,6 +4610,10 @@ fn camp_tick(
                         seen: c.seen.clone(),
                         ..c.source.items.clone()
                     },
+                    abilities: camp::abilities::AbilitiesData {
+                        members: vec![sora_abilities.clone()],
+                        texts: c.source.abilities.clone(),
+                    },
                 };
                 let (menu, s) = Camp::open(layout, data, c.memory);
                 c.open = Some(menu);
@@ -4532,6 +4631,11 @@ fn camp_tick(
                 c.config_flags = menu.data.config_flags;
                 c.stock = menu.data.items.counts.clone();
                 c.seen = menu.data.items.seen.clone();
+                if let Some(m) = menu.data.abilities.members.first() {
+                    c.ability_slots = m.slots.clone();
+                }
+                // Guard's ability bit gates PTYA 0x0b (FUN_140402750).
+                game.guard_equipped = c.ability_slots.contains(&(0x8000 | GUARD_ABILITY));
                 // Items used in the camp change the room's HP / MP.
                 if let Some(sora) = menu.data.panels.members.first() {
                     if let Some(rt) = game.enemy.as_mut() {
@@ -4831,6 +4935,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         jump_queued: false,
         attack_queued: false,
         guard_queued: false,
+        guard_equipped: ROOM_ABILITIES.contains(&(0x8000 | GUARD_ABILITY)),
         menu_up_queued: false,
         menu_down_queued: false,
         enemy: None,
@@ -5056,6 +5161,11 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             keyboard_last: true,
             stock: ROOM_STOCK.into_iter().collect(),
             seen: Vec::new(),
+            ability_slots: {
+                let mut s = ROOM_ABILITIES.to_vec();
+                s.resize(80, 0);
+                s
+            },
         });
     }
     Ok(app

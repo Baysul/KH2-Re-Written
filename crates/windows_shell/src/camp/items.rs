@@ -96,6 +96,9 @@ pub struct ItemInfo {
     pub amount: u16,
     pub sell: u16,
     pub icon: u8,
+    /// +6: an ability's kind (low byte) and AP cost (high byte); a
+    /// weapon's stat entry.
+    pub param: u16,
     pub name: Vec<u8>,
     pub description: Vec<u8>,
 }
@@ -265,6 +268,10 @@ fn restore(item: &ItemInfo, m: &mut Member, apply: bool) -> bool {
 pub(super) struct Grid {
     pub(super) list: MenuList,
     pub(super) scroll: usize,
+    /// Columns and visible lines (the stock list: 2 × 9; a plain scrolling
+    /// list: 1 × 9).
+    pub(super) cols: usize,
+    pub(super) lines: usize,
 }
 
 const COLS: usize = 2;
@@ -278,8 +285,10 @@ impl Grid {
 
     /// FUN_1403e2… the grid branch of FUN_1402f9440 / FUN_1402f8240 /
     /// FUN_1402f8650 (camp-05 §3.8).
-    fn input(&mut self, p: &Pad) -> (Pick, bool) {
+    pub(super) fn input(&mut self, p: &Pad) -> (Pick, bool) {
         use bits::*;
+        let (cols, lines) = (self.cols, self.lines);
+        let page = cols * lines;
         let n = self.list.total;
         if n == 0 {
             return (Pick::None, false);
@@ -287,31 +296,31 @@ impl Grid {
         let before = self.index();
         let (mut cur, mut sc) = (self.list.cursor, self.scroll);
         let a = cur + sc;
-        let (row, col) = (a / COLS, a % COLS);
-        let rows_n = n.div_ceil(COLS);
+        let (row, col) = (a / cols, a % cols);
+        let rows_n = n.div_ceil(cols);
         let mask = self.list.mask;
         // The jump to the last item (FUN_1402f8650's grid branch).
         let last = || -> (usize, usize) {
-            let rem = n % PAGE;
-            let t = PAGE - rem;
-            let s = ((t % COLS) as i64 - t as i64 - rem as i64 + n as i64).max(0) as usize;
+            let rem = n % page;
+            let t = page - rem;
+            let s = ((t % cols) as i64 - t as i64 - rem as i64 + n as i64).max(0) as usize;
             (n - s - 1, s)
         };
         if p.repeat & UP != 0 && mask & 0x1 != 0 {
             let blocked = (row == 0 && p.trig & UP == 0) || (rows_n == 1 && p.trig & UP != 0);
             if !blocked {
-                if cur / COLS >= 1 {
-                    cur -= COLS;
+                if cur / cols >= 1 {
+                    cur -= cols;
                 } else if sc >= 1 {
-                    sc -= COLS;
+                    sc -= cols;
                 } else {
-                    let vis = if PAGE < n {
-                        sc = (n - PAGE).div_ceil(COLS) * COLS;
-                        LINES
+                    let vis = if page < n {
+                        sc = (n - page).div_ceil(cols) * cols;
+                        lines
                     } else {
                         rows_n
                     };
-                    cur = (vis - 1) * COLS + col;
+                    cur = (vis - 1) * cols + col;
                     if n <= cur + sc {
                         cur = n - sc - 1;
                     }
@@ -322,10 +331,10 @@ impl Grid {
                 (row + 1 >= rows_n && p.trig & DOWN == 0) || (rows_n == 1 && p.trig & DOWN != 0);
             if !blocked {
                 if row + 1 < rows_n {
-                    if cur / COLS < LINES - 1 || rows_n <= LINES {
-                        cur += COLS;
+                    if cur / cols < lines - 1 || rows_n <= lines {
+                        cur += cols;
                     } else {
-                        sc += COLS;
+                        sc += cols;
                     }
                     if n <= cur + sc {
                         cur = n - sc - 1;
@@ -336,10 +345,10 @@ impl Grid {
                 }
             }
         } else if p.repeat & (LEFT | RIGHT) != 0 && mask & 0xc != 0 {
-            let last_cols = if !n.is_multiple_of(COLS) && a >= n - n % COLS {
-                n % COLS
+            let last_cols = if !n.is_multiple_of(cols) && a >= n - n % cols {
+                n % cols
             } else {
-                COLS
+                cols
             };
             if p.repeat & LEFT != 0 {
                 cur = if col > 0 { cur } else { cur + last_cols } - 1;
@@ -350,24 +359,24 @@ impl Grid {
             }
         } else if p.repeat & L1 != 0 && mask & 0x2000 != 0 {
             if a > 0 || p.trig & L1 != 0 {
-                if sc < PAGE {
+                if sc < page {
                     if sc == 0 && cur == 0 {
                         (cur, sc) = last();
-                    } else if sc + cur < PAGE {
+                    } else if sc + cur < page {
                         (cur, sc) = (0, 0);
                     } else {
-                        (cur, sc) = (a - PAGE, 0);
+                        (cur, sc) = (a - page, 0);
                     }
                 } else {
-                    sc -= PAGE;
+                    sc -= page;
                 }
             }
         } else if p.repeat & R1 != 0 && mask & 0x1000 != 0 {
             if a + 1 < n {
-                let s = sc + PAGE;
+                let s = sc + page;
                 if s + cur < n {
-                    if PAGE + s >= n {
-                        let s = rows_n.saturating_sub(LINES) * COLS;
+                    if page + s >= n {
+                        let s = rows_n.saturating_sub(lines) * cols;
                         cur = cur.min(n - s - 1);
                         sc = s;
                     } else {
@@ -391,6 +400,8 @@ impl Grid {
             Pick::Cancel
         } else if p.trig & START != 0 && mask & 0x40 != 0 {
             Pick::Start
+        } else if let Some(b) = buttons(p, mask) {
+            b
         } else if p.trig & R2 != 0 && mask & 0x4000 != 0 {
             Pick::Next
         } else if p.trig & L2 != 0 && mask & 0x8000 != 0 {
@@ -417,8 +428,9 @@ pub(super) struct Ui {
     pub(super) grid: Grid,
     frame: Option<Id>,
     badges: Vec<Id>,
-    scroll: Vec<Id>,
+    pub(super) scroll: Vec<Id>,
     scroll_scale: f32,
+    scroll_parent: Option<Id>,
     bar: Option<Id>,
     arrows: Vec<Id>,
     highlight: Option<Id>,
@@ -455,7 +467,7 @@ impl Ui {
 }
 
 impl Camp {
-    fn info(&self, id: u16) -> ItemInfo {
+    pub(super) fn info(&self, id: u16) -> ItemInfo {
         self.data
             .items
             .table
@@ -466,7 +478,7 @@ impl Camp {
     }
 
     /// FUN_1402ebf70: `09 icon` + the item's name.
-    fn item_name(&self, id: u16, alt: bool) -> Vec<u8> {
+    pub(super) fn item_name(&self, id: u16, alt: bool) -> Vec<u8> {
         let r = self.info(id);
         let icon = if alt { type_icon(r.kind, true) } else { r.icon };
         let mut out = vec![0x09, icon];
@@ -474,29 +486,29 @@ impl Camp {
         out
     }
 
-    fn alive_opt(&self, id: Option<Id>) -> bool {
+    pub(super) fn alive_opt(&self, id: Option<Id>) -> bool {
         id.is_some_and(|i| self.sprites.alive(i))
     }
 
-    fn group_of(&self, id: Option<Id>) -> Option<usize> {
+    pub(super) fn group_of(&self, id: Option<Id>) -> Option<usize> {
         id.filter(|&i| self.sprites.alive(i))
             .map(|i| self.sprites.get(i).player.group)
     }
 
-    fn set_text(&mut self, id: Id, bytes: Vec<u8>) {
+    pub(super) fn set_text(&mut self, id: Id, bytes: Vec<u8>) {
         if let Some(t) = self.sprites.get_mut(id).text.as_mut() {
             t.bytes = bytes;
         }
     }
 
     /// A text with the font's own RGB (flag 8 kept), no group position.
-    fn kept_text(bytes: Vec<u8>, size: f32) -> Text {
+    pub(super) fn kept_text(bytes: Vec<u8>, size: f32) -> Text {
         let mut t = Text::new(bytes, size);
         t.group_position = false;
         t
     }
 
-    fn close_opt(&mut self, seq: &Sequence, id: Option<Id>, group: usize) {
+    pub(super) fn close_opt(&mut self, seq: &Sequence, id: Option<Id>, group: usize) {
         if let Some(i) = id
             && self.sprites.alive(i)
         {
@@ -504,13 +516,13 @@ impl Camp {
         }
     }
 
-    fn kill_opt(&mut self, id: Option<Id>) {
+    pub(super) fn kill_opt(&mut self, id: Option<Id>) {
         if let Some(i) = id {
             self.sprites.kill(i);
         }
     }
 
-    fn rows_alive(&self, list: &MenuList) -> bool {
+    pub(super) fn rows_alive(&self, list: &MenuList) -> bool {
         list.rows.iter().any(|&r| self.sprites.alive(r))
     }
 
@@ -610,6 +622,12 @@ impl Camp {
         }
         self.item_preview(seq);
         self.items_help(seq);
+        // SQUARE opens Abilities (mask 0x100) with its banner 0xb619.
+        if self.entry_enabled(1) {
+            self.item_ui.list.mask |= 0x100;
+            let t = self.data.abilities.texts.abilities_banner.clone();
+            self.show_banner(seq, t);
+        }
     }
 
     /// Items of the "new" types (0x1405bc560) not yet in the stock list's
@@ -734,8 +752,18 @@ impl Camp {
                 || self.rows_alive(&self.item_ui.list.clone())
                 || self.alive_opt(self.item_ui.stock_badge);
             let p = self.pending;
-            if !busy && (p != Some(State::Top) || !self.tab_alive(0)) {
+            let leaving = matches!(p, Some(State::Top) | Some(State::AbilityChars));
+            if !busy && !self.alive_opt(self.banner) && (!leaving || !self.tab_alive(0)) {
                 match self.pending.take() {
+                    Some(State::AbilityChars) => {
+                        let m = self.memory.items_row;
+                        let member = if m < self.data.panels.members.len() {
+                            m
+                        } else {
+                            0
+                        };
+                        self.abilities_from_items(seq, member);
+                    }
                     Some(State::Stock) => {
                         self.item_ui.tab = 0;
                         self.memory.stock = (0, 0);
@@ -748,7 +776,8 @@ impl Camp {
                 for &r in &self.item_ui.list.rows {
                     self.sprites.kill(r);
                 }
-                if p == Some(State::Top) {
+                self.kill_opt(self.banner);
+                if leaving {
                     self.kill_tab(0);
                     self.kill_tab(1);
                 }
@@ -765,7 +794,7 @@ impl Camp {
                 };
                 self.sprites.set(seq, r, g, None);
             }
-            for i in 0..2 {
+            for i in 0..self.tabs.len() {
                 if let Some(tab) = &self.tabs[i]
                     && self.sprites.alive(tab.id)
                 {
@@ -794,12 +823,17 @@ impl Camp {
                 self.memory.items_row = cursor;
                 self.exit = true;
             }
-            Pick::Cancel => {
+            Pick::Cancel | Pick::Square => {
                 self.memory.items_row = cursor;
                 self.hide_help(seq);
+                self.close_banner(seq);
                 self.close_tab(seq, 0);
                 self.close_items_screen(seq);
-                self.pending = Some(State::Top);
+                self.pending = Some(if pick == Pick::Square {
+                    State::AbilityChars
+                } else {
+                    State::Top
+                });
                 self.substate = 2;
             }
             // Stock; a member row would go to Equip (state 2, not built).
@@ -807,6 +841,7 @@ impl Camp {
                 self.memory.items_row = cursor;
                 let label = self.data.items.texts.stock.clone();
                 self.tab_text(1, label);
+                self.close_banner(seq);
                 self.hide_help(seq);
                 self.close_items_screen(seq);
                 self.pending = Some(State::Stock);
@@ -871,7 +906,7 @@ impl Camp {
             rows.push(r);
         }
         let n = c.max(1);
-        self.build_scrollbar(seq, f, n.div_ceil(2));
+        self.build_scrollbar(seq, f, PRIO_STOCK_ROW, n.div_ceil(2), LINES);
         let (mut cur, mut sc) = self.memory.stock;
         if n <= cur + sc {
             if cur > 0 {
@@ -888,7 +923,12 @@ impl Camp {
         if c == 0 {
             list.mask &= !0x10;
         }
-        self.item_ui.grid = Grid { list, scroll: sc };
+        self.item_ui.grid = Grid {
+            list,
+            scroll: sc,
+            cols: COLS,
+            lines: LINES,
+        };
         self.stock_page(seq);
         self.mark_seen(seq);
         self.item_ui.no_pointer = c == 0;
@@ -897,40 +937,54 @@ impl Camp {
         }
     }
 
-    /// FUN_1402fa930: the scrollbar's three players on the frame at its
-    /// group's (LightPositionX, TextPositionY).
-    fn build_scrollbar(&mut self, seq: &Sequence, f: Id, rows_total: usize) {
-        let fg = &seq.groups[STOCK_FRAME[0]];
-        let origin = [fg.light_position_x as f32, fg.text_position_y as f32];
-        let length = fg.text_scale as f32;
+    /// FUN_1402fa930: the scrollbar's three players on `parent` at its
+    /// group's (LightPositionX, TextPositionY); the track is that group's
+    /// TextScale.
+    pub(super) fn build_scrollbar(
+        &mut self,
+        seq: &Sequence,
+        parent: Id,
+        prio: u32,
+        rows_total: usize,
+        visible: usize,
+    ) {
+        let group = self.sprites.get(parent).player.group;
+        let length = seq.groups[group].text_scale as f32;
         let t = seq.groups[SCROLL[1][0]].text_scale as f32;
-        let total = rows_total.max(LINES);
-        let s = (LINES as f32 / total as f32).min(1.) * length / t;
+        let total = rows_total.max(visible);
+        let s = (visible as f32 / total as f32).min(1.) * length / t;
         self.item_ui.scroll_scale = s;
+        self.item_ui.scroll_parent = Some(parent);
         self.item_ui.scroll.clear();
         for (k, g) in SCROLL.iter().enumerate() {
-            let id = self
-                .sprites
-                .create(seq, PRIO_STOCK_ROW, ART, g[0], Some(g[1]), None);
-            self.child(id, f);
-            self.sprites.get_mut(id).offset = origin;
+            let id = self.sprites.create(seq, prio, ART, g[0], Some(g[1]), None);
+            self.child(id, parent);
             if k == 1 {
                 self.sprites.get_mut(id).scale = [1., s];
             }
             self.closers.push((id, g[2]));
             self.item_ui.scroll.push(id);
         }
-        self.scroll_to(seq, 0, rows_total);
+        self.scroll_to(seq, 0, rows_total, visible);
     }
 
     /// FUN_1402facd0: the thumb at the first visible row.
-    fn scroll_to(&mut self, seq: &Sequence, row0: usize, rows_total: usize) {
-        let fg = &seq.groups[STOCK_FRAME[0]];
-        let origin = [fg.light_position_x as f32, fg.text_position_y as f32];
-        let length = fg.text_scale as f32;
+    pub(super) fn scroll_to(
+        &mut self,
+        seq: &Sequence,
+        row0: usize,
+        rows_total: usize,
+        visible: usize,
+    ) {
+        let Some(parent) = self.item_ui.scroll_parent else {
+            return;
+        };
+        let g = &seq.groups[self.sprites.get(parent).player.group];
+        let origin = [g.light_position_x as f32, g.text_position_y as f32];
+        let length = g.text_scale as f32;
         let t = seq.groups[SCROLL[1][0]].text_scale as f32;
-        let total = rows_total.max(LINES);
-        let row0 = row0.min(total - LINES);
+        let total = rows_total.max(visible);
+        let row0 = row0.min(total - visible);
         let y = ((length / total as f32) * row0 as f32) as i32 as f32;
         let thumb = (t * self.item_ui.scroll_scale) as i32 as f32;
         for (k, &id) in self.item_ui.scroll.clone().iter().enumerate() {
@@ -939,6 +993,12 @@ impl Camp {
         }
     }
 
+    /// The scrollbar closes (FUN_1402fab60).
+    pub(super) fn close_scrollbar(&mut self, seq: &Sequence) {
+        for (k, &id) in self.item_ui.scroll.clone().iter().enumerate() {
+            self.close_opt(seq, Some(id), SCROLL[k][2]);
+        }
+    }
     /// FUN_1403509b0: the page's names, counts and badges, then the help.
     fn stock_page(&mut self, seq: &Sequence) {
         let rows = self.item_ui.grid.list.rows.clone();
@@ -961,7 +1021,7 @@ impl Camp {
             }
         } else {
             let first = self.item_ui.grid.scroll;
-            self.scroll_to(seq, first / 2, c.div_ceil(2));
+            self.scroll_to(seq, first / 2, c.div_ceil(2), LINES);
             for (j, &row) in rows.iter().enumerate() {
                 let Some(&(id, n)) = self.item_ui.entries.get(first + j) else {
                     break;
@@ -1078,9 +1138,7 @@ impl Camp {
     /// FUN_14034e6a0: the frame and scrollbar close.
     fn close_stock_list(&mut self, seq: &Sequence) {
         self.close_opt(seq, self.item_ui.frame, STOCK_FRAME[2]);
-        for (k, &id) in self.item_ui.scroll.clone().iter().enumerate() {
-            self.close_opt(seq, Some(id), SCROLL[k][2]);
-        }
+        self.close_scrollbar(seq);
     }
 
     /// FUN_14034dba0.
@@ -1136,7 +1194,7 @@ impl Camp {
                     self.sprites.set(seq, a, ARROWS[k][1], None);
                 }
             }
-            for i in 0..2 {
+            for i in 0..self.tabs.len() {
                 if let Some(tab) = &self.tabs[i]
                     && self.sprites.alive(tab.id)
                 {
@@ -1342,7 +1400,7 @@ impl Camp {
     }
 
     /// The current hand stays, dimmed (alt group), on its row.
-    fn dim_glove(&mut self, seq: &Sequence) {
+    pub(super) fn dim_glove(&mut self, seq: &Sequence) {
         if let Some(g) = self.glove.take()
             && self.sprites.alive(g)
         {
@@ -1351,7 +1409,7 @@ impl Camp {
         }
     }
 
-    fn undim_last(&mut self) {
+    pub(super) fn undim_last(&mut self) {
         if let Some(g) = self.item_ui.dim.pop() {
             self.sprites.kill(g);
         }
@@ -1479,7 +1537,7 @@ impl Camp {
 
     /// FUN_140306f30 + FUN_140306cc0: the box (G6 → 7) and its choice rows
     /// on the box at its group's (LightPositionX, TextPositionY).
-    fn open_dialog(&mut self, seq: &Sequence, text: Vec<u8>, choices: Vec<Vec<u8>>) {
+    pub(super) fn open_dialog(&mut self, seq: &Sequence, text: Vec<u8>, choices: Vec<Vec<u8>>) {
         let size = seq.groups[DIALOG[0]].text_scale as f32;
         let mut t = Self::kept_text(text, size);
         t.align = 2;
@@ -1523,18 +1581,18 @@ impl Camp {
         self.item_ui.choices = list;
     }
 
-    fn close_dialog(&mut self, seq: &Sequence) {
+    pub(super) fn close_dialog(&mut self, seq: &Sequence) {
         self.close_opt(seq, self.item_ui.dialog, DIALOG[2]);
         for &r in &self.item_ui.choices.rows.clone() {
             self.close_opt(seq, Some(r), CHOICE_ROWS.close);
         }
     }
 
-    fn dialog_alive(&self) -> bool {
+    pub(super) fn dialog_alive(&self) -> bool {
         self.alive_opt(self.item_ui.dialog) || self.rows_alive(&self.item_ui.choices.clone())
     }
 
-    fn kill_dialog(&mut self) {
+    pub(super) fn kill_dialog(&mut self) {
         self.kill_opt(self.item_ui.dialog);
         for &r in &self.item_ui.choices.rows {
             self.sprites.kill(r);
@@ -1542,7 +1600,7 @@ impl Camp {
     }
 
     /// The box skips to idle on a press; substate 1 once idle.
-    fn dialog_intro(&mut self, seq: &Sequence, pressed: bool) {
+    pub(super) fn dialog_intro(&mut self, seq: &Sequence, pressed: bool) {
         if pressed
             && self.group_of(self.item_ui.dialog) == Some(DIALOG[0])
             && let Some(d) = self.item_ui.dialog
@@ -1904,7 +1962,12 @@ mod tests {
         let mut list = MenuList::new((0..PAGE).map(Id).collect(), 0);
         list.total = n;
         list.mask = 0x7f | 0x3000 | 0xc000;
-        Grid { list, scroll: 0 }
+        Grid {
+            list,
+            scroll: 0,
+            cols: COLS,
+            lines: LINES,
+        }
     }
 
     fn press(g: &mut Grid, bit: u64) -> (Pick, bool) {

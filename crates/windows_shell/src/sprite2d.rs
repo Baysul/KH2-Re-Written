@@ -69,6 +69,8 @@ pub struct Sprite {
     /// A draw callback's text (+0x220, e.g. the stock list's "×N" count,
     /// FUN_14034e330), laid out like `text` after it.
     pub after: Option<Text>,
+    /// Flag 2 (FUN_140166bd0 by tag): updated but not drawn.
+    pub hidden: bool,
     pub dead: bool,
     /// Set by a close: the sprite dies when its play-once group ends.
     pub die_when_done: bool,
@@ -153,6 +155,7 @@ impl Sprites {
             multiplier: [1.; 4],
             text,
             after: None,
+            hidden: false,
             dead: false,
             die_when_done: false,
             scale: [1.; 2],
@@ -296,7 +299,8 @@ impl Sprites {
         let mut out = Vec::new();
         for i in self.order() {
             let s = &self.list[i];
-            if !keep(s.prio) || s.dead || s.parent.is_some_and(|p| self.list[p.0].dead) {
+            if !keep(s.prio) || s.dead || s.hidden || s.parent.is_some_and(|p| self.list[p.0].dead)
+            {
                 continue;
             }
             let id = Id(i);

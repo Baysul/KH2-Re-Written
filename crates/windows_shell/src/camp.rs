@@ -11,6 +11,7 @@
 //! Customize, Party, Journal) are not built: deciding those entries plays
 //! the decide sound only. The 3D party models are pasted from off-screen
 //! renders the caller makes (Tz::MenuObj).
+pub mod abilities;
 pub mod items;
 
 use crate::command::Font;
@@ -113,6 +114,9 @@ mod bits {
     pub const DECIDE: u64 = 0x4;
     pub const CANCEL: u64 = 0x8;
     pub const START: u64 = 0x100;
+    pub const SQUARE: u64 = 0x800;
+    pub const TRIANGLE: u64 = 0x1000;
+    pub const SELECT: u64 = 0x2000;
     pub const R1: u64 = 0x4000;
     pub const L1: u64 = 0x8000;
     pub const R2: u64 = 0x1_0000;
@@ -200,6 +204,7 @@ pub struct Data {
     pub config_flags: u32,
     pub game_mode: u32,
     pub items: items::ItemsData,
+    pub abilities: abilities::AbilitiesData,
 }
 
 /// Cursor memory kept between camp openings (DAT_140beec30 / 7c).
@@ -213,6 +218,10 @@ pub struct Memory {
     /// mem[1]: the Items row; mem[10]: the stock cursor (in page) and scroll.
     pub items_row: usize,
     pub stock: (usize, usize),
+    /// mem[0xf] / mem[0x10]: the Abilities character row; the ability
+    /// list's cursor and scroll.
+    pub ability_char: usize,
+    pub ability_list: (usize, usize),
 }
 
 /// What a draw item samples: the camp sheet, the system font, or member
@@ -258,6 +267,11 @@ pub enum State {
     UseTarget,
     NoEffect,
     ThrowAway,
+    /// 0xf characters, 0x10 ability list, 0x11–0x13 the Equip popup of
+    /// category 0 Action / 1 Growth / 2 Support.
+    AbilityChars,
+    AbilityList,
+    AbilityPopup(u8),
     StatusList,
     StatusBrowse,
     Config,
@@ -331,6 +345,10 @@ enum Pick {
     Row(usize),
     Cancel,
     Start,
+    /// −5 / −6 / −7 (SQUARE, TRIANGLE, SELECT).
+    Square,
+    Triangle,
+    Select,
     Next,
     Previous,
     Left,
@@ -411,6 +429,8 @@ impl MenuList {
             Pick::Cancel
         } else if p.trig & START != 0 && self.mask & 0x40 != 0 {
             Pick::Start
+        } else if let Some(b) = buttons(p, self.mask) {
+            b
         } else if p.trig & R2 != 0 && self.mask & 0x4000 != 0 {
             Pick::Next
         } else if p.trig & L2 != 0 && self.mask & 0x8000 != 0 {
@@ -422,15 +442,33 @@ impl MenuList {
     }
 }
 
+/// FUN_1402f9440's −5 / −6 / −7 (trig 0x800 / 0x1000 / 0x2000 with mask
+/// 0x100 / 0x200 / 0x400).
+fn buttons(p: &Pad, mask: u32) -> Option<Pick> {
+    use bits::*;
+    if p.trig & SQUARE != 0 && mask & 0x100 != 0 {
+        Some(Pick::Square)
+    } else if p.trig & TRIANGLE != 0 && mask & 0x200 != 0 {
+        Some(Pick::Triangle)
+    } else if p.trig & SELECT != 0 && mask & 0x400 != 0 {
+        Some(Pick::Select)
+    } else {
+        None
+    }
+}
+
 /// FUN_1402f6270: the sound for a list result; `valid` is the validator.
 fn pick_sound(pick: Pick, moved: bool, valid: bool) -> Option<u32> {
     match pick {
         _ if moved => Some(SOUND_CURSOR),
         Pick::Left | Pick::Right => Some(SOUND_CURSOR),
         Pick::Cancel | Pick::Start => Some(SOUND_CLOSE),
-        Pick::Row(_) | Pick::Next | Pick::Previous => {
-            Some(if valid { SOUND_DECIDE } else { SOUND_INVALID })
-        }
+        Pick::Row(_)
+        | Pick::Next
+        | Pick::Previous
+        | Pick::Square
+        | Pick::Triangle
+        | Pick::Select => Some(if valid { SOUND_DECIDE } else { SOUND_INVALID }),
         Pick::None => None,
     }
 }
@@ -468,9 +506,9 @@ pub struct Camp {
     glove: Option<Id>,
     help: Option<Id>,
     help_offset: [f32; 2],
-    tabs: [Option<Tab>; 2],
+    tabs: [Option<Tab>; 3],
     /// Text for a tab not created yet (FUN_140324480 before FUN_140323c60).
-    pending_tab_text: [Option<Vec<u8>>; 2],
+    pending_tab_text: [Option<Vec<u8>>; 3],
     /// Sprites to close on exit, with their close groups.
     closers: Vec<(Id, usize)>,
     // Status.
@@ -490,6 +528,8 @@ pub struct Camp {
     config_frame: Option<Id>,
     // Items.
     item_ui: items::Ui,
+    // Abilities.
+    ability_ui: abilities::Ui,
 }
 
 impl Camp {
@@ -525,8 +565,8 @@ impl Camp {
             glove: None,
             help: None,
             help_offset: [0.; 2],
-            tabs: [None, None],
-            pending_tab_text: [None, None],
+            tabs: [None, None, None],
+            pending_tab_text: [None, None, None],
             closers: vec![(munny, MUNNY[2]), (time, TIME[2])],
             status_list: MenuList::default(),
             status_rows: Vec::new(),
@@ -540,6 +580,7 @@ impl Camp {
             choices: Vec::new(),
             config_frame: None,
             item_ui: items::Ui::default(),
+            ability_ui: abilities::Ui::default(),
         };
         camp.build_top(seq);
         camp.munny_digits = digits(seq, &munny_groups(camp.data.panels.munny), Vec::new());
@@ -716,6 +757,9 @@ impl Camp {
                     State::UseTarget => self.use_target(seq, &pad, &mut sounds),
                     State::NoEffect => self.no_effect(seq, &pad, &mut sounds),
                     State::ThrowAway => self.throw_away(seq, &pad, &mut sounds),
+                    State::AbilityChars => self.ability_chars(seq, &pad, &mut sounds),
+                    State::AbilityList => self.ability_list(seq, &pad, &mut sounds),
+                    State::AbilityPopup(_) => self.ability_popup(seq, &pad, &mut sounds),
                     State::StatusList => self.status_list(seq, &pad, &mut sounds),
                     State::StatusBrowse => self.status_browse(seq, &pad, &mut sounds),
                     State::Config => self.config(seq, &pad, &mut sounds),
@@ -761,6 +805,9 @@ impl Camp {
             State::NoEffect | State::ThrowAway => {
                 (&ui.choices, RowGroupsFor::Fixed(items::CHOICE_ROWS))
             }
+            State::AbilityChars => (&self.ability_ui.chars, RowGroupsFor::Top),
+            State::AbilityList => (&self.ability_ui.list.list, RowGroupsFor::None),
+            State::AbilityPopup(_) => (&self.ability_ui.popup, RowGroupsFor::None),
             State::StatusList => (&self.status_list, RowGroupsFor::Status),
             State::StatusBrowse => (&self.columns[self.column], RowGroupsFor::None),
             State::Config => (&self.config_list, RowGroupsFor::None),
@@ -810,7 +857,11 @@ impl Camp {
             }
             let row = rows[cursor];
             // States of list 0x1405baf20 (the stock list here) use G22.
-            let group = if state == State::Stock { 22 } else { GLOVE };
+            let group = if matches!(state, State::Stock | State::AbilityPopup(_)) {
+                22
+            } else {
+                GLOVE
+            };
             match self.glove {
                 Some(g) if self.sprites.alive(g) => self.sprites.get_mut(g).parent = Some(row),
                 _ => {
@@ -926,6 +977,7 @@ impl Camp {
                 self.memory.entry = entry.id;
                 let pending = match entry.id {
                     0 => Some(State::Items),
+                    1 => Some(State::AbilityChars),
                     4 => Some(State::StatusList),
                     7 => Some(State::Config),
                     _ => None,
@@ -967,6 +1019,7 @@ impl Camp {
         if rows_dead && block_dead {
             match self.pending.take() {
                 Some(State::Items) => self.enter_items(seq, None),
+                Some(State::AbilityChars) => self.enter_ability_chars(seq, None),
                 Some(State::StatusList) => self.enter_status(seq),
                 Some(State::Config) => self.enter_config(seq),
                 _ => {}
@@ -1111,6 +1164,7 @@ impl Camp {
     fn return_top(&mut self, seq: &Sequence) {
         self.kill_tab(0);
         self.kill_tab(1);
+        self.kill_tab(2);
         self.build_top(seq);
     }
 
@@ -1328,7 +1382,7 @@ impl Camp {
         if let Some(p) = self.panel {
             self.sprites.set(seq, p, STATUS_PANEL[1], None);
         }
-        for i in 0..2 {
+        for i in 0..self.tabs.len() {
             if let Some(tab) = &self.tabs[i]
                 && self.sprites.alive(tab.id)
             {
@@ -1486,7 +1540,7 @@ impl Camp {
             if let Some(b) = self.banner {
                 self.sprites.set(seq, b, BANNER[1], None);
             }
-            for i in 0..2 {
+            for i in 0..self.tabs.len() {
                 if let Some(tab) = &self.tabs[i] {
                     let id = tab.id;
                     if self.sprites.alive(id) {
