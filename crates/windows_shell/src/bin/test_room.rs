@@ -20,10 +20,11 @@ use bevy::{
     },
 };
 use package_reader::{
-    bar, model_inspection, model_inspection_textures::TextureMode, motion, objentry, original,
-    preferences, probe::ProbeSource, ptya, sklt,
+    bar, model_inspection, model_inspection_textures::TextureMode, motion, object_collision,
+    objentry, original, preferences, probe::ProbeSource, ptya, sklt,
 };
-use player_sim::combat::{self, Enemy, EnemyMotions, EnemyState};
+use player_sim::combat;
+use player_sim::shadow::{self, ScriptRandom, Shadow};
 use player_sim::{
     Action, AttackStep, Clip, Clips, Input, Params, Player, TriangleWorld, World,
     camera::{self, CameraInput, FollowCamera},
@@ -118,6 +119,8 @@ struct EnemyConfig {
     motion_set: Locator,
     /// Weapon mdlx (W_EX010) for the Keyblade's attack spheres.
     weapon_model: Locator,
+    /// Sora's mdlx (P_EX100) for his HIT spheres.
+    actor_model: Locator,
     enmp_id: u16,
     /// World battle level used when the ENMP level is 0 (test-room choice).
     battle_level: u16,
@@ -145,6 +148,10 @@ struct HudSource {
 
 /// Top-menu labels: Attack, Magic, Items, Drive (03system 'cmd' message ids).
 const MENU_MESSAGES: [u32; 4] = [0x81e0, 0x81e1, 0x81e2, 0x81e3];
+
+/// Sora's grounded damage motions: front-high, front-low, back-high,
+/// back-low (motion ids 10..13).
+const SORA_HURT: [u16; 4] = [10, 11, 12, 13];
 
 /// Public MotionSet names for the locomotion IDs used here.
 const LOCOMOTION: [(&str, u16); 6] = [
@@ -187,6 +194,8 @@ struct ClipPoses {
     /// Attack windows from the weapon motion's range trigger 10:
     /// (start, end, ATKP id, collision group), in clip ticks.
     hits: Vec<(u32, u32, u16, u8)>,
+    /// Sora's HIT-bone matrices per frame (model space, root removed).
+    body: Vec<HashMap<usize, Mat4>>,
 }
 
 #[derive(Resource)]
@@ -406,28 +415,60 @@ struct Loaded {
     enemy: Option<EnemySource>,
 }
 
-/// One enemy clip: skinned positions and HIT-bone matrices per tick.
+/// One enemy clip: skinned positions, HIT-bone matrices and root
+/// translation per tick, plus its loop start.
 struct EnemyClip {
     frames: Vec<Vec<Vec3>>,
     bones: Vec<HashMap<usize, Mat4>>,
+    root: Vec<Vec3>,
+    loop_start: u32,
+    /// Attack windows (range trigger 10): start, end, ATKP id, group.
+    windows: Vec<(u32, u32, u16, u8)>,
 }
 
 struct EnemyClips(HashMap<usize, EnemyClip>);
-impl combat::ClipLengths for EnemyClips {
+impl shadow::Clips for EnemyClips {
     fn length(&self, slot: usize) -> u32 {
         self.0.get(&slot).map_or(1, |c| c.frames.len() as u32)
+    }
+    fn loop_start(&self, slot: usize) -> u32 {
+        self.0.get(&slot).map_or(0, |c| c.loop_start)
+    }
+    fn root(&self, slot: usize, tick: u32) -> [f32; 3] {
+        self.0
+            .get(&slot)
+            .and_then(|c| c.root.get(tick as usize))
+            .map_or([0.; 3], |r| r.to_array())
+    }
+}
+
+struct RoomFloor<'a>(&'a TriangleWorld);
+impl shadow::Env for RoomFloor<'_> {
+    fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        self.0.floor(x, z, top)
     }
 }
 
 /// Live enemy state for the session.
 struct EnemyRuntime {
     clips: EnemyClips,
-    motions: EnemyMotions,
     body: Vec<(usize, Vec3, f32, bool)>,
     blade: HashMap<u8, Vec<(Vec3, f32)>>,
     attacks: HashMap<u16, combat::AttackParams>,
     sora: combat::AttackerStats,
-    enemy: Enemy,
+    enemy: Shadow,
+    rng: ScriptRandom,
+    claws: HashMap<u8, Vec<(usize, Vec3, f32)>>,
+    claw_attacks: HashMap<u16, combat::AttackParams>,
+    shadow_attacker: combat::AttackerStats,
+    sora_target: combat::TargetStats,
+    sora_body: Vec<(usize, Vec3, f32, bool)>,
+    /// Claw instances that already hit Sora, and last claw centres.
+    sora_hit_by: Vec<u64>,
+    claw_previous: HashMap<(u64, usize), Vec3>,
+    /// Sora's HP and KO timer (test room refills after a KO).
+    sora_hp: i32,
+    ko_ticks: u32,
     /// Last frame's attack sphere centres by (window instance, sphere).
     previous: HashMap<(u64, usize), Vec3>,
     indices: Vec<Vec<u32>>,
@@ -441,7 +482,6 @@ struct EnemyPart(usize);
 struct EnemySource {
     model: model_inspection::InspectionModel,
     clips: EnemyClips,
-    motions: EnemyMotions,
     /// HIT spheres: bone, offset, radius, high-flinch argument.
     body: Vec<(usize, Vec3, f32, bool)>,
     /// Keyblade attack spheres by collision group: offset, radius.
@@ -450,17 +490,12 @@ struct EnemySource {
     sora: combat::AttackerStats,
     stats: combat::TargetStats,
     offset: Vec3,
+    claws: HashMap<u8, Vec<(usize, Vec3, f32)>>,
+    claw_attacks: HashMap<u16, combat::AttackParams>,
+    shadow_attacker: combat::AttackerStats,
+    sora_target: combat::TargetStats,
+    sora_body: Vec<(usize, Vec3, f32, bool)>,
 }
-
-/// Shadow motion slots (direct slot = motion id, combat-01).
-const SHADOW_MOTIONS: EnemyMotions = EnemyMotions {
-    idle: 0,
-    flinch: [10, 11, 12, 13],
-    blow: [16, 18],
-    blow_land: [17, 19],
-    appear: 44,
-    leave: 45,
-};
 
 /// Walkable collision levels (8-unit height bins) by XZ area, largest first,
 /// each with the centroid of its largest triangle.
@@ -692,6 +727,47 @@ fn load(
     )?);
     ids.extend([0, 1, 2]);
     let battle_count = ids.len() - 3;
+    // Damage reactions (motion ids 10..13) when an enemy can hit Sora.
+    let hurt_count = if config.enemy.is_some() {
+        let hurt_selection = motion::MotionSetSelection {
+            index: config.motion_set.index.clone(),
+            ordinal: config.motion_set.ordinal,
+            name_hash: config.motion_set.name_hash,
+            battle: config.battle_mode,
+            has_weapon: config.has_weapon,
+        };
+        motions.extend(motion::read_motion_ids(
+            source,
+            &hurt_selection,
+            &SORA_HURT,
+        )?);
+        ids.extend(SORA_HURT);
+        SORA_HURT.len()
+    } else {
+        0
+    };
+    // Sora's HIT spheres (object collision type 2), for enemy attacks.
+    let sora_body: Vec<(usize, Vec3, f32, bool)> = match &config.enemy {
+        Some(e) => {
+            object_collision::read(bar_entry_typed(&read_archive(source, &e.actor_model)?, 23)?)?
+                .iter()
+                .filter(|c| c.kind == object_collision::HIT && c.group == 0 && c.bone >= 0)
+                .map(|c| {
+                    (
+                        c.bone as usize,
+                        Vec3::new(
+                            c.position[0] as f32,
+                            c.position[1] as f32,
+                            c.position[2] as f32,
+                        ),
+                        c.radius as f32,
+                        matches!(c.argument, 0 | 2 | 3 | 4 | 5),
+                    )
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
     let mut weapon_motions: HashMap<usize, motion::SelectedMotion> = HashMap::new();
     if let Some(set) = &config.weapon_motion_set {
         let weapon_selection = motion::MotionSetSelection {
@@ -724,6 +800,7 @@ fn load(
                 let mut root = Vec::with_capacity(clip.end as usize);
                 let mut weapon_frames = Vec::new();
                 let mut blade = Vec::new();
+                let mut body = Vec::new();
                 let hits = weapon_motions
                     .get(&selected.slot)
                     .map(|own| {
@@ -788,6 +865,15 @@ fn load(
                         eval_totals[3] += s.unsupported_constraints;
                         pose
                     };
+                    body.push(
+                        sora_body
+                            .iter()
+                            .filter_map(|&(b, ..)| {
+                                let m = pose.matrix_bits.get(b)?;
+                                Some((b, Mat4::from_cols_array(&m.map(f32::from_bits))))
+                            })
+                            .collect(),
+                    );
                     // Row-vector matrices: the row-major words are Bevy's
                     // column-major layout of the same transform.
                     hand.push(Mat4::from_cols_array(
@@ -807,6 +893,7 @@ fn load(
                     root,
                     blade,
                     hits,
+                    body,
                 });
                 by_slot.insert(selected.slot, clip_poses.len() - 1);
                 clip_poses.len() - 1
@@ -848,6 +935,10 @@ fn load(
             .zip(&clip_list[n + ground.len()..])
             .map(|(e, c)| step(e, c))
             .collect(),
+        hurt: clip_list[field + 3..field + 3 + hurt_count]
+            .iter()
+            .map(|c| c.0.clone())
+            .collect(),
     };
     // Pose clip per (action, weapon drawn).
     let mut actions = vec![
@@ -868,6 +959,9 @@ fn load(
     }
     for i in 0..air.len() {
         both.push((Action::AirAttack(i), clip_list[n + ground.len() + i].1));
+    }
+    for i in 0..hurt_count {
+        both.push((Action::Hurt(i), clip_list[field + 3 + i].1));
     }
     for (action, clip) in both {
         actions.push(((action, true), clip));
@@ -949,7 +1043,14 @@ fn load(
         "inferred_rules":["direction constraints aim local +X","two-joint IK bends the middle joint about local Z","expression list/condition semantics","Hermite tangents scaled by key span","field/battle mode switch with 6 s disarm timeout"],
         "gameplay_verified":false});
     let enemy = match &config.enemy {
-        Some(e) => Some(load_enemy(source, base, e, &battle, &config, &clip_poses)?),
+        Some(e) => Some(load_enemy(
+            source,
+            base,
+            e,
+            &battle,
+            &clip_poses,
+            sora_body,
+        )?),
         None => None,
     };
     Ok(Loaded {
@@ -977,10 +1078,10 @@ fn load_enemy(
     base: &Path,
     config: &EnemyConfig,
     battle: &[u8],
-    _room: &Config,
     clip_poses: &[ClipPoses],
+    sora_body: Vec<(usize, Vec3, f32, bool)>,
 ) -> Result<EnemySource, Box<dyn std::error::Error>> {
-    use package_reader::{battle_tables, object_collision};
+    use package_reader::battle_tables;
     let mut models =
         model_inspection::read_selected_models(source, &base.join(&config.model_selection))?;
     if models.len() != 1 {
@@ -989,6 +1090,21 @@ fn load_enemy(
     let model = models.remove(0);
     let collision =
         object_collision::read(bar_entry_typed(&read_archive(source, &config.model)?, 23)?)?;
+    let mut claws: HashMap<u8, Vec<(usize, Vec3, f32)>> = HashMap::new();
+    for e in collision
+        .iter()
+        .filter(|e| e.kind == object_collision::ATTACK && e.bone >= 0)
+    {
+        claws.entry(e.group).or_default().push((
+            e.bone as usize,
+            Vec3::new(
+                e.position[0] as f32,
+                e.position[1] as f32,
+                e.position[2] as f32,
+            ),
+            e.radius as f32,
+        ));
+    }
     let body: Vec<_> = collision
         .iter()
         .filter(|e| e.kind == object_collision::HIT && e.group == 0 && e.bone >= 0)
@@ -1023,11 +1139,7 @@ fn load_enemy(
             e.radius as f32,
         ));
     }
-    let m = SHADOW_MOTIONS;
-    let mut slots: Vec<usize> = vec![m.idle, m.appear, m.leave];
-    slots.extend(m.flinch);
-    slots.extend(m.blow);
-    slots.extend(m.blow_land);
+    let slots = shadow::motion::ALL;
     let selected = motion::read_slots(
         source,
         &config.motion_set.index,
@@ -1040,11 +1152,36 @@ fn load_enemy(
         let (clip, key_start) = clip_for(sel)?;
         let mut frames = Vec::new();
         let mut bones = Vec::new();
+        let mut root = Vec::new();
+        let windows: Vec<(u32, u32, u16, u8)> = sel
+            .triggers
+            .iter()
+            .flat_map(|t| &t.records.ranges)
+            .filter(|r| r.trigger == 10 && r.parameters.len() >= 2)
+            .map(|r| {
+                (
+                    r.start_frame.max(0) as u32,
+                    if r.end_frame < 0 {
+                        clip.end
+                    } else {
+                        r.end_frame as u32
+                    },
+                    r.parameters[0] as u16,
+                    r.parameters[1] as u8,
+                )
+            })
+            .collect();
+        let bone_list: Vec<usize> = body
+            .iter()
+            .map(|b| b.0)
+            .chain(claws.values().flatten().map(|c| c.0))
+            .collect();
         for offset in 0..=clip.end {
             let (pose, evaluated) = model
                 .skinning
                 .sample_evaluated(&sel.motion, (key_start + offset) as f32)?;
             let r = Vec3::from_array(evaluated.root_translation);
+            root.push(r);
             frames.push(
                 pose.position_bits
                     .iter()
@@ -1052,8 +1189,9 @@ fn load_enemy(
                     .collect(),
             );
             bones.push(
-                body.iter()
-                    .filter_map(|&(b, ..)| {
+                bone_list
+                    .iter()
+                    .filter_map(|&b| {
                         let m = pose.matrix_bits.get(b)?;
                         let mut m = Mat4::from_cols_array(&m.map(f32::from_bits));
                         m.w_axis -= r.extend(0.);
@@ -1062,13 +1200,36 @@ fn load_enemy(
                     .collect(),
             );
         }
-        clips.insert(sel.slot, EnemyClip { frames, bones });
+        clips.insert(
+            sel.slot,
+            EnemyClip {
+                frames,
+                bones,
+                root,
+                loop_start: clip.loop_start,
+                windows,
+            },
+        );
     }
     let atkp = bar_entry(battle, b"atkp")?;
     let mut attacks = HashMap::new();
     for (_, _, id, _) in clip_poses.iter().flat_map(|c| &c.hits) {
         let a = battle_tables::attack(atkp, *id)?;
         attacks.insert(
+            *id,
+            combat::AttackParams {
+                power: a.power,
+                stat: a.stat,
+                element: a.element,
+                reaction: a.reaction,
+                knockback: a.knockback,
+            },
+        );
+    }
+    let mut claw_attacks = HashMap::new();
+    for (_, _, id, _) in clips.values().flat_map(|c: &EnemyClip| &c.windows) {
+        let a = battle_tables::attack(atkp, *id)?;
+        claw_attacks.insert(
             *id,
             combat::AttackParams {
                 power: a.power,
@@ -1107,16 +1268,37 @@ fn load_enemy(
         max: 99999,
         min: 1,
     };
+    // Enemy as attacker: LVPM Str with its max/min clamps; Sora as target:
+    // LVUP + PLRP defence, player clamps 99999/1, weaknesses 100.
+    let shadow_attacker = combat::AttackerStats {
+        strength: row.strength as i32,
+        magic: row.strength as i32,
+        max: row.max_strength as i32,
+        min: row.min_strength as i32,
+    };
+    let plrp_hp = plrp.get(8 + 3).copied().unwrap_or(20) as i32;
+    let plrp_def = plrp.get(8 + 8).copied().unwrap_or(0) as i32;
+    let sora_target = combat::TargetStats {
+        max_hp: plrp_hp,
+        defense: lv.defense as i32 + plrp_def,
+        cap: 99999,
+        min: 1,
+        weakness: [100; 7],
+    };
     Ok(EnemySource {
         model,
         clips: EnemyClips(clips),
-        motions: m,
         body,
         blade,
         attacks,
         sora,
         stats,
         offset: Vec3::from_array(config.offset),
+        claws,
+        claw_attacks,
+        shadow_attacker,
+        sora_target,
+        sora_body,
     })
 }
 
@@ -1571,10 +1753,11 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 15] = [
-    90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100,
+const AUTOPLAY_CAPTURES: [u64; 18] = [
+    90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1300, 1500, 1700,
 ];
-const AUTOPLAY_END: u64 = 1140;
+/// The last stretch leaves Sora standing so an enemy can attack him.
+const AUTOPLAY_END: u64 = 1800;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(
@@ -1729,7 +1912,7 @@ fn simulate(
         let (position, yaw, action) = (game.player.position, game.player.yaw, game.player.action);
         let enemy = game.enemy.as_ref().map(|e| {
             serde_json::json!({"position":e.enemy.position,"yaw":e.enemy.yaw,
-                "hp":e.enemy.hp,"state":format!("{:?}", e.enemy.state),"motion":e.enemy.motion})
+                "hp":e.enemy.hp,"act":format!("{:?}", e.enemy.current_act()),"motion":e.enemy.motion})
         });
         game.event(
             serde_json::json!({"event":"state","tick":tick,"position":position,"yaw":yaw,
@@ -1742,10 +1925,20 @@ fn simulate(
 
 /// HUD frame: test-room debug keys (H/G HP -/+2, M/N MP -/+10, B drive +10)
 /// or the unattended script change stats, then the gauge logic runs.
-fn hud_tick(keys: Res<ButtonInput<KeyCode>>, game: Res<Game>, hud: Option<ResMut<Hud>>) {
+fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
     let Some(mut hud) = hud else { return };
     let mut s = hud.stats;
-    if game.autoplay.is_some() {
+    if let Some(rt) = game.enemy.as_mut() {
+        // Combat drives HP; G refills it.
+        if keys.just_pressed(KeyCode::KeyG) {
+            rt.sora_hp = rt.sora_target.max_hp;
+        }
+        s.hp = rt.sora_hp;
+        s.max_hp = rt.sora_target.max_hp;
+        if game.autoplay.is_some() && game.tick == 500 {
+            s.mp = s.max_mp / 2;
+        }
+    } else if game.autoplay.is_some() {
         match game.tick {
             420 => s.hp = s.max_hp * 7 / 10,
             500 => s.mp = s.max_mp / 2,
@@ -1879,6 +2072,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
     let frame = player.motion_frame(clips) as usize;
     let cp = &clip_poses[clip];
     let e = &rt.enemy;
+    let targetable = e.targetable();
     let enemy_turn = Quat::from_rotation_y(e.yaw);
     let enemy_at = Vec3::from_array(e.position);
     let ec = &rt.clips.0[&e.motion];
@@ -1892,7 +2086,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
         })
         .collect();
     let mut hit = None;
-    if !cp.blade.is_empty() {
+    if targetable && !cp.blade.is_empty() {
         let f = frame.min(cp.blade.len() - 1);
         let to_model = cp.weapon[f.min(cp.weapon.len() - 1)] * cp.blade[f];
         for (w, &(start, end, atkp, group)) in cp.hits.iter().enumerate() {
@@ -1920,30 +2114,114 @@ fn combat_tick(game: &mut Game, tick: u64) {
     {
         let d = (enemy_at - sora_at) * Vec3::new(1., 0., 1.);
         let dir = d.normalize_or(Vec3::new(player.yaw.sin(), 0., player.yaw.cos()));
-        if let Some(damage) = rt.enemy.hit(
-            instance,
-            dir.to_array(),
-            high,
-            attack,
-            &rt.sora,
-            &rt.motions,
-        ) {
+        if let Some(damage) = rt
+            .enemy
+            .hit(instance, dir.to_array(), high, attack, &rt.sora)
+        {
             let record = serde_json::json!({"event":"hit","tick":tick,"atkp":atkp,"damage":damage,
-                "enemy_hp":rt.enemy.hp,"reaction":format!("{:?}", rt.enemy.state),"high":high});
+                "enemy_hp":rt.enemy.hp,"reaction":format!("{:?}", rt.enemy.reaction),
+                "act":format!("{:?}", rt.enemy.current_act()),"high":high});
             if let Some(file) = log.as_mut() {
                 let _ = serde_json::to_writer(&mut *file, &record);
                 let _ = std::io::Write::write_all(file, b"\n");
             }
         }
     }
-    let ground = |p: [f32; 3]| world.floor(p[0], p[2], p[1] + params.step_height);
+    let _ = params;
+    // The Shadow's claws against Sora's HIT spheres.
+    let e = &rt.enemy;
+    let ec = &rt.clips.0[&e.motion];
+    let tick_in = e.motion_tick;
+    let mut sora_hit = None;
+    if e.alive() && !e.sunk {
+        let bones = &ec.bones[(tick_in as usize).min(ec.bones.len() - 1)];
+        let sora_bones = &cp.body[frame.min(cp.body.len().saturating_sub(1))];
+        let sora_spheres: Vec<(Vec3, f32, bool)> = rt
+            .sora_body
+            .iter()
+            .filter_map(|&(b, offset, r, high)| {
+                let m = sora_bones.get(&b)?;
+                Some((sora_at + sora_turn * m.transform_point3(offset), r, high))
+            })
+            .collect();
+        for (w, &(start, end, atkp, group)) in ec.windows.iter().enumerate() {
+            if tick_in < start || tick_in > end {
+                continue;
+            }
+            let instance = ((e.motion_serial as u64) << 4) | w as u64;
+            if rt.sora_hit_by.contains(&instance) {
+                continue;
+            }
+            for (i, &(b, offset, radius)) in rt.claws.get(&group).into_iter().flatten().enumerate()
+            {
+                let Some(m) = bones.get(&b) else { continue };
+                let centre = enemy_at + enemy_turn * m.transform_point3(offset);
+                let previous = rt.claw_previous.insert((instance, i), centre);
+                for c in combat::swept(centre.to_array(), previous.map(|p| p.to_array()), radius) {
+                    if sora_hit.is_none()
+                        && let Some(&(_, _, high)) = sora_spheres
+                            .iter()
+                            .find(|(b, r, _)| combat::spheres_overlap(c, radius, b.to_array(), *r))
+                    {
+                        sora_hit = Some((instance, atkp, high));
+                    }
+                }
+            }
+        }
+    }
+    if let Some((instance, atkp, high)) = sora_hit
+        && let Some(attack) = rt.claw_attacks.get(&atkp)
+        && rt.sora_hp > 0
+    {
+        rt.sora_hit_by.push(instance);
+        let damage = combat::damage(&rt.shadow_attacker, attack, &rt.sora_target);
+        rt.sora_hp = (rt.sora_hp - damage).max(0);
+        let d = (sora_at - enemy_at) * Vec3::new(1., 0., 1.);
+        let dir = d.normalize_or(Vec3::Z);
+        let facing = Vec3::new(player.yaw.sin(), 0., player.yaw.cos());
+        let back = facing.dot(dir) >= 0.;
+        // Knock-back: KB1 0x7fff selects SSTM HitBackSmall (200), x 0.1.
+        let kb = if attack.knockback[0] == 0x7fff {
+            200.
+        } else {
+            attack.knockback[0] as f32
+        } * 0.1;
+        let index = (back as usize) * 2 + (!high) as usize;
+        let started = player.hurt(index, [dir.x * kb, dir.z * kb], clips);
+        if started.is_some() {
+            *action_started = tick;
+        }
+        let record = serde_json::json!({"event":"sora_hit","tick":tick,"atkp":atkp,"damage":damage,
+            "sora_hp":rt.sora_hp,"reaction":format!("{started:?}")});
+        if let Some(file) = log.as_mut() {
+            let _ = serde_json::to_writer(&mut *file, &record);
+            let _ = std::io::Write::write_all(file, b"\n");
+        }
+    }
+    if rt.sora_hp == 0 {
+        rt.ko_ticks += 1;
+        if rt.ko_ticks >= 120 {
+            rt.sora_hp = rt.sora_target.max_hp;
+            rt.ko_ticks = 0;
+        }
+    }
+    let before = rt.enemy.current_act();
     rt.enemy.tick(
-        &rt.motions,
+        &mut rt.rng,
         &rt.clips,
-        params.gravity,
+        &RoomFloor(world),
         player.position,
-        &ground,
+        player.position,
     );
+    let after = rt.enemy.current_act();
+    if before != after
+        && let Some(file) = log.as_mut()
+    {
+        let record = serde_json::json!({"event":"enemy_act","tick":tick,"act":format!("{after:?}"),
+            "motion":rt.enemy.motion,"position":rt.enemy.position});
+        let _ = serde_json::to_writer(&mut *file, &record);
+        let _ = std::io::Write::write_all(file, b"\n");
+    }
 }
 
 fn present_enemy(
@@ -1957,7 +2235,9 @@ fn present_enemy(
     if let Ok((mut t, mut v)) = roots.single_mut() {
         t.translation = Vec3::from_array(e.position);
         t.rotation = Quat::from_rotation_y(e.yaw);
-        *v = if matches!(e.state, EnemyState::Gone { .. }) {
+        t.scale = Vec3::new(1., e.scale_y.max(0.01), 1.);
+        // Alpha fades are shown as visible/hidden at half alpha.
+        *v = if e.gone || e.alpha < 0.5 {
             Visibility::Hidden
         } else {
             Visibility::Inherited
@@ -2338,24 +2618,31 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
     if let Some(e) = loaded.enemy {
         let spawn = loaded.spawn + e.offset;
         let to_sora = loaded.spawn - spawn;
-        let enemy = Enemy::new(
-            spawn.to_array(),
-            to_sora.x.atan2(to_sora.z),
-            e.stats,
-            &e.motions,
-        );
+        let enemy = Shadow::new(spawn.to_array(), to_sora.x.atan2(to_sora.z), e.stats);
         game.event(serde_json::json!({"event":"enemy","hp":e.stats.max_hp,"defense":e.stats.defense,
             "damage_cap":e.stats.cap,"damage_min":e.stats.min,"sora_strength":e.sora.strength,
-            "hit_spheres":e.body.len(),"blade_groups":e.blade.keys().collect::<Vec<_>>(),"position":spawn}));
+            "hit_spheres":e.body.len(),"blade_groups":e.blade.keys().collect::<Vec<_>>(),"position":spawn,
+            "claw_groups":e.claws.iter().map(|(g, v)| (g.to_string(), v.len())).collect::<HashMap<_, _>>(),
+            "claw_windows":e.clips.0.iter().filter(|(_, c)| !c.windows.is_empty()).map(|(s, c)| (s.to_string(), c.windows.clone())).collect::<HashMap<_, _>>(),
+            "sora_hit_spheres":e.sora_body.len(),"sora_target":format!("{:?}", e.sora_target),"shadow_attacker":format!("{:?}", e.shadow_attacker)}));
         enemy_model = Some(e.model);
         game.enemy = Some(EnemyRuntime {
             clips: e.clips,
-            motions: e.motions,
             body: e.body,
             blade: e.blade,
             attacks: e.attacks,
             sora: e.sora,
             enemy,
+            rng: ScriptRandom::default(),
+            claws: e.claws,
+            claw_attacks: e.claw_attacks,
+            shadow_attacker: e.shadow_attacker,
+            sora_target: e.sora_target,
+            sora_body: e.sora_body,
+            sora_hit_by: Vec::new(),
+            claw_previous: HashMap::new(),
+            sora_hp: e.sora_target.max_hp,
+            ko_ticks: 0,
             previous: HashMap::new(),
             indices: Vec::new(),
         });

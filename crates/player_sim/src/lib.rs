@@ -9,6 +9,7 @@
 
 pub mod camera;
 pub mod combat;
+pub mod shadow;
 
 pub type Vec3 = [f32; 3];
 
@@ -136,6 +137,9 @@ pub struct Clips {
     pub land: Clip,
     pub ground_combo: Vec<AttackStep>,
     pub air_combo: Vec<AttackStep>,
+    /// Grounded damage reactions (front-high, front-low, back-high,
+    /// back-low; motion ids 10..13). Empty when not loaded.
+    pub hurt: Vec<Clip>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -148,6 +152,8 @@ pub enum Action {
     Land,
     Attack(usize),
     AirAttack(usize),
+    /// A damage reaction (index into `Clips::hurt`).
+    Hurt(usize),
 }
 
 impl Action {
@@ -187,7 +193,12 @@ pub struct Player {
     idle_ticks: u32,
     queued_attack: bool,
     air_combo_spent: bool,
+    /// Knock-back slide per tick while hurt.
+    slide: [f32; 2],
 }
+
+/// Knock-back slide brake per tick [test-room choice; SSTM brake 0.8].
+pub const HURT_SLIDE_BRAKE: f32 = 0.8;
 
 /// What changed during one tick, for logging and presentation.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -217,7 +228,22 @@ impl Player {
             idle_ticks: 0,
             queued_attack: false,
             air_combo_spent: false,
+            slide: [0.; 2],
         }
+    }
+
+    /// Starts a grounded damage reaction with a knock-back slide (per tick,
+    /// decaying). Airborne actions only take the slide.
+    pub fn hurt(&mut self, index: usize, slide: [f32; 2], clips: &Clips) -> Option<Action> {
+        self.slide = slide;
+        if self.action.airborne() || index >= clips.hurt.len() {
+            return None;
+        }
+        self.action = Action::Hurt(index);
+        self.frame = 0;
+        self.queued_attack = false;
+        self.arm();
+        Some(self.action)
     }
 
     fn start(&mut self, action: Action, step: &mut Step) {
@@ -240,6 +266,7 @@ impl Player {
             (Action::Land, _) => &clips.land,
             (Action::Attack(i), _) => &clips.ground_combo[i].clip,
             (Action::AirAttack(i), _) => &clips.air_combo[i].clip,
+            (Action::Hurt(i), _) => &clips.hurt[i],
         }
     }
 
@@ -421,6 +448,17 @@ impl Player {
                     input, moving, magnitude, direction, p, clips, world, &mut step,
                 );
             }
+            Action::Hurt(i) => {
+                if self.frame >= clips.hurt[i].end {
+                    self.start(Action::Idle, &mut step);
+                }
+            }
+        }
+        if self.slide[0].hypot(self.slide[1]) > 1e-3 {
+            let grounded = !self.action.airborne();
+            let slide = self.slide;
+            self.travel(slide, p, world, grounded);
+            self.slide = slide.map(|v| v * HURT_SLIDE_BRAKE);
         }
         step
     }
@@ -675,6 +713,13 @@ mod tests {
                 attack(50, (60, 60), 0.),
             ],
             air_combo: vec![attack(30, (8, 20), 20.), attack(30, (8, 20), 20.)],
+            hurt: vec![
+                Clip {
+                    end: 24,
+                    ..Clip::default()
+                };
+                4
+            ],
         }
     }
     /// A flat 2000-unit square floor with one wall along x = 500.
@@ -957,5 +1002,21 @@ mod tests {
         assert!(p.validate().is_ok());
         p.run_speed = f32::NAN;
         assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn hurt_plays_its_clip_slides_back_and_returns_to_idle() {
+        let c = clips();
+        let world = room();
+        let mut player = Player::new([0.; 3], 0.);
+        assert_eq!(player.hurt(1, [0., -10.], &c), Some(Action::Hurt(1)));
+        assert!(player.armed);
+        let p = params();
+        player.tick(&Input::default(), &p, &c, &world);
+        assert!((player.position[2] + 10.).abs() < 1e-3);
+        for _ in 0..30 {
+            player.tick(&Input::default(), &p, &c, &world);
+        }
+        assert_eq!(player.action, Action::Idle);
     }
 }
