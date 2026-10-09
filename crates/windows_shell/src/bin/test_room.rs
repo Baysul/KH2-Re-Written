@@ -155,6 +155,9 @@ struct CameraRig {
     /// Right-drag turn not yet consumed by a tick, in manual-turn units.
     pending_turn: f32,
     recenter_queued: bool,
+    /// Map camera collision triangles in game world space.
+    collision: Vec<[[f32; 3]; 3]>,
+    collision_hits: u64,
 }
 
 /// Scene (Y up) to game world (Y down) and back; the map is converted with
@@ -1120,7 +1123,19 @@ fn simulate(
     camera.turn = turn.clamp(-1., 1.);
     camera.zoom = zoom.clamp(-1., 1.);
     camera.recenter = std::mem::take(&mut rig.recenter_queued);
-    rig.camera.tick(&camera);
+    let CameraRig {
+        camera: follow,
+        collision,
+        collision_hits,
+        ..
+    } = &mut *rig;
+    let hits = std::cell::Cell::new(0);
+    follow.tick(&camera, &|a, b| {
+        let hit = camera::segment_hit(collision, a, b);
+        hits.set(hits.get() + hit.is_some() as u64);
+        hit
+    });
+    *collision_hits += hits.get();
     rig.previous_position = game.player.position;
     game.tick += 1;
     if let Some(action) = step.started {
@@ -1136,7 +1151,8 @@ fn simulate(
         let (position, yaw, action) = (game.player.position, game.player.yaw, game.player.action);
         game.event(
             serde_json::json!({"event":"state","tick":tick,"position":position,"yaw":yaw,
-            "action":format!("{action:?}")}),
+            "action":format!("{action:?}"),"camera_eye":rig.camera.eye,"camera_yaw":rig.camera.yaw,
+            "camera_collision_triangles":rig.collision.len(),"camera_collision_hits":rig.collision_hits}),
         );
     }
 }
@@ -1504,6 +1520,13 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         previous_position: game.player.position,
         pending_turn: 0.,
         recenter_queued: false,
+        collision_hits: 0,
+        collision: loaded
+            .room
+            .camera_triangles
+            .iter()
+            .map(|t| t.map(|p| to_world(p.to_array())))
+            .collect(),
     };
     eprintln!(
         "Test room ready. WASD/arrows move (Shift walks), Space jumps, Enter/K/left-click attacks, Q/E or right-drag turns the camera, -/= zoom, C recenters, Esc exits."

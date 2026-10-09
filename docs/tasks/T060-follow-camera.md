@@ -18,24 +18,27 @@ Same selected Steam source and private manifest as T056–T059 (quarantined; ful
    - The speed term reads a player value compared with 8; Sora's PRTY run speed is 8, so it contributes zero here.
 3. The projection takes the field of view as horizontal across a 640×480 virtual screen (512/0.8 by 416/0.8667). Field of view 1.5 gives a vertical field of view of 1.2197 rad.
 
+4. Camera collision: after placing the eye target, and again after the spring, the update casts the segment from the look-at point to the eye against the map's camera collision mesh (BAR type 11, COCT layout; `CH_t` in tt08) and, on a hit, places the eye 5 units off the surface along the polygon normal (30 units in another call site not used by the default mode). After the second cast the eye target is reset to the clipped eye. A surface type 5 branch and a dynamic-object sphere check run first; neither is implemented here.
+
 ## Implementation
 
 - `player_sim::camera` (new): `FollowCamera` with the mode-0 row, yaw follow, radius return, manual turn/zoom/recenter, spring easing and vertical field of view, in the game's Y-down world space; four tests.
+- Camera collision: `camera::segment_hit` (nearest segment/triangle hit, normal turned toward the look-at point) applied at both points above; `room::load_rooms` now also returns the type-11 camera collision triangles (278 in tt08).
 - `test_room`: the camera ticks with the 60 Hz simulation (world = scene (x, −y, −z)), stick movement is relative to the camera's view direction, the projection uses the derived vertical field of view, and Q/E (or right-drag / right stick) turn, −/= zoom, C recenters. Unattended runs orbit 180° at 3°/frame to check Sora's front.
 
 ## Evidence (private, outside Git)
 
-Ghidra project `%LOCALAPPDATA%/KH2FinalRewrite/research/ghidra-kh2-a1/` outputs `cam-01` (references to the mode table), `cam-02` (camera routines), `cam-03` (helpers: angle wrap/approach, player position/facing, moved check, button tests), `cam-04`/`cam-05` (projection). Autoplay `research/playable-room-20261008/autoplay-22` with log and captures.
+Ghidra project `%LOCALAPPDATA%/KH2FinalRewrite/research/ghidra-kh2-a1/` outputs `cam-01` (references to the mode table), `cam-02` (camera routines), `cam-03` (helpers: angle wrap/approach, player position/facing, moved check, button tests), `cam-04`/`cam-05` (projection). Autoplay `research/playable-room-20261008/autoplay-22` with log and captures; `autoplay-24` adds camera collision (log state events carry eye, yaw and cumulative hits: 66 hits while running past the stairs/planter at the start).
 
 Inspected autoplay-22 captures: running away shows Sora small in the lower middle of a wide view with the look-at point above his head; after the scripted orbit, battle idle is seen from the front with the station building behind, matching the original's framing at the default radius.
 
 ## Checks
 
-PASS fmt; PASS clippy (warnings denied); PASS `cargo test --workspace --locked` (151 tests); PASS build; PASS 180-frame smoke; PASS autoplay-22; PASS release `test_room` build. NOT RUN: interactive playtest by the user; side-by-side capture against the installed game.
+PASS fmt; PASS clippy (warnings denied); PASS `cargo test --workspace --locked` (154 tests); PASS build; PASS 180-frame smoke; PASS autoplay-22; PASS release `test_room` build. NOT RUN: interactive playtest by the user; side-by-side capture against the installed game.
 
 ## Uncertainty
 
-Not implemented: camera collision against the map's camera collision mesh (the routine exists and is called for eye targets), lock-on/battle camera modes and the fixed-mode switch from area scripts. Assumptions: the default camera setting (a global that selects 0.4/0.0018 gains instead of 0.07/0.0006 is taken as off); the speed value is the PRTY run speed; the stick's +Y is toward the camera; the PC build widens the horizontal view for 16:9 and keeps the 4:3 vertical field of view. Button bindings are test-room choices.
+Not implemented: the camera-collision surface-type-5 branch and dynamic-object check, lock-on/battle camera modes and the fixed-mode switch from area scripts. Assumptions: the default camera setting (a global that selects 0.4/0.0018 gains instead of 0.07/0.0006 is taken as off); the speed value is the PRTY run speed; the stick's +Y is toward the camera; the PC build widens the horizontal view for 16:9 and keeps the 4:3 vertical field of view. Button bindings are test-room choices.
 
 ## Verdict / next
 

@@ -26,6 +26,9 @@ pub struct LoadedRoom {
     /// Collision display triangles in scene coordinates (pinned MapStudio
     /// GenerateVertex conversion).
     pub collision_triangles: Vec<CollisionTriangle>,
+    /// Camera collision (BAR type 11, COCT layout) triangles in scene
+    /// coordinates.
+    pub camera_triangles: Vec<[Vec3; 3]>,
 }
 pub struct CollisionTriangle {
     pub polygon: usize,
@@ -129,6 +132,19 @@ pub fn load_rooms(
             inspection_ground = Some(heights[0]);
         }
     }
+    let mut camera_triangles = Vec::new();
+    for entry in table
+        .entries
+        .iter()
+        .filter(|e| e.entry_type == 11 && e.offset > 0 && e.size > 0)
+    {
+        let collision = room_collision::read(
+            &archive.bytes[entry.offset as usize..entry.offset as usize + entry.size as usize],
+        )?;
+        for (_, corners) in collision.triangle_indices()? {
+            camera_triangles.push(corners.map(|i| scene_point(collision.vertex_bits[i as usize])));
+        }
+    }
     let mut rgba_bytes = 0;
     for entry in table
         .entries
@@ -173,6 +189,7 @@ pub fn load_rooms(
         frame_points,
         inspection_ground,
         collision_triangles,
+        camera_triangles,
     })
 }
 

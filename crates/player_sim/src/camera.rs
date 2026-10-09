@@ -6,8 +6,9 @@
 //!
 //! Positions here are in the game's own world space: Y points down, so
 //! "above the player" is negative Y. One `tick` is one 60 Hz frame (the
-//! game's frame-time scale of 1). Camera collision against the map's camera
-//! collision mesh is not implemented.
+//! game's frame-time scale of 1). Camera collision uses the map's camera
+//! collision mesh: the eye is pulled to the first hit on the segment from the
+//! look-at point, 5 units off the surface.
 
 pub type Vec3 = [f32; 3];
 
@@ -60,6 +61,60 @@ pub const LOOK_AT_EXTRA_GAIN: f32 = 0.03;
 pub const SPRING: f32 = 2.5;
 pub const DAMPING: f32 = 0.5;
 pub const REST_LENGTH: f32 = 1.;
+/// Distance the eye is kept off a camera collision surface.
+pub const COLLISION_OFFSET: f32 = 5.;
+
+/// First hit on the segment `from` -> `to`: point and unit surface normal
+/// facing `from`.
+pub type Hit = Option<(Vec3, Vec3)>;
+
+fn cross(a: Vec3, b: Vec3) -> Vec3 {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// Nearest intersection of a segment with a triangle soup.
+pub fn segment_hit(triangles: &[[Vec3; 3]], from: Vec3, to: Vec3) -> Hit {
+    let dir = sub(to, from);
+    let mut best: Option<(f32, Vec3)> = None;
+    for [a, b, c] in triangles {
+        let (e1, e2) = (sub(*b, *a), sub(*c, *a));
+        let p = cross(dir, e2);
+        let det = dot(e1, p);
+        if det.abs() < 1e-8 {
+            continue;
+        }
+        let inv = 1. / det;
+        let t0 = sub(from, *a);
+        let u = dot(t0, p) * inv;
+        if !(0. ..=1.).contains(&u) {
+            continue;
+        }
+        let q = cross(t0, e1);
+        let v = dot(dir, q) * inv;
+        if v < 0. || u + v > 1. {
+            continue;
+        }
+        let t = dot(e2, q) * inv;
+        if (0. ..=1.).contains(&t) && best.is_none_or(|(bt, _)| t < bt) {
+            best = Some((t, cross(e1, e2)));
+        }
+    }
+    let (t, n) = best?;
+    let len = dot(n, n).sqrt();
+    let mut n = n.map(|c| c / len);
+    if dot(n, dir) > 0. {
+        n = n.map(|c| -c);
+    }
+    Some(([0, 1, 2].map(|k| from[k] + dir[k] * t), n))
+}
+
+fn pushed_off((point, normal): (Vec3, Vec3)) -> Vec3 {
+    [0, 1, 2].map(|k| point[k] + normal[k] * COLLISION_OFFSET)
+}
 
 /// Per-frame inputs. Stick axes follow the pad convention: x right, y
 /// toward the player (down on the stick); `magnitude` is the stick's
@@ -195,7 +250,9 @@ impl FollowCamera {
         }
     }
 
-    pub fn tick(&mut self, input: &CameraInput) {
+    /// One frame. `collide` returns the first camera-collision hit on a
+    /// segment (see `segment_hit`).
+    pub fn tick(&mut self, input: &CameraInput, collide: &dyn Fn(Vec3, Vec3) -> Hit) {
         self.look_at_target_prev = self.look_at_target;
         self.eye_target_prev = self.eye_target;
         let mode = self.mode;
@@ -237,6 +294,9 @@ impl FollowCamera {
             }
         }
         self.place_targets(input.player_position, snap);
+        if let Some(hit) = collide(self.look_at_target, self.eye_target) {
+            self.eye_target = pushed_off(hit);
+        }
         // At 60 Hz the gain is halved; the look-at point adds its extra gain
         // afterwards.
         let gain = (SPRING_GAIN + speed_offset * SPRING_GAIN_PER_UNIT) * 0.5;
@@ -247,6 +307,10 @@ impl FollowCamera {
             gain + LOOK_AT_EXTRA_GAIN,
         );
         self.eye = spring(self.eye, self.eye_target, self.eye_target_prev, gain);
+        if let Some(hit) = collide(self.look_at, self.eye) {
+            self.eye = pushed_off(hit);
+            self.eye_target = self.eye;
+        }
     }
 }
 
@@ -296,19 +360,35 @@ mod tests {
     }
 
     #[test]
+    fn wall_between_look_at_and_eye_pulls_the_eye_in() {
+        // A wall at z = -100 across the path behind a player facing +Z.
+        let wall = [[
+            [-1000., -1000., -100.],
+            [1000., -1000., -100.],
+            [0., 1000., -100.],
+        ]];
+        let mut camera = FollowCamera::new(OUTDOOR, &input([0., 0., 0.], [0., 0., 1.]));
+        camera.tick(&input([0., 0., 0.], [0., 0., 1.]), &|a, b| {
+            segment_hit(&wall, a, b)
+        });
+        assert!((camera.eye[2] - (-95.)).abs() < 1e-3);
+        assert!(segment_hit(&wall, [0., 0., 0.], [0., 0., -50.]).is_none());
+    }
+
+    #[test]
     fn follow_swings_behind_a_moving_player_and_pauses_when_running_at_it() {
         let mut camera = FollowCamera::new(OUTDOOR, &input([0., 0., 0.], [0., 0., 1.]));
         let mut step = input([0., 0., 0.], [1., 0., 0.]);
         step.moved = true;
         step.magnitude = 1.;
-        camera.tick(&step);
+        camera.tick(&step, &|_, _| None);
         // Behind +Z is -pi; behind +X is -pi/2. Full stick, no tilt turns
         // 2 * 1 * 1 * 1 * FOLLOW_SPEED per frame toward it.
         let expected = -std::f32::consts::PI + 2. * FOLLOW_SPEED;
         assert!((camera.yaw - expected).abs() < 1e-5);
         let before = camera.yaw;
         step.stick = [0., 1.];
-        camera.tick(&step);
+        camera.tick(&step, &|_, _| None);
         assert_eq!(camera.yaw, before);
     }
 }
