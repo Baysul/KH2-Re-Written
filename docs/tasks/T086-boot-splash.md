@@ -33,9 +33,10 @@ Same selected source and private manifest (quarantined; full rehash at every lau
 
 - `windows_shell::title`: no logic change. `Title::new(first_boot = true)` already started scene 8 with the intro queued. A new test checks that decide/START do not skip scene 8 and that it hands straight to scene 12.
 - `kh2fm title`: `first_boot` now defaults to true, so the splash plays on every launch as in the exe. A config can still set it false. Unattended runs (`--autoplay`) keep their scene-17 start and skip both splashes, because their press plan uses fixed ticks.
-- `windows_shell::splash` (new, **not original**): the user's GLURBUS STUDIOS splash.
-  - It plays after the opening fade-in, before the title task starts (so before scene 8 and the BGM). It is silent.
-  - It copies the Disney group's timing: 0–19 black → backdrop; the logo under a fading overlay at 20–79 / 80–199 / 200–259. It then fades to black over 260–279, so scene 8 opens from black as it does after the opening fade. Total 280 frames.
+- `windows_shell::splash` (new, **not original**): the user's GLURBUS STUDIOS splash, placed after the Square Enix logo at the user's request.
+  - The boot splash holds at frame 520, on its bare backdrop, after the Square Enix logo has faded out at 519. The layouts and the title task get no frames while the studio splash plays; scene 8 then resumes at 520 with the copyright block. The Title BGM, already started under the Disney logo, keeps playing.
+  - It copies the Square Enix group's timing: 20 frames of bare backdrop, then the logo under a fading overlay at 20–79 / 80–199 / 200–259. Total 260 frames.
+  - It plays only with the boot splash, so a config with `first_boot: false` shows neither.
   - The logo square is drawn 224 units tall (the Disney part's height) at the centre. The image's paper is set to the backdrop grey 0xf5, so no box shows.
 - Asset: `crates/windows_shell/assets/glurbus-splash.png` (1280×720).
   - **Provenance:** the user's own art. They uploaded it in the project thread and asked for it to be used. It is not game data.
@@ -43,11 +44,10 @@ Same selected source and private manifest (quarantined; full rehash at every lau
 
 ## Evidence (private, outside Git)
 
-- `title-run-15` / `title-run-16` / `title-run-17` (+ `.jsonl`).
+- `title-run-15` to `title-run-18` (+ `.jsonl`). Runs 15–17 had the studio splash first; run 18 has the final order.
   - These came from a local, uncommitted build that kept both splashes in the autoplay plan.
-  - Run 16 timeline: studio splash from tick 123, title start on scene 8 at tick 402, BGM at 403.
-  - Captures show the studio splash, the Square Enix logo, the copyright block, then the intro sketch.
-  - Run 17 shows the studio splash on the matched 0xf5 backdrop, without the box edge seen in run 15.
+  - Run 18 timeline: title start on scene 8 at tick 123, BGM at 124, studio splash from tick 645 (scene frame 520) to 905.
+  - Run 18 captures show the Square Enix logo (tick 450), the studio splash on the matched 0xf5 backdrop (750), then the copyright block (970).
 
 ## Checks
 
@@ -70,4 +70,4 @@ NOT RUN:
 
 ## Verdict / next
 
-PROGRESS. A launch now plays the opening fade, the studio splash, then Disney → Square Enix → copyright with the Title BGM, then the intro and the idle title, matching the exe's first-boot order. Next: compare the sequence against an installed-game capture.
+PROGRESS. A launch now plays the opening fade, then Disney → Square Enix → the studio splash → copyright with the Title BGM, then the intro and the idle title, matching the exe's first-boot order. Next: compare the sequence against an installed-game capture.

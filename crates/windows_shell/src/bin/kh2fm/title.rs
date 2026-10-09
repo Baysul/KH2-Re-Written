@@ -31,7 +31,7 @@ use windows_shell::pad::{self, Pad};
 use windows_shell::sound::{self, Banks, Music};
 use windows_shell::splash::{self, Splash};
 use windows_shell::sprite2d::Sheet;
-use windows_shell::title::{Action, Event, State, Title};
+use windows_shell::title::{Action, Event, SCENE_BOOT, State, Title};
 use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
 
 #[derive(Deserialize, Clone)]
@@ -109,8 +109,9 @@ mod pad_bits {
 struct Session {
     menu: Menu2ld,
     first_boot: bool,
-    /// The rewrite's own studio splash, before everything else (not in the
-    /// original game); `None` once played, and for unattended runs.
+    /// The rewrite's own studio splash, inside the boot splash after the
+    /// Square Enix logo (not in the original game); `None` once played,
+    /// without the boot splash, and for unattended runs.
     studio: Option<Splash>,
     studio_image: Option<splash::Image>,
     studio_sheet: usize,
@@ -286,9 +287,17 @@ fn tick(
     }
     s.image_sheets[GLYPH_IMAGE] = s.glyph_sheets[s.glyph].expect("glyph sheet");
 
+    // The studio splash holds the boot splash on its bare backdrop after the
+    // Square Enix logo [rebuild addition]: no layout or title-task frames
+    // while it plays.
+    let studio_now = s.studio.is_some()
+        && s.title.as_ref().is_some_and(|t| {
+            t.main.scene == SCENE_BOOT && t.main.player.time >= splash::BOOT_FRAME
+        });
+
     // Sprite and layout tasks (priority ~0x7532) run first, then the 2D
     // draw (103000), then the title task (300000), then the fade (330000).
-    if let Some(t) = s.title.as_mut() {
+    if !studio_now && let Some(t) = s.title.as_mut() {
         t.update_layouts(&s.menu.layout, 1.);
     }
     let dialog_seq = &s.menu.layout.sequences[0];
@@ -318,13 +327,7 @@ fn tick(
         }
     }
 
-    // The studio splash plays once the opening fade-in is done, before the
-    // title task starts [rebuild addition].
-    if s.title.is_none()
-        && s.handoff.is_none()
-        && s.fade.state == fade::State::Idle
-        && let Some(mut sp) = s.studio.take()
-    {
+    if studio_now && let Some(mut sp) = s.studio.take() {
         if sp.frame == 0 {
             s.event(serde_json::json!({"event":"studio_splash","tick":tick}));
         }
@@ -371,7 +374,6 @@ fn tick(
     let music_pending = s.music_rx.is_some();
     if s.title.is_none()
         && s.handoff.is_none()
-        && s.studio.is_none()
         && s.fade.state == fade::State::Idle
         && !music_pending
     {
@@ -417,7 +419,7 @@ fn tick(
                     }
                 }
             }
-        } else {
+        } else if !studio_now {
             events = t.frame(&s.menu.layout, trig, 1.);
         }
         for e in events {
@@ -712,14 +714,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     };
     // Unattended plans press at fixed ticks from the scene-17 start, so they
     // skip both splashes.
-    let (studio, studio_image) = if autoplay.is_none() {
+    let first_boot = config.first_boot && autoplay.is_none();
+    let (studio, studio_image) = if first_boot {
         (Some(Splash::default()), Some(splash::load()?))
     } else {
         (None, None)
     };
     let session = Session {
         menu,
-        first_boot: config.first_boot && autoplay.is_none(),
+        first_boot,
         studio,
         studio_image,
         studio_sheet: 0,

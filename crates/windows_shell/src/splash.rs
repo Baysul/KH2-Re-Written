@@ -1,11 +1,11 @@
 //! The rewrite's own studio splash, "GLURBUS STUDIOS", shown once per launch
-//! before the game's boot splash (title.2ld scene 8). It is not in the
-//! original game. Its timing copies the Disney group of that splash
-//! (title.2ld SEQD 1 group 0): a fade from black to the off-white backdrop
-//! over frames 0..19, then the logo from 20 to 259 under an overlay of the
-//! backdrop colour that fades out over 20..79 and back in over 200..259.
-//! Frames 260..279 then fade the backdrop to black, so scene 8 opens from
-//! black as it does after the opening fade.
+//! inside the game's boot splash (title.2ld scene 8), between the Square
+//! Enix logo and the copyright block. It is not in the original game. The
+//! boot splash holds at frame 520, on its bare backdrop, while this plays.
+//! Its timing copies the Square Enix group of that splash (SEQD 1 group 1):
+//! frames 0..19 are the bare backdrop, then the logo shows from 20 to 259
+//! under an overlay of the backdrop colour that fades out over 20..79 and
+//! back in over 200..259.
 //!
 //! The art is the project owner's own image (`assets/glurbus-splash.png`),
 //! not game data.
@@ -15,7 +15,10 @@ use package_reader::sequence::Quad;
 pub const IMAGE_PNG: &[u8] = include_bytes!("../assets/glurbus-splash.png");
 
 /// Frames the splash lasts at 60 Hz.
-pub const LENGTH: u32 = 280;
+pub const LENGTH: u32 = 260;
+/// The boot-splash frame it plays at: the start of SEQD 1 group 2 (the
+/// copyright block), after the Square Enix logo has faded out at 519.
+pub const BOOT_FRAME: f32 = 520.;
 
 /// The logo's square inside the 1280x720 image, in pixels, inset past the
 /// paper's faint edge.
@@ -80,16 +83,16 @@ impl Splash {
         self.frame >= LENGTH
     }
 
-    /// Backdrop level (0 black, 1 the backdrop grey), whether the logo is
-    /// drawn, and the overlay's alpha over it (1 opaque).
-    fn state(&self) -> (f32, bool, f32) {
+    /// Whether the logo is drawn, and the overlay's alpha over it (1
+    /// opaque).
+    fn state(&self) -> (bool, f32) {
         let t = self.frame;
         match t {
-            0..=19 => (progress(t, 0, 19), false, 0.),
-            20..=79 => (1., true, 1. - progress(t, 20, 79)),
-            80..=199 => (1., true, 0.),
-            200..=259 => (1., true, progress(t, 200, 259)),
-            _ => (1. - progress(t, 260, LENGTH - 1), false, 0.),
+            0..=19 => (false, 0.),
+            20..=79 => (true, 1. - progress(t, 20, 79)),
+            80..=199 => (true, 0.),
+            200..=259 => (true, progress(t, 200, 259)),
+            _ => (false, 0.),
         }
     }
 
@@ -97,14 +100,9 @@ impl Splash {
     /// image sheet (if shown), then the overlay on the white sheet. Colours
     /// use the sequence scale (0x80 = 1.0).
     pub fn quads(&self) -> (Vec<Quad>, Option<Quad>, Option<Quad>) {
-        let (level, logo, overlay) = self.state();
+        let (logo, overlay) = self.state();
         let grey = BACKDROP_GREY as f32 / 255.;
-        let backdrop = grey * level;
-        let backdrop = vec![rect(
-            BACKDROP,
-            [0, 0, 1, 1],
-            [backdrop, backdrop, backdrop, 1.],
-        )];
+        let backdrop = vec![rect(BACKDROP, [0, 0, 1, 1], [grey, grey, grey, 1.])];
         let logo = logo.then(|| rect(LOGO_RECT, LOGO_UV, [1., 1., 1., 1.]));
         let overlay = (logo.is_some() && overlay > 0.)
             .then(|| rect(BACKDROP, [0, 0, 1, 1], [grey, grey, grey, overlay]));
@@ -125,21 +123,19 @@ fn rect([x0, y0, x1, y1]: [f32; 4], uv: [i32; 4], colour: [f32; 4]) -> Quad {
 mod tests {
     use super::*;
 
-    fn at(frame: u32) -> (f32, bool, f32) {
+    fn at(frame: u32) -> (bool, f32) {
         Splash { frame }.state()
     }
 
     #[test]
-    fn follows_the_disney_group_timing() {
-        assert_eq!(at(0), (0., false, 0.));
-        assert_eq!(at(19), (1., false, 0.));
-        assert_eq!(at(20), (1., true, 1.));
-        assert_eq!(at(79), (1., true, 0.));
-        assert_eq!(at(150), (1., true, 0.));
-        assert_eq!(at(200), (1., true, 0.));
-        assert_eq!(at(259), (1., true, 1.));
-        assert_eq!(at(260), (1., false, 0.));
-        assert_eq!(at(LENGTH - 1), (0., false, 0.));
+    fn follows_the_square_enix_group_timing() {
+        assert_eq!(at(0), (false, 0.));
+        assert_eq!(at(19), (false, 0.));
+        assert_eq!(at(20), (true, 1.));
+        assert_eq!(at(79), (true, 0.));
+        assert_eq!(at(150), (true, 0.));
+        assert_eq!(at(200), (true, 0.));
+        assert_eq!(at(LENGTH - 1), (true, 1.));
     }
 
     #[test]
