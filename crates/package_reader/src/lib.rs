@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::{collections::HashSet, io};
 
 pub mod bar;
+pub mod battle_tables;
 pub mod font;
 pub mod font_cell;
 pub mod hd_image;
@@ -26,6 +27,7 @@ pub mod model_texture_routing;
 pub mod motion;
 pub mod motion_eval;
 pub mod motion_trigger;
+pub mod object_collision;
 pub mod objentry;
 pub mod original;
 pub mod plain;

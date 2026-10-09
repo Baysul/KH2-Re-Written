@@ -8,6 +8,7 @@
 //! collision response are explicit test-room choices, not observed KH2 rules.
 
 pub mod camera;
+pub mod combat;
 
 pub type Vec3 = [f32; 3];
 

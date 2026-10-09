@@ -23,6 +23,7 @@ use package_reader::{
     bar, model_inspection, model_inspection_textures::TextureMode, motion, objentry, original,
     preferences, probe::ProbeSource, ptya, sklt,
 };
+use player_sim::combat::{self, Enemy, EnemyMotions, EnemyState};
 use player_sim::{
     Action, AttackStep, Clip, Clips, Input, Params, Player, TriangleWorld, World,
     camera::{self, CameraInput, FollowCamera},
@@ -87,9 +88,29 @@ struct Config {
     /// Command menu sources.
     #[serde(default)]
     menu: Option<MenuSources>,
+    /// Target enemy (test-room choice of placement).
+    #[serde(default)]
+    enemy: Option<EnemyConfig>,
     /// Optional spawn (x, probe height, z) in scene coordinates.
     #[serde(default)]
     spawn: Option<[f32; 3]>,
+}
+
+#[derive(Deserialize)]
+struct EnemyConfig {
+    /// Model selection (relative to this configuration), e.g. M_EX020.mdlx.
+    model_selection: PathBuf,
+    /// The same mdlx as a locator, for its object-collision table.
+    model: Locator,
+    /// Its motion set (direct slot = motion id).
+    motion_set: Locator,
+    /// Weapon mdlx (W_EX010) for the Keyblade's attack spheres.
+    weapon_model: Locator,
+    enmp_id: u16,
+    /// World battle level used when the ENMP level is 0 (test-room choice).
+    battle_level: u16,
+    /// Placement relative to Sora's spawn, in scene units.
+    offset: [f32; 3],
 }
 
 #[derive(Deserialize)]
@@ -149,6 +170,11 @@ struct ClipPoses {
     weapon_frames: Vec<Vec<Vec3>>,
     /// Root-position curve translation for each frame (model space).
     root: Vec<Vec3>,
+    /// Keyblade bone 2 matrix in hand-joint space per frame (attack spheres).
+    blade: Vec<Mat4>,
+    /// Attack windows from the weapon motion's range trigger 10:
+    /// (start, end, ATKP id, collision group), in clip ticks.
+    hits: Vec<(u32, u32, u16, u8)>,
 }
 
 #[derive(Resource)]
@@ -171,6 +197,7 @@ struct Game {
     attack_queued: bool,
     menu_up_queued: bool,
     menu_down_queued: bool,
+    enemy: Option<EnemyRuntime>,
     display: Vec<Vec3>,
     /// Pose, Keyblade transform and start tick of the active crossfade.
     blend_from: Option<(Vec<Vec3>, Transform, u64)>,
@@ -363,7 +390,64 @@ struct Loaded {
     world: TriangleWorld,
     summary: serde_json::Value,
     hud: Option<HudSource>,
+    enemy: Option<EnemySource>,
 }
+
+/// One enemy clip: skinned positions and HIT-bone matrices per tick.
+struct EnemyClip {
+    frames: Vec<Vec<Vec3>>,
+    bones: Vec<HashMap<usize, Mat4>>,
+}
+
+struct EnemyClips(HashMap<usize, EnemyClip>);
+impl combat::ClipLengths for EnemyClips {
+    fn length(&self, slot: usize) -> u32 {
+        self.0.get(&slot).map_or(1, |c| c.frames.len() as u32)
+    }
+}
+
+/// Live enemy state for the session.
+struct EnemyRuntime {
+    clips: EnemyClips,
+    motions: EnemyMotions,
+    body: Vec<(usize, Vec3, f32, bool)>,
+    blade: HashMap<u8, Vec<(Vec3, f32)>>,
+    attacks: HashMap<u16, combat::AttackParams>,
+    sora: combat::AttackerStats,
+    enemy: Enemy,
+    /// Last frame's attack sphere centres by (window instance, sphere).
+    previous: HashMap<(u64, usize), Vec3>,
+    indices: Vec<Vec<u32>>,
+}
+
+#[derive(Component)]
+struct EnemyRoot;
+#[derive(Component)]
+struct EnemyPart(usize);
+
+struct EnemySource {
+    model: model_inspection::InspectionModel,
+    clips: EnemyClips,
+    motions: EnemyMotions,
+    /// HIT spheres: bone, offset, radius, high-flinch argument.
+    body: Vec<(usize, Vec3, f32, bool)>,
+    /// Keyblade attack spheres by collision group: offset, radius.
+    blade: HashMap<u8, Vec<(Vec3, f32)>>,
+    attacks: HashMap<u16, combat::AttackParams>,
+    sora: combat::AttackerStats,
+    stats: combat::TargetStats,
+    offset: Vec3,
+}
+
+/// Shadow motion slots (direct slot = motion id, combat-01).
+const SHADOW_MOTIONS: EnemyMotions = EnemyMotions {
+    idle: 0,
+    flinch: [10, 11, 12, 13],
+    blow: [16, 18],
+    blow_land: [17, 19],
+    appear: 44,
+    leave: 45,
+};
 
 /// Walkable collision levels (8-unit height bins) by XZ area, largest first,
 /// each with the centroid of its largest triangle.
@@ -619,6 +703,29 @@ fn load(
                 let mut hand = Vec::with_capacity(clip.end as usize);
                 let mut root = Vec::with_capacity(clip.end as usize);
                 let mut weapon_frames = Vec::new();
+                let mut blade = Vec::new();
+                let hits = weapon_motions
+                    .get(&selected.slot)
+                    .map(|own| {
+                        own.triggers
+                            .iter()
+                            .flat_map(|t| &t.records.ranges)
+                            .filter(|r| r.trigger == 10 && r.parameters.len() >= 2)
+                            .map(|r| {
+                                (
+                                    r.start_frame.max(0) as u32,
+                                    if r.end_frame < 0 {
+                                        clip.end
+                                    } else {
+                                        r.end_frame as u32
+                                    },
+                                    r.parameters[0] as u16,
+                                    r.parameters[1] as u8,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 for offset in 0..=clip.end {
                     let frame = key_start + offset;
                     if let Some(own) = weapon_motions.get(&selected.slot) {
@@ -631,6 +738,9 @@ fn load(
                                 .map(|p| Vec3::from_array(p.map(f32::from_bits)))
                                 .collect(),
                         );
+                        if let Some(m) = pose.matrix_bits.get(2) {
+                            blade.push(Mat4::from_cols_array(&m.map(f32::from_bits)));
+                        }
                     }
                     let pose = if basic_fk {
                         root.push(Vec3::ZERO);
@@ -675,6 +785,8 @@ fn load(
                     weapon: hand,
                     weapon_frames,
                     root,
+                    blade,
+                    hits,
                 });
                 by_slot.insert(selected.slot, clip_poses.len() - 1);
                 clip_poses.len() - 1
@@ -816,6 +928,10 @@ fn load(
         "missing":["scale channels","up-vector/path/camera constraint types","limiter damping","root rotation","weapon constraint motion","hit detection","enemies","measured installed timing"],
         "inferred_rules":["direction constraints aim local +X","two-joint IK bends the middle joint about local Z","expression list/condition semantics","Hermite tangents scaled by key span","field/battle mode switch with 6 s disarm timeout"],
         "gameplay_verified":false});
+    let enemy = match &config.enemy {
+        Some(e) => Some(load_enemy(source, base, e, &battle, &config, &clip_poses)?),
+        None => None,
+    };
     Ok(Loaded {
         room,
         actor,
@@ -828,7 +944,172 @@ fn load(
         world,
         summary,
         hud,
+        enemy,
     })
+}
+
+/// Shadow (or another enemy) for the test room: model, direct-slot clips,
+/// HIT spheres, the Keyblade's attack spheres and the ATKP/ENMP/LVPM/LVUP
+/// rows the damage routine reads.
+fn load_enemy(
+    source: &ProbeSource,
+    base: &Path,
+    config: &EnemyConfig,
+    battle: &[u8],
+    _room: &Config,
+    clip_poses: &[ClipPoses],
+) -> Result<EnemySource, Box<dyn std::error::Error>> {
+    use package_reader::{battle_tables, object_collision};
+    let mut models =
+        model_inspection::read_selected_models(source, &base.join(&config.model_selection))?;
+    if models.len() != 1 {
+        return Err("enemy selection requires exactly one model".into());
+    }
+    let model = models.remove(0);
+    let collision =
+        object_collision::read(bar_entry_typed(&read_archive(source, &config.model)?, 23)?)?;
+    let body: Vec<_> = collision
+        .iter()
+        .filter(|e| e.kind == object_collision::HIT && e.group == 0 && e.bone >= 0)
+        .map(|e| {
+            (
+                e.bone as usize,
+                Vec3::new(
+                    e.position[0] as f32,
+                    e.position[1] as f32,
+                    e.position[2] as f32,
+                ),
+                e.radius as f32,
+                matches!(e.argument, 0 | 2 | 3 | 4 | 5),
+            )
+        })
+        .collect();
+    let weapon_collision = object_collision::read(bar_entry_typed(
+        &read_archive(source, &config.weapon_model)?,
+        23,
+    )?)?;
+    let mut blade: HashMap<u8, Vec<(Vec3, f32)>> = HashMap::new();
+    for e in weapon_collision
+        .iter()
+        .filter(|e| e.kind == object_collision::ATTACK && e.bone == 2)
+    {
+        blade.entry(e.group).or_default().push((
+            Vec3::new(
+                e.position[0] as f32,
+                e.position[1] as f32,
+                e.position[2] as f32,
+            ),
+            e.radius as f32,
+        ));
+    }
+    let m = SHADOW_MOTIONS;
+    let mut slots: Vec<usize> = vec![m.idle, m.appear, m.leave];
+    slots.extend(m.flinch);
+    slots.extend(m.blow);
+    slots.extend(m.blow_land);
+    let selected = motion::read_slots(
+        source,
+        &config.motion_set.index,
+        config.motion_set.ordinal,
+        config.motion_set.name_hash,
+        &slots,
+    )?;
+    let mut clips = HashMap::new();
+    for sel in &selected {
+        let (clip, key_start) = clip_for(sel)?;
+        let mut frames = Vec::new();
+        let mut bones = Vec::new();
+        for offset in 0..=clip.end {
+            let (pose, evaluated) = model
+                .skinning
+                .sample_evaluated(&sel.motion, (key_start + offset) as f32)?;
+            let r = Vec3::from_array(evaluated.root_translation);
+            frames.push(
+                pose.position_bits
+                    .iter()
+                    .map(|p| Vec3::from_array(p.map(f32::from_bits)) - r)
+                    .collect(),
+            );
+            bones.push(
+                body.iter()
+                    .filter_map(|&(b, ..)| {
+                        let m = pose.matrix_bits.get(b)?;
+                        let mut m = Mat4::from_cols_array(&m.map(f32::from_bits));
+                        m.w_axis -= r.extend(0.);
+                        Some((b, m))
+                    })
+                    .collect(),
+            );
+        }
+        clips.insert(sel.slot, EnemyClip { frames, bones });
+    }
+    let atkp = bar_entry(battle, b"atkp")?;
+    let mut attacks = HashMap::new();
+    for (_, _, id, _) in clip_poses.iter().flat_map(|c| &c.hits) {
+        let a = battle_tables::attack(atkp, *id)?;
+        attacks.insert(
+            *id,
+            combat::AttackParams {
+                power: a.power,
+                stat: a.stat,
+                element: a.element,
+                reaction: a.reaction,
+                knockback: a.knockback,
+            },
+        );
+    }
+    let enemy = battle_tables::enemy(bar_entry(battle, b"enmp")?, config.enmp_id)?;
+    let level = if enemy.level == 0 {
+        config.battle_level
+    } else {
+        enemy.level
+    };
+    let row = battle_tables::enemy_level(bar_entry(battle, b"lvpm")?, level)?;
+    let stats = combat::TargetStats::enemy(
+        enemy.hp_percent,
+        enemy.damage_cap,
+        enemy.damage_min,
+        enemy.weakness,
+        row.hp,
+        row.defense,
+    );
+    // Sora at level 1: LVUP row + PLRP (id 0, char 1, Str byte 6) +
+    // Kingdom Key item status +3 Str / +1 Mag (03system item row 80,
+    // combat-01; test-room constant).
+    let lv = battle_tables::player_level(bar_entry(battle, b"lvup")?, 1, 1)?;
+    let plrp = bar_entry(battle, b"plrp")?;
+    let plrp_str = plrp.get(8 + 6).copied().unwrap_or(0) as i32;
+    let plrp_mag = plrp.get(8 + 7).copied().unwrap_or(0) as i32;
+    let sora = combat::AttackerStats {
+        strength: lv.strength as i32 + plrp_str + 3,
+        magic: lv.magic as i32 + plrp_mag + 1,
+        max: 99999,
+        min: 1,
+    };
+    Ok(EnemySource {
+        model,
+        clips: EnemyClips(clips),
+        motions: m,
+        body,
+        blade,
+        attacks,
+        sora,
+        stats,
+        offset: Vec3::from_array(config.offset),
+    })
+}
+
+/// The single BAR entry of a type.
+fn bar_entry_typed(bytes: &[u8], kind: u16) -> Result<&[u8], Box<dyn std::error::Error>> {
+    let table = bar::read_bar(bytes)?;
+    let e = table
+        .entries
+        .iter()
+        .find(|e| e.entry_type == kind && e.offset > 0 && e.size > 0)
+        .ok_or("BAR entry type absent")?;
+    bytes
+        .get(e.offset as usize..e.offset as usize + e.size as usize)
+        .ok_or_else(|| "BAR entry exceeds archive".into())
 }
 
 #[derive(Resource)]
@@ -837,6 +1118,7 @@ struct Startup {
     actor: Option<model_inspection::InspectionModel>,
     weapon: Option<model_inspection::InspectionModel>,
     hud: Option<HudSource>,
+    enemy_model: Option<model_inspection::InspectionModel>,
 }
 
 /// Spawns one textured mesh per model part under `parent`, in part order.
@@ -911,6 +1193,7 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
 ) {
     let room = startup.room.take().expect("room retained for setup");
+    let enemy_model = startup.enemy_model.take();
     if let Some(HudSource {
         sheets,
         stats: (hp, mp),
@@ -1157,6 +1440,35 @@ fn setup(
         }
     }
     game.weapon_indices = weapon_indices;
+    if let (Some(model), Some(rt)) = (&enemy_model, game.enemy.as_mut()) {
+        let e = &rt.enemy;
+        let pose = &rt.clips.0[&e.motion].frames[0];
+        let root = commands
+            .spawn((
+                EnemyRoot,
+                ChildOf(world),
+                Transform::from_translation(Vec3::from_array(e.position))
+                    .with_rotation(Quat::from_rotation_y(e.yaw)),
+                Visibility::default(),
+            ))
+            .id();
+        let mut indices = Vec::new();
+        for (ordinal, entity) in spawn_model(
+            &mut commands,
+            model,
+            pose,
+            root,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+        ) {
+            indices.push(model.parts[ordinal].indices.clone());
+            if let Some(entity) = entity {
+                commands.entity(entity).insert(EnemyPart(ordinal));
+            }
+        }
+        rt.indices = indices;
+    }
     game.weapon_display = weapon_pose;
     game.part_indices = part_indices;
     game.display = pose;
@@ -1307,6 +1619,7 @@ fn simulate(
         ..
     } = &mut *game;
     let step = player.tick(&input, params, clips, world);
+    combat_tick(&mut game, tick);
     // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
     // recenters (test-room bindings for the original's camera buttons).
     let mut turn = 0f32;
@@ -1376,10 +1689,15 @@ fn simulate(
     }
     if tick.is_multiple_of(60) {
         let (position, yaw, action) = (game.player.position, game.player.yaw, game.player.action);
+        let enemy = game.enemy.as_ref().map(|e| {
+            serde_json::json!({"position":e.enemy.position,"yaw":e.enemy.yaw,
+                "hp":e.enemy.hp,"state":format!("{:?}", e.enemy.state),"motion":e.enemy.motion})
+        });
         game.event(
             serde_json::json!({"event":"state","tick":tick,"position":position,"yaw":yaw,
             "action":format!("{action:?}"),"camera_eye":rig.camera.eye,"camera_yaw":rig.camera.yaw,
-            "camera_collision_triangles":rig.collision.len(),"camera_collision_hits":rig.collision_hits}),
+            "camera_collision_triangles":rig.collision.len(),"camera_collision_hits":rig.collision_hits,
+            "enemy":enemy}),
         );
     }
 }
@@ -1488,6 +1806,135 @@ fn hud_present(
     canvas.render(&draws, &textures);
     if let Some(mut target) = images.get_mut(image.id()) {
         target.data = Some(canvas.rgba.clone());
+    }
+}
+
+/// One tick of the Keyblade's attack windows against the enemy, then the
+/// enemy's own tick. Attack spheres: weapon bone 2 entries of the window's
+/// collision group, placed through Sora's hand and swept from last frame;
+/// target spheres: the enemy's HIT entries on its animated bones.
+fn combat_tick(game: &mut Game, tick: u64) {
+    let Game {
+        player,
+        clips,
+        clip_poses,
+        poses,
+        enemy,
+        params,
+        world,
+        action_started,
+        autoplay,
+        log,
+        ..
+    } = game;
+    let Some(rt) = enemy.as_mut() else { return };
+    if autoplay.is_some() && tick == 380 {
+        // Unattended runs place the target just ahead of Sora.
+        let f = Vec3::new(player.yaw.sin(), 0., player.yaw.cos());
+        let at = Vec3::from_array(player.position) + f * 110.;
+        rt.enemy.position = at.to_array();
+        rt.enemy.spawn = at.to_array();
+    }
+    let sora_at = Vec3::from_array(player.position);
+    let sora_turn = Quat::from_rotation_y(player.yaw);
+    let clip = poses[&(player.action, player.armed)];
+    let frame = player.motion_frame(clips) as usize;
+    let cp = &clip_poses[clip];
+    let e = &rt.enemy;
+    let enemy_turn = Quat::from_rotation_y(e.yaw);
+    let enemy_at = Vec3::from_array(e.position);
+    let ec = &rt.clips.0[&e.motion];
+    let bones = &ec.bones[(e.motion_tick as usize).min(ec.bones.len() - 1)];
+    let body: Vec<(Vec3, f32, bool)> = rt
+        .body
+        .iter()
+        .filter_map(|&(b, offset, r, high)| {
+            let m = bones.get(&b)?;
+            Some((enemy_at + enemy_turn * m.transform_point3(offset), r, high))
+        })
+        .collect();
+    let mut hit = None;
+    if !cp.blade.is_empty() {
+        let f = frame.min(cp.blade.len() - 1);
+        let to_model = cp.weapon[f.min(cp.weapon.len() - 1)] * cp.blade[f];
+        for (w, &(start, end, atkp, group)) in cp.hits.iter().enumerate() {
+            if (frame as u32) < start || frame as u32 > end {
+                continue;
+            }
+            let instance = (*action_started << 4) | w as u64;
+            for (i, &(offset, radius)) in rt.blade.get(&group).into_iter().flatten().enumerate() {
+                let centre = sora_at + sora_turn * to_model.transform_point3(offset);
+                let previous = rt.previous.insert((instance, i), centre);
+                for c in combat::swept(centre.to_array(), previous.map(|p| p.to_array()), radius) {
+                    if hit.is_none()
+                        && let Some(&(_, _, high)) = body
+                            .iter()
+                            .find(|(b, r, _)| combat::spheres_overlap(c, radius, b.to_array(), *r))
+                    {
+                        hit = Some((instance as u32, atkp, high));
+                    }
+                }
+            }
+        }
+    }
+    if let Some((instance, atkp, high)) = hit
+        && let Some(attack) = rt.attacks.get(&atkp)
+    {
+        let d = (enemy_at - sora_at) * Vec3::new(1., 0., 1.);
+        let dir = d.normalize_or(Vec3::new(player.yaw.sin(), 0., player.yaw.cos()));
+        if let Some(damage) = rt.enemy.hit(
+            instance,
+            dir.to_array(),
+            high,
+            attack,
+            &rt.sora,
+            &rt.motions,
+        ) {
+            let record = serde_json::json!({"event":"hit","tick":tick,"atkp":atkp,"damage":damage,
+                "enemy_hp":rt.enemy.hp,"reaction":format!("{:?}", rt.enemy.state),"high":high});
+            if let Some(file) = log.as_mut() {
+                let _ = serde_json::to_writer(&mut *file, &record);
+                let _ = std::io::Write::write_all(file, b"\n");
+            }
+        }
+    }
+    let ground = |p: [f32; 3]| world.floor(p[0], p[2], p[1] + params.step_height);
+    rt.enemy.tick(
+        &rt.motions,
+        &rt.clips,
+        params.gravity,
+        player.position,
+        &ground,
+    );
+}
+
+fn present_enemy(
+    game: Res<Game>,
+    mut roots: Query<(&mut Transform, &mut Visibility), With<EnemyRoot>>,
+    parts: Query<(&EnemyPart, &Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let Some(rt) = &game.enemy else { return };
+    let e = &rt.enemy;
+    if let Ok((mut t, mut v)) = roots.single_mut() {
+        t.translation = Vec3::from_array(e.position);
+        t.rotation = Quat::from_rotation_y(e.yaw);
+        *v = if matches!(e.state, EnemyState::Gone { .. }) {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+    }
+    let clip = &rt.clips.0[&e.motion];
+    let pose = &clip.frames[(e.motion_tick as usize).min(clip.frames.len() - 1)];
+    for (part, handle) in &parts {
+        let positions: Vec<[f32; 3]> = rt.indices[part.0]
+            .iter()
+            .map(|&i| pose[i as usize].to_array())
+            .collect();
+        if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        }
     }
 }
 
@@ -1835,6 +2282,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         attack_queued: false,
         menu_up_queued: false,
         menu_down_queued: false,
+        enemy: None,
         display: Vec::new(),
         blend_from: None,
         display_hand: Transform::IDENTITY,
@@ -1848,6 +2296,32 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         autoplay_failed: false,
     };
     game.event(loaded.summary);
+    let mut enemy_model = None;
+    if let Some(e) = loaded.enemy {
+        let spawn = loaded.spawn + e.offset;
+        let to_sora = loaded.spawn - spawn;
+        let enemy = Enemy::new(
+            spawn.to_array(),
+            to_sora.x.atan2(to_sora.z),
+            e.stats,
+            &e.motions,
+        );
+        game.event(serde_json::json!({"event":"enemy","hp":e.stats.max_hp,"defense":e.stats.defense,
+            "damage_cap":e.stats.cap,"damage_min":e.stats.min,"sora_strength":e.sora.strength,
+            "hit_spheres":e.body.len(),"blade_groups":e.blade.keys().collect::<Vec<_>>(),"position":spawn}));
+        enemy_model = Some(e.model);
+        game.enemy = Some(EnemyRuntime {
+            clips: e.clips,
+            motions: e.motions,
+            body: e.body,
+            blade: e.blade,
+            attacks: e.attacks,
+            sora: e.sora,
+            enemy,
+            previous: HashMap::new(),
+            indices: Vec::new(),
+        });
+    }
     let rig = CameraRig {
         camera: FollowCamera::new(
             camera::OUTDOOR,
@@ -1874,6 +2348,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             actor: Some(loaded.actor),
             weapon: Some(loaded.weapon),
             hud: loaded.hud,
+            enemy_model,
         })
         .insert_resource(rig)
         .insert_resource(Time::<Fixed>::from_hz(60.))
@@ -1893,7 +2368,10 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         .add_systems(Startup, (setup, pause_for_autoplay))
         .add_systems(PreUpdate, gather_input.after(bevy::input::InputSystems))
         .add_systems(FixedUpdate, (simulate, hud_tick).chain())
-        .add_systems(Update, (camera_control, present, hud_present, finish).chain())
+        .add_systems(
+            Update,
+            (camera_control, present, present_enemy, hud_present, finish).chain(),
+        )
         .run())
 }
 

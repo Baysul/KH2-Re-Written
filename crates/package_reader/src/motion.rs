@@ -414,24 +414,48 @@ pub fn read_selected(
         return Err("motion selection identity/count invalid".into());
     }
     source.verify_full_source()?;
-    let mut checked = source.open_index(&selected.index)?;
+    read_slots(
+        source,
+        &selected.index,
+        selected.ordinal,
+        selected.name_hash,
+        &selected.slots,
+    )
+}
+
+/// Motions at explicit BAR slots of a motion set. Sets whose header byte
+/// +0xc bit 0 is clear (e.g. M_EX020.mset) index slots directly by motion id
+/// (executable FUN_1403c7c50 / FUN_14040d7d0).
+pub fn read_slots(
+    source: &crate::probe::ProbeSource,
+    index: &str,
+    ordinal: usize,
+    name_hash: [u8; 16],
+    slots: &[usize],
+) -> Result<Vec<SelectedMotion>, Box<dyn std::error::Error>> {
+    if slots.is_empty() || slots.len() > 32 {
+        return Err("motion slot count invalid".into());
+    }
+    let mut checked = source.open_index(index)?;
     let entry = checked
         .inventory
         .entries
-        .get(selected.ordinal)
-        .filter(|e| e.name_hash == selected.name_hash)
+        .get(ordinal)
+        .filter(|e| e.name_hash == name_hash)
         .ok_or("motion source entry mismatch")?;
     let original = crate::original::read_original(&mut checked.reader, entry)?;
     let table = crate::bar::read_bar(&original.bytes)?;
     let mut result = Vec::new();
-    for slot in selected.slots {
+    for &slot in slots {
         let entry = table
             .entries
             .get(slot)
             .filter(|e| e.offset > 0 && e.size > 0)
             .ok_or("motion slot absent/dummy")?;
-        let anb =
-            &original.bytes[entry.offset as usize..entry.offset as usize + entry.size as usize];
+        let anb = original
+            .bytes
+            .get(entry.offset as usize..entry.offset as usize + entry.size as usize)
+            .ok_or("motion slot exceeds set")?;
         let nested = crate::bar::read_bar(anb)?;
         let entries: Vec<_> = nested
             .entries
