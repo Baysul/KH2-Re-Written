@@ -628,7 +628,59 @@ struct CampSource {
     /// "LV", "HP", "MP" and Sora's name (0xb9fc..0xb9fe, 0x851f).
     labels: [Vec<u8>; 3],
     name: Vec<u8>,
+    /// Sora's Status help line and the 0x18 banner.
+    help: Vec<u8>,
+    banner: Vec<u8>,
+    /// Status stats: bit, label, help, style.
+    stats: Vec<(usize, Vec<u8>, Vec<u8>, usize)>,
+    config: Vec<camp::ConfigRow>,
+    numbers: SoraNumbers,
 }
+
+/// Sora's Status numbers the room does not track elsewhere.
+#[derive(Clone, Copy)]
+struct SoraNumbers {
+    next_exp: u32,
+    ap: i32,
+    strength: i32,
+    magic: i32,
+    defense: i32,
+}
+
+/// Status stats Sora shows with nothing obtained (camp-04 §2.4): bit,
+/// label id, help id, style.
+const CAMP_STATS: [(usize, u32, u32, usize); 14] = [
+    (0, 0xc559, 0xc56e, 0),
+    (1, 0xc55a, 0xc56f, 0),
+    (2, 0xc55b, 0xc570, 0),
+    (3, 0xc55c, 0xc571, 1),
+    (4, 0xc55d, 0xc572, 1),
+    (5, 0xc55e, 0xc573, 1),
+    (7, 0xc567, 0xc57c, 4),
+    (10, 0xc560, 0xc575, 2),
+    (11, 0xc561, 0xc576, 2),
+    (12, 0xc562, 0xc577, 2),
+    (13, 0xc563, 0xc578, 3),
+    (14, 0xc564, 0xc579, 3),
+    (15, 0xc565, 0xc57a, 3),
+    (16, 0xc566, 0xc57b, 3),
+];
+
+/// Config rows (table 0x1405bc340): label, choice labels, help per choice.
+const CAMP_CONFIG: [(u32, &[u32], &[u32]); 8] = [
+    (0xb717, &[0xb71e, 0xb71f], &[0xb720, 0xb721]),
+    (0xc2f5, &[0xc2f8, 0xc2f9], &[0xc2fa, 0xc2fb]),
+    (0xc2f6, &[0xc2fc, 0xc2fd], &[0xc2fe, 0xc2ff]),
+    (0xc2f7, &[0xc302, 0xc300, 0xc301], &[0xc305, 0xc303, 0xc304]),
+    (0xb719, &[0xb726, 0xb727], &[0xb728, 0xb729]),
+    (0xb71a, &[0xb72a, 0xb752], &[0xb72c, 0xb72d]),
+    (0xb71c, &[0xb734, 0xb735], &[0xb736, 0xb737]),
+    (
+        0xb71d,
+        &[0xb738, 0xb739, 0xb73a, 0xce30],
+        &[0xb73b, 0xb73c, 0xb73d, 0xce31],
+    ),
+];
 
 /// Camp entries (table 0x1405badb0): id, label and help ids. The test
 /// room offers Items, Abilities, Customize, Party, Status, Jiminy's
@@ -1376,21 +1428,86 @@ fn load(
                     m.font_info.name_hash,
                 ),
             )?;
-            let mut status = hud::load_messages(
-                source,
-                &m.messages.index,
-                m.messages.ordinal,
-                m.messages.name_hash,
-                &[0xb9fc, 0xb9fd, 0xb9fe, 0x851f],
-            )?;
+            let msg = |ids: &[u32]| {
+                hud::load_messages(
+                    source,
+                    &m.messages.index,
+                    m.messages.ordinal,
+                    m.messages.name_hash,
+                    ids,
+                )
+            };
+            let mut status = msg(&[0xb9fc, 0xb9fd, 0xb9fe, 0x851f, 0xc5ae, 0xb61a])?;
+            let banner = status.pop().unwrap_or_default();
+            let status_help = status.pop().unwrap_or_default();
             let name = status.pop().unwrap_or_default();
             let labels = [status[0].clone(), status[1].clone(), status[2].clone()];
+            // "<0d>´s Status.": code 0x0d takes the character's name.
+            let mut help = Vec::new();
+            for &b in &status_help {
+                if b == 0x0d {
+                    help.extend_from_slice(&name);
+                } else {
+                    help.push(b);
+                }
+            }
+            let stat_ids: Vec<u32> = CAMP_STATS
+                .iter()
+                .flat_map(|&(_, label, help, _)| [label, help])
+                .collect();
+            let stat_texts = msg(&stat_ids)?;
+            let stats = CAMP_STATS
+                .iter()
+                .zip(stat_texts.chunks(2))
+                .map(|(&(bit, _, _, style), t)| (bit, t[0].clone(), t[1].clone(), style))
+                .collect();
+            let config_ids: Vec<u32> = CAMP_CONFIG
+                .iter()
+                .flat_map(|(label, choices, helps)| {
+                    std::iter::once(*label)
+                        .chain(choices.iter().copied())
+                        .chain(helps.iter().copied())
+                })
+                .collect();
+            let mut config_texts = msg(&config_ids)?.into_iter();
+            let config = CAMP_CONFIG
+                .iter()
+                .map(|(_, choices, helps)| {
+                    let mut take = |n: usize| -> Vec<Vec<u8>> {
+                        (0..n).filter_map(|_| config_texts.next()).collect()
+                    };
+                    let label = take(1).pop().unwrap_or_default();
+                    camp::ConfigRow {
+                        label,
+                        choices: take(choices.len()),
+                        help: take(helps.len()),
+                    }
+                })
+                .collect();
+            let lvup = bar_entry(&battle, b"lvup")?;
+            let plrp = bar_entry(&battle, b"plrp")?;
+            let lv = package_reader::battle_tables::player_level(lvup, 1, 1)?;
+            let byte = |at: usize| plrp.get(8 + at).copied().unwrap_or(0) as i32;
+            // Sora at level 1 (LVUP row + PLRP id 0, Kingdom Key +3 Str /
+            // +1 Mag as in the combat setup) [test-room values].
+            let numbers = SoraNumbers {
+                next_exp: lv.exp,
+                ap: lv.ap as i32 + byte(5),
+                strength: lv.strength as i32 + byte(6) + 3,
+                magic: lv.magic as i32 + byte(7) + 1,
+                defense: lv.defense as i32 + byte(8),
+            };
             Some(CampSource {
                 menu,
                 entries,
                 font,
                 labels,
                 name,
+                help,
+                banner,
+                stats,
+                config,
+                numbers,
             })
         }
         _ => None,
@@ -2311,9 +2428,9 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 26] = [
+const AUTOPLAY_CAPTURES: [u64; 34] = [
     90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1198, 1300, 1500,
-    1700, 1815, 1830, 1845, 1880, 1925, 1940, 1985,
+    1700, 1830, 1900, 1930, 1990, 2030, 2050, 2070, 2110, 2230, 2310, 2330, 2390, 2420, 2450, 2520,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -2325,7 +2442,7 @@ const AUTOPLAY_TALK_END: u64 = 260;
 /// in earlier unattended runs.
 const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 /// The last stretch leaves Sora standing so an enemy can attack him.
-const AUTOPLAY_END: u64 = 2000;
+const AUTOPLAY_END: u64 = 2560;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
@@ -3927,14 +4044,12 @@ fn finish(
 /// The camp (pause) menu: its sources, the open menu and the menu pad.
 #[derive(Resource)]
 struct CampRes {
-    menu: Menu2ld,
-    entries: Vec<camp::Entry>,
-    font: SystemFont,
-    labels: [Vec<u8>; 3],
-    name: Vec<u8>,
+    source: CampSource,
     open: Option<Camp>,
-    /// Remembered entry (DAT_140beec30).
-    cursor: usize,
+    /// Cursor memory and the save's config bits / game mode.
+    memory: camp::Memory,
+    config_flags: u32,
+    game_mode: u32,
     pad: Pad,
     /// Sheet slots: camp art per glyph variant, then the font.
     art: [Option<usize>; 4],
@@ -3943,15 +4058,34 @@ struct CampRes {
     keyboard_last: bool,
 }
 
-/// Unattended camp check after the combat plan: open, move, close.
-const AUTOPLAY_CAMP: [(u64, u64); 5] = [
+/// Unattended camp check after the combat plan: open, down to Status,
+/// the character list, the stat browser (column switch, move), back out,
+/// down to Config, change Field Camera and Summon Effects, jump to the
+/// bottom with R1, back out, close with START.
+const AUTOPLAY_CAMP: [(u64, u64); 22] = [
     (1810, 0x2),
     (1840, 0x20),
+    (1850, 0x20),
+    (1860, 0x20),
     (1870, 0x20),
-    (1890, 0x10),
-    (1920, 0x8),
+    (1890, 0x4),
+    (1940, 0x4),
+    (2040, 0x80),
+    (2060, 0x20),
+    (2090, 0x8),
+    (2140, 0x8),
+    (2240, 0x20),
+    (2250, 0x20),
+    (2270, 0x4),
+    (2320, 0x80),
+    (2340, 0x20),
+    (2350, 0x20),
+    (2360, 0x20),
+    (2380, 0x80),
+    (2400, 0x4000),
+    (2430, 0x8),
+    (2480, 0x2),
 ];
-
 fn camp_setup(
     camp: Option<ResMut<CampRes>>,
     mut frame: ResMut<Ui2dFrame>,
@@ -3960,16 +4094,16 @@ fn camp_setup(
     let Some(mut c) = camp else { return };
     let c = &mut *c;
     for n in 0..4 {
-        if let Some((t, scale)) = c.menu.texture_for(0, n) {
+        if let Some((t, scale)) = c.source.menu.texture_for(0, n) {
             let (rgba, size) = (t.rgba.clone(), t.size);
             c.art[n] = Some(frame.add_sheet(&mut images, rgba, size, scale));
         }
     }
     c.font_sheet = frame.add_font_sheet(
         &mut images,
-        std::mem::take(&mut c.font.rgba),
-        c.font.size,
-        c.font.texel_scale as f32,
+        std::mem::take(&mut c.source.font.rgba),
+        c.source.font.size,
+        c.source.font.texel_scale as f32,
     );
 }
 
@@ -4028,7 +4162,7 @@ fn camp_tick(
     };
     c.pad.update(logical, 1.);
     let mut sounds = Vec::new();
-    let layout = &c.menu.layout;
+    let layout = &c.source.menu.layout;
     // Test-room values: no munny, level 1, the room's HP/MP; the clock is
     // the room's frame count.
     let (hp, max_hp, mp, max_mp) = match (&game.enemy, &hud) {
@@ -4045,19 +4179,58 @@ fn camp_tick(
         munny: 0,
         time_frames: tick as u32,
         members: vec![camp::Member {
-            name: c.name.clone(),
+            name: c.source.name.clone(),
             level: 1,
             hp,
             max_hp,
             mp,
             max_mp,
         }],
-        labels: c.labels.clone(),
+        labels: c.source.labels.clone(),
     };
     match c.open.as_mut() {
         None => {
             if c.pad.pressed & 0x2 != 0 && !game.talking {
-                let (menu, s) = Camp::open(layout, c.entries.clone(), c.cursor, &panels);
+                // Status values are built when the camp opens (FUN_140354340).
+                let n = c.source.numbers;
+                let value = |bit: usize| -> String {
+                    match bit {
+                        0 => "1".into(),
+                        1 | 7 => "0".into(),
+                        2 => format!("{}", n.next_exp),
+                        3 => format!("{hp}/{max_hp}"),
+                        4 => format!("{mp}/{max_mp}"),
+                        5 => format!("0/{}", n.ap),
+                        10 => format!("{}", n.strength),
+                        11 => format!("{}", n.magic),
+                        12 => format!("{}", n.defense),
+                        _ => "0%".into(),
+                    }
+                };
+                let mut stats = vec![None; 20];
+                for (bit, label, help, style) in &c.source.stats {
+                    stats[*bit] = Some(camp::Stat {
+                        label: label.clone(),
+                        help: help.clone(),
+                        style: *style,
+                        value: camp::encode_number(&value(*bit)),
+                    });
+                }
+                let data = camp::Data {
+                    entries: c.source.entries.clone(),
+                    panels,
+                    status: vec![camp::StatusEntry {
+                        bit: 0,
+                        label: c.source.name.clone(),
+                        help: c.source.help.clone(),
+                        stats,
+                    }],
+                    banner: c.source.banner.clone(),
+                    config: c.source.config.clone(),
+                    config_flags: c.config_flags,
+                    game_mode: c.game_mode,
+                };
+                let (menu, s) = Camp::open(layout, data, c.memory);
                 c.open = Some(menu);
                 sounds = s;
                 game.tick += 1;
@@ -4065,10 +4238,12 @@ fn camp_tick(
             }
         }
         Some(menu) => {
-            sounds = menu.frame(layout, c.pad.pressed, c.pad.repeat, &panels);
+            sounds = menu.frame(layout, c.pad.pressed, c.pad.repeat, tick as u32);
+
             game.tick += 1;
             if menu.closed {
-                c.cursor = menu.cursor;
+                c.memory = menu.memory;
+                c.config_flags = menu.data.config_flags;
                 c.open = None;
                 game.event(serde_json::json!({"event":"camp_close","tick":tick}));
             }
@@ -4094,10 +4269,10 @@ fn camp_present(camp: Option<ResMut<CampRes>>, mut frame: ResMut<Ui2dFrame>) {
     let c = &mut *c;
     let Some(menu) = c.open.as_mut() else { return };
     let font = command::Font {
-        widths: &c.font.widths,
+        widths: &c.source.font.widths,
     };
     let art = c.art[c.glyph].or(c.art[0]).expect("camp art");
-    for (sheet, quads) in menu.draw(&c.menu.layout, &font) {
+    for (sheet, quads) in menu.draw(&c.source.menu.layout, &font) {
         let slot = match sheet {
             camp::Sheet::Art => art,
             camp::Sheet::Font => c.font_sheet,
@@ -4544,15 +4719,15 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         game.event(serde_json::json!({"event":"camp_loaded","props":c.menu.layout.props.len(),
             "scenes":c.menu.layout.scenes.len(),"sequences":c.menu.layout.sequences.len(),
             "replacements":c.menu.replacements.iter().map(|r| r.as_ref().map(|t| t.size)).collect::<Vec<_>>(),
-            "entries":c.entries.len()}));
+            "entries":c.entries.len(),"stats":c.stats.len(),"config_rows":c.config.len()}));
         app.insert_resource(CampRes {
-            menu: c.menu,
-            entries: c.entries,
-            font: c.font,
-            labels: c.labels,
-            name: c.name,
+            source: c,
             open: None,
-            cursor: 0,
+            memory: camp::Memory::default(),
+            // A new game's config (FUN_1402e4fc0) and Standard mode
+            // (FUN_1401523a0) [test-room save].
+            config_flags: 0x40b,
+            game_mode: 1,
             pad: Pad::default(),
             art: [None; 4],
             font_sheet: 0,

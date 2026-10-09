@@ -441,7 +441,7 @@ impl NewGame {
         if self.light.id.is_some() {
             let l = &self.lists[self.list_index()];
             if let Some(&row) = l.rows.get(l.cursor) {
-                let c = self.sprites.context(seq, row);
+                let c = self.sprites.context(row);
                 let g = &seq.groups[self.sprites.get(row).player.group];
                 let target = [
                     c[0] + g.light_position_x as f32,

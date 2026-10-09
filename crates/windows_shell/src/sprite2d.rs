@@ -71,6 +71,25 @@ pub struct Sprite {
     pub die_when_done: bool,
     /// Player scale multipliers (+0x178 / +0x17c; gauge fills).
     pub scale: [f32; 2],
+    /// The player's child context and colour as last found (FUN_140192be0
+    /// keeps them while no IsActive animation runs).
+    pub ctx: [f32; 2],
+    pub ctx_color: [f32; 4],
+}
+
+impl Sprite {
+    fn refresh(&mut self, seq: &Sequence) {
+        let m = Modifiers::default();
+        if let Some(c) = seq.child_context(&self.player, &m) {
+            self.ctx = c;
+        }
+        if let Some(c) = seq
+            .context_color(&self.player, &m)
+            .or_else(|| seq.current_color(&self.player))
+        {
+            self.ctx_color = c;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -131,8 +150,12 @@ impl Sprites {
             dead: false,
             die_when_done: false,
             scale: [1.; 2],
+            ctx: [0.; 2],
+            ctx_color: [1.; 4],
         });
-        Id(self.list.len() - 1)
+        let id = Id(self.list.len() - 1);
+        self.list[id.0].refresh(seq);
+        id
     }
 
     pub fn get(&self, id: Id) -> &Sprite {
@@ -156,6 +179,7 @@ impl Sprites {
         s.player = Player::new(seq, group);
         s.queued = queued;
         s.die_when_done = false;
+        s.refresh(seq);
     }
 
     /// Plays a close group, then dies (FUN_140300c50(·, group) with no
@@ -206,10 +230,11 @@ impl Sprites {
                     s.dead = true;
                 }
             }
+            s.refresh(seq);
         }
     }
 
-    fn modifiers(&self, seq: &Sequence, i: usize) -> Modifiers {
+    fn modifiers(&self, i: usize) -> Modifiers {
         let s = &self.list[i];
         let mut m = Modifiers {
             color: s.multiplier,
@@ -220,38 +245,34 @@ impl Sprites {
         if s.inherit_alpha
             && let Some(p) = s.parent
         {
-            let pm = self.modifiers(seq, p.0);
-            let ps = &self.list[p.0];
-            let a = seq.context_color(&ps.player, &pm).map_or(1., |c| c[3]);
+            let pm = self.modifiers(p.0);
+            let a = self.list[p.0].ctx_color[3] * pm.color[3];
             m.color = [s.multiplier[0], s.multiplier[1], s.multiplier[2], a];
         }
         m
     }
 
     /// Resolved base (FUN_14016abf0): the parent's context + offset + base.
-    pub fn resolved_base(&self, seq: &Sequence, id: Id) -> [f32; 2] {
+    pub fn resolved_base(&self, id: Id) -> [f32; 2] {
         let s = self.get(id);
         match s.parent {
             Some(p) => {
-                let pb = self.resolved_base(seq, p);
+                let pb = self.resolved_base(p);
                 let ps = self.get(p);
-                let c = seq
-                    .child_context(&ps.player, &Modifiers::default())
-                    .unwrap_or([0.; 2]);
-                [pb[0] + ps.offset[0] + c[0], pb[1] + ps.offset[1] + c[1]]
+                [
+                    pb[0] + ps.offset[0] + ps.ctx[0],
+                    pb[1] + ps.offset[1] + ps.ctx[1],
+                ]
             }
             None => s.base,
         }
     }
 
     /// Where this sprite's children sit (its context in screen space).
-    pub fn context(&self, seq: &Sequence, id: Id) -> [f32; 2] {
-        let b = self.resolved_base(seq, id);
+    pub fn context(&self, id: Id) -> [f32; 2] {
+        let b = self.resolved_base(id);
         let s = self.get(id);
-        let c = seq
-            .child_context(&s.player, &Modifiers::default())
-            .unwrap_or([0.; 2]);
-        [b[0] + s.offset[0] + c[0], b[1] + s.offset[1] + c[1]]
+        [b[0] + s.offset[0] + s.ctx[0], b[1] + s.offset[1] + s.ctx[1]]
     }
 
     /// The draw list: art, then text, per sprite in priority order.
@@ -273,16 +294,13 @@ impl Sprites {
                 continue;
             }
             let id = Id(i);
-            let m = self.modifiers(seq, i);
-            let b = self.resolved_base(seq, id);
+            let m = self.modifiers(i);
+            let b = self.resolved_base(id);
             let origin = [b[0] + s.offset[0], b[1] + s.offset[1]];
             out.push((Sheet::Art(s.sheet), seq.quads(&s.player, origin, &m)));
             let Some(t) = &s.text else { continue };
             // FUN_14016ae30.
-            let mut c = seq
-                .child_context(&s.player, &Modifiers::default())
-                .unwrap_or([0.; 2]);
-            c = [c[0] + s.offset[0], c[1] + s.offset[1]];
+            let mut c = [s.ctx[0] + s.offset[0], s.ctx[1] + s.offset[1]];
             let g = &seq.groups[s.player.group];
             if t.group_position {
                 c[0] += g.light_position_x as f32;
@@ -290,10 +308,7 @@ impl Sprites {
             }
             let mut rgba = color(t.colour);
             if t.anim_colour {
-                let anim = seq
-                    .context_color(&s.player, &m)
-                    .or_else(|| seq.current_color(&s.player))
-                    .unwrap_or([1.; 4]);
+                let anim: [f32; 4] = std::array::from_fn(|k| s.ctx_color[k] * m.color[k]);
                 rgba = if t.keep_rgb {
                     [rgba[0], rgba[1], rgba[2], anim[3]]
                 } else {

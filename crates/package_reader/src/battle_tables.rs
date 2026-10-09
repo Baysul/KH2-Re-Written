@@ -153,6 +153,9 @@ pub fn enemy_level(lvpm: &[u8], level: u16) -> io::Result<LevelRow> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayerLevel {
+    /// EXP of the row (u32 at +0; the Status "Next LV" subtracts the
+    /// save's EXP from the current level's row, FUN_1403a14b0).
+    pub exp: u32,
     pub strength: u8,
     pub magic: u8,
     pub defense: u8,
@@ -172,6 +175,7 @@ pub fn player_level(lvup: &[u8], character: usize, level: usize) -> io::Result<P
         .get(r..r + 16)
         .ok_or_else(|| invalid("LVUP truncated"))?;
     Ok(PlayerLevel {
+        exp: u32::from_le_bytes([row[0], row[1], row[2], row[3]]),
         strength: row[4],
         magic: row[5],
         defense: row[6],
