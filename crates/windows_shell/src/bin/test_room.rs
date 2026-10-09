@@ -9,6 +9,7 @@
 use bevy::{
     app::AppExit,
     asset::RenderAssetUsages,
+    camera::visibility::RenderLayers,
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
     image::ImageSampler,
     input::mouse::AccumulatedMouseMotion,
@@ -2128,6 +2129,75 @@ fn setup(
             commands.entity(entity).insert(SoraPart(ordinal));
         }
     }
+    // Tz::MenuObj's member 0: Sora's walk (motion 0x8b = slot 6) rendered
+    // off-screen on layer 3 and pasted into the camp (camp-03 spec). Menu
+    // space: (mx, my, mz + 100) seen from (0, 50, 800) toward (0, 0, -55),
+    // i.e. the game's view turned 180° about X (no mirror).
+    let walk = game.poses[&(Action::Walk, false)];
+    let walk_pose: Vec<Vec3> = {
+        let c = &game.clip_poses[walk];
+        c.frames[0].iter().map(|p| *p + c.root[0]).collect()
+    };
+    let menu_root = commands
+        .spawn((
+            MenuModelRoot,
+            Transform::from_xyz(0., 0., 100.),
+            Visibility::Hidden,
+            RenderLayers::layer(MENU_LAYER),
+        ))
+        .id();
+    for (ordinal, entity) in spawn_model(
+        &mut commands,
+        &actor,
+        &walk_pose,
+        menu_root,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+    ) {
+        if let Some(entity) = entity {
+            commands
+                .entity(entity)
+                .insert((MenuModelPart(ordinal), RenderLayers::layer(MENU_LAYER)));
+        }
+    }
+    let menu_target = images.add(Image::new_target_texture(
+        MENU_TARGET[0],
+        MENU_TARGET[1],
+        TextureFormat::Rgba8UnormSrgb,
+        None,
+    ));
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            order: -3,
+            is_active: false,
+            clear_color: ClearColorConfig::Custom(Color::NONE),
+            ..default()
+        },
+        bevy::camera::RenderTarget::Image(menu_target.clone().into()),
+        // A 640x480-style camera with horizontal FOV 40° (focal 879.19):
+        // vertical 2·atan(240 / 879.19); squeezed to the layout, the
+        // target's 16:9 square pixels match it (camp-03 §1).
+        Projection::Perspective(PerspectiveProjection {
+            fov: 2. * (240f32 / 879.1928).atan(),
+            near: 1.,
+            far: 100_000.,
+            ..default()
+        }),
+        Transform::from_xyz(0., 50., 800.).looking_at(Vec3::new(0., 0., -55.), Vec3::Y),
+        Msaa::Off,
+        Tonemapping::None,
+        DebandDither::Disabled,
+        NoIndirectDrawing,
+        RenderLayers::layer(MENU_LAYER),
+        MenuCamera,
+    ));
+    commands.insert_resource(MenuModel {
+        sheet: frame.add_image(menu_target, MENU_TARGET, true),
+        clip: walk,
+        indices: actor.parts.iter().map(|p| p.indices.clone()).collect(),
+    });
     let hand = commands
         .spawn((
             WeaponRoot,
@@ -2318,6 +2388,64 @@ fn setup(
     commands.insert_resource(compose);
 }
 
+/// The camp menu's member model (Tz::MenuObj) and its off-screen target.
+const MENU_LAYER: usize = 3;
+const MENU_TARGET: [u32; 2] = [1280, 720];
+
+#[derive(Component)]
+struct MenuModelRoot;
+#[derive(Component)]
+struct MenuModelPart(usize);
+#[derive(Component)]
+struct MenuCamera;
+
+#[derive(Resource)]
+struct MenuModel {
+    sheet: usize,
+    clip: usize,
+    indices: Vec<Vec<u32>>,
+}
+
+/// While the camp shows its members, render Sora's walk at the menu time
+/// (root motion kept, camp-03 §3).
+fn menu_model_present(
+    camp: Option<Res<CampRes>>,
+    model: Option<Res<MenuModel>>,
+    game: Res<Game>,
+    mut cameras: Query<&mut Camera, With<MenuCamera>>,
+    mut roots: Query<&mut Visibility, With<MenuModelRoot>>,
+    parts: Query<(&MenuModelPart, &Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let Some(model) = model else { return };
+    let time = camp.and_then(|c| c.open.as_ref().and_then(|m| m.model_time));
+    if let Ok(mut camera) = cameras.single_mut() {
+        camera.is_active = time.is_some();
+    }
+    for mut v in &mut roots {
+        let want = if time.is_some() {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if *v != want {
+            *v = want;
+        }
+    }
+    let Some(t) = time else { return };
+    let c = &game.clip_poses[model.clip];
+    let f = (t as usize).min(c.frames.len() - 1);
+    let root = c.root[f.min(c.root.len() - 1)];
+    for (part, handle) in &parts {
+        let positions: Vec<[f32; 3]> = model.indices[part.0]
+            .iter()
+            .map(|&i| (c.frames[f][i as usize] + root).to_array())
+            .collect();
+        if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        }
+    }
+}
 /// The 2D composition's sheets: the rendered scene, the dissolve snapshot
 /// and the HUD canvas.
 #[derive(Resource)]
@@ -3798,6 +3926,7 @@ type CameraOnly = (
     Without<SoraRoot>,
     Without<WeaponRoot>,
     Without<SnapshotCamera>,
+    Without<MenuCamera>,
 );
 
 fn camera_control(
@@ -4264,7 +4393,11 @@ fn camp_tick(
 
 /// The camp over the frozen field; the field HUD is hidden meanwhile
 /// [inferred].
-fn camp_present(camp: Option<ResMut<CampRes>>, mut frame: ResMut<Ui2dFrame>) {
+fn camp_present(
+    camp: Option<ResMut<CampRes>>,
+    model: Option<Res<MenuModel>>,
+    mut frame: ResMut<Ui2dFrame>,
+) {
     let Some(mut c) = camp else { return };
     let c = &mut *c;
     let Some(menu) = c.open.as_mut() else { return };
@@ -4272,10 +4405,26 @@ fn camp_present(camp: Option<ResMut<CampRes>>, mut frame: ResMut<Ui2dFrame>) {
         widths: &c.source.font.widths,
     };
     let art = c.art[c.glyph].or(c.art[0]).expect("camp art");
-    for (sheet, quads) in menu.draw(&c.source.menu.layout, &font) {
+    let members = menu.data.panels.members.len();
+    for (sheet, mut quads) in menu.draw(&c.source.menu.layout, &font) {
         let slot = match sheet {
             camp::Sheet::Art => art,
             camp::Sheet::Font => c.font_sheet,
+            // Only Sora's model is rendered in this room.
+            camp::Sheet::Model(i) => {
+                let Some(m) = model.as_ref().filter(|_| i == 0) else {
+                    continue;
+                };
+                let [dx, dy] = camp::model_offset(i, members);
+                for q in &mut quads {
+                    for c in &mut q.corners {
+                        c[0] += dx;
+                        c[1] += dy;
+                    }
+                    q.uv = [0, 0, MENU_TARGET[0] as i32, MENU_TARGET[1] as i32];
+                }
+                m.sheet
+            }
         };
         frame.draws.push((slot, quads));
     }
@@ -4792,6 +4941,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
                 hud_present,
                 resize_scene,
                 compose_2d,
+                menu_model_present,
                 camp_present,
                 finish,
             )

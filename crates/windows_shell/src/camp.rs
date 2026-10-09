@@ -8,8 +8,9 @@
 //! FUN_140323c60, help FUN_1402fa1d0 and the digit rows FUN_1402fb450 /
 //! FUN_140324690. Everything draws from `menu/<lang>/camp.2ld` sequence 1 in
 //! layout space (x origin 0). The other sub-screens (Items, Abilities,
-//! Customize, Party, Journal) and the 3D party models are not built:
-//! deciding those entries plays the decide sound only.
+//! Customize, Party, Journal) are not built: deciding those entries plays
+//! the decide sound only. The 3D party models are pasted from off-screen
+//! renders the caller makes (Tz::MenuObj).
 use crate::command::Font;
 use crate::sprite2d::{self, Id, LightCur, Sprites, Text};
 use package_reader::layout::{Layout, LayoutTask};
@@ -208,12 +209,34 @@ pub struct Memory {
     pub config_row: usize,
 }
 
-/// What a draw item samples: the camp sheet or the system font.
+/// What a draw item samples: the camp sheet, the system font, or member
+/// `i`'s off-screen model render (Tz::MenuObj's paste, prio 0x7538).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sheet {
     Art,
     Font,
+    Model(usize),
 }
+
+/// The menu model's layout offset for member `i` of `n` (FUN_140306400):
+/// x {47, 145, 243}[i] - (98n - 98)/n, y 96 (61 in world 10): the shift of
+/// the projection centre from the layout centre (camp-03 §1.4).
+pub fn model_offset(i: usize, n: usize) -> [f32; 2] {
+    let n = n.clamp(1, 3) as i32;
+    let x = [47, 145, 243][i.min(2)] - (98 * n - 98) / n;
+    [x as f32, 96.]
+}
+
+/// Motion time of the menu walk (FUN_1403001b0): t += 1, past the clip's
+/// length it drops by the length, so it runs 1..=length.
+pub fn model_time(t: f32, length: f32) -> f32 {
+    let t = t + 1.;
+    if t > length { t - length } else { t }
+}
+
+const PRIO_MODEL: u32 = 0x7538;
+/// The paste tint (FUN_1402ff530: 0x60 = 0.75 of 0x80).
+pub const MODEL_TINT: f32 = 0x60 as f32 / 128.;
 
 /// Camp states (DAT_140bee64c).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -413,6 +436,8 @@ pub struct Camp {
     munny_digits: Vec<Player>,
     time_digits: Vec<Player>,
     status_block: Option<Id>,
+    /// Tz::MenuObj: the members' walk time while the party frame lives.
+    pub model_time: Option<f32>,
     // Shared.
     light: LightCur,
     glove: Option<Id>,
@@ -468,6 +493,7 @@ impl Camp {
             munny_digits: Vec::new(),
             time_digits: Vec::new(),
             status_block: None,
+            model_time: None,
             light: LightCur::default(),
             glove: None,
             help: None,
@@ -532,6 +558,8 @@ impl Camp {
             .create(seq, PRIO_FRAME, ART, FRAME[0], Some(FRAME[1]), None);
         self.closers.push((frame, FRAME[2]));
         self.frame_sprite = Some(frame);
+        // FUN_1402feb20: the members are added with the frame.
+        self.model_time = Some(0.);
         if self.prompt.is_none_or(|p| !self.sprites.alive(p)) {
             let p = self
                 .sprites
@@ -661,6 +689,13 @@ impl Camp {
         }
         self.place_help(layout);
         self.place_lights(seq);
+        // FUN_1403001b0: the walk advances; the models go with the frame.
+        match self.frame_sprite {
+            Some(f) if self.sprites.alive(f) => {
+                self.model_time = self.model_time.map(|t| model_time(t, MODEL_LENGTH));
+            }
+            _ => self.model_time = None,
+        }
         if self.exit && self.layout.dead {
             self.closed = true;
         }
@@ -1764,15 +1799,34 @@ impl Camp {
                 sprite2d::Sheet::Font => (Sheet::Font, quads),
             })
         };
-        // The digit rows (Tz::MultiSeq, 0x753b) follow their labels.
+        // The model paste (0x7538), then the panel band; the digit rows
+        // (Tz::MultiSeq, 0x753b) follow their labels.
         out.extend(convert(
-            self.sprites.draw_where(seq, font, |p| p <= PRIO_PANEL),
+            self.sprites.draw_where(seq, font, |p| p < PRIO_MODEL),
+        ));
+        if let Some(a) = self.model_alpha() {
+            for i in 0..self.data.panels.members.len().min(3) {
+                out.push((Sheet::Model(i), model_quads(a)));
+            }
+        }
+        out.extend(convert(
+            self.sprites
+                .draw_where(seq, font, |p| (PRIO_MODEL..=PRIO_PANEL).contains(&p)),
         ));
         out.push((Sheet::Art, self.digit_quads(seq)));
         out.extend(convert(
             self.sprites.draw_where(seq, font, |p| p > PRIO_PANEL),
         ));
         out
+    }
+
+    /// The paste alpha: the party frame's colour alpha (FUN_1402ffac0),
+    /// while the frame and the models live.
+    pub fn model_alpha(&self) -> Option<f32> {
+        self.model_time?;
+        let f = self.frame_sprite?;
+        let s = self.sprites.get(f);
+        (!s.dead).then_some(s.ctx_color[3])
     }
 
     /// Tz::MultiSeq: from the label's context + (LightPositionX,
@@ -1806,6 +1860,23 @@ impl Camp {
         }
         out
     }
+}
+
+/// Sora's menu motion 0x8b (P_EX100.mset slot 558 = the field walk) runs
+/// 64 ticks.
+pub const MODEL_LENGTH: f32 = 64.;
+
+/// One whole-layout quad for a member's render; the caller shifts it by
+/// `model_offset` and samples that member's target (uv in the caller's
+/// texels).
+fn model_quads(alpha: f32) -> Vec<Quad> {
+    let (l, r) = (256. - 512. * 2. / 3., 256. + 512. * 2. / 3.);
+    vec![Quad {
+        corners: [[l, 0.], [r, 0.], [l, 416.], [r, 416.]],
+        uv: [0, 0, 1, 1],
+        colors: [[MODEL_TINT, MODEL_TINT, MODEL_TINT, alpha]; 4],
+        blend: 0,
+    }]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1879,6 +1950,17 @@ mod tests {
             encode_number("12/30%"),
             vec![0x22, 0x23, 0x4b, 0x24, 0x21, 0x4a]
         );
+    }
+
+    #[test]
+    fn member_models_follow_the_exe_offsets_and_clock() {
+        assert_eq!(model_offset(0, 1), [47., 96.]);
+        assert_eq!(model_offset(0, 2), [-2., 96.]);
+        assert_eq!(model_offset(1, 2), [96., 96.]);
+        assert_eq!(model_offset(2, 3), [178., 96.]);
+        assert_eq!(model_time(0., MODEL_LENGTH), 1.);
+        assert_eq!(model_time(63., MODEL_LENGTH), 64.);
+        assert_eq!(model_time(64., MODEL_LENGTH), 1.);
     }
 
     #[test]
