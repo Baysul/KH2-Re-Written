@@ -34,6 +34,12 @@ const ROW: usize = 16;
 const LAST_ROW: usize = 11;
 const ICON_FRAME: usize = 45;
 const POINTER: usize = 20;
+/// Reaction-command slot (0x140718358 normal group 2) at (0x1c, 0x179)
+/// less a row pitch per item, like the panel [inferred: above the rows];
+/// a failed angle gate shows it at RGB x0.6 (0x1405b1c50 mode 5).
+const REACTION_GROUP: usize = 2;
+const REACTION_Y: f32 = 377.;
+const REACTION_DIM: f32 = 0.6;
 /// Row/cursor text colours by colour index (0x140717d78, 0x140717da0).
 const ROW_TEXT: [u32; 9] = [
     0x80b4b4b4, 0x80646464, 0x800079b7, 0x80646464, 0x80646464, 0x80646464, 0x80646464, 0x80e6e6e6,
@@ -66,8 +72,17 @@ struct Slot {
     text: Option<Vec<u8>>,
     text_colour: u32,
     disabled: bool,
+    dimmed: bool,
     context: [f32; 2],
     resolved: [f32; 2],
+}
+
+/// The reaction command offered above the menu (e.g. Talk).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reaction {
+    pub label: Vec<u8>,
+    /// The candidate failed its angle gate (display mode 5).
+    pub dimmed: bool,
 }
 
 pub struct CommandMenu {
@@ -75,6 +90,7 @@ pub struct CommandMenu {
     slots: Vec<Slot>,
     counter: usize,
     pub items: Vec<Item>,
+    pub reaction: Option<Reaction>,
     pub cursor: usize,
     last_cursor: Option<usize>,
     last_count: usize,
@@ -99,6 +115,7 @@ impl CommandMenu {
             slots: Vec::new(),
             counter: 0,
             items,
+            reaction: None,
             cursor: 0,
             last_cursor: None,
             last_count: 0,
@@ -157,6 +174,7 @@ impl CommandMenu {
                 text: None,
                 text_colour: colour,
                 disabled: false,
+                dimmed: false,
                 context: [0.; 2],
                 resolved: [0.; 2],
             });
@@ -171,6 +189,7 @@ impl CommandMenu {
         s.base = base;
         s.parent = None;
         s.disabled = false;
+        s.dimmed = false;
         s.text_colour = colour;
         self.counter += 1;
         i
@@ -259,6 +278,17 @@ impl CommandMenu {
             let pointer = self.slot(seq, POINTER, force, [0., 0.], None, colour);
             self.slots[pointer].parent = Some(c);
         }
+        if let Some(r) = self.reaction.clone() {
+            let i = self.slot(
+                seq,
+                REACTION_GROUP,
+                false,
+                [x, REACTION_Y - PITCH * n as f32],
+                Some(r.label),
+                ROW_TEXT[0],
+            );
+            self.slots[i].dimmed = r.dimmed;
+        }
         self.last_cursor = Some(cur);
         self.last_count = n;
         self.slots.truncate(self.counter);
@@ -302,6 +332,10 @@ impl CommandMenu {
             s.context = seq.child_context(&s.player, &m).unwrap_or([0.; 2]);
             if s.disabled {
                 continue;
+            }
+            let mut m = m;
+            if s.dimmed {
+                m.color = [REACTION_DIM, REACTION_DIM, REACTION_DIM, 1.];
             }
             out.push(Draw::Quads {
                 quads: seq.quads(&s.player, [X_ORIGIN + base[0], base[1]], &m),
@@ -406,6 +440,7 @@ mod tests {
             slots: Vec::new(),
             counter: 0,
             items,
+            reaction: None,
             cursor: 0,
             last_cursor: None,
             last_count: 0,

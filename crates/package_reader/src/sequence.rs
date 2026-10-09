@@ -59,6 +59,10 @@ pub struct AnimationGroup {
     /// Play count; 0 loops forever.
     pub play_count: i16,
     pub loop_frames: [i32; 2],
+    /// Group +0x10 / +0x14 (OpenKH LightPositionX / TextPositionY): the
+    /// message window uses them as the box's interior padding.
+    pub light_position_x: i32,
+    pub text_position_y: i32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -181,6 +185,8 @@ pub fn read(bytes: &[u8]) -> io::Result<Sequence> {
                 animations: range(i16_at(bytes, a) as i64, i16_at(bytes, a + 2) as i64, ac)?,
                 play_count: i16_at(bytes, a + 4),
                 loop_frames: [i32_at(bytes, a + 8), i32_at(bytes, a + 12)],
+                light_position_x: i32_at(bytes, a + 16),
+                text_position_y: i32_at(bytes, a + 20),
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -191,6 +197,45 @@ pub fn read(bytes: &[u8]) -> io::Result<Sequence> {
         animations,
         groups,
     })
+}
+
+impl Sequence {
+    /// FUN_140193430: fits the nine parts of the sprite group drawn by
+    /// `group`'s first animation around a `w` x `h` interior (each padded
+    /// by the group's +0x10 / +0x14 and rounded down to even), centred on the
+    /// origin: corners keep their size, edges and centre stretch.
+    pub fn fit_nine_slice(&mut self, group: usize, w: i32, h: i32) {
+        let g = &self.groups[group];
+        let (w, h) = ((g.light_position_x + w) & !1, (g.text_position_y + h) & !1);
+        let Some(a) = self.animations.get(g.animations.start) else {
+            return;
+        };
+        let parts = self.sprite_groups[a.sprite_group].clone();
+        if parts.len() < 9 {
+            return;
+        }
+        let p = &mut self.parts[parts];
+        let width = |p: &SpritePart| p.rect[2] - p.rect[0];
+        let height = |p: &SpritePart| p.rect[3] - p.rect[1];
+        let (left, top, right, bottom) = (-(w / 2), -(h / 2), w / 2, h / 2);
+        // (x, y, width, height) per part; None keeps the part's own size.
+        let layout: [(i32, i32, Option<i32>, Option<i32>); 9] = [
+            (left - width(&p[0]), top - height(&p[0]), None, None),
+            (left, top - height(&p[1]), Some(w), None),
+            (right, top - height(&p[2]), None, None),
+            (left - width(&p[3]), top, None, Some(h)),
+            (left, top, Some(w), Some(h)),
+            (right, top, None, Some(h)),
+            (left - width(&p[6]), bottom, None, None),
+            (left, bottom, Some(w), None),
+            (right, bottom, None, None),
+        ];
+        for (part, (x, y, pw, ph)) in p.iter_mut().zip(layout) {
+            let pw = pw.unwrap_or(width(part));
+            let ph = ph.unwrap_or(height(part));
+            part.rect = [x, y, x + pw, y + ph];
+        }
+    }
 }
 
 /// Sequence colors: 0x80 per channel is 1.0.

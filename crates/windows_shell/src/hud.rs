@@ -158,6 +158,17 @@ pub fn load_system_font(
     image: (&str, usize, [u8; 16]),
     info: (&str, usize, [u8; 16]),
 ) -> Result<SystemFont, Box<dyn std::error::Error>> {
+    load_font(source, image, info, b"sys\0")
+}
+
+/// Any font plane of fontimage.bar (e.g. 'sys', 'evt') with its width
+/// table of the same name in fontinfo.bar.
+pub fn load_font(
+    source: &ProbeSource,
+    image: (&str, usize, [u8; 16]),
+    info: (&str, usize, [u8; 16]),
+    plane: &[u8; 4],
+) -> Result<SystemFont, Box<dyn std::error::Error>> {
     let (images, hd) = read_entry(source, image.0, image.1, image.2, true)?;
     let planes: Vec<_> = bar::read_bar(&images)?
         .entries
@@ -166,8 +177,8 @@ pub fn load_system_font(
         .collect();
     let slot = planes
         .iter()
-        .position(|e| &e.name_bytes == b"sys\0")
-        .ok_or("system font plane absent")?;
+        .position(|e| &e.name_bytes == plane)
+        .ok_or("font plane absent")?;
     if hd.len() != planes.len() {
         return Err("font HD replacements do not match the planes".into());
     }
@@ -180,13 +191,98 @@ pub fn load_system_font(
         return Err("system font HD plane is not an integer upscale".into());
     }
     let (infos, _) = read_entry(source, info.0, info.1, info.2, false)?;
-    let widths = named(&infos, 2, b"sys\0")?.to_vec();
+    let widths = named(&infos, 2, plane)?.to_vec();
     Ok(SystemFont {
         size: [decoded.width, decoded.height],
         rgba: decoded.pixels_rgba,
         texel_scale: scale,
         widths,
     })
+}
+
+/// The message window art: the first SEQD of msg/<lang>/fontinfo.bar
+/// ('md_m', FUN_1403e2230) and the 'md_m' IMGD of the world message bar
+/// (FUN_1403adc10), whose IMGD replacements come last in IMGD order.
+pub fn load_window_sheet(
+    source: &ProbeSource,
+    info: (&str, usize, [u8; 16]),
+    world: (&str, usize, [u8; 16]),
+) -> Result<Sheet, Box<dyn std::error::Error>> {
+    let (infos, _) = read_entry(source, info.0, info.1, info.2, false)?;
+    let table = bar::read_bar(&infos)?;
+    let e = table
+        .entries
+        .iter()
+        .find(|e| e.entry_type == SEQD)
+        .ok_or("window SEQD absent")?;
+    let sequence = sequence::read(
+        infos
+            .get(e.offset as usize..e.offset as usize + e.size as usize)
+            .ok_or("window SEQD exceeds archive")?,
+    )?;
+    let (archive, hd) = read_entry(source, world.0, world.1, world.2, true)?;
+    let table = bar::read_bar(&archive)?;
+    let images: Vec<_> = table
+        .entries
+        .iter()
+        .filter(|e| e.entry_type == IMGD)
+        .collect();
+    let slot = images
+        .iter()
+        .position(|e| &e.name_bytes == b"md_m" && e.size > 0)
+        .ok_or("window IMGD absent")?;
+    let image = images[slot];
+    let header = image_structure::read_imgd_header(
+        archive
+            .get(image.offset as usize..image.offset as usize + image.size as usize)
+            .ok_or("window IMGD exceeds archive")?,
+    )?;
+    let first = hd
+        .len()
+        .checked_sub(images.len())
+        .ok_or("fewer HD replacements than IMGDs")?;
+    let r = &hd[first + slot];
+    let decoded =
+        hd_image::decode_hd_image(&r.bytes, r.metadata.declared_decompressed_length as usize)?;
+    let (w, h) = (header.width as u32, header.height as u32);
+    let scale = decoded.width / w;
+    if scale == 0 || decoded.width != w * scale || decoded.height != h * scale {
+        return Err("window HD image is not an integer upscale".into());
+    }
+    Ok(Sheet {
+        sequence,
+        texture_size: [decoded.width, decoded.height],
+        texture_rgba: decoded.pixels_rgba,
+        texel_scale: scale,
+    })
+}
+
+/// 03system 'ftst' text colour: after {u32 1, u32 count}, 0x50-byte records
+/// {u32 id, u32 colour[19 worlds]} (FUN_1403ea860); PS2 0xAABBGGRR.
+pub fn ftst_colour(
+    system: &[u8],
+    id: u32,
+    world: usize,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    let table = bar::read_bar(system)?;
+    let e = table
+        .entries
+        .iter()
+        .find(|e| &e.name_bytes == b"ftst")
+        .ok_or("ftst absent")?;
+    let d = system
+        .get(e.offset as usize..e.offset as usize + e.size as usize)
+        .ok_or("ftst exceeds archive")?;
+    let word = |at: usize| {
+        d.get(at..at + 4)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+    };
+    // Header: u32 version (1), u32 record count.
+    let count = word(4).ok_or("ftst header")? as usize;
+    (0..count)
+        .find(|&k| word(8 + k * 0x50) == Some(id))
+        .and_then(|k| word(8 + k * 0x50 + 4 + world * 4))
+        .ok_or_else(|| "ftst colour absent".into())
 }
 
 /// Encoded strings of a message archive (e.g. msg/<lang>/sys.bar) by id &

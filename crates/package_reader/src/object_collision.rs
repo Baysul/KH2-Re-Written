@@ -4,6 +4,10 @@
 use std::io;
 
 pub const HIT: u8 = 2;
+/// Target shape (lock-on / talk camera fallback, FUN_1403be230).
+pub const TARGET: u8 = 3;
+/// Reaction-command shape (FUN_140407de0).
+pub const REACTION: u8 = 5;
 pub const ATTACK: u8 = 6;
 pub const SPHERE: u8 = 3;
 

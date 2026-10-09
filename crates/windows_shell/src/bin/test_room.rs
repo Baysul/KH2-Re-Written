@@ -110,6 +110,51 @@ struct Config {
     /// enemy's PAX, and `effect/texcommon.dpd` (the common atlas).
     #[serde(default)]
     effects: Option<EffectConfig>,
+    /// A field NPC to talk to (needs `menu` for the reaction label and
+    /// `system` for the text colour).
+    #[serde(default)]
+    npc: Option<NpcConfig>,
+}
+
+/// Field-talk test NPC. In vanilla no field talk has Axel speaking, so
+/// three values are composed (dialogue-01 §7B): the talk reaction (cmd 31
+/// via the towns-person reaction sphere), the talk camera shape (the TARGET
+/// shape of `target_model`) and the script (`script`, libretto op 1 per
+/// message id).
+#[derive(Deserialize)]
+struct NpcConfig {
+    /// Model selection (relative to this configuration): obj/B_EX110_RTN.mdlx.
+    model_selection: PathBuf,
+    /// Its motion set (direct slots; slot 0 is the idle 'R00A').
+    motion_set: Locator,
+    /// Archive whose object collision has the TARGET shape used for the
+    /// camera (obj/B_EX110.mdlx shares the skeleton).
+    target_model: Locator,
+    /// Placement relative to Sora's spawn (scene units) and facing (rad).
+    offset: [f32; 3],
+    yaw: f32,
+    /// Message archive with the script's lines (msg/us/hb.bar for Axel).
+    messages: Locator,
+    script: Vec<u32>,
+    /// msg/<lang>/fontinfo.bar, fontimage.bar and the world message bar.
+    font_info: Locator,
+    font_image: Locator,
+    world_messages: Locator,
+    /// World index into the ftst colour table (tt = 2).
+    world: usize,
+    /// Composed talk-camera shape (the type-19 role) used instead of the
+    /// TARGET fallback: the towns-person dimensions on the head bone.
+    #[serde(default)]
+    camera_shape: Option<ShapeConfig>,
+}
+
+#[derive(Deserialize)]
+struct ShapeConfig {
+    bone: usize,
+    offset: [f32; 3],
+    pos_h: f32,
+    radius: f32,
+    height: f32,
 }
 
 #[derive(Deserialize)]
@@ -349,6 +394,14 @@ struct Game {
     /// Action start tick and clip tick already scanned for sound triggers.
     sound_frame: Option<(u64, u32)>,
     effect_queue: Vec<EffectRequest>,
+    /// Field talk: control locked, and this tick's reaction / advance
+    /// presses (Triangle; decide, back or Triangle).
+    talking: bool,
+    rc_queued: bool,
+    advance_queued: bool,
+    /// Unattended capture ticks and end for this room.
+    captures: &'static [u64],
+    autoplay_end: u64,
 }
 
 /// Sound output and banks; requests resolve by id (bank·1000 + sound).
@@ -541,6 +594,7 @@ struct Loaded {
     enemy: Option<EnemySource>,
     banks: Banks,
     effects: Option<EffectSources>,
+    npc: Option<NpcSource>,
 }
 
 /// One enemy clip: skinned positions, HIT-bone matrices and root
@@ -1223,6 +1277,10 @@ fn load(
             b.replacement.as_deref(),
         )?)?;
     }
+    let npc = match &config.npc {
+        Some(n) => Some(load_npc(source, base, &config, n)?),
+        None => None,
+    };
     let effects = match &config.effects {
         Some(e) => {
             use windows_shell::effects::{load_atlas, load_pax};
@@ -1263,6 +1321,7 @@ fn load(
         enemy,
         banks,
         effects,
+        npc,
     })
 }
 
@@ -1532,6 +1591,7 @@ struct Startup {
     hud: Option<HudSource>,
     enemy_model: Option<model_inspection::InspectionModel>,
     effect_atlas: Option<windows_shell::effects::Atlas>,
+    npc_model: Option<model_inspection::InspectionModel>,
 }
 
 /// Spawns one textured mesh per model part under `parent`, in part order.
@@ -1604,6 +1664,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    talk: Option<ResMut<Talk>>,
 ) {
     let room = startup.room.take().expect("room retained for setup");
     let enemy_model = startup.enemy_model.take();
@@ -1898,6 +1959,65 @@ fn setup(
         }
         rt.indices = indices;
     }
+    if let (Some(model), Some(mut talk)) = (startup.npc_model.take(), talk) {
+        let root = commands
+            .spawn((
+                NpcRoot,
+                ChildOf(world),
+                Transform::from_translation(talk.position)
+                    .with_rotation(Quat::from_rotation_y(talk.yaw)),
+                Visibility::default(),
+            ))
+            .id();
+        let mut indices = Vec::new();
+        for (ordinal, entity) in spawn_model(
+            &mut commands,
+            &model,
+            &talk.frames[0],
+            root,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+        ) {
+            indices.push(model.parts[ordinal].indices.clone());
+            if let Some(entity) = entity {
+                commands.entity(entity).insert(NpcPart(ordinal));
+            }
+        }
+        talk.indices = indices;
+        // The cross-dissolve: a second camera renders the old view into an
+        // image, drawn under the HUD while it fades.
+        let snapshot = images.add(Image::new_target_texture(
+            1280,
+            720,
+            TextureFormat::Rgba8UnormSrgb,
+            None,
+        ));
+        commands.spawn((
+            Camera3d::default(),
+            Camera {
+                order: -1,
+                is_active: false,
+                ..default()
+            },
+            bevy::camera::RenderTarget::Image(snapshot.clone().into()),
+            Transform::default(),
+            Msaa::Off,
+            Tonemapping::None,
+            DebandDither::Disabled,
+            NoIndirectDrawing,
+            SnapshotCamera,
+        ));
+        commands.spawn((
+            Sprite {
+                image: snapshot,
+                color: Color::srgba(1., 1., 1., 0.),
+                ..default()
+            },
+            Transform::from_xyz(0., 0., -1.),
+            DissolveOverlay,
+        ));
+    }
     game.weapon_display = weapon_pose;
     game.part_indices = part_indices;
     game.display = pose;
@@ -1978,6 +2098,19 @@ fn gather_input(
         }
     }
     game.guard_queued |= guard;
+    // Reaction command (Triangle: T or the pad's north button); a page
+    // advances on decide, back or Triangle (trigger mask 0x40c).
+    let mut rc = keys.just_pressed(KeyCode::KeyT);
+    let mut advance = attack || keys.just_pressed(KeyCode::Backspace) || rc;
+    if game.gamepad {
+        for pad in &pads {
+            rc |= pad.just_pressed(GamepadButton::North);
+            advance |=
+                pad.just_pressed(GamepadButton::East) || pad.just_pressed(GamepadButton::North);
+        }
+    }
+    game.rc_queued |= rc;
+    game.advance_queued |= advance;
     game.jump_queued |= jump;
     game.attack_queued |= attack;
     game.menu_up_queued |= up;
@@ -2000,6 +2133,12 @@ const AUTOPLAY_CAPTURES: [u64; 19] = [
     90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1198, 1300, 1500,
     1700,
 ];
+/// The talk room: Talk at tick 60, one advance once the text is up, and
+/// captures through the prompt, dissolve, window, close and return.
+const AUTOPLAY_TALK: [u64; 1] = [60];
+const AUTOPLAY_ADVANCE: [u64; 1] = [150];
+const AUTOPLAY_TALK_CAPTURES: [u64; 10] = [40, 61, 68, 84, 100, 140, 156, 164, 172, 200];
+const AUTOPLAY_TALK_END: u64 = 260;
 /// Guard presses ahead of the Shadow's claws seen at ticks 1194 and 1361
 /// in earlier unattended runs.
 const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
@@ -2024,7 +2163,12 @@ fn simulate(
         queued
     };
     let (stick, jump, decide) = if game.autoplay.is_some() {
-        autoplay_input(tick)
+        if game.autoplay_end == AUTOPLAY_TALK_END {
+            // The talk room's unattended run stands still.
+            (Vec2::ZERO, false, false)
+        } else {
+            autoplay_input(tick)
+        }
     } else {
         let mut stick = Vec2::ZERO;
         for (key, delta) in [
@@ -2056,6 +2200,14 @@ fn simulate(
         game.attack_queued = false;
         (stick, queued.0, queued.1)
     };
+    // Field talk locks control (player+0xdc8 → +0x40 bit 0).
+    let talking = game.talking;
+    let (stick, jump, decide) = if talking {
+        (Vec2::ZERO, false, false)
+    } else {
+        (stick, jump, decide)
+    };
+    let (up, down) = if talking { (false, false) } else { (up, down) };
     // Camera-relative stick in displayed (mirrored) space: forward is the
     // view direction on the ground, right is screen right.
     let eye = from_world(rig.camera.eye) * MIRROR;
@@ -2087,7 +2239,7 @@ fn simulate(
         AUTOPLAY_GUARDS.contains(&tick)
     } else {
         std::mem::take(&mut game.guard_queued)
-    };
+    } && !talking;
     // The current target: the enemy while it can be hit.
     let target = game
         .enemy
@@ -2409,6 +2561,414 @@ fn present_effects(
     }
 }
 
+/// A collision shape for the talk camera: bone, offset, height offset,
+/// radius and height (model space, Y up).
+#[derive(Clone, Copy, Debug)]
+struct Shape {
+    bone: usize,
+    offset: Vec3,
+    pos_h: f32,
+    radius: f32,
+    height: f32,
+}
+
+struct NpcSource {
+    model: model_inspection::InspectionModel,
+    frames: Vec<Vec<Vec3>>,
+    bones: Vec<HashMap<usize, Mat4>>,
+    loop_start: u32,
+    target: Shape,
+    sheet: Sheet,
+    font: SystemFont,
+    lines: HashMap<u32, Vec<u8>>,
+    colour: u32,
+    label: Vec<u8>,
+    offset: Vec3,
+    yaw: f32,
+    script: Vec<windows_shell::dialogue::Op>,
+}
+
+/// Sora's OBJ ellipsoid (P_EX100 type 23 entry 1): radius, height and its
+/// centre above the root; the towns-person reaction sphere (composed for
+/// Axel): centre 200 up, radius 200, height 200 (dialogue-01 §2.2).
+const SORA_OBJ: [f32; 3] = [35., 55., 85.];
+const REACTION_SPHERE: [f32; 3] = [200., 200., 200.];
+/// cmd 31 "Talk": angle gate cos 135° (+0x10); message 0x81ea.
+const TALK_DOT: f32 = -std::f32::consts::FRAC_1_SQRT_2;
+const TALK_LABEL: u32 = 0x81ea;
+/// Screen cross-dissolve length (FUN_140163040(8.0, 1): 2 × 8 frames) and
+/// the talk camera's field of view (0x14071a290, 60°).
+const DISSOLVE_FRAMES: u32 = 16;
+const TALK_FOV: f32 = std::f32::consts::FRAC_PI_3;
+
+/// The field-talk state: the NPC, the window art and font, the running
+/// script and the talk camera (FUN_140401410 / FUN_140400f90).
+#[derive(Resource)]
+struct Talk {
+    position: Vec3,
+    yaw: f32,
+    home_yaw: f32,
+    tick: u32,
+    frames: Vec<Vec<Vec3>>,
+    bones: Vec<HashMap<usize, Mat4>>,
+    loop_start: u32,
+    target: Shape,
+    indices: Vec<Vec<u32>>,
+    sheet: Sheet,
+    font: SystemFont,
+    lines: HashMap<u32, Vec<u8>>,
+    colour: u32,
+    label: Vec<u8>,
+    script: Vec<windows_shell::dialogue::Op>,
+    /// Script position while talking.
+    active: Option<usize>,
+    current: Option<windows_shell::dialogue::TalkWindow>,
+    closing: Vec<windows_shell::dialogue::TalkWindow>,
+    wait: f32,
+    /// Talk camera eye and target (scene coordinates).
+    camera: Option<(Vec3, Vec3)>,
+    /// Remaining cross-dissolve frames, and a snapshot to take this frame.
+    dissolve: u32,
+    snapshot: bool,
+    /// Reaction candidate this frame: Some(dimmed).
+    reaction: Option<bool>,
+}
+
+#[derive(Component)]
+struct NpcRoot;
+#[derive(Component)]
+struct NpcPart(usize);
+#[derive(Component)]
+struct SnapshotCamera;
+#[derive(Component)]
+struct DissolveOverlay;
+
+fn load_npc(
+    source: &ProbeSource,
+    base: &Path,
+    config: &Config,
+    npc: &NpcConfig,
+) -> Result<NpcSource, Box<dyn std::error::Error>> {
+    let menu = config
+        .menu
+        .as_ref()
+        .ok_or("an NPC needs the menu sources")?;
+    let mut models =
+        model_inspection::read_selected_models(source, &base.join(&npc.model_selection))?;
+    if models.len() != 1 {
+        return Err("NPC selection requires exactly one model".into());
+    }
+    let model = models.remove(0);
+    let collision = object_collision::read(bar_entry_typed(
+        &read_archive(source, &npc.target_model)?,
+        23,
+    )?)?;
+    let t = collision
+        .iter()
+        .find(|e| e.kind == object_collision::TARGET && e.bone >= 0)
+        .ok_or("no TARGET shape for the talk camera")?;
+    let target = match &npc.camera_shape {
+        Some(c) => Shape {
+            bone: c.bone,
+            offset: Vec3::from_array(c.offset),
+            pos_h: c.pos_h,
+            radius: c.radius,
+            height: c.height,
+        },
+        None => Shape {
+            bone: t.bone as usize,
+            offset: Vec3::new(
+                t.position[0] as f32,
+                t.position[1] as f32,
+                t.position[2] as f32,
+            ),
+            pos_h: t.position_height as f32,
+            radius: t.radius as f32,
+            height: t.height as f32,
+        },
+    };
+    let selected = motion::read_slots(
+        source,
+        &npc.motion_set.index,
+        npc.motion_set.ordinal,
+        npc.motion_set.name_hash,
+        &[0],
+    )?;
+    let sel = selected.first().ok_or("NPC idle motion absent")?;
+    let (clip, key_start) = clip_for(sel)?;
+    let (mut frames, mut bones) = (Vec::new(), Vec::new());
+    for offset in 0..=clip.end {
+        let (pose, evaluated) = model
+            .skinning
+            .sample_evaluated(&sel.motion, (key_start + offset) as f32)?;
+        let r = Vec3::from_array(evaluated.root_translation);
+        frames.push(
+            pose.position_bits
+                .iter()
+                .map(|p| Vec3::from_array(p.map(f32::from_bits)) - r)
+                .collect(),
+        );
+        let mut b = HashMap::new();
+        if let Some(m) = pose.matrix_bits.get(target.bone) {
+            let mut m = Mat4::from_cols_array(&m.map(f32::from_bits));
+            m.w_axis -= r.extend(0.);
+            b.insert(target.bone, m);
+        }
+        bones.push(b);
+    }
+    fn loc(l: &Locator) -> (&str, usize, [u8; 16]) {
+        (l.index.as_str(), l.ordinal, l.name_hash)
+    }
+    let sheet = hud::load_window_sheet(source, loc(&npc.font_info), loc(&npc.world_messages))?;
+    let font = hud::load_font(source, loc(&npc.font_image), loc(&npc.font_info), b"evt\0")?;
+    let texts = hud::load_messages(
+        source,
+        &npc.messages.index,
+        npc.messages.ordinal,
+        npc.messages.name_hash,
+        &npc.script,
+    )?;
+    let lines = npc.script.iter().copied().zip(texts).collect();
+    let colour = hud::ftst_colour(&read_archive(source, &config.system)?, 5, npc.world)?;
+    let label = hud::load_messages(
+        source,
+        &menu.messages.index,
+        menu.messages.ordinal,
+        menu.messages.name_hash,
+        &[TALK_LABEL],
+    )?
+    .remove(0);
+    Ok(NpcSource {
+        model,
+        frames,
+        bones,
+        loop_start: clip.loop_start,
+        target,
+        sheet,
+        font,
+        lines,
+        colour,
+        label,
+        offset: Vec3::from_array(npc.offset),
+        yaw: npc.yaw,
+        // Composed libretto script: op 1 per message id.
+        script: npc
+            .script
+            .iter()
+            .map(|&id| windows_shell::dialogue::Op::Message(id))
+            .collect(),
+    })
+}
+
+/// FUN_140175e50 (flag 1): the target is the shape centre; the eye sits
+/// `radius` from it toward the player, raised by `height`.
+fn talk_camera(talk: &Talk, player: Vec3) -> (Vec3, Vec3) {
+    let s = talk.target;
+    let m = talk.bones[(talk.tick as usize).min(talk.bones.len() - 1)]
+        .get(&s.bone)
+        .copied()
+        .unwrap_or(Mat4::IDENTITY);
+    let turn = Quat::from_rotation_y(talk.yaw);
+    let centre = talk.position + turn * (m.transform_point3(s.offset) + Vec3::Y * s.pos_h);
+    let toward = ((player - centre) * Vec3::new(1., 0., 1.)).normalize_or(Vec3::Z);
+    (centre + toward * s.radius + Vec3::Y * s.height, centre)
+}
+
+/// One frame of field talk: the NPC's idle, the reaction-command test
+/// (FUN_140407de0 / FUN_1404088f0), and while talking the script
+/// (FUN_1403ecb60), its windows and Sora turning toward the NPC.
+fn talk_tick(mut game: ResMut<Game>, talk: Option<ResMut<Talk>>, hud: Option<ResMut<Hud>>) {
+    use windows_shell::dialogue::{Op, TalkWindow};
+    let Some(mut talk) = talk else { return };
+    let tick = game.tick;
+    let autoplay = game.autoplay.is_some();
+    let rc = std::mem::take(&mut game.rc_queued) || (autoplay && AUTOPLAY_TALK.contains(&tick));
+    let advance =
+        std::mem::take(&mut game.advance_queued) || (autoplay && AUTOPLAY_ADVANCE.contains(&tick));
+    // The talk motion (0x32) is absent from Axel's set, so he keeps idling.
+    talk.tick += 1;
+    if talk.tick as usize >= talk.frames.len() {
+        talk.tick = talk.loop_start;
+    }
+    talk.dissolve = talk.dissolve.saturating_sub(1);
+    let sora = Vec3::from_array(game.player.position);
+    if talk.active.is_none() {
+        let sora_centre = sora + Vec3::Y * SORA_OBJ[2];
+        let npc_centre = talk.position + Vec3::Y * REACTION_SPHERE[2];
+        let d = npc_centre - sora_centre;
+        let (r, h) = (
+            REACTION_SPHERE[0] + SORA_OBJ[0],
+            REACTION_SPHERE[1] + SORA_OBJ[1],
+        );
+        let inside = (d.x * d.x + d.z * d.z) / (r * r) + d.y * d.y / (h * h) < 1.;
+        // cmd flags bit 4: no Talk in battle (an enemy is active).
+        let battle = game.enemy.as_ref().is_some_and(|rt| rt.enemy.alive());
+        let facing = Vec3::new(game.player.yaw.sin(), 0., game.player.yaw.cos());
+        let dir = (d * Vec3::new(1., 0., 1.)).normalize_or_zero();
+        talk.reaction = (inside && !battle && !game.player.action.airborne())
+            .then(|| dir.dot(facing) < TALK_DOT);
+        if rc && talk.reaction == Some(false) {
+            // FUN_140401410 → FUN_140400f90: lock Sora, snap the NPC to face
+            // him, cross-dissolve to the talk camera.
+            talk.active = Some(0);
+            game.talking = true;
+            let to_sora = sora - talk.position;
+            talk.yaw = to_sora.x.atan2(to_sora.z);
+            talk.snapshot = true;
+            talk.dissolve = DISSOLVE_FRAMES;
+            let cam = talk_camera(&talk, sora);
+            talk.camera = Some(cam);
+            game.event(serde_json::json!({"event":"talk_start","tick":tick,
+                "camera_eye":cam.0.to_array(),"camera_target":cam.1.to_array()}));
+        }
+    }
+    if let Some(mut i) = talk.active {
+        // Sora turns toward the NPC at his turn rate (FUN_1403b65c0).
+        let v = talk.position - sora;
+        let want = v.x.atan2(v.z);
+        let step = game.params.turn_speed;
+        let delta = (want - game.player.yaw + std::f32::consts::PI)
+            .rem_euclid(std::f32::consts::TAU)
+            - std::f32::consts::PI;
+        game.player.yaw += delta.clamp(-step, step);
+        loop {
+            let Some(op) = talk.script.get(i).cloned() else {
+                // End: restore facing, camera (with a dissolve) and control.
+                talk.active = None;
+                talk.yaw = talk.home_yaw;
+                talk.camera = None;
+                talk.snapshot = true;
+                talk.dissolve = DISSOLVE_FRAMES;
+                game.talking = false;
+                game.event(serde_json::json!({"event":"talk_end","tick":tick}));
+                break;
+            };
+            match op {
+                Op::Message(id) => match talk.current.as_ref().map(|w| w.state) {
+                    None => {
+                        let text = talk.lines.get(&id).cloned().unwrap_or_default();
+                        let window = TalkWindow::new(
+                            &talk.sheet.sequence,
+                            text,
+                            talk.colour,
+                            &talk.font.widths,
+                        );
+                        game.event(serde_json::json!({"event":"talk_window","tick":tick,
+                            "message":id,"size":window.size()}));
+                        talk.current = Some(window);
+                        break;
+                    }
+                    Some(3) => {
+                        let mut w = talk.current.take().unwrap();
+                        w.close();
+                        talk.closing.push(w);
+                        i += 1;
+                    }
+                    Some(_) => break,
+                },
+                Op::Wait(frames) => {
+                    if talk.wait <= 0. {
+                        talk.wait = frames;
+                    }
+                    talk.wait -= 1.;
+                    if talk.wait > 0. {
+                        break;
+                    }
+                    i += 1;
+                }
+                Op::Stop => i = usize::MAX,
+                Op::Signal(_) | Op::Other(..) => i += 1,
+            }
+            if talk.active.is_some() {
+                talk.active = Some(i);
+            }
+        }
+    }
+    let mut sounds = Vec::new();
+    if let Some(w) = talk.current.as_mut() {
+        sounds.extend(w.step(advance));
+    }
+    for w in &mut talk.closing {
+        sounds.extend(w.step(false));
+    }
+    talk.closing.retain(|w| !w.deleted());
+    for s in sounds {
+        game.sound_queue.push((s, "talk"));
+    }
+    if let Some(mut hud) = hud
+        && let Some(m) = hud.menu.as_mut()
+    {
+        let label = talk.label.clone();
+        m.menu.reaction = if game.talking {
+            None
+        } else {
+            talk.reaction
+                .map(|dimmed| command::Reaction { label, dimmed })
+        };
+    }
+}
+
+fn present_npc(
+    talk: Option<Res<Talk>>,
+    mut roots: Query<&mut Transform, With<NpcRoot>>,
+    parts: Query<(&NpcPart, &Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let Some(talk) = talk else { return };
+    if let Ok(mut t) = roots.single_mut() {
+        t.translation = talk.position;
+        t.rotation = Quat::from_rotation_y(talk.yaw);
+    }
+    let frame = &talk.frames[(talk.tick as usize).min(talk.frames.len() - 1)];
+    for (part, handle) in &parts {
+        let positions: Vec<[f32; 3]> = talk.indices[part.0]
+            .iter()
+            .map(|&i| frame[i as usize].to_array())
+            .collect();
+        if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        }
+    }
+}
+
+/// FUN_140163040 / FUN_1401635a0: on a camera cut the old frame is
+/// snapshotted and drawn over the new view at alpha falling 1 → 0 over 16
+/// frames. The snapshot renders the old view with a second camera before
+/// `camera_control` moves the main one.
+#[allow(clippy::type_complexity)]
+fn dissolve_present(
+    talk: Option<ResMut<Talk>>,
+    main: Query<(&Transform, &Projection), CameraOnly>,
+    mut snapshot: Query<
+        (&mut Camera, &mut Transform, &mut Projection),
+        (With<SnapshotCamera>, Without<SoraRoot>, Without<WeaponRoot>),
+    >,
+    mut overlay: Query<&mut Sprite, With<DissolveOverlay>>,
+    windows: Query<&Window>,
+) {
+    let Some(mut talk) = talk else { return };
+    let Ok((mut camera, mut transform, mut projection)) = snapshot.single_mut() else {
+        return;
+    };
+    camera.is_active = false;
+    if std::mem::take(&mut talk.snapshot)
+        && let Ok((t, p)) = main.single()
+    {
+        *transform = *t;
+        *projection = p.clone();
+        camera.is_active = true;
+    }
+    if let Ok(mut sprite) = overlay.single_mut() {
+        sprite.color = Color::srgba(1., 1., 1., talk.dissolve as f32 / DISSOLVE_FRAMES as f32);
+        if let Ok(window) = windows.single() {
+            let size = Vec2::new(window.width(), window.height());
+            if sprite.custom_size != Some(size) {
+                sprite.custom_size = Some(size);
+            }
+        }
+    }
+}
+
 /// Frame-8 sound triggers of Sora's current clip (the Keyblade's motion)
 /// reached since the last scan; a new action or a loop rescans from 0.
 fn sora_sounds(game: &mut Game) {
@@ -2526,6 +3086,7 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
 
 fn hud_present(
     hud: Option<ResMut<Hud>>,
+    talk: Option<Res<Talk>>,
     mut images: ResMut<Assets<Image>>,
     windows: Query<&Window>,
     mut overlay: Query<&mut Sprite, With<HudOverlay>>,
@@ -2581,6 +3142,23 @@ fn hud_present(
         );
     }
     draws.extend(gauge.draw(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>()));
+    // Message windows (task priority 25000) draw above the HUD.
+    if let Some(t) = &talk {
+        let first = textures.len();
+        textures.push(Texture {
+            rgba: &t.sheet.texture_rgba,
+            size: t.sheet.texture_size.map(|v| v as usize),
+            texel_scale: t.sheet.texel_scale as f32,
+        });
+        textures.push(Texture {
+            rgba: &t.font.rgba,
+            size: t.font.size.map(|v| v as usize),
+            texel_scale: t.font.texel_scale as f32,
+        });
+        for w in t.closing.iter().chain(&t.current) {
+            draws.extend(w.draw(first, first + 1));
+        }
+    }
     canvas.render(&draws, &textures);
     if let Some(mut target) = images.get_mut(image.id()) {
         target.data = Some(canvas.rgba.clone());
@@ -2966,14 +3544,20 @@ fn present_enemy(
 /// The weapon root, distinct from Sora's root transform.
 type WeaponOnly = (With<WeaponRoot>, Without<SoraRoot>);
 /// The camera never shares a transform with Sora's hierarchy.
-type CameraOnly = (With<Camera3d>, Without<SoraRoot>, Without<WeaponRoot>);
+type CameraOnly = (
+    With<Camera3d>,
+    Without<SoraRoot>,
+    Without<WeaponRoot>,
+    Without<SnapshotCamera>,
+);
 
 fn camera_control(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
     mut rig: ResMut<CameraRig>,
-    mut camera: Query<&mut Transform, CameraOnly>,
+    mut camera: Query<(&mut Transform, &mut Projection), CameraOnly>,
+    talk: Option<Res<Talk>>,
 ) {
     if mouse.pressed(MouseButton::Right) {
         rig.pending_turn = (rig.pending_turn + motion.delta.x * 0.1).clamp(-30., 30.);
@@ -2981,10 +3565,27 @@ fn camera_control(
     if keys.just_pressed(KeyCode::KeyC) {
         rig.recenter_queued = true;
     }
-    let eye = from_world(rig.camera.eye) * MIRROR;
-    let look_at = from_world(rig.camera.look_at) * MIRROR;
-    if let Ok(mut transform) = camera.single_mut() {
+    let (eye, look_at, fov) = match talk.as_ref().and_then(|t| t.camera) {
+        // The talk camera (FUN_140175e50): 60° in the game's horizontal
+        // 4:3 sense, converted like the follow camera's.
+        Some((eye, target)) => (
+            eye * MIRROR,
+            target * MIRROR,
+            2. * (240. / (320. / (TALK_FOV / 2.).tan())).atan(),
+        ),
+        None => (
+            from_world(rig.camera.eye) * MIRROR,
+            from_world(rig.camera.look_at) * MIRROR,
+            rig.camera.vertical_fov(),
+        ),
+    };
+    if let Ok((mut transform, mut projection)) = camera.single_mut() {
         *transform = Transform::from_translation(eye).looking_at(look_at, Vec3::Y);
+        if let Projection::Perspective(p) = projection.as_mut()
+            && p.fov != fov
+        {
+            p.fov = fov;
+        }
     }
 }
 
@@ -3100,7 +3701,7 @@ fn finish(
     }
     if let Some(dir) = game.autoplay.clone()
         && !game.capture_pending
-        && let Some(&at) = AUTOPLAY_CAPTURES.get(game.captures_taken)
+        && let Some(&at) = game.captures.get(game.captures_taken)
         && game.tick >= at
     {
         game.capture_pending = true;
@@ -3157,8 +3758,8 @@ fn finish(
         }
     }
     let autoplay_done = game.autoplay.is_some()
-        && game.tick >= AUTOPLAY_END
-        && game.captures_taken == AUTOPLAY_CAPTURES.len();
+        && game.tick >= game.autoplay_end
+        && game.captures_taken == game.captures.len();
     let window_closed = closed.read().count() > 0;
     if keys.just_pressed(KeyCode::Escape)
         || window_closed
@@ -3185,7 +3786,7 @@ fn finish(
 
 /// Double-click launch: with no arguments, read the three required paths
 /// (and optional extra options) from a private launch file outside Git.
-fn launch_file_args() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn launch_file_args(name: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     #[derive(Deserialize)]
     struct Launch {
         steam_root: PathBuf,
@@ -3199,11 +3800,12 @@ fn launch_file_args() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         for up in exe.ancestors().skip(1).take(4) {
-            candidates.push(up.join(".local/test-room/launch.json"));
+            candidates.push(up.join(format!(".local/test-room/{name}.json")));
         }
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        candidates.push(PathBuf::from(local).join("KH2FinalRewrite/test-room-launch.json"));
+        candidates
+            .push(PathBuf::from(local).join(format!("KH2FinalRewrite/test-room-{name}.json")));
     }
     let path = candidates.iter().find(|p| p.is_file()).ok_or_else(|| {
         format!(
@@ -3223,8 +3825,11 @@ fn launch_file_args() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
 
 fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    // No arguments: the private launch file; `talk`: the talk-room one.
     if args.is_empty() {
-        args = launch_file_args()?;
+        args = launch_file_args("launch")?;
+    } else if args.len() == 1 && args[0].as_os_str() == "talk" {
+        args = launch_file_args("launch-talk")?;
     }
     if args.len() < 3 {
         return Err("usage: test_room <Steam-root> <manifest> <test-room-config> [--log new.jsonl] [--frames N] [--autoplay <new-capture-dir>] [--gamepad] [--show-collision] [--basic-fk]".into());
@@ -3288,6 +3893,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
     for (action, clip) in &loaded.actions {
         poses.insert(*action, *clip);
     }
+    let talk_room = loaded.npc.is_some();
     let mut game = Game {
         params: loaded.params,
         clips: loaded.clips,
@@ -3323,6 +3929,19 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         sound_queue: Vec::new(),
         sound_frame: None,
         effect_queue: Vec::new(),
+        talking: false,
+        rc_queued: false,
+        advance_queued: false,
+        captures: if talk_room {
+            &AUTOPLAY_TALK_CAPTURES
+        } else {
+            &AUTOPLAY_CAPTURES
+        },
+        autoplay_end: if talk_room {
+            AUTOPLAY_TALK_END
+        } else {
+            AUTOPLAY_END
+        },
     };
     game.event(loaded.summary);
     let output = if loaded.banks.numbers().is_empty() {
@@ -3344,6 +3963,45 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         output,
         banks: loaded.banks,
         alarm: false,
+    };
+    let (talk, npc_model) = match loaded.npc {
+        Some(n) => {
+            let position = loaded.spawn + n.offset;
+            game.event(serde_json::json!({"event":"npc","position":position.to_array(),"yaw":n.yaw,
+                "frames":n.frames.len(),"target_shape":format!("{:?}", n.target),
+                "lines":n.lines.iter().map(|(k, v)| (format!("{k:#x}"), v.len())).collect::<HashMap<_, _>>(),
+                "text_colour":format!("{:#010x}", n.colour),"window_texel_scale":n.sheet.texel_scale,
+                "font_texel_scale":n.font.texel_scale}));
+            (
+                Some(Talk {
+                    position,
+                    yaw: n.yaw,
+                    home_yaw: n.yaw,
+                    tick: 0,
+                    frames: n.frames,
+                    bones: n.bones,
+                    loop_start: n.loop_start,
+                    target: n.target,
+                    indices: Vec::new(),
+                    sheet: n.sheet,
+                    font: n.font,
+                    lines: n.lines,
+                    colour: n.colour,
+                    label: n.label,
+                    script: n.script,
+                    active: None,
+                    current: None,
+                    closing: Vec::new(),
+                    wait: 0.,
+                    camera: None,
+                    dissolve: 0,
+                    snapshot: false,
+                    reaction: None,
+                }),
+                Some(n.model),
+            )
+        }
+        None => (None, None),
     };
     let (effects, effect_atlas) = match loaded.effects {
         Some(e) => {
@@ -3443,7 +4101,11 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
     eprintln!(
         "Test room ready. WASD moves (Shift walks), Up/Down choose a command, Space jumps, Enter/K/left-click attacks, Q/E or right-drag turns the camera, -/= zoom, C recenters, Esc exits."
     );
-    Ok(App::new()
+    let mut app = App::new();
+    if let Some(talk) = talk {
+        app.insert_resource(talk);
+    }
+    Ok(app
         .insert_resource(game)
         .insert_resource(Startup {
             room: Some(loaded.room),
@@ -3453,6 +4115,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             hud: loaded.hud,
             enemy_model,
             effect_atlas,
+            npc_model,
         })
         .insert_resource(rig)
         .insert_resource(audio)
@@ -3461,7 +4124,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         .insert_resource(ClearColor(Color::srgb(0.06, 0.07, 0.09)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "KH2FM test room (quarantined source) | WASD move, Shift walk, Space jump, Enter/K/LMB attack, Q/E camera, Esc".into(),
+                title: "KH2FM test room (quarantined source) | WASD move, Shift walk, Space jump, Enter/K/LMB attack, F guard, T talk, Q/E camera, Esc".into(),
                 resolution: (1280, 720).into(),
                 ..default()
             }),
@@ -3475,14 +4138,16 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         .add_systems(PreUpdate, gather_input.after(bevy::input::InputSystems))
         .add_systems(
             FixedUpdate,
-            (simulate, effects_tick, hud_tick, play_sounds).chain(),
+            (simulate, talk_tick, effects_tick, hud_tick, play_sounds).chain(),
         )
         .add_systems(
             Update,
             (
+                dissolve_present,
                 camera_control,
                 present,
                 present_enemy,
+                present_npc,
                 present_effects,
                 hud_present,
                 finish,
