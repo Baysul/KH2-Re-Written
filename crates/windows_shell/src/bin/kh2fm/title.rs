@@ -4,9 +4,9 @@
 //! space, with the system sounds from se000 and the exe's pad/keyboard
 //! mapping (pad mode 7).
 //!
-//! Every launch rehashes the complete selected source once. Not built yet:
-//! the title music (needs a Vorbis decoder), the file menu, the Theater and
-//! the Game Settings overlay. Esc quits (on PC it opens Game Settings).
+//! Every launch checks the selected source (executable and indexes rehashed,
+//! each package byte read verified against the full-scan record). Not built:
+//! the file menu, the Theater and the Game Settings overlay. Esc quits (on PC it opens Game Settings).
 use bevy::{
     app::AppExit,
     input::mouse::MouseWheel,
@@ -567,8 +567,7 @@ fn launch_file_args() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     Ok(args)
 }
 
-fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
-    let mut args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     if args.is_empty() {
         args = launch_file_args()?;
     }
@@ -610,11 +609,12 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             return Err("autoplay capture directory must exist and be empty".into());
         }
     }
-    eprintln!("Validating the selected KH2FM source (full rehash), then decoding the title...");
+    eprintln!("Validating the selected KH2FM source, then decoding the title...");
     let config: Config = serde_json::from_slice(&read_limited(&args[2])?)?;
     if config.schema_version != 1 || config.source_content_identity != source.content_identity() {
         return Err("title config does not match the selected source".into());
     }
+    source.verify_session()?;
     let l = &config.title;
     let menu = layout2d::load(&source, &l.index, l.ordinal, l.name_hash)?;
     let mut banks = Banks::default();
@@ -739,13 +739,15 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         .run())
 }
 
-fn main() -> std::process::ExitCode {
-    match run() {
+/// Runs this program with its arguments; `interactive` = started from the
+/// launcher menu (keep the console open on an error).
+pub fn main(args: Vec<PathBuf>, interactive: bool) -> std::process::ExitCode {
+    match run(args) {
         Ok(AppExit::Success) => std::process::ExitCode::SUCCESS,
         Ok(_) => std::process::ExitCode::FAILURE,
         Err(e) => {
             eprintln!("Title rejected: {e}");
-            if std::env::args_os().len() == 1 {
+            if interactive {
                 eprintln!("Press Enter to close.");
                 let _ = std::io::stdin().read_line(&mut String::new());
             }

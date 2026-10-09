@@ -11,6 +11,10 @@ use std::{
 
 pub const KH2_EXECUTABLE: &str = "KINGDOM HEARTS II FINAL MIX.exe";
 const PACKAGES: [&str; 6] = ["first", "second", "third", "fourth", "fifth", "sixth"];
+/// Schema 2 also records the SHA-256 of every CHUNK_SIZE-byte chunk, so a
+/// session can verify exactly the bytes it reads against the full scan.
+pub const SCHEMA: u32 = 2;
+pub const CHUNK_SIZE: u64 = 1 << 20;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SourceFile {
@@ -19,11 +23,17 @@ pub struct SourceFile {
     pub modified_unix_nanos: u128,
     pub sha256: String,
     pub role: String,
+    /// SHA-256 (hex) of each CHUNK_SIZE chunk in order (schema 2).
+    #[serde(default)]
+    pub chunks: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SourceManifest {
     pub schema_version: u32,
+    /// Binds every file's chunk digests (schema 2); see `chunk_identity`.
+    #[serde(default)]
+    pub chunk_identity: String,
     pub canonical_source_path: PathBuf,
     pub product: String,
     pub observed_app_id: Option<String>,
@@ -49,6 +59,17 @@ fn timestamp(time: SystemTime) -> io::Result<u128> {
 
 /// Hash a regular file using bounded memory, rejecting metadata changes during reading.
 pub fn inspect_file(root: &Path, relative: &str, role: &str) -> io::Result<SourceFile> {
+    inspect_file_with(root, relative, role, true)
+}
+
+/// `inspect_file`; `chunks` = false skips the per-chunk digests (a check
+/// against an existing manifest needs only the whole-file hash).
+pub fn inspect_file_with(
+    root: &Path,
+    relative: &str,
+    role: &str,
+    with_chunks: bool,
+) -> io::Result<SourceFile> {
     let path = root.join(relative);
     let resolved = fs::canonicalize(&path)?;
     if !resolved.starts_with(root) {
@@ -60,15 +81,31 @@ pub fn inspect_file(root: &Path, relative: &str, role: &str) -> io::Result<Sourc
     }
     let mut file = File::open(&resolved)?;
     let mut hash = Sha256::new();
-    let mut buffer = vec![0; 1024 * 1024];
+    let mut buffer = vec![0; CHUNK_SIZE as usize];
     let mut bytes = 0u64;
+    let mut chunks = Vec::new();
     loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
+        // Fill a whole chunk (short reads are legal) so chunk bounds are
+        // fixed multiples of CHUNK_SIZE.
+        let mut filled = 0;
+        while filled < buffer.len() {
+            let count = file.read(&mut buffer[filled..])?;
+            if count == 0 {
+                break;
+            }
+            filled += count;
+        }
+        if filled == 0 {
             break;
         }
-        hash.update(&buffer[..count]);
-        bytes += count as u64;
+        hash.update(&buffer[..filled]);
+        if with_chunks {
+            chunks.push(format!("{:x}", Sha256::digest(&buffer[..filled])));
+        }
+        bytes += filled as u64;
+        if filled < buffer.len() {
+            break;
+        }
     }
     let after = file.metadata()?;
     let path_after = fs::metadata(&resolved)?;
@@ -88,7 +125,65 @@ pub fn inspect_file(root: &Path, relative: &str, role: &str) -> io::Result<Sourc
         modified_unix_nanos: timestamp(before.modified()?)?,
         sha256: format!("{:x}", hash.finalize()),
         role: role.into(),
+        chunks,
     })
+}
+
+/// SHA-256 over every file's chunk digests in path order, so the chunk
+/// records cannot drift from the manifest they came with.
+pub fn chunk_identity(files: &[SourceFile]) -> String {
+    let mut sorted: Vec<_> = files.iter().collect();
+    sorted.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    let mut hash = Sha256::new();
+    hash.update(b"kh2-source-chunks-v1\0");
+    hash.update(CHUNK_SIZE.to_le_bytes());
+    for file in sorted {
+        hash.update((file.relative_path.len() as u64).to_le_bytes());
+        hash.update(file.relative_path.as_bytes());
+        hash.update((file.chunks.len() as u64).to_le_bytes());
+        for c in &file.chunks {
+            hash.update(c.as_bytes());
+        }
+    }
+    format!("{:x}", hash.finalize())
+}
+
+/// `inspect_file` for every listed file, several at a time.
+pub fn inspect_files(
+    root: &Path,
+    list: &[(String, &str)],
+    with_chunks: bool,
+) -> io::Result<Vec<SourceFile>> {
+    let workers = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(list.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results: Vec<std::sync::Mutex<Option<io::Result<SourceFile>>>> =
+        list.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((relative, role)) = list.get(i) else {
+                        break;
+                    };
+                    let r = inspect_file_with(root, relative, role, with_chunks);
+                    *results[i].lock().unwrap() = Some(r);
+                }
+            });
+        }
+    });
+    results
+        .into_iter()
+        .zip(list)
+        .map(|(r, (relative, _))| {
+            r.into_inner()
+                .unwrap()
+                .unwrap_or_else(|| Err(invalid("scan worker stopped")))
+                .map_err(|e| invalid(format!("cannot inspect {relative}: {e}; select the collection install root and finish/verify the installation in Steam")))
+        })
+        .collect()
 }
 
 /// Identity excludes machine-specific root paths and timestamps; names and content remain binding.
@@ -121,21 +216,23 @@ pub fn required_files() -> Vec<(String, &'static str)> {
 
 /// Scan the observed local layout, fail on missing files, and leave unsupported sources quarantined.
 pub fn scan(root: &Path) -> io::Result<SourceManifest> {
+    scan_with(root, true)
+}
+
+/// `scan`; without chunk digests when only whole-file hashes are compared.
+pub fn scan_with(root: &Path, with_chunks: bool) -> io::Result<SourceManifest> {
     let root = fs::canonicalize(root)?;
     if !root.is_dir() {
         return Err(invalid(
             "select the installed game folder, not a file or cache",
         ));
     }
-    let mut files = Vec::new();
-    for (relative, role) in required_files() {
-        let file = inspect_file(&root, &relative, role).map_err(|e| invalid(format!("cannot inspect {relative}: {e}; select the collection install root and finish/verify the installation in Steam")))?;
-        if file.size == 0 {
-            return Err(invalid(format!(
-                "empty required candidate file: {relative}; finish/verify the Steam installation"
-            )));
-        }
-        files.push(file);
+    let files = inspect_files(&root, &required_files(), with_chunks)?;
+    if let Some(empty) = files.iter().find(|f| f.size == 0) {
+        return Err(invalid(format!(
+            "empty required candidate file: {}; finish/verify the Steam installation",
+            empty.relative_path
+        )));
     }
     let acf = root
         .parent()
@@ -151,7 +248,8 @@ pub fn scan(root: &Path) -> io::Result<SourceManifest> {
                 .is_some_and(|name| name == std::ffi::OsStr::new(&dir))
         });
     Ok(SourceManifest {
-        schema_version: 1,
+        schema_version: SCHEMA,
+        chunk_identity: chunk_identity(&files),
         canonical_source_path: root,
         product: "KINGDOM HEARTS II FINAL MIX (Steam collection candidate)".into(),
         observed_app_id: steam_matches

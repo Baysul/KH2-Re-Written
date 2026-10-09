@@ -14,13 +14,13 @@ Current implementation priority is a test room with controllable Sora. **A playa
 
 ### Playing the test room
 
-Each launch rehashes the selected Steam files (about a minute), then decodes everything it needs. Selections and logs are private files outside Steam and Git; the configuration schema is in [T056](docs/tasks/T056-playable-test-room.md).
+One program, `kh2fm`, opens the title screen, the arena test room or the talk test room. Each launch checks the selected Steam files: the executable and package indexes are rehashed, and every package byte the session reads is verified against the full-scan manifest (schema 2, [T080](docs/tasks/T080-launcher-and-session-check.md)). It then decodes everything it needs. Selections and logs are private files outside Steam and Git; the configuration schema is in [T056](docs/tasks/T056-playable-test-room.md).
 
 ```powershell
-cargo run -p windows_shell --bin test_room --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/test-room.json'
+cargo run -p windows_shell --bin kh2fm --locked -- room '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/test-room.json'
 ```
 
-To launch by double-clicking, build `cargo build --release -p windows_shell --bin test_room --locked` and create `.local/test-room/launch.json` in the checkout (the exe also checks `%LOCALAPPDATA%/KH2FinalRewrite/test-room-launch.json`; the desktop app can virtualize that folder) with `steam_root`, `manifest`, `config` (and optional `options`, e.g. `["--gamepad"]`); `target/release/test_room.exe` then starts without arguments. `--basic-fk` selects the older T053 FK-only poses for comparison.
+`title` and `talk` take the same three paths with their own configuration. To launch by double-clicking, build `cargo build --release -p windows_shell --bin kh2fm --locked` and create `.local/test-room/launch.json`, `launch-talk.json` and `launch-title.json` in the checkout (the exe also checks `%LOCALAPPDATA%/KH2FinalRewrite/test-room-<name>.json`) with `steam_root`, `manifest`, `config` (and optional `options`); `target/release/kh2fm.exe` then shows a menu. `--basic-fk` selects the older T053 FK-only poses for comparison.
 
 Controls: WASD or arrows move (hold Shift to walk), Space jumps, Enter / K / left mouse attacks (press again during a swing to continue the combo; attack in the air for the air combo), Q/E or right-mouse drag turns the camera, +/- zoom, F1 shows collision, Esc exits. Add `--gamepad` for a controller (left stick move, A attack, B jump, right stick camera), `--log '<new.jsonl>'` for an action log, or `--autoplay '<empty-private-dir>'` for an unattended scripted run with captures.
 
@@ -54,7 +54,7 @@ After selecting your collection install root, write a candidate manifest to an *
 cargo run -p source_identity --release --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json'
 ```
 
-The scanner hashes only the observed KH2 candidate set. It never labels an unknown build supported and refuses existing output files. Full shared/language dependency coverage and actual gameplay remain pending. Every eventual gameplay session will require the supported installation even when a cache exists.
+The scanner hashes only the observed KH2 candidate set, recording each file's SHA-256 and the SHA-256 of every 1 MiB chunk. It never labels an unknown build supported and refuses existing output files. Full shared/language dependency coverage and actual gameplay remain pending. Every session still checks the installation itself: a manifest only records what the bytes must be.
 
 Use the optimized scanner for multi-gigabyte packages. Detailed manifests and package records are stored outside this repository. The smoke app's default log goes under `%LOCALAPPDATA%/KH2FinalRewrite/logs/`.
 

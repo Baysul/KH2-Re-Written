@@ -1,7 +1,8 @@
 //! Playable source-bound test room: Sora walks/runs, jumps/lands and attacks
 //! with motions read from the selected Steam installation.
 //!
-//! Every launch rehashes the complete selected source once, then decodes the
+//! Every launch checks the selected source (executable and indexes rehashed,
+//! each package byte read verified against the full-scan record), then decodes the
 //! room, Sora's model/motion set and his PRTY/SSTM/PTYA records from it. The
 //! controller (`player_sim`) is a test-room profile: data-backed where a
 //! public lead exists, explicit choices elsewhere. It is not a measured
@@ -921,8 +922,9 @@ fn load(
         return Err("test room configuration identity/schema invalid".into());
     }
     let base = config_path.parent().ok_or("configuration directory")?;
-    // One complete selected-source scan admits this session.
-    source.verify_full_source()?;
+    // The session check (executable and indexes rehashed, every package
+    // byte read verified by chunk) admits this session.
+    source.verify_session()?;
     let mut actors =
         model_inspection::read_selected_models(source, &base.join(&config.actor_selection))?;
     if actors.len() != 1 {
@@ -4740,8 +4742,7 @@ fn launch_file_args(name: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Erro
     Ok(args)
 }
 
-fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
-    let mut args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     // No arguments: the private launch file; `talk`: the talk-room one.
     if args.is_empty() {
         args = launch_file_args("launch")?;
@@ -4800,7 +4801,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         }
         None => None,
     };
-    eprintln!("Validating the selected KH2FM source (full rehash), then decoding the test room...");
+    eprintln!("Validating the selected KH2FM source, then decoding the test room...");
     let loaded = load(&source, &args[2], basic_fk)?;
     let log = match log_path {
         Some(path) => Some(OpenOptions::new().write(true).create_new(true).open(path)?),
@@ -5123,14 +5124,16 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         .run())
 }
 
-fn main() -> std::process::ExitCode {
-    match run() {
+/// Runs this program with its arguments; `interactive` = started from the
+/// launcher menu (keep the console open on an error).
+pub fn main(args: Vec<PathBuf>, interactive: bool) -> std::process::ExitCode {
+    match run(args) {
         Ok(AppExit::Success) => std::process::ExitCode::SUCCESS,
         Ok(_) => std::process::ExitCode::FAILURE,
         Err(e) => {
             eprintln!("Test room rejected: {e}");
             // Keep a double-clicked console open long enough to read the error.
-            if std::env::args_os().len() == 1 {
+            if interactive {
                 eprintln!("Press Enter to close.");
                 let _ = std::io::stdin().read_line(&mut String::new());
             }
