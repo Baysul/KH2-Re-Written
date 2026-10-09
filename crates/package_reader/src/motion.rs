@@ -537,10 +537,10 @@ pub fn read_motion_ids(
 }
 
 impl InterpolatedMotion {
-    /// Public FrameData words (FrameLoop, FrameEnd, FramePerSecond) at
-    /// interpolated header words 32..35. Key times observed in this set use
-    /// twice the declared 30-per-second frame units.
-    pub fn frame_window(&self) -> io::Result<(f32, f32, f32)> {
+    /// Public FrameData words (FrameStart, FrameEnd, FramePerSecond,
+    /// FrameReturn) at interpolated header words 32..35. Key times in this
+    /// set use twice the declared 30-per-second frame units.
+    pub fn frame_window(&self) -> io::Result<(f32, f32, f32, f32)> {
         let word = |i: usize| {
             self.interpolated_header_words
                 .get(i)
@@ -548,7 +548,7 @@ impl InterpolatedMotion {
                 .filter(|v| v.is_finite())
                 .ok_or_else(|| invalid("motion frame window absent"))
         };
-        Ok((word(32)?, word(33)?, word(34)?))
+        Ok((word(32)?, word(33)?, word(34)?, word(35)?))
     }
 }
 

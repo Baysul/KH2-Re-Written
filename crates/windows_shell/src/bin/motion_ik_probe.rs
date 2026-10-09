@@ -140,8 +140,8 @@ fn samples(
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
-    if args.len() != 5 {
-        return Err("usage: motion_ik_probe <Steam-root> <manifest> <model-selection> <motion-id-selection> <new-report>".into());
+    if args.len() != 5 && args.len() != 6 {
+        return Err("usage: motion_ik_probe <Steam-root> <manifest> <model-selection> <motion-id-selection> <new-report> [<new-private-payload-dir>]".into());
     }
     let source = ProbeSource::bind_session(&args[0], &args[1])?;
     let output = source.output_path(&args[4])?;
@@ -170,6 +170,53 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         has_weapon: selection.has_weapon,
     };
     let motions = motion::read_motion_ids(&source, &set, &selection.motion_ids)?;
+    // Optional private payloads (original model BAR and each selected
+    // type-9 motion record) for comparison against a reference evaluator.
+    if let Some(dir) = args.get(5) {
+        std::fs::create_dir(dir)?;
+        source.output_path(&dir.join("model-original.bin"))?;
+        let write = |name: String, bytes: &[u8]| -> std::io::Result<()> {
+            let mut f = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dir.join(name))?;
+            f.write_all(bytes)?;
+            f.sync_all()
+        };
+        let mut checked = source.open_index(&model.index)?;
+        let entry = checked
+            .inventory
+            .entries
+            .get(model.ordinal)
+            .ok_or("model entry absent")?;
+        let original = package_reader::original::read_original(&mut checked.reader, entry)?;
+        write("model-original.bin".into(), &original.bytes)?;
+        let mut mset = source.open_index(&set.index)?;
+        let entry = mset
+            .inventory
+            .entries
+            .get(set.ordinal)
+            .filter(|e| e.name_hash == set.name_hash)
+            .ok_or("motion set entry absent")?;
+        let original = package_reader::original::read_original(&mut mset.reader, entry)?;
+        let table = package_reader::bar::read_bar(&original.bytes)?;
+        for (selected, id) in motions.iter().zip(&selection.motion_ids) {
+            let e = &table.entries[selected.slot];
+            let anb = &original.bytes[e.offset as usize..e.offset as usize + e.size as usize];
+            let nested = package_reader::bar::read_bar(anb)?;
+            let m = nested
+                .entries
+                .iter()
+                .find(|e| e.entry_type == 9 && e.offset > 0 && e.size > 0)
+                .ok_or("motion record absent")?;
+            write(
+                format!("motion-{id:03}-slot-{:04}.bin", selected.slot),
+                &anb[m.offset as usize..m.offset as usize + m.size as usize],
+            )?;
+        }
+        checked.verify_unchanged()?;
+        mset.verify_unchanged()?;
+    }
     let report = json!({"source_qualification":"quarantined_unqualified","skeleton":bones,
         "motions":motions.iter().zip(&selection.motion_ids).map(|(m,id)| json!({"motion_id":id,"slot":m.slot,"sha256":m.sha256,
             "triggers":m.triggers.iter().map(|t| &t.records).collect::<Vec<_>>(),"tables":tables(&m.motion),

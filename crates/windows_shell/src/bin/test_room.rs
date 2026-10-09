@@ -118,11 +118,15 @@ struct Game {
     jump_queued: bool,
     attack_queued: bool,
     display: Vec<Vec3>,
-    blend_from: Option<(Vec<Vec3>, u32)>,
+    /// Pose, Keyblade transform and start tick of the active crossfade.
+    blend_from: Option<(Vec<Vec3>, Transform, u64)>,
+    display_hand: Transform,
     shown_action: Option<(Action, u64)>,
     action_started: u64,
     exit_code: Option<u8>,
     show_collision: bool,
+    rendered_frames: u64,
+    autoplay_failed: bool,
 }
 
 #[derive(Resource)]
@@ -206,16 +210,21 @@ fn word_f32(bytes: &[u8], at: usize) -> Result<f32, Box<dyn std::error::Error>> 
 }
 
 /// Clip timing and honoured range triggers from one decoded motion.
-fn clip_for(selected: &motion::SelectedMotion) -> Result<Clip, Box<dyn std::error::Error>> {
-    let (frame_loop, frame_end, fps) = selected.motion.frame_window()?;
-    if !(1. ..=60.).contains(&fps) || !(0. ..=frame_end).contains(&frame_loop) || frame_end < 1. {
+/// Clip timing relative to FrameStart, plus the key time of FrameStart.
+fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn std::error::Error>> {
+    let (frame_start, frame_end, fps, frame_return) = selected.motion.frame_window()?;
+    if !(1. ..=60.).contains(&fps)
+        || !(0. ..frame_end).contains(&frame_start)
+        || !(frame_start..=frame_end).contains(&frame_return)
+    {
         return Err("motion frame window outside test-room profile".into());
     }
     let scale = 60. / fps;
-    let end = (frame_end * scale).round() as u32;
+    let start = (frame_start * scale).round() as u32;
+    let end = (frame_end * scale).round() as u32 - start;
     let mut clip = Clip {
         end,
-        loop_start: ((frame_loop * scale).round() as u32).min(end - 1),
+        loop_start: (frame_return * scale).round() as u32 - start,
         ..Clip::default()
     };
     for record in selected.triggers.iter().flat_map(|t| &t.records.ranges) {
@@ -232,7 +241,7 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<Clip, Box<dyn std::erro
             _ => {}
         }
     }
-    Ok(clip)
+    Ok((clip, start))
 }
 
 struct Loaded {
@@ -410,14 +419,15 @@ fn load(
     let mut by_slot: HashMap<usize, usize> = HashMap::new();
     let mut slots = Vec::new();
     for selected in &motions {
-        let clip = clip_for(selected)?;
+        let (clip, key_start) = clip_for(selected)?;
         let index = match by_slot.get(&selected.slot) {
             Some(&i) => i,
             None => {
                 let mut frames = Vec::with_capacity(clip.end as usize);
                 let mut weapon = Vec::with_capacity(clip.end as usize);
                 let mut root = Vec::with_capacity(clip.end as usize);
-                for frame in 0..clip.end {
+                for offset in 0..=clip.end {
+                    let frame = key_start + offset;
                     let pose = if basic_fk {
                         root.push(Vec3::ZERO);
                         actor.skinning.sample_fk(&selected.motion, frame)?
@@ -905,6 +915,7 @@ const AUTOPLAY_CAPTURES: [u64; 15] = [
     90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100,
 ];
 const AUTOPLAY_END: u64 = 1140;
+const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(
     keys: Res<ButtonInput<KeyCode>>,
@@ -1049,6 +1060,7 @@ fn camera_control(
 }
 
 fn present(
+    fixed: Res<Time<Fixed>>,
     mut game: ResMut<Game>,
     mut roots: Query<&mut Transform, (With<SoraRoot>, Without<WeaponRoot>)>,
     mut hands: Query<(&mut Transform, &mut Visibility), WeaponOnly>,
@@ -1059,7 +1071,7 @@ fn present(
     let started = game.action_started;
     if game.shown_action != Some((action, started)) {
         if game.shown_action.is_some() {
-            game.blend_from = Some((game.display.clone(), BLEND_TICKS));
+            game.blend_from = Some((game.display.clone(), game.display_hand, game.action_started));
         }
         game.shown_action = Some((action, started));
     }
@@ -1069,24 +1081,34 @@ fn present(
     let target = &target[frame.min(target.len() - 1)];
     let mut display = target.clone();
     let weapons = &game.clip_poses[clip].weapon;
-    let hand = weapons[frame.min(weapons.len() - 1)];
+    let mut hand = Transform::from_matrix(weapons[frame.min(weapons.len() - 1)]);
+    // Crossfade measured in simulation ticks (plus the fixed-step overstep),
+    // applied to the body and the Keyblade alike.
+    if let Some((from, from_hand, start)) = &game.blend_from {
+        let elapsed = (game.tick - start) as f32 + fixed.overstep_fraction();
+        let weight = (elapsed / BLEND_TICKS as f32).clamp(0., 1.);
+        if weight >= 1. {
+            game.blend_from = None;
+        } else {
+            for (d, f) in display.iter_mut().zip(from) {
+                *d = f.lerp(*d, weight);
+            }
+            hand = Transform {
+                translation: from_hand.translation.lerp(hand.translation, weight),
+                rotation: from_hand.rotation.slerp(hand.rotation, weight),
+                scale: from_hand.scale.lerp(hand.scale, weight),
+            };
+        }
+    }
+    game.display_hand = hand;
     if let Ok((mut transform, mut visibility)) = hands.single_mut() {
-        *transform = Transform::from_matrix(hand);
+        *transform = hand;
         // The Keyblade is drawn only in battle mode.
         *visibility = if game.player.armed {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
-    }
-    if let Some((from, remaining)) = game.blend_from.take() {
-        let weight = remaining as f32 / (BLEND_TICKS + 1) as f32;
-        for (d, f) in display.iter_mut().zip(&from) {
-            *d = d.lerp(*f, weight);
-        }
-        if remaining > 1 {
-            game.blend_from = Some((from, remaining - 1));
-        }
     }
     for (part, handle) in &parts {
         let positions: Vec<[f32; 3]> = game.part_indices[part.0]
@@ -1104,26 +1126,62 @@ fn present(
     }
 }
 
+/// Unattended runs start with simulation time paused until rendering has
+/// warmed up, so the first capture is not a blank frame.
+fn pause_for_autoplay(game: Res<Game>, mut time: ResMut<Time<Virtual>>) {
+    if game.autoplay.is_some() {
+        time.pause();
+    }
+}
+
+// Bevy systems take each resource as a parameter.
+#[allow(clippy::too_many_arguments)]
 fn finish(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     mut overlay: Query<&mut Visibility, With<CollisionOverlay>>,
     mut game: ResMut<Game>,
+    mut time: ResMut<Time<Virtual>>,
+    mut closed: MessageReader<bevy::window::WindowCloseRequested>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    game.rendered_frames += 1;
+    if game.autoplay.is_some()
+        && time.is_paused()
+        && !game.capture_pending
+        && game.rendered_frames >= AUTOPLAY_WARMUP_FRAMES
+    {
+        time.unpause();
+    }
     if let Some(dir) = game.autoplay.clone()
         && !game.capture_pending
         && let Some(&at) = AUTOPLAY_CAPTURES.get(game.captures_taken)
         && game.tick >= at
     {
         game.capture_pending = true;
+        // Hold simulation time so the capture shows exactly this tick.
+        time.pause();
         let index = game.captures_taken;
         let path = dir.join(format!("test-room-{index:02}.png"));
         let action = format!("{:?}", game.player.action);
         let tick = game.tick;
         commands.spawn(Screenshot::primary_window()).observe(
-            move |event: On<ScreenshotCaptured>, mut game: ResMut<Game>| {
-                let image = event.image.clone().try_into_dynamic().expect("test room capture");
+            move |event: On<ScreenshotCaptured>,
+                  mut game: ResMut<Game>,
+                  mut time: ResMut<Time<Virtual>>| {
+                let image = event
+                    .image
+                    .clone()
+                    .try_into_dynamic()
+                    .expect("test room capture");
+                let luma = image.to_luma8();
+                let (low, high) = luma.pixels().fold((u8::MAX, u8::MIN), |(l, h), p| {
+                    (l.min(p.0[0]), h.max(p.0[0]))
+                });
+                let uniform = high.saturating_sub(low) < 8;
+                if uniform {
+                    game.autoplay_failed = true;
+                }
                 let mut file = OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -1135,7 +1193,11 @@ fn finish(
                 file.sync_all().expect("capture flush");
                 game.capture_pending = false;
                 game.captures_taken += 1;
-                game.event(serde_json::json!({"event":"capture","index":index,"tick":tick,"action":action}));
+                time.unpause();
+                game.event(
+                    serde_json::json!({"event":"capture","index":index,"tick":tick,"action":action,
+                    "luma_range":[low,high],"uniform":uniform}),
+                );
             },
         );
     }
@@ -1152,11 +1214,13 @@ fn finish(
     let autoplay_done = game.autoplay.is_some()
         && game.tick >= AUTOPLAY_END
         && game.captures_taken == AUTOPLAY_CAPTURES.len();
+    let window_closed = closed.read().count() > 0;
     if keys.just_pressed(KeyCode::Escape)
+        || window_closed
         || autoplay_done
         || game.limit.is_some_and(|n| game.tick >= n)
     {
-        let code = if game.autoplay.is_some() && !autoplay_done {
+        let code = if game.autoplay.is_some() && (!autoplay_done || game.autoplay_failed) {
             1
         } else {
             0
@@ -1164,7 +1228,7 @@ fn finish(
         if game.exit_code.is_none() {
             game.exit_code = Some(code);
             let tick = game.tick;
-            game.event(serde_json::json!({"event":"exit","tick":tick,"code":code}));
+            game.event(serde_json::json!({"event":"exit","tick":tick,"code":code,"window_closed":window_closed}));
             exit.write(if code == 0 {
                 AppExit::Success
             } else {
@@ -1231,10 +1295,14 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         }
     }
     let source = ProbeSource::bind_session(&args[0], &args[1])?;
-    let log = match log_path {
+    // Validate the log path now; the file is created only after admission.
+    let log_path = match log_path {
         Some(path) => {
             let path = source.output_path(&path)?;
-            Some(OpenOptions::new().write(true).create_new(true).open(path)?)
+            if path.exists() {
+                return Err("test room log must be new".into());
+            }
+            Some(path)
         }
         None => None,
     };
@@ -1251,6 +1319,10 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
     };
     eprintln!("Validating the selected KH2FM source (full rehash), then decoding the test room...");
     let loaded = load(&source, &args[2], basic_fk)?;
+    let log = match log_path {
+        Some(path) => Some(OpenOptions::new().write(true).create_new(true).open(path)?),
+        None => None,
+    };
     let mut poses = HashMap::new();
     for (action, clip) in &loaded.actions {
         poses.insert(*action, *clip);
@@ -1274,10 +1346,13 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         attack_queued: false,
         display: Vec::new(),
         blend_from: None,
+        display_hand: Transform::IDENTITY,
         shown_action: None,
         action_started: 0,
         exit_code: None,
         show_collision,
+        rendered_frames: 0,
+        autoplay_failed: false,
     };
     game.event(loaded.summary);
     eprintln!(
@@ -1304,9 +1379,13 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
                 resolution: (1280, 720).into(),
                 ..default()
             }),
+            // Closing the window goes through finish() so the exit code and
+            // log record reflect an unfinished unattended run.
+            exit_condition: bevy::window::ExitCondition::DontExit,
+            close_when_requested: false,
             ..default()
         }))
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, pause_for_autoplay))
         .add_systems(PreUpdate, gather_input.after(bevy::input::InputSystems))
         .add_systems(FixedUpdate, simulate)
         .add_systems(Update, (camera_control, present, finish).chain())

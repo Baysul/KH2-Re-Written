@@ -59,12 +59,16 @@ impl Params {
         }
         Ok(())
     }
+    /// Launch speed whose discrete apex (speed reduced by gravity before
+    /// each position step) reaches `jump_height`.
     pub fn jump_speed(&self) -> f32 {
-        (2. * self.gravity * self.jump_height).sqrt()
+        launch_speed(self.gravity, self.jump_height)
     }
 }
 
-/// Motion timing in ticks, with the ANB range triggers the controller honours.
+/// Motion timing in ticks relative to the motion's FrameStart, with the ANB
+/// range triggers the controller honours. `end` is FrameEnd and
+/// `loop_start` FrameReturn; a return at or past the end holds the last frame.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Clip {
     pub end: u32,
@@ -88,17 +92,18 @@ impl Clip {
     fn within(ranges: &[(u32, u32)], frame: u32) -> bool {
         ranges.iter().any(|&(a, b)| (a..=b).contains(&frame))
     }
-    /// Frame shown for a running counter: loops from `loop_start`.
+    /// Frame shown for a running counter: plays to FrameEnd, then loops
+    /// from FrameReturn (or holds FrameEnd when there is no loop span).
     pub fn looped_frame(&self, frame: u32) -> u32 {
-        if frame < self.end {
-            frame
+        if frame <= self.end || self.loop_start >= self.end {
+            frame.min(self.end)
         } else {
-            let span = self.end.saturating_sub(self.loop_start).max(1);
+            let span = self.end - self.loop_start;
             self.loop_start + (frame - self.loop_start) % span
         }
     }
     pub fn held_frame(&self, frame: u32) -> u32 {
-        frame.min(self.end.saturating_sub(1))
+        frame.min(self.end)
     }
 }
 
@@ -188,6 +193,10 @@ pub struct Step {
     pub landed: bool,
 }
 
+fn launch_speed(gravity: f32, height: f32) -> f32 {
+    (2. * gravity * height).sqrt() + gravity * 0.5
+}
+
 fn wrap_angle(a: f32) -> f32 {
     let tau = std::f32::consts::TAU;
     (a + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI
@@ -267,7 +276,7 @@ impl Player {
 
     fn lift(&mut self, height: f32, p: &Params) {
         if height.is_finite() && height > 0. {
-            self.vertical_speed = self.vertical_speed.max((2. * p.gravity * height).sqrt());
+            self.vertical_speed = self.vertical_speed.max(launch_speed(p.gravity, height));
         }
     }
 
@@ -333,10 +342,19 @@ impl Player {
                         && self.frame < clips.land.blend_to_idle.unwrap_or(clips.land.end);
                     let target = if !moving {
                         if landing { Action::Land } else { Action::Idle }
-                    } else if magnitude < p.walk_threshold {
-                        Action::Walk
                     } else {
-                        Action::Run
+                        // Hysteresis keeps an analog stick near the threshold
+                        // from flipping between walk and run every tick.
+                        let band = if self.action == Action::Run {
+                            -0.05
+                        } else {
+                            0.05
+                        };
+                        if magnitude < p.walk_threshold + band {
+                            Action::Walk
+                        } else {
+                            Action::Run
+                        }
                     };
                     self.idle_ticks = self.idle_ticks.saturating_add(1);
                     if self.armed && self.idle_ticks >= p.disarm_ticks && target != Action::Land {
@@ -431,6 +449,16 @@ impl Player {
                 self.start(Action::AirAttack(i + 1), step);
                 self.lift(clips.air_combo[i + 1].hop, p);
             } else if self.frame >= clip.end {
+                let [x, y, z] = self.position;
+                // A swing that touched down finishes on the ground.
+                if world
+                    .floor(x, z, y + 1e-3)
+                    .is_some_and(|f| (y - f).abs() < 1e-3)
+                {
+                    self.start(Action::Land, step);
+                    step.landed = true;
+                    return;
+                }
                 self.start(Action::Fall, step);
             }
         } else if input.attack && !self.air_combo_spent && !clips.air_combo.is_empty() {
@@ -467,6 +495,10 @@ impl Player {
         {
             self.position[1] = floor;
             self.vertical_speed = 0.;
+            if matches!(self.action, Action::AirAttack(_)) {
+                // Test-room choice: let the aerial swing play out on the ground.
+                return;
+            }
             step.landed = true;
             self.start(Action::Land, step);
             return;
@@ -729,7 +761,7 @@ mod tests {
             }
         }
         // Discrete integration lands slightly under the continuous apex.
-        assert!(apex > 175. && apex <= 185., "apex {apex}");
+        assert!(apex > 184. && apex <= 185., "apex {apex}");
         assert!(landed.is_some());
         assert_eq!(player.action, Action::Land);
         assert_eq!(player.position[1], 0.);
