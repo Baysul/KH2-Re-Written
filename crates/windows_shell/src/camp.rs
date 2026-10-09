@@ -11,6 +11,8 @@
 //! Customize, Party, Journal) are not built: deciding those entries plays
 //! the decide sound only. The 3D party models are pasted from off-screen
 //! renders the caller makes (Tz::MenuObj).
+pub mod items;
+
 use crate::command::Font;
 use crate::sprite2d::{self, Id, LightCur, Sprites, Text};
 use package_reader::layout::{Layout, LayoutTask};
@@ -197,6 +199,7 @@ pub struct Data {
     /// save+0x41a4 and save+0x2498.
     pub config_flags: u32,
     pub game_mode: u32,
+    pub items: items::ItemsData,
 }
 
 /// Cursor memory kept between camp openings (DAT_140beec30 / 7c).
@@ -207,6 +210,9 @@ pub struct Memory {
     /// Status list bit.
     pub status_bit: u8,
     pub config_row: usize,
+    /// mem[1]: the Items row; mem[10]: the stock cursor (in page) and scroll.
+    pub items_row: usize,
+    pub stock: (usize, usize),
 }
 
 /// What a draw item samples: the camp sheet, the system font, or member
@@ -215,6 +221,8 @@ pub struct Memory {
 pub enum Sheet {
     Art,
     Font,
+    /// The font image's icon plane (0x09 icons).
+    Icon,
     Model(usize),
 }
 
@@ -242,6 +250,14 @@ pub const MODEL_TINT: f32 = 0x60 as f32 / 128.;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Top,
+    /// 1: members + Stock; 10: the stock grid; 11: Use / Throw away; 12:
+    /// the use target; 13: the "no effect" box; 14: the throw-away box.
+    Items,
+    Stock,
+    ItemCommand,
+    UseTarget,
+    NoEffect,
+    ThrowAway,
     StatusList,
     StatusBrowse,
     Config,
@@ -304,6 +320,9 @@ struct MenuList {
     mask: u32,
     /// Page keys (+0x27) with this page size.
     page: Option<usize>,
+    /// FUN_1402f8eb0(list, 0x80, 0x40): RIGHT moves up, LEFT down (the
+    /// dialog choices).
+    sideways: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -332,6 +351,7 @@ impl MenuList {
             cursor: cursor.min(total.saturating_sub(1)),
             mask: 0x73,
             page: None,
+            sideways: false,
         }
     }
 
@@ -341,17 +361,22 @@ impl MenuList {
         if n == 0 {
             return (Pick::None, false);
         }
+        let (up, down) = if self.sideways {
+            (RIGHT, LEFT)
+        } else {
+            (UP, DOWN)
+        };
         let before = self.cursor;
-        if p.repeat & UP != 0 && self.mask & 0x1 != 0 {
+        if p.repeat & up != 0 && self.mask & 0x1 != 0 {
             if self.cursor > 0 {
                 self.cursor -= 1;
-            } else if p.trig & UP != 0 {
+            } else if p.trig & up != 0 {
                 self.cursor = n - 1;
             }
-        } else if p.repeat & DOWN != 0 && self.mask & 0x2 != 0 {
+        } else if p.repeat & down != 0 && self.mask & 0x2 != 0 {
             if self.cursor + 1 < n {
                 self.cursor += 1;
-            } else if p.trig & DOWN != 0 {
+            } else if p.trig & down != 0 {
                 self.cursor = 0;
             }
         } else if let Some(page) = self.page {
@@ -463,6 +488,8 @@ pub struct Camp {
     config_list: MenuList,
     choices: Vec<Vec<Id>>,
     config_frame: Option<Id>,
+    // Items.
+    item_ui: items::Ui,
 }
 
 impl Camp {
@@ -512,6 +539,7 @@ impl Camp {
             config_list: MenuList::default(),
             choices: Vec::new(),
             config_frame: None,
+            item_ui: items::Ui::default(),
         };
         camp.build_top(seq);
         camp.munny_digits = digits(seq, &munny_groups(camp.data.panels.munny), Vec::new());
@@ -573,12 +601,26 @@ impl Camp {
     }
 
     fn build_status_block(&mut self, seq: &Sequence) -> Id {
-        let sp = &mut self.sprites;
-        let status = sp.create(seq, PRIO_PANEL, ART, STATUS[0], Some(STATUS[1]), None);
-        self.closers.push((status, STATUS[2]));
-        let panels = self.data.panels.clone();
-        let n = panels.members.len();
+        let n = self.data.panels.members.len();
         let pitch = seq.groups[STATUS[0]].text_position_x as f32;
+        self.status_block_with(seq, STATUS, n, |i| [pitch * (n - i) as f32, 0.])
+    }
+
+    /// FUN_140367b50 with the value mode 0 (LV/HP/MP): the container in
+    /// `groups` (appear, idle, close) and the first `count` members at
+    /// `place(i)`.
+    fn status_block_with(
+        &mut self,
+        seq: &Sequence,
+        groups: [usize; 3],
+        count: usize,
+        place: impl Fn(usize) -> [f32; 2],
+    ) -> Id {
+        let sp = &mut self.sprites;
+        let status = sp.create(seq, PRIO_PANEL, ART, groups[0], Some(groups[1]), None);
+        self.closers.push((status, groups[2]));
+        let mut panels = self.data.panels.clone();
+        panels.members.truncate(count);
         let sub_size = seq.groups[SUB_ANCHOR].text_scale as f32;
         let row_pitch = seq.groups[SUB_ANCHOR].ui_padding as f32;
         let value_x = seq.groups[SUB_ANCHOR].light_position_x as f32;
@@ -592,7 +634,7 @@ impl Camp {
             name.group_position = false;
             let block = sp.create(seq, PRIO_ROW, ART, BLOCK, None, Some(name));
             child(sp, block, status);
-            sp.get_mut(block).offset = [pitch * (n - i) as f32, 0.];
+            sp.get_mut(block).offset = place(i);
             let sub = sp.create(seq, PRIO_ROW, ART, SUB_ANCHOR, None, None);
             child(sp, sub, block);
             let values = [
@@ -668,6 +710,12 @@ impl Camp {
             if !gated || trig != 0 {
                 let moved = match self.state {
                     State::Top => self.top_level(seq, &pad, &mut sounds),
+                    State::Items => self.items(seq, &pad, &mut sounds),
+                    State::Stock => self.stock(seq, &pad, &mut sounds),
+                    State::ItemCommand => self.item_command(seq, &pad, &mut sounds),
+                    State::UseTarget => self.use_target(seq, &pad, &mut sounds),
+                    State::NoEffect => self.no_effect(seq, &pad, &mut sounds),
+                    State::ThrowAway => self.throw_away(seq, &pad, &mut sounds),
                     State::StatusList => self.status_list(seq, &pad, &mut sounds),
                     State::StatusBrowse => self.status_browse(seq, &pad, &mut sounds),
                     State::Config => self.config(seq, &pad, &mut sounds),
@@ -703,8 +751,16 @@ impl Camp {
     }
 
     fn rows_of(&self, state: State) -> (&MenuList, RowGroupsFor) {
+        let ui = &self.item_ui;
         match state {
             State::Top => (&self.top, RowGroupsFor::Top),
+            State::Items => (&ui.list, RowGroupsFor::Top),
+            State::Stock => (&ui.grid.list, RowGroupsFor::Fixed(items::STOCK_ROWS)),
+            State::ItemCommand => (&ui.commands, RowGroupsFor::Fixed(items::COMMAND_ROWS)),
+            State::UseTarget => (&ui.targets, RowGroupsFor::Fixed(items::COMMAND_ROWS)),
+            State::NoEffect | State::ThrowAway => {
+                (&ui.choices, RowGroupsFor::Fixed(items::CHOICE_ROWS))
+            }
             State::StatusList => (&self.status_list, RowGroupsFor::Status),
             State::StatusBrowse => (&self.columns[self.column], RowGroupsFor::None),
             State::Config => (&self.config_list, RowGroupsFor::None),
@@ -722,6 +778,7 @@ impl Camp {
                     FORM_ROWS
                 })
             }
+            RowGroupsFor::Fixed(g) => Some(g),
             RowGroupsFor::None => None,
         }
     }
@@ -735,7 +792,13 @@ impl Camp {
         let rows = list.rows.clone();
         let cursor = list.cursor;
         let live = rows.iter().any(|&r| self.sprites.alive(r));
-        if self.substate == 1 && live {
+        // DAT_140beec22: an empty stock list has no pointer.
+        if self.substate == 1 && live && self.item_ui.no_pointer {
+            if let Some(g) = self.glove.take() {
+                self.sprites.kill(g);
+            }
+            self.light.kill(&mut self.sprites);
+        } else if self.substate == 1 && live {
             if moved {
                 for (i, &r) in rows.iter().enumerate() {
                     if let Some(g) = self.groups_for(kind, i) {
@@ -746,10 +809,12 @@ impl Camp {
                 self.light.retarget();
             }
             let row = rows[cursor];
+            // States of list 0x1405baf20 (the stock list here) use G22.
+            let group = if state == State::Stock { 22 } else { GLOVE };
             match self.glove {
                 Some(g) if self.sprites.alive(g) => self.sprites.get_mut(g).parent = Some(row),
                 _ => {
-                    let g = self.sprites.create(seq, PRIO_LIGHT, ART, GLOVE, None, None);
+                    let g = self.sprites.create(seq, PRIO_LIGHT, ART, group, None, None);
                     self.sprites.get_mut(g).parent = Some(row);
                     self.glove = Some(g);
                 }
@@ -860,6 +925,7 @@ impl Camp {
                 let entry = self.data.entries[i].clone();
                 self.memory.entry = entry.id;
                 let pending = match entry.id {
+                    0 => Some(State::Items),
                     4 => Some(State::StatusList),
                     7 => Some(State::Config),
                     _ => None,
@@ -900,6 +966,7 @@ impl Camp {
         let block_dead = self.status_block.is_none_or(|s| !self.sprites.alive(s));
         if rows_dead && block_dead {
             match self.pending.take() {
+                Some(State::Items) => self.enter_items(seq, None),
                 Some(State::StatusList) => self.enter_status(seq),
                 Some(State::Config) => self.enter_config(seq),
                 _ => {}
@@ -1777,6 +1844,7 @@ impl Camp {
         if let Some(f) = self.config_frame.take() {
             self.sprites.kill(f);
         }
+        self.item_ui.kill_dim(&mut self.sprites);
     }
 
     /// The draw list: the layout (0x7532), then every sprite in priority
@@ -1797,6 +1865,7 @@ impl Camp {
             items.into_iter().map(|(sheet, quads)| match sheet {
                 sprite2d::Sheet::Art(_) => (Sheet::Art, quads),
                 sprite2d::Sheet::Font => (Sheet::Font, quads),
+                sprite2d::Sheet::Icon => (Sheet::Icon, quads),
             })
         };
         // The model paste (0x7538), then the panel band; the digit rows
@@ -1883,6 +1952,7 @@ fn model_quads(alpha: f32) -> Vec<Quad> {
 enum RowGroupsFor {
     Top,
     Status,
+    Fixed(RowGroups),
     None,
 }
 

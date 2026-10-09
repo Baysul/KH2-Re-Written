@@ -636,6 +636,90 @@ struct CampSource {
     stats: Vec<(usize, Vec<u8>, Vec<u8>, usize)>,
     config: Vec<camp::ConfigRow>,
     numbers: SoraNumbers,
+    /// The item table with its texts and the Items screens' messages.
+    items: camp::items::ItemsData,
+    /// The font image's icon plane (0x09 icons).
+    icons: SystemFont,
+}
+
+/// Items screen messages (camp-05 §9).
+const ITEM_MESSAGES: [u32; 19] = [
+    0x8455, 0x845a, 0x8456, 0x8457, 0x8448, 0xb943, 0xb944, 0xbb86, 0xbb87, 0xb90c, 0xb90f, 0xb90d,
+    0xb90e, 0xb910, 0xb94f, 0xbb90, 0x9fcf, 0x9fd0, 0x9fd1,
+];
+
+/// The room's stock and Sora's equipment [test-room values: a new save's
+/// inventory is not decoded]: 3 Potions, a Hi-Potion, 2 Ethers; the
+/// Kingdom Key with one empty armor, accessory and two item slots.
+const ROOM_STOCK: [(u16, u8); 3] = [(1, 3), (2, 1), (3, 2)];
+
+/// 03system `item` with names and descriptions, and the screens' texts.
+fn load_camp_items(
+    system: &[u8],
+    msg: impl Fn(&[u32]) -> Result<Vec<Option<Vec<u8>>>, Box<dyn std::error::Error>>,
+) -> Result<camp::items::ItemsData, Box<dyn std::error::Error>> {
+    use camp::items::{ItemInfo, ItemTexts, ItemsData};
+    let table = package_reader::item_table::read(bar_entry(system, b"item")?)?;
+    let ids: Vec<u32> = table
+        .iter()
+        .flat_map(|r| [r.name as u32, r.description as u32])
+        .collect();
+    let texts = msg(&ids)?;
+    let table = table
+        .iter()
+        .zip(texts.chunks(2))
+        .map(|(r, t)| ItemInfo {
+            id: r.id,
+            kind: r.kind,
+            amount: r.amount,
+            sell: r.sell,
+            icon: r.icon,
+            name: t[0].clone().unwrap_or_default(),
+            description: t[1].clone().unwrap_or_default(),
+        })
+        .collect();
+    let fixed: Vec<u32> = ITEM_MESSAGES.to_vec();
+    let mut f = msg(&fixed)?
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect::<Vec<_>>()
+        .into_iter();
+    let mut take = || f.next().unwrap_or_default();
+    // Category glyph messages (0x1405ba790): 0xb9c7 + t for t ≤ 0x11,
+    // 0xbe2b for type 0x14.
+    let category_ids: Vec<u32> = (0..=0x14u32)
+        .map(|t| match t {
+            0..=0x11 => 0xb9c7 + t,
+            0x14 => 0xbe2b,
+            _ => 0,
+        })
+        .collect();
+    let categories = msg(&category_ids)?
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect();
+    let texts = ItemTexts {
+        stock: take(),
+        empty: take(),
+        use_: take(),
+        throw: take(),
+        blank: take(),
+        use_on: take(),
+        all: take(),
+        help: [take(), take()],
+        tabs: [take(), take(), take(), take(), take()],
+        throw_query: take(),
+        no_effect: take(),
+        ok: take(),
+        yes: take(),
+        no: take(),
+        categories,
+    };
+    Ok(ItemsData {
+        table,
+        texts,
+        ..ItemsData::default()
+    })
 }
 
 /// Sora's Status numbers the room does not track elsewhere.
@@ -1429,6 +1513,20 @@ fn load(
                     m.font_info.name_hash,
                 ),
             )?;
+            let icons = hud::load_font(
+                source,
+                (
+                    &m.font_image.index,
+                    m.font_image.ordinal,
+                    m.font_image.name_hash,
+                ),
+                (
+                    &m.font_info.index,
+                    m.font_info.ordinal,
+                    m.font_info.name_hash,
+                ),
+                b"icon",
+            )?;
             let msg = |ids: &[u32]| {
                 hud::load_messages(
                     source,
@@ -1498,6 +1596,15 @@ fn load(
                 magic: lv.magic as i32 + byte(7) + 1,
                 defense: lv.defense as i32 + byte(8),
             };
+            let items = load_camp_items(&system, |ids| {
+                hud::load_messages_optional(
+                    source,
+                    &m.messages.index,
+                    m.messages.ordinal,
+                    m.messages.name_hash,
+                    ids,
+                )
+            })?;
             Some(CampSource {
                 menu,
                 entries,
@@ -1509,6 +1616,8 @@ fn load(
                 stats,
                 config,
                 numbers,
+                items,
+                icons,
             })
         }
         _ => None,
@@ -2556,9 +2665,10 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 34] = [
+const AUTOPLAY_CAPTURES: [u64; 47] = [
     90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1198, 1300, 1500,
     1700, 1830, 1900, 1930, 1990, 2030, 2050, 2070, 2110, 2230, 2310, 2330, 2390, 2420, 2450, 2520,
+    2690, 2715, 2760, 2780, 2840, 2880, 2920, 2970, 3080, 3200, 3220, 3270, 3300,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -2570,7 +2680,7 @@ const AUTOPLAY_TALK_END: u64 = 260;
 /// in earlier unattended runs.
 const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 /// The last stretch leaves Sora standing so an enemy can attack him.
-const AUTOPLAY_END: u64 = 2560;
+const AUTOPLAY_END: u64 = 3480;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
@@ -3487,7 +3597,6 @@ fn hud_present(
             rgba: &s.texture_rgba,
             size: s.texture_size.map(|v| v as usize),
             texel_scale: s.texel_scale as f32,
-            luminance: false,
         })
         .collect();
     // The command menu (priorities 0x14b5..0x14b7) draws before the gauge
@@ -3499,18 +3608,17 @@ fn hud_present(
             rgba: &m.sheet.texture_rgba,
             size: m.sheet.texture_size.map(|v| v as usize),
             texel_scale: m.sheet.texel_scale as f32,
-            luminance: false,
         });
         textures.push(Texture {
             rgba: &m.font.rgba,
             size: m.font.size.map(|v| v as usize),
             texel_scale: m.font.texel_scale as f32,
-            luminance: true,
         });
         draws = m.menu.draw(
             &m.sheet.sequence,
             &command::Font {
                 widths: &m.font.widths,
+                pad: 1,
             },
             first,
             first + 1,
@@ -3524,13 +3632,11 @@ fn hud_present(
             rgba: &t.sheet.texture_rgba,
             size: t.sheet.texture_size.map(|v| v as usize),
             texel_scale: t.sheet.texel_scale as f32,
-            luminance: false,
         });
         textures.push(Texture {
             rgba: &t.font.rgba,
             size: t.font.size.map(|v| v as usize),
             texel_scale: t.font.texel_scale as f32,
-            luminance: true,
         });
         for w in t.closing.iter().chain(&t.current) {
             draws.extend(w.draw(first, first + 1));
@@ -4183,15 +4289,20 @@ struct CampRes {
     /// Sheet slots: camp art per glyph variant, then the font.
     art: [Option<usize>; 4],
     font_sheet: usize,
+    icon_sheet: usize,
     glyph: usize,
     keyboard_last: bool,
+    /// The room's stock (ROOM_STOCK, then what the camp leaves) and the
+    /// stock list's seen marks.
+    stock: std::collections::BTreeMap<u16, u8>,
+    seen: Vec<u16>,
 }
 
 /// Unattended camp check after the combat plan: open, down to Status,
 /// the character list, the stat browser (column switch, move), back out,
 /// down to Config, change Field Camera and Summon Effects, jump to the
 /// bottom with R1, back out, close with START.
-const AUTOPLAY_CAMP: [(u64, u64); 22] = [
+const AUTOPLAY_CAMP: [(u64, u64); 45] = [
     (1810, 0x2),
     (1840, 0x20),
     (1850, 0x20),
@@ -4214,6 +4325,31 @@ const AUTOPLAY_CAMP: [(u64, u64); 22] = [
     (2400, 0x4000),
     (2430, 0x8),
     (2480, 0x2),
+    // Items: reopen, wrap to Items, Stock, the consumables tab, use an
+    // Ether, use another (MP full: the no-effect box), throw it away.
+    (2600, 0x2),
+    (2640, 0x20),
+    (2660, 0x4),
+    (2700, 0x20),
+    (2730, 0x4),
+    (2770, 0x80),
+    (2790, 0x1_0000),
+    (2830, 0x20),
+    (2850, 0x4),
+    (2890, 0x4),
+    (2930, 0x4),
+    (2980, 0x4),
+    (3010, 0x4),
+    (3050, 0x4),
+    (3090, 0x4),
+    (3120, 0x8),
+    (3150, 0x20),
+    (3170, 0x4),
+    (3210, 0x40),
+    (3230, 0x4),
+    (3280, 0x8),
+    (3320, 0x8),
+    (3400, 0x2),
 ];
 fn camp_setup(
     camp: Option<ResMut<CampRes>>,
@@ -4228,11 +4364,17 @@ fn camp_setup(
             c.art[n] = Some(frame.add_sheet(&mut images, rgba, size, scale));
         }
     }
-    c.font_sheet = frame.add_font_sheet(
+    c.font_sheet = frame.add_sheet(
         &mut images,
         std::mem::take(&mut c.source.font.rgba),
         c.source.font.size,
         c.source.font.texel_scale as f32,
+    );
+    c.icon_sheet = frame.add_sheet(
+        &mut images,
+        std::mem::take(&mut c.source.icons.rgba),
+        c.source.icons.size,
+        c.source.icons.texel_scale as f32,
     );
 }
 
@@ -4250,7 +4392,7 @@ fn camp_tick(
     camp: Option<ResMut<CampRes>>,
     mut game: ResMut<Game>,
     mut audio: ResMut<Audio>,
-    hud: Option<Res<Hud>>,
+    mut hud: Option<ResMut<Hud>>,
 ) {
     let Some(mut c) = camp else { return };
     let c = &mut *c;
@@ -4358,6 +4500,19 @@ fn camp_tick(
                     config: c.source.config.clone(),
                     config_flags: c.config_flags,
                     game_mode: c.game_mode,
+                    items: camp::items::ItemsData {
+                        counts: c.stock.clone(),
+                        equipment: vec![camp::items::Equipment {
+                            weapon: 0x29,
+                            armor: vec![0],
+                            accessories: vec![0],
+                            items: vec![0, 0],
+                            originals: vec![0, 0],
+                            ..Default::default()
+                        }],
+                        seen: c.seen.clone(),
+                        ..c.source.items.clone()
+                    },
                 };
                 let (menu, s) = Camp::open(layout, data, c.memory);
                 c.open = Some(menu);
@@ -4373,6 +4528,18 @@ fn camp_tick(
             if menu.closed {
                 c.memory = menu.memory;
                 c.config_flags = menu.data.config_flags;
+                c.stock = menu.data.items.counts.clone();
+                c.seen = menu.data.items.seen.clone();
+                // Items used in the camp change the room's HP / MP.
+                if let Some(sora) = menu.data.panels.members.first() {
+                    if let Some(rt) = game.enemy.as_mut() {
+                        rt.sora_hp = sora.hp;
+                    }
+                    if let Some(h) = hud.as_mut() {
+                        h.stats.hp = sora.hp;
+                        h.stats.mp = sora.mp;
+                    }
+                }
                 c.open = None;
                 game.event(serde_json::json!({"event":"camp_close","tick":tick}));
             }
@@ -4403,6 +4570,8 @@ fn camp_present(
     let Some(menu) = c.open.as_mut() else { return };
     let font = command::Font {
         widths: &c.source.font.widths,
+        // Keyboard prompts (key caps) are not translated: Xbox icons.
+        pad: if c.glyph == 0 { 1 } else { c.glyph as u8 },
     };
     let art = c.art[c.glyph].or(c.art[0]).expect("camp art");
     let members = menu.data.panels.members.len();
@@ -4410,6 +4579,7 @@ fn camp_present(
         let slot = match sheet {
             camp::Sheet::Art => art,
             camp::Sheet::Font => c.font_sheet,
+            camp::Sheet::Icon => c.icon_sheet,
             // Only Sora's model is rendered in this room.
             camp::Sheet::Model(i) => {
                 let Some(m) = model.as_ref().filter(|_| i == 0) else {
@@ -4880,8 +5050,11 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             pad: Pad::default(),
             art: [None; 4],
             font_sheet: 0,
+            icon_sheet: 0,
             glyph: 0,
             keyboard_last: true,
+            stock: ROOM_STOCK.into_iter().collect(),
+            seen: Vec::new(),
         });
     }
     Ok(app

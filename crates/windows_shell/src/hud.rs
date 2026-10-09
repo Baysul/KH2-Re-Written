@@ -287,13 +287,14 @@ pub fn ftst_colour(
 
 /// Encoded strings of a message archive (e.g. msg/<lang>/sys.bar) by id &
 /// 0x7fff, up to the terminating zero.
-pub fn load_messages(
+/// Messages by id from a message archive; `None` for an absent id.
+pub fn load_messages_optional(
     source: &ProbeSource,
     index: &str,
     ordinal: usize,
     name_hash: [u8; 16],
     ids: &[u32],
-) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+) -> Result<Vec<Option<Vec<u8>>>, Box<dyn std::error::Error>> {
     let (archive, _) = read_entry(source, index, ordinal, name_hash, false)?;
     let table = bar::read_bar(&archive)?;
     let e = table
@@ -321,14 +322,35 @@ pub fn load_messages(
                 if word(8 + k * 8)? & 0x7fff == id & 0x7fff {
                     let start = word(12 + k * 8)? as usize;
                     let rest = d.get(start..).ok_or("message offset outside table")?;
-                    let end = rest
-                        .iter()
-                        .position(|&b| b == 0)
-                        .ok_or("unterminated message")?;
-                    return Ok(rest[..end].to_vec());
+                    // The terminator is a 0 in code position: a code's
+                    // parameters (e.g. 0x07's colour) may hold zeros.
+                    let mut end = 0;
+                    loop {
+                        match rest.get(end) {
+                            None => return Err("unterminated message".into()),
+                            Some(0) => break,
+                            Some(&b) if b < 0x20 => end += crate::dialogue::code_length(b),
+                            Some(_) => end += 1,
+                        }
+                    }
+                    return Ok(Some(rest[..end.min(rest.len())].to_vec()));
                 }
             }
-            Err(format!("message {id:#x} absent").into())
+            Ok(None)
         })
+        .collect()
+}
+
+pub fn load_messages(
+    source: &ProbeSource,
+    index: &str,
+    ordinal: usize,
+    name_hash: [u8; 16],
+    ids: &[u32],
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    load_messages_optional(source, index, ordinal, name_hash, ids)?
+        .into_iter()
+        .zip(ids)
+        .map(|(m, id)| m.ok_or_else(|| format!("message {id:#x} absent").into()))
         .collect()
 }

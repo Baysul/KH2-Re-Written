@@ -62,6 +62,9 @@ pub struct Item {
 /// System font: HD glyph sheet plus the original width table.
 pub struct Font<'a> {
     pub widths: &'a [u8],
+    /// Pad kind for the 09 da..f9 button prompts (FUN_1403af840): 1 Xbox,
+    /// 2 PlayStation, 3 generic.
+    pub pad: u8,
 }
 
 struct Slot {
@@ -441,7 +444,10 @@ mod tests {
     #[test]
     fn text_advances_by_scaled_width() {
         let widths = [11u8; 100];
-        let font = Font { widths: &widths };
+        let font = Font {
+            widths: &widths,
+            pad: 1,
+        };
         let q = text_quads(&[0x2e, 0x01, 0x2e], [10., 20.], [1.; 4], &font);
         assert_eq!(q.len(), 2);
         // 'A' is glyph 14: cell (14 * 18, 0).

@@ -112,6 +112,9 @@ struct Session {
     texts: Texts,
     font: SystemFont,
     font_sheet: usize,
+    /// The font image's icon plane (0x09 icons).
+    icons: SystemFont,
+    icon_sheet: usize,
     /// This frame's 2D draw (taken before the title task's logic, as the
     /// sprite draw task runs before it).
     snapshot: Vec<(usize, Vec<Quad>)>,
@@ -197,11 +200,17 @@ fn setup(
         }
     }
     s.white = frame.add_sheet(&mut images, vec![255; 4], [1, 1], 1.);
-    s.font_sheet = frame.add_font_sheet(
+    s.font_sheet = frame.add_sheet(
         &mut images,
         std::mem::take(&mut s.font.rgba),
         s.font.size,
         s.font.texel_scale as f32,
+    );
+    s.icon_sheet = frame.add_sheet(
+        &mut images,
+        std::mem::take(&mut s.icons.rgba),
+        s.icons.size,
+        s.icons.texel_scale as f32,
     );
     // FUN_1402b4c60: fade.out(0), near-instant black; the task then fades
     // in over 0x3c.
@@ -282,11 +291,13 @@ fn tick(
     if let Some(d) = &s.dialog {
         let font = Font {
             widths: &s.font.widths,
+            pad: 1,
         };
         for (sheet, quads) in d.sprites.draw(dialog_seq, &font) {
             let slot = match sheet {
                 Sheet::Art(image) => s.image_sheets[image],
                 Sheet::Font => s.font_sheet,
+                Sheet::Icon => s.icon_sheet,
             };
             s.snapshot.push((slot, quads));
         }
@@ -631,6 +642,12 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         (&fo.index, fo.ordinal, fo.name_hash),
         b"sys\0",
     )?;
+    let icons = hud::load_font(
+        &source,
+        (&fi.index, fi.ordinal, fi.name_hash),
+        (&fo.index, fo.ordinal, fo.name_hash),
+        b"icon",
+    )?;
     let music_rx = match &config.music {
         Some(l) => {
             let bytes = sound::load_bank(&source, &l.index, l.ordinal, l.name_hash, None)?;
@@ -670,6 +687,8 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         texts,
         font,
         font_sheet: 0,
+        icons,
+        icon_sheet: 0,
         snapshot: Vec::new(),
         fade: Fade::default(),
         fade_drawn: false,

@@ -33,7 +33,6 @@ const CENTRE_X: f32 = 256.;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlendKey {
     blend: u8,
-    luminance: bool,
     srgb_source: bool,
 }
 
@@ -44,8 +43,6 @@ pub struct LayoutMaterial {
     #[sampler(1)]
     pub texture: Handle<Image>,
     pub blend: u8,
-    /// Font pixel shader (ps 029): RGB = luminance of the texel x colour.
-    pub luminance: bool,
     /// The texture is sRGB (a render target): re-encode to gamma.
     pub srgb_source: bool,
 }
@@ -54,7 +51,6 @@ impl From<&LayoutMaterial> for BlendKey {
     fn from(m: &LayoutMaterial) -> Self {
         BlendKey {
             blend: m.blend,
-            luminance: m.luminance,
             srgb_source: m.srgb_source,
         }
     }
@@ -109,9 +105,6 @@ impl Material2d for LayoutMaterial {
             }
         };
         if let Some(fragment) = descriptor.fragment.as_mut() {
-            if key.bind_group_data.luminance {
-                fragment.shader_defs.push("LUMINANCE".into());
-            }
             if key.bind_group_data.srgb_source {
                 fragment.shader_defs.push("SRGB_SOURCE".into());
             }
@@ -157,7 +150,6 @@ pub struct Sheet {
     pub image: Handle<Image>,
     pub size: [u32; 2],
     pub texel_scale: f32,
-    pub luminance: bool,
     pub srgb_source: bool,
 }
 
@@ -200,7 +192,6 @@ impl Ui2dFrame {
             image: images.add(image),
             size,
             texel_scale,
-            luminance: false,
             srgb_source: false,
         });
         self.sheets.len() - 1
@@ -213,7 +204,6 @@ impl Ui2dFrame {
             image,
             size,
             texel_scale: 1.,
-            luminance: false,
             srgb_source: srgb,
         });
         self.sheets.len() - 1
@@ -233,19 +223,6 @@ impl Ui2dFrame {
                 blend: 0,
             }],
         ));
-    }
-
-    /// A system-font sheet, drawn with the font pixel shader.
-    pub fn add_font_sheet(
-        &mut self,
-        images: &mut Assets<Image>,
-        rgba: Vec<u8>,
-        size: [u32; 2],
-        texel_scale: f32,
-    ) -> usize {
-        let slot = self.add_sheet(images, rgba, size, texel_scale);
-        self.sheets[slot].luminance = true;
-        slot
     }
 
     /// Re-points a sheet slot at another upload (e.g. a device-glyph swap).
@@ -388,7 +365,6 @@ fn present(
                 materials.add(LayoutMaterial {
                     texture: frame.sheets[*sheet].image.clone(),
                     blend: *blend,
-                    luminance: frame.sheets[*sheet].luminance,
                     srgb_source: frame.sheets[*sheet].srgb_source,
                 })
             })

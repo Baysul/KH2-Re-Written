@@ -15,10 +15,6 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     let hi = 1.055 * pow(c.rgb, vec3(1.0 / 2.4)) - 0.055;
     c = vec4(select(hi, lo, c.rgb <= vec3(0.0031308)), c.a);
 #endif
-#ifdef LUMINANCE
-    // Font pixel shader (ps 029): grey from the texel's weighted sum.
-    c = vec4(vec3(dot(c.rgb, vec3(0.299, 0.596, 0.211))), c.a);
-#endif
 #ifdef VERTEX_COLORS
     c = c * mesh.color;
 #endif
