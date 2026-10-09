@@ -8,9 +8,12 @@
 //! reproduction of the installed game's movement or combat rules.
 use bevy::{
     app::AppExit,
+    asset::RenderAssetUsages,
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
+    image::ImageSampler,
     input::mouse::AccumulatedMouseMotion,
     prelude::*,
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     render::view::{
         NoIndirectDrawing,
         screenshot::{Screenshot, ScreenshotCaptured},
@@ -31,6 +34,8 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+use windows_shell::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
+use windows_shell::hud::{self, HudAssets};
 use windows_shell::room::{CollisionTriangle, LoadedRoom, load_rooms, mesh, rgba_image, upload};
 
 #[derive(Deserialize)]
@@ -71,6 +76,10 @@ struct Config {
     /// byte above is used.
     #[serde(default)]
     sklt_character_id: Option<u32>,
+    /// Field 2D sequence archive holding the 'gaug' HUD sequence
+    /// (field2d/<lang>/<world>0field.2dd).
+    #[serde(default)]
+    hud: Option<Locator>,
     /// Optional spawn (x, probe height, z) in scene coordinates.
     #[serde(default)]
     spawn: Option<[f32; 3]>,
@@ -144,6 +153,21 @@ struct Game {
     show_collision: bool,
     rendered_frames: u64,
     autoplay_failed: bool,
+}
+
+#[derive(Component)]
+struct HudOverlay;
+
+/// Sora's field gauge: the translated GAUGE_PLAYER logic, drawn into a
+/// software canvas shown as a full-window overlay.
+#[derive(Resource)]
+struct Hud {
+    assets: HudAssets,
+    gauge: Gauge,
+    stats: GaugeStats,
+    canvas: Canvas,
+    image: Handle<Image>,
+    updated: bool,
 }
 
 /// The original's default follow camera, ticked with the simulation in the
@@ -300,6 +324,7 @@ struct Loaded {
     spawn: Vec3,
     world: TriangleWorld,
     summary: serde_json::Value,
+    hud: Option<(HudAssets, (i32, i32))>,
 }
 
 /// Walkable collision levels (8-unit height bins) by XZ area, largest first,
@@ -423,6 +448,13 @@ fn load(
 
     // PTYA attack entries chosen by ID for the grounded and aerial combos.
     let battle = read_archive(source, &config.battle)?;
+    let hud = match &config.hud {
+        Some(l) => Some((
+            hud::load(source, &l.index, l.ordinal, l.name_hash, b"gaug")?,
+            hud::starting_stats(bar_entry(&battle, b"plrp")?)?,
+        )),
+        None => None,
+    };
     let ptya_bytes = bar_entry(&battle, b"ptya")?;
     let table = ptya::read_table(ptya_bytes)?;
     let set = ptya::read_set(ptya_bytes, &table, config.ptya_pointer)?;
@@ -706,6 +738,7 @@ fn load(
         spawn,
         world,
         summary,
+        hud,
     })
 }
 
@@ -714,6 +747,7 @@ struct Startup {
     room: Option<LoadedRoom>,
     actor: Option<model_inspection::InspectionModel>,
     weapon: Option<model_inspection::InspectionModel>,
+    hud: Option<(HudAssets, (i32, i32))>,
 }
 
 /// Spawns one textured mesh per model part under `parent`, in part order.
@@ -788,6 +822,56 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
 ) {
     let room = startup.room.take().expect("room retained for setup");
+    if let Some((assets, (hp, mp))) = startup.hud.take() {
+        // Test-room choices for values the opening room does not define:
+        // full HP/MP from PLRP, normal drive mode with three full bars.
+        let stats = GaugeStats {
+            hp,
+            max_hp: hp,
+            mp,
+            max_mp: mp,
+            drive_mode: 1,
+            drive: 0,
+            drive_level: 3,
+            drive_max: 3,
+        };
+        let canvas = Canvas::new(assets.texel_scale as f32);
+        let mut image = Image::new(
+            Extent3d {
+                width: canvas.width as u32,
+                height: canvas.height as u32,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            canvas.rgba.clone(),
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        );
+        image.sampler = ImageSampler::linear();
+        let image = images.add(image);
+        // The 16:9 HUD canvas stretched over the window by a 2D camera drawn
+        // after the scene.
+        commands.spawn((
+            Camera2d,
+            Camera {
+                order: 1,
+                clear_color: ClearColorConfig::None,
+                ..default()
+            },
+            Msaa::Off,
+            Tonemapping::None,
+            DebandDither::Disabled,
+        ));
+        commands.spawn((Sprite::from_image(image.clone()), HudOverlay));
+        commands.insert_resource(Hud {
+            gauge: Gauge::new(&assets.gauge, &stats),
+            assets,
+            stats,
+            canvas,
+            image,
+            updated: true,
+        });
+    }
     // Scene data stays in source coordinates under one X-mirrored root; see
     // MIRROR. The simulation never sees the mirror.
     let world = commands
@@ -1154,6 +1238,79 @@ fn simulate(
             "action":format!("{action:?}"),"camera_eye":rig.camera.eye,"camera_yaw":rig.camera.yaw,
             "camera_collision_triangles":rig.collision.len(),"camera_collision_hits":rig.collision_hits}),
         );
+    }
+}
+
+/// HUD frame: test-room debug keys (H/G HP -/+2, M/N MP -/+10, B drive +10)
+/// or the unattended script change stats, then the gauge logic runs.
+fn hud_tick(keys: Res<ButtonInput<KeyCode>>, game: Res<Game>, hud: Option<ResMut<Hud>>) {
+    let Some(mut hud) = hud else { return };
+    let mut s = hud.stats;
+    if game.autoplay.is_some() {
+        match game.tick {
+            420 => s.hp = s.max_hp * 7 / 10,
+            500 => s.mp = s.max_mp / 2,
+            640 => s.hp = s.max_hp / 5,
+            900 => (s.hp, s.mp) = (s.max_hp, s.max_mp),
+            _ => {}
+        }
+    } else {
+        if keys.just_pressed(KeyCode::KeyH) {
+            s.hp = (s.hp - 2).max(0);
+        }
+        if keys.just_pressed(KeyCode::KeyG) {
+            s.hp = (s.hp + 2).min(s.max_hp);
+        }
+        if keys.just_pressed(KeyCode::KeyM) {
+            s.mp = (s.mp - 10).max(0);
+        }
+        if keys.just_pressed(KeyCode::KeyN) {
+            s.mp = (s.mp + 10).min(s.max_mp);
+        }
+        if keys.just_pressed(KeyCode::KeyB) {
+            s.drive = (s.drive + 10).min(100);
+        }
+    }
+    hud.stats = s;
+    let Hud { assets, gauge, .. } = &mut *hud;
+    gauge.update(&assets.gauge, &s);
+    hud.updated = true;
+}
+
+fn hud_present(
+    hud: Option<ResMut<Hud>>,
+    mut images: ResMut<Assets<Image>>,
+    windows: Query<&Window>,
+    mut overlay: Query<&mut Sprite, With<HudOverlay>>,
+) {
+    let Some(mut hud) = hud else { return };
+    if let (Ok(window), Ok(mut sprite)) = (windows.single(), overlay.single_mut()) {
+        let size = Vec2::new(window.width(), window.height());
+        if sprite.custom_size != Some(size) {
+            sprite.custom_size = Some(size);
+        }
+    }
+    if !std::mem::take(&mut hud.updated) {
+        return;
+    }
+    let Hud {
+        assets,
+        gauge,
+        canvas,
+        image,
+        ..
+    } = &mut *hud;
+    let draws: Vec<Draw> = gauge.draw(&assets.gauge);
+    canvas.render(
+        &draws,
+        &Texture {
+            rgba: &assets.texture_rgba,
+            size: assets.texture_size.map(|v| v as usize),
+            texel_scale: assets.texel_scale as f32,
+        },
+    );
+    if let Some(mut target) = images.get_mut(image.id()) {
+        target.data = Some(canvas.rgba.clone());
     }
 }
 
@@ -1537,6 +1694,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             room: Some(loaded.room),
             actor: Some(loaded.actor),
             weapon: Some(loaded.weapon),
+            hud: loaded.hud,
         })
         .insert_resource(rig)
         .insert_resource(Time::<Fixed>::from_hz(60.))
@@ -1555,8 +1713,8 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         }))
         .add_systems(Startup, (setup, pause_for_autoplay))
         .add_systems(PreUpdate, gather_input.after(bevy::input::InputSystems))
-        .add_systems(FixedUpdate, simulate)
-        .add_systems(Update, (camera_control, present, finish).chain())
+        .add_systems(FixedUpdate, (simulate, hud_tick).chain())
+        .add_systems(Update, (camera_control, present, hud_present, finish).chain())
         .run())
 }
 
