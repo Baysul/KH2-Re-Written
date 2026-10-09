@@ -424,9 +424,6 @@ struct Audio {
     alarm: bool,
 }
 
-#[derive(Component)]
-struct HudOverlay;
-
 struct MenuState {
     menu: CommandMenu,
     sheet: Sheet,
@@ -1758,8 +1755,16 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     talk: Option<ResMut<Talk>>,
+    mut frame: ResMut<Ui2dFrame>,
+    windows: Query<&Window>,
 ) {
     let room = startup.room.take().expect("room retained for setup");
+    let mut compose = Compose {
+        scene: Handle::default(),
+        scene_sheet: 0,
+        snapshot_sheet: None,
+        hud_sheet: None,
+    };
     let enemy_model = startup.enemy_model.take();
     if let Some(HudSource {
         sheets,
@@ -1793,20 +1798,13 @@ fn setup(
         );
         image.sampler = ImageSampler::linear();
         let image = images.add(image);
-        // The 16:9 HUD canvas stretched over the window by a 2D camera drawn
+        // The 16:9 HUD canvas over the whole window, composed in gamma space
         // after the scene.
-        commands.spawn((
-            Camera2d,
-            Camera {
-                order: 1,
-                clear_color: ClearColorConfig::None,
-                ..default()
-            },
-            Msaa::Off,
-            Tonemapping::None,
-            DebandDither::Disabled,
+        compose.hud_sheet = Some(frame.add_image(
+            image.clone(),
+            [canvas.width as u32, canvas.height as u32],
+            true,
         ));
-        commands.spawn((Sprite::from_image(image.clone()), HudOverlay));
         commands.insert_resource(Hud {
             gauge: Gauge::new(
                 &sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(),
@@ -2101,15 +2099,7 @@ fn setup(
             NoIndirectDrawing,
             SnapshotCamera,
         ));
-        commands.spawn((
-            Sprite {
-                image: snapshot,
-                color: Color::srgba(1., 1., 1., 0.),
-                ..default()
-            },
-            Transform::from_xyz(0., 0., -1.),
-            DissolveOverlay,
-        ));
+        compose.snapshot_sheet = Some(frame.add_image(snapshot, [1280, 720], true));
     }
     game.weapon_display = weapon_pose;
     game.part_indices = part_indices;
@@ -2141,8 +2131,26 @@ fn setup(
             ));
         }
     }
+    // The 3D scene renders into an image the 2D pass composes first, so
+    // every 2D layer blends in gamma space as the exe's framebuffer does.
+    let size = windows
+        .single()
+        .map(|w| [w.physical_width().max(1), w.physical_height().max(1)])
+        .unwrap_or([1280, 720]);
+    compose.scene = images.add(Image::new_target_texture(
+        size[0],
+        size[1],
+        TextureFormat::Rgba8UnormSrgb,
+        None,
+    ));
+    compose.scene_sheet = frame.add_image(compose.scene.clone(), size, true);
     commands.spawn((
         Camera3d::default(),
+        Camera {
+            order: -2,
+            ..default()
+        },
+        bevy::camera::RenderTarget::Image(compose.scene.clone().into()),
         Projection::Perspective(PerspectiveProjection {
             fov: FollowCamera::new(camera::OUTDOOR, &CameraInput::default()).vertical_fov(),
             near: 5.,
@@ -2155,6 +2163,64 @@ fn setup(
         DebandDither::Disabled,
         NoIndirectDrawing,
     ));
+    commands.insert_resource(compose);
+}
+
+/// The 2D composition's sheets: the rendered scene, the dissolve snapshot
+/// and the HUD canvas.
+#[derive(Resource)]
+struct Compose {
+    scene: Handle<Image>,
+    scene_sheet: usize,
+    snapshot_sheet: Option<usize>,
+    hud_sheet: Option<usize>,
+}
+
+/// The scene image follows the window's size.
+fn resize_scene(
+    compose: Option<Res<Compose>>,
+    windows: Query<&Window>,
+    mut images: ResMut<Assets<Image>>,
+    mut frame: ResMut<Ui2dFrame>,
+) {
+    let (Some(c), Ok(w)) = (compose, windows.single()) else {
+        return;
+    };
+    let size = [w.physical_width().max(1), w.physical_height().max(1)];
+    if frame.sheets[c.scene_sheet].size == size {
+        return;
+    }
+    if let Some(mut image) = images.get_mut(&c.scene) {
+        image.resize(Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        });
+    }
+    frame.sheets[c.scene_sheet].size = size;
+}
+
+/// The scene, then the dissolve snapshot fading out over it, then the HUD
+/// (hidden while the camp is open [inferred]); the camp draws after.
+fn compose_2d(
+    compose: Option<Res<Compose>>,
+    talk: Option<Res<Talk>>,
+    camp: Option<Res<CampRes>>,
+    mut frame: ResMut<Ui2dFrame>,
+) {
+    let Some(c) = compose else { return };
+    frame.full_screen(c.scene_sheet, [1.; 4]);
+    if let (Some(s), Some(t)) = (c.snapshot_sheet, &talk)
+        && t.dissolve > 0
+    {
+        frame.full_screen(s, [1., 1., 1., t.dissolve as f32 / DISSOLVE_FRAMES as f32]);
+    }
+    let camp_open = camp.is_some_and(|c| c.open.is_some());
+    if let Some(h) = c.hud_sheet
+        && !camp_open
+    {
+        frame.full_screen(h, [1.; 4]);
+    }
 }
 
 /// The exe's pad pipeline for the room (bgm-input-01 Part B): PADDATA,
@@ -2682,8 +2748,6 @@ struct NpcRoot;
 struct NpcPart(usize);
 #[derive(Component)]
 struct SnapshotCamera;
-#[derive(Component)]
-struct DissolveOverlay;
 
 fn load_npc(
     source: &ProbeSource,
@@ -2985,8 +3049,6 @@ fn dissolve_present(
         (&mut Camera, &mut Transform, &mut Projection),
         (With<SnapshotCamera>, Without<SoraRoot>, Without<WeaponRoot>),
     >,
-    mut overlay: Query<&mut Sprite, With<DissolveOverlay>>,
-    windows: Query<&Window>,
 ) {
     let Some(mut talk) = talk else { return };
     let Ok((mut camera, mut transform, mut projection)) = snapshot.single_mut() else {
@@ -2999,15 +3061,6 @@ fn dissolve_present(
         *transform = *t;
         *projection = p.clone();
         camera.is_active = true;
-    }
-    if let Ok(mut sprite) = overlay.single_mut() {
-        sprite.color = Color::srgba(1., 1., 1., talk.dissolve as f32 / DISSOLVE_FRAMES as f32);
-        if let Ok(window) = windows.single() {
-            let size = Vec2::new(window.width(), window.height());
-            if sprite.custom_size != Some(size) {
-                sprite.custom_size = Some(size);
-            }
-        }
     }
 }
 
@@ -3130,16 +3183,8 @@ fn hud_present(
     hud: Option<ResMut<Hud>>,
     talk: Option<Res<Talk>>,
     mut images: ResMut<Assets<Image>>,
-    windows: Query<&Window>,
-    mut overlay: Query<&mut Sprite, With<HudOverlay>>,
 ) {
     let Some(mut hud) = hud else { return };
-    if let (Ok(window), Ok(mut sprite)) = (windows.single(), overlay.single_mut()) {
-        let size = Vec2::new(window.width(), window.height());
-        if sprite.custom_size != Some(size) {
-            sprite.custom_size = Some(size);
-        }
-    }
     if !std::mem::take(&mut hud.updated) {
         return;
     }
@@ -3986,24 +4031,9 @@ fn camp_tick(
 
 /// The camp over the frozen field; the field HUD is hidden meanwhile
 /// [inferred].
-fn camp_present(
-    camp: Option<ResMut<CampRes>>,
-    mut frame: ResMut<Ui2dFrame>,
-    mut overlay: Query<&mut Visibility, With<HudOverlay>>,
-) {
+fn camp_present(camp: Option<ResMut<CampRes>>, mut frame: ResMut<Ui2dFrame>) {
     let Some(mut c) = camp else { return };
     let c = &mut *c;
-    let hidden = c.open.is_some();
-    for mut v in &mut overlay {
-        let want = if hidden {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
-        };
-        if *v != want {
-            *v = want;
-        }
-    }
     let Some(menu) = c.open.as_mut() else { return };
     let font = command::Font {
         widths: &c.font.widths,
@@ -4389,8 +4419,8 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             ..default()
         }))
         .add_plugins(Ui2dPlugin {
-            order: 2,
-            overlay: true,
+            order: 0,
+            overlay: false,
         })
         .add_systems(Startup, (setup, pause_for_autoplay, camp_setup))
         .add_systems(
@@ -4414,6 +4444,8 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
                 present_npc,
                 present_effects,
                 hud_present,
+                resize_scene,
+                compose_2d,
                 camp_present,
                 finish,
             )

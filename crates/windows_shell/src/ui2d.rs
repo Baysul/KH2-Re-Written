@@ -34,6 +34,7 @@ const CENTRE_X: f32 = 256.;
 pub struct BlendKey {
     blend: u8,
     luminance: bool,
+    srgb_source: bool,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
@@ -45,6 +46,8 @@ pub struct LayoutMaterial {
     pub blend: u8,
     /// Font pixel shader (ps 029): RGB = luminance of the texel x colour.
     pub luminance: bool,
+    /// The texture is sRGB (a render target): re-encode to gamma.
+    pub srgb_source: bool,
 }
 
 impl From<&LayoutMaterial> for BlendKey {
@@ -52,6 +55,7 @@ impl From<&LayoutMaterial> for BlendKey {
         BlendKey {
             blend: m.blend,
             luminance: m.luminance,
+            srgb_source: m.srgb_source,
         }
     }
 }
@@ -108,6 +112,9 @@ impl Material2d for LayoutMaterial {
             if key.bind_group_data.luminance {
                 fragment.shader_defs.push("LUMINANCE".into());
             }
+            if key.bind_group_data.srgb_source {
+                fragment.shader_defs.push("SRGB_SOURCE".into());
+            }
             for target in fragment.targets.iter_mut().flatten() {
                 target.blend = Some(BlendState { color, alpha });
             }
@@ -151,6 +158,7 @@ pub struct Sheet {
     pub size: [u32; 2],
     pub texel_scale: f32,
     pub luminance: bool,
+    pub srgb_source: bool,
 }
 
 /// The sheets and this frame's draw list, in draw order.
@@ -193,8 +201,38 @@ impl Ui2dFrame {
             size,
             texel_scale,
             luminance: false,
+            srgb_source: false,
         });
         self.sheets.len() - 1
+    }
+
+    /// An existing image (e.g. a render target) as a sheet; `srgb` when
+    /// its format is sRGB, so samples are re-encoded to gamma.
+    pub fn add_image(&mut self, image: Handle<Image>, size: [u32; 2], srgb: bool) -> usize {
+        self.sheets.push(Sheet {
+            image,
+            size,
+            texel_scale: 1.,
+            luminance: false,
+            srgb_source: srgb,
+        });
+        self.sheets.len() - 1
+    }
+
+    /// A whole-window quad of `sheet` (its full texel extent) tinted by
+    /// `rgba`.
+    pub fn full_screen(&mut self, sheet: usize, rgba: [f32; 4]) {
+        let [w, h] = self.sheets[sheet].size;
+        let (l, r) = (CENTRE_X - WIDE_WIDTH / 2., CENTRE_X + WIDE_WIDTH / 2.);
+        self.draws.push((
+            sheet,
+            vec![Quad {
+                corners: [[l, 0.], [r, 0.], [l, HEIGHT], [r, HEIGHT]],
+                uv: [0, 0, w as i32, h as i32],
+                colors: [rgba; 4],
+                blend: 0,
+            }],
+        ));
     }
 
     /// A system-font sheet, drawn with the font pixel shader.
@@ -351,6 +389,7 @@ fn present(
                     texture: frame.sheets[*sheet].image.clone(),
                     blend: *blend,
                     luminance: frame.sheets[*sheet].luminance,
+                    srgb_source: frame.sheets[*sheet].srgb_source,
                 })
             })
             .clone();
