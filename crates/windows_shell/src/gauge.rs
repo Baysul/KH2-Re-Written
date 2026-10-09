@@ -11,10 +11,14 @@
 use package_reader::sequence::{Modifiers, Player, Quad, Sequence};
 use player_sim::camera::wrap;
 
-/// X origin added to every gauge sprite and mask (literal 0x55).
+/// X origin added to every gauge sprite and mask (literal 0x55). Outside
+/// 4:3 the HUD anchors right-half elements 85 units further right and
+/// left-half ones 85 units further left (0x14017d870, 0x14017d9e0).
 pub const X_ORIGIN: f32 = 85.;
-/// The 4:3 layout centred in a 16:9 canvas: 512 * (16/9) / (4/3).
+/// The 4:3 layout centred in a 16:9 canvas: 512 * (16/9) / (4/3), so layout
+/// x = 0 sits CANVAS_PAD units from the canvas's left edge.
 pub const CANVAS_WIDTH: f32 = 512. * 4. / 3.;
+pub const CANVAS_PAD: f32 = (CANVAS_WIDTH - 512.) / 2.;
 pub const CANVAS_HEIGHT: f32 = 416.;
 /// Ring angle per HP below 60 (pi/40, 0x14071b004).
 const RING_RADIANS_PER_HP: f32 = 0.078_539_8;
@@ -577,7 +581,7 @@ impl Canvas {
             match draw {
                 Draw::Mask { polygons, z } => {
                     for q in polygons {
-                        let q = q.map(|[x, y]| [x * k, y * k]);
+                        let q = q.map(|[x, y]| [(x + CANVAS_PAD) * k, y * k]);
                         for tri in [[q[0], q[1], q[2]], [q[1], q[3], q[2]]] {
                             self.raster(tri, |c, i, _| c.depth[i] = *z);
                         }
@@ -611,7 +615,7 @@ impl Canvas {
 
     fn quad(&mut self, quad: &Quad, z: i32, texture: &Texture) {
         let k = self.scale;
-        let q = quad.corners.map(|[x, y]| [x * k, y * k]);
+        let q = quad.corners.map(|[x, y]| [(x + CANVAS_PAD) * k, y * k]);
         let [u0, v0, u1, v1] = quad.uv.map(|v| v as f32 * texture.texel_scale);
         let uv = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
         for t in [[0usize, 1, 2], [1, 3, 2]] {
@@ -689,7 +693,8 @@ mod tests {
             },
         ];
         canvas.render(&draws, std::slice::from_ref(&texture));
-        let alpha = |c: &Canvas, x: usize, y: usize| c.rgba[(y * c.width + x) * 4 + 3];
+        let pad = CANVAS_PAD.ceil() as usize;
+        let alpha = |c: &Canvas, x: usize, y: usize| c.rgba[(y * c.width + x + pad) * 4 + 3];
         // z 100 is hidden by the z 200 mask; z 300 shows; unmasked shows.
         assert_eq!(alpha(&canvas, 1, 1), 255);
         assert_eq!(alpha(&canvas, 9, 1), 255);

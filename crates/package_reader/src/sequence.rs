@@ -413,6 +413,14 @@ impl Sequence {
             })
     }
 
+    /// Colour of the first active animation (the player's current colour).
+    pub fn current_color(&self, player: &Player) -> Option<[f32; 4]> {
+        player
+            .active(self)
+            .next()
+            .map(|(a, t)| frame(a, t, &Modifiers::default()).color)
+    }
+
     /// Quads of a player's current frame drawn at `origin`.
     pub fn quads(&self, player: &Player, origin: [f32; 2], m: &Modifiers) -> Vec<Quad> {
         let mut out = Vec::new();

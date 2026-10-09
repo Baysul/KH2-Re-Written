@@ -99,3 +99,140 @@ pub fn starting_stats(plrp: &[u8]) -> Result<(i32, i32), Box<dyn std::error::Err
         .map(|e| (e[3] as i32, e[4] as i32))
         .ok_or_else(|| "PLRP entry for Sora absent".into())
 }
+
+/// System font: the HD replacement of fontimage.bar's 'sys' plane and the
+/// 'sys' width table from fontinfo.bar (one byte per glyph).
+pub struct SystemFont {
+    pub rgba: Vec<u8>,
+    pub size: [u32; 2],
+    /// HD texels per original font texel (original plane 512 wide).
+    pub texel_scale: u32,
+    pub widths: Vec<u8>,
+}
+
+fn read_entry(
+    source: &ProbeSource,
+    index: &str,
+    ordinal: usize,
+    name_hash: [u8; 16],
+    replacements: bool,
+) -> Result<(Vec<u8>, Vec<replacement::ReplacementSample>), Box<dyn std::error::Error>> {
+    let mut checked = source.open_index(index)?;
+    let entry = checked
+        .inventory
+        .entries
+        .get(ordinal)
+        .filter(|e| e.name_hash == name_hash)
+        .ok_or("archive entry mismatch")?;
+    let archive = original::read_original(&mut checked.reader, entry)?.bytes;
+    let hd = if replacements {
+        replacement::read_all_replacements(&mut checked.reader, entry)?
+    } else {
+        Vec::new()
+    };
+    checked.verify_unchanged()?;
+    Ok((archive, hd))
+}
+
+fn named<'a>(
+    archive: &'a [u8],
+    kind: u16,
+    name: &[u8; 4],
+) -> Result<&'a [u8], Box<dyn std::error::Error>> {
+    let table = bar::read_bar(archive)?;
+    let e = table
+        .entries
+        .iter()
+        .find(|e| e.entry_type == kind && &e.name_bytes == name)
+        .ok_or("BAR entry absent")?;
+    archive
+        .get(e.offset as usize..e.offset as usize + e.size as usize)
+        .ok_or_else(|| "BAR entry exceeds archive".into())
+}
+
+/// `image` = msg/<lang>/fontimage.bar, `info` = msg/<lang>/fontinfo.bar,
+/// as (index, ordinal, name hash). The font planes (type 36) are replaced
+/// in archive order; 'sys' is the first.
+pub fn load_system_font(
+    source: &ProbeSource,
+    image: (&str, usize, [u8; 16]),
+    info: (&str, usize, [u8; 16]),
+) -> Result<SystemFont, Box<dyn std::error::Error>> {
+    let (images, hd) = read_entry(source, image.0, image.1, image.2, true)?;
+    let planes: Vec<_> = bar::read_bar(&images)?
+        .entries
+        .into_iter()
+        .filter(|e| e.entry_type == 36)
+        .collect();
+    let slot = planes
+        .iter()
+        .position(|e| &e.name_bytes == b"sys\0")
+        .ok_or("system font plane absent")?;
+    if hd.len() != planes.len() {
+        return Err("font HD replacements do not match the planes".into());
+    }
+    let decoded = hd_image::decode_hd_image(
+        &hd[slot].bytes,
+        hd[slot].metadata.declared_decompressed_length as usize,
+    )?;
+    let scale = decoded.width / 512;
+    if scale == 0 || decoded.width != 512 * scale {
+        return Err("system font HD plane is not an integer upscale".into());
+    }
+    let (infos, _) = read_entry(source, info.0, info.1, info.2, false)?;
+    let widths = named(&infos, 2, b"sys\0")?.to_vec();
+    Ok(SystemFont {
+        size: [decoded.width, decoded.height],
+        rgba: decoded.pixels_rgba,
+        texel_scale: scale,
+        widths,
+    })
+}
+
+/// Encoded strings of a message archive (e.g. msg/<lang>/sys.bar) by id &
+/// 0x7fff, up to the terminating zero.
+pub fn load_messages(
+    source: &ProbeSource,
+    index: &str,
+    ordinal: usize,
+    name_hash: [u8; 16],
+    ids: &[u32],
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    let (archive, _) = read_entry(source, index, ordinal, name_hash, false)?;
+    let table = bar::read_bar(&archive)?;
+    let e = table
+        .entries
+        .iter()
+        .find(|e| e.entry_type == 2)
+        .ok_or("message table absent")?;
+    let d = archive
+        .get(e.offset as usize..e.offset as usize + e.size as usize)
+        .ok_or("message table exceeds archive")?;
+    let word = |at: usize| -> Result<u32, Box<dyn std::error::Error>> {
+        Ok(u32::from_le_bytes(
+            d.get(at..at + 4)
+                .ok_or("message table truncated")?
+                .try_into()?,
+        ))
+    };
+    if word(0)? != 1 {
+        return Err("message table header".into());
+    }
+    let count = word(4)? as usize;
+    ids.iter()
+        .map(|&id| {
+            for k in 0..count {
+                if word(8 + k * 8)? & 0x7fff == id & 0x7fff {
+                    let start = word(12 + k * 8)? as usize;
+                    let rest = d.get(start..).ok_or("message offset outside table")?;
+                    let end = rest
+                        .iter()
+                        .position(|&b| b == 0)
+                        .ok_or("unterminated message")?;
+                    return Ok(rest[..end].to_vec());
+                }
+            }
+            Err(format!("message {id:#x} absent").into())
+        })
+        .collect()
+}

@@ -34,8 +34,9 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+use windows_shell::command::{self, CommandMenu, Decision, Item};
 use windows_shell::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
-use windows_shell::hud::{self, Sheet};
+use windows_shell::hud::{self, Sheet, SystemFont};
 use windows_shell::room::{CollisionTriangle, LoadedRoom, load_rooms, mesh, rgba_image, upload};
 
 #[derive(Deserialize)]
@@ -83,10 +84,34 @@ struct Config {
     /// Character archive holding the 'face' sequence (obj/P_EX100.a.<lang>).
     #[serde(default)]
     face: Option<Locator>,
+    /// Command menu sources.
+    #[serde(default)]
+    menu: Option<MenuSources>,
     /// Optional spawn (x, probe height, z) in scene coordinates.
     #[serde(default)]
     spawn: Option<[f32; 3]>,
 }
+
+#[derive(Deserialize)]
+struct MenuSources {
+    /// field2d/<lang>/<world><n>command.2dd ('comw' sequence).
+    command: Locator,
+    /// msg/<lang>/fontimage.bar and msg/<lang>/fontinfo.bar.
+    font_image: Locator,
+    font_info: Locator,
+    /// msg/<lang>/sys.bar (command labels).
+    messages: Locator,
+}
+
+/// HUD sources loaded with the session.
+struct HudSource {
+    sheets: Vec<Sheet>,
+    stats: (i32, i32),
+    menu: Option<(Sheet, SystemFont, Vec<Vec<u8>>)>,
+}
+
+/// Top-menu labels: Attack, Magic, Items, Drive (03system 'cmd' message ids).
+const MENU_MESSAGES: [u32; 4] = [0x81e0, 0x81e1, 0x81e2, 0x81e3];
 
 /// Public MotionSet names for the locomotion IDs used here.
 const LOCOMOTION: [(&str, u16); 6] = [
@@ -144,6 +169,8 @@ struct Game {
     gamepad: bool,
     jump_queued: bool,
     attack_queued: bool,
+    menu_up_queued: bool,
+    menu_down_queued: bool,
     display: Vec<Vec3>,
     /// Pose, Keyblade transform and start tick of the active crossfade.
     blend_from: Option<(Vec<Vec3>, Transform, u64)>,
@@ -161,12 +188,19 @@ struct Game {
 #[derive(Component)]
 struct HudOverlay;
 
+struct MenuState {
+    menu: CommandMenu,
+    sheet: Sheet,
+    font: SystemFont,
+}
+
 /// Sora's field gauge: the translated GAUGE_PLAYER logic, drawn into a
 /// software canvas shown as a full-window overlay.
 #[derive(Resource)]
 struct Hud {
     /// Gauge sheet, then the face sheet when configured.
     sheets: Vec<Sheet>,
+    menu: Option<MenuState>,
     gauge: Gauge,
     stats: GaugeStats,
     canvas: Canvas,
@@ -328,7 +362,7 @@ struct Loaded {
     spawn: Vec3,
     world: TriangleWorld,
     summary: serde_json::Value,
-    hud: Option<(Vec<Sheet>, (i32, i32))>,
+    hud: Option<HudSource>,
 }
 
 /// Walkable collision levels (8-unit height bins) by XZ area, largest first,
@@ -470,7 +504,43 @@ fn load(
                     b"face",
                 )?);
             }
-            Some((sheets, hud::starting_stats(bar_entry(&battle, b"plrp")?)?))
+            let menu = match &config.menu {
+                Some(m) => Some((
+                    hud::load(
+                        source,
+                        &m.command.index,
+                        m.command.ordinal,
+                        m.command.name_hash,
+                        b"comw",
+                    )?,
+                    hud::load_system_font(
+                        source,
+                        (
+                            &m.font_image.index,
+                            m.font_image.ordinal,
+                            m.font_image.name_hash,
+                        ),
+                        (
+                            &m.font_info.index,
+                            m.font_info.ordinal,
+                            m.font_info.name_hash,
+                        ),
+                    )?,
+                    hud::load_messages(
+                        source,
+                        &m.messages.index,
+                        m.messages.ordinal,
+                        m.messages.name_hash,
+                        &MENU_MESSAGES,
+                    )?,
+                )),
+                None => None,
+            };
+            Some(HudSource {
+                sheets,
+                stats: hud::starting_stats(bar_entry(&battle, b"plrp")?)?,
+                menu,
+            })
         }
         None => None,
     };
@@ -766,7 +836,7 @@ struct Startup {
     room: Option<LoadedRoom>,
     actor: Option<model_inspection::InspectionModel>,
     weapon: Option<model_inspection::InspectionModel>,
-    hud: Option<(Vec<Sheet>, (i32, i32))>,
+    hud: Option<HudSource>,
 }
 
 /// Spawns one textured mesh per model part under `parent`, in part order.
@@ -841,7 +911,12 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
 ) {
     let room = startup.room.take().expect("room retained for setup");
-    if let Some((sheets, (hp, mp))) = startup.hud.take() {
+    if let Some(HudSource {
+        sheets,
+        stats: (hp, mp),
+        menu,
+    }) = startup.hud.take()
+    {
         // Test-room choices for values the opening room does not define:
         // full HP/MP from PLRP, normal drive mode with three full bars.
         let stats = GaugeStats {
@@ -888,6 +963,24 @@ fn setup(
                 &stats,
             ),
             sheets,
+            menu: menu.map(|(sheet, font, labels)| {
+                // Test-room choices for the opening state: Magic and Drive
+                // have no entries yet (colour 5), Items is usable.
+                let items = labels
+                    .into_iter()
+                    .zip([(1, 0), (2, 5), (3, 0), (4, 5)])
+                    .map(|(label, (icon, colour))| Item {
+                        label,
+                        icon,
+                        colour,
+                    })
+                    .collect();
+                MenuState {
+                    menu: CommandMenu::new(&sheet.sequence, items),
+                    sheet,
+                    font,
+                }
+            }),
             stats,
             canvas,
             image,
@@ -1102,8 +1195,18 @@ fn gather_input(
             attack |= pad.just_pressed(GamepadButton::South);
         }
     }
+    let mut up = keys.just_pressed(KeyCode::ArrowUp);
+    let mut down = keys.just_pressed(KeyCode::ArrowDown);
+    if game.gamepad {
+        for pad in &pads {
+            up |= pad.just_pressed(GamepadButton::DPadUp);
+            down |= pad.just_pressed(GamepadButton::DPadDown);
+        }
+    }
     game.jump_queued |= jump;
     game.attack_queued |= attack;
+    game.menu_up_queued |= up;
+    game.menu_down_queued |= down;
 }
 
 /// Scripted input for unattended verification runs.
@@ -1129,17 +1232,24 @@ fn simulate(
     pads: Query<&Gamepad>,
     mut rig: ResMut<CameraRig>,
     mut game: ResMut<Game>,
+    hud: Option<ResMut<Hud>>,
 ) {
     let tick = game.tick;
-    let (stick, jump, attack) = if game.autoplay.is_some() {
+    let (up, down) = if game.autoplay.is_some() {
+        (false, tick == 980)
+    } else {
+        let queued = (game.menu_up_queued, game.menu_down_queued);
+        game.menu_up_queued = false;
+        game.menu_down_queued = false;
+        queued
+    };
+    let (stick, jump, decide) = if game.autoplay.is_some() {
         autoplay_input(tick)
     } else {
         let mut stick = Vec2::ZERO;
         for (key, delta) in [
             (KeyCode::KeyW, Vec2::Y),
-            (KeyCode::ArrowUp, Vec2::Y),
             (KeyCode::KeyS, Vec2::NEG_Y),
-            (KeyCode::ArrowDown, Vec2::NEG_Y),
             (KeyCode::KeyA, Vec2::NEG_X),
             (KeyCode::ArrowLeft, Vec2::NEG_X),
             (KeyCode::KeyD, Vec2::X),
@@ -1173,6 +1283,17 @@ fn simulate(
     let forward = (look_at - eye).xz().normalize_or(Vec2::NEG_Y);
     let right = Vec2::new(-forward.y, forward.x);
     let direction = (forward * stick.y + right * stick.x) * MIRROR.xz();
+    // The decide button executes the command under the cursor; Attack
+    // (icon 1) is the only command this room implements.
+    let attack = match hud.and_then(|h| {
+        h.into_inner().menu.as_mut().map(|m| {
+            m.menu.input(up, down, decide) == Decision::Execute(0)
+                && m.menu.items.first().is_some_and(|i| i.icon == 1)
+        })
+    }) {
+        Some(execute) => execute,
+        None => decide,
+    };
     let input = Input {
         direction: direction.to_array(),
         jump,
@@ -1294,7 +1415,15 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, game: Res<Game>, hud: Option<ResMut
         }
     }
     hud.stats = s;
-    let Hud { sheets, gauge, .. } = &mut *hud;
+    let Hud {
+        sheets,
+        gauge,
+        menu,
+        ..
+    } = &mut *hud;
+    if let Some(m) = menu {
+        m.menu.update(&m.sheet.sequence);
+    }
     gauge.update(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(), &s);
     hud.updated = true;
 }
@@ -1320,10 +1449,10 @@ fn hud_present(
         gauge,
         canvas,
         image,
+        menu,
         ..
     } = &mut *hud;
-    let draws: Vec<Draw> = gauge.draw(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>());
-    let textures: Vec<Texture> = sheets
+    let mut textures: Vec<Texture> = sheets
         .iter()
         .map(|s| Texture {
             rgba: &s.texture_rgba,
@@ -1331,6 +1460,31 @@ fn hud_present(
             texel_scale: s.texel_scale as f32,
         })
         .collect();
+    // The command menu (priorities 0x14b5..0x14b7) draws before the gauge
+    // (7000).
+    let mut draws: Vec<Draw> = Vec::new();
+    if let Some(m) = menu {
+        let first = textures.len();
+        textures.push(Texture {
+            rgba: &m.sheet.texture_rgba,
+            size: m.sheet.texture_size.map(|v| v as usize),
+            texel_scale: m.sheet.texel_scale as f32,
+        });
+        textures.push(Texture {
+            rgba: &m.font.rgba,
+            size: m.font.size.map(|v| v as usize),
+            texel_scale: m.font.texel_scale as f32,
+        });
+        draws = m.menu.draw(
+            &m.sheet.sequence,
+            &command::Font {
+                widths: &m.font.widths,
+            },
+            first,
+            first + 1,
+        );
+    }
+    draws.extend(gauge.draw(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>()));
     canvas.render(&draws, &textures);
     if let Some(mut target) = images.get_mut(image.id()) {
         target.data = Some(canvas.rgba.clone());
@@ -1679,6 +1833,8 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         gamepad,
         jump_queued: false,
         attack_queued: false,
+        menu_up_queued: false,
+        menu_down_queued: false,
         display: Vec::new(),
         blend_from: None,
         display_hand: Transform::IDENTITY,
@@ -1709,7 +1865,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             .collect(),
     };
     eprintln!(
-        "Test room ready. WASD/arrows move (Shift walks), Space jumps, Enter/K/left-click attacks, Q/E or right-drag turns the camera, -/= zoom, C recenters, Esc exits."
+        "Test room ready. WASD moves (Shift walks), Up/Down choose a command, Space jumps, Enter/K/left-click attacks, Q/E or right-drag turns the camera, -/= zoom, C recenters, Esc exits."
     );
     Ok(App::new()
         .insert_resource(game)
