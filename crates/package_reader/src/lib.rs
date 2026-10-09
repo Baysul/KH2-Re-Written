@@ -44,7 +44,6 @@ pub mod scd;
 pub mod sequence;
 pub mod sklt;
 pub mod vif;
-pub mod vorbis;
 pub mod vpu;
 
 pub const RECORD_SIZE: usize = 32;

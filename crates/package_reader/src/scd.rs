@@ -2,8 +2,8 @@
 //! `se/se%03d.win32.scd` and from the `se/obj/seNNN` replacement assets of
 //! object archives. Sound `no` of a bank lists {track, audio} layers; each
 //! audio stream here is MS-ADPCM (codec 12) or, for music, Ogg Vorbis
-//! (codec 6), decoded to interleaved i16 PCM.
-use crate::{ogg, vorbis};
+//! (codec 6, decoded with lewton), as interleaved i16 PCM.
+use crate::ogg;
 use std::io;
 
 const MAGIC: &[u8; 8] = b"SEDBSSCF";
@@ -246,11 +246,12 @@ impl<'a> Bank<'a> {
     }
 }
 
-/// Decodes a whole codec-6 stream. PCM is `clamp(trunc(f x 32767))`
-/// (FUN_1400af3a0); the loop runs from the granule of the page at the loop
-/// byte offset plus the skip count to the last granule (bgm-input-01
-/// §A2.1), end inclusive.
+/// Decodes a whole codec-6 stream with lewton. PCM is
+/// `clamp(trunc(f x 32767))` (FUN_1400af3a0); the loop runs from the
+/// granule of the page at the loop byte offset plus the skip count to the
+/// last granule (bgm-input-01 §A2.1), end inclusive.
 pub fn decode_vorbis(v: &VorbisStream) -> io::Result<Pcm> {
+    let bad = |e: &dyn std::fmt::Debug| invalid(&format!("Vorbis: {e:?}"));
     let mut headers = ogg::Packets::new(&v.header, 0);
     let mut next = || -> io::Result<Vec<u8>> {
         Ok(headers
@@ -261,19 +262,28 @@ pub fn decode_vorbis(v: &VorbisStream) -> io::Result<Pcm> {
     let identification = next()?;
     let _comment = next()?;
     let setup = next()?;
-    let mut decoder = vorbis::Decoder::new(vorbis::Setup::read(&identification, &setup)?);
-    let channels = decoder.setup.channels;
-    if channels as u32 != v.channels || channels > 8 {
+    let ident = lewton::header::read_header_ident(&identification).map_err(|e| bad(&e))?;
+    let setup = lewton::header::read_header_setup(
+        &setup,
+        ident.audio_channels,
+        (ident.blocksize_0, ident.blocksize_1),
+    )
+    .map_err(|e| bad(&e))?;
+    let channels = ident.audio_channels as usize;
+    if channels as u32 != v.channels {
         return Err(invalid("Vorbis channel count differs from the SCD"));
     }
+    let mut window = lewton::audio::PreviousWindowRight::new();
     let mut samples: Vec<i16> = Vec::new();
     let mut packets = ogg::Packets::new(v.data, 0);
     let mut last_granule = 0i64;
     while let Some(p) = packets.next_packet()? {
-        let pcm = decoder.decode(&p.data)?;
+        let pcm: Vec<Vec<f32>> =
+            lewton::audio::read_audio_packet_generic(&ident, &setup, &p.data, &mut window)
+                .map_err(|e| bad(&e))?;
         if let Some(first) = pcm.first() {
             for i in 0..first.len() {
-                for c in pcm.iter() {
+                for c in &pcm {
                     samples.push((c[i] * 32767.).trunc().clamp(-32768., 32767.) as i16);
                 }
             }
@@ -298,13 +308,12 @@ pub fn decode_vorbis(v: &VorbisStream) -> io::Result<Pcm> {
     };
     Ok(Pcm {
         channels: channels as u16,
-        rate: decoder.setup.rate,
+        rate: ident.audio_sample_rate,
         samples,
         loop_start,
         loop_end,
     })
 }
-
 /// MS-ADPCM with a WAVEFORMATEX + ADPCMWAVEFORMAT `format` block.
 pub fn decode_ms_adpcm(format: &[u8], channels: usize, data: &[u8]) -> io::Result<Vec<i16>> {
     let align = u16_at(format, 12)? as usize;

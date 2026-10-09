@@ -1,4 +1,4 @@
-# T076 — Music: own Vorbis decoder, title stream, field/battle tracks
+# T076 — Music: Vorbis via lewton, title stream, field/battle tracks
 
 Owner Claude, 2026-10-09. Gate P22. Starts from T075. User request: all sounds and music 1:1.
 
@@ -87,3 +87,16 @@ NOT RUN: a listening check, and a bit-exact comparison with libvorbis output (no
 ## Verdict / next
 
 PROGRESS: title, field and battle music play from the installed streams, with the exe's loop points, levels and switching rules. Next: the camp's party models and sub-screens; a vanilla towns-person talk check.
+
+## Amendment: lewton (user instruction)
+
+The user then answered "use lewton". `package_reader::scd::decode_vorbis` now decodes the packets with lewton 0.10.2 (pinned, default features off). The project's Ogg reassembly, header XOR, loop rule and the exe's `clamp(trunc(f·32767))` conversion stay unchanged.
+
+Before it was removed, the in-house decoder was compared against lewton on music118 and music119 (`music-compare-01.jsonl`):
+- identical lengths and loop points;
+- maximum difference 1 LSB;
+- 99.89 % and 99.82 % of samples identical.
+
+The in-house decoder and its tests were then deleted. The dependency inventory and `docs/release/provenance.md` record the new crate.
+
+lewton is optimized in dev builds (workspace profile), as package_reader already is. title-run-12: the stream decodes in 4.2 s, the title starts at tick 123, the stream starts at 124, and the levels are unchanged. Checks re-run: PASS fmt, clippy, tests, build, smoke.

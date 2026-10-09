@@ -29,3 +29,8 @@ opt-level = 3
 # startup; unoptimized FK sampling made that step impractically slow.
 [profile.dev.package.package_reader]
 opt-level = 3
+
+# Music is decoded whole at startup; an unoptimized Vorbis decode of the
+# title stream took about 16 s.
+[profile.dev.package.lewton]
+opt-level = 3
