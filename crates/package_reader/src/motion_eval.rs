@@ -354,8 +354,10 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
     // Locals and parents for model bones and IK helpers.
     let mut locals = Vec::with_capacity(total);
     let mut parents = Vec::with_capacity(total);
+    let mut lengths = Vec::with_capacity(total);
     for bone in bones {
         let t = bone.transform_bits.map(f32::from_bits);
+        lengths.push(t[3]);
         locals.push(Local {
             scale: [t[0], t[1], t[2]],
             rotation: [t[4], t[5], t[6]],
@@ -364,6 +366,7 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
         parents.push(bone.header_i32[1]);
     }
     for b in m.helpers.bytes.as_chunks::<64>().0 {
+        lengths.push(float(b, 28));
         locals.push(Local {
             scale: [float(b, 16), float(b, 20), float(b, 24)],
             rotation: [float(b, 32), float(b, 36), float(b, 40)],
@@ -627,15 +630,17 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
                         && flags[top as usize] & 3 != 0
                     {
                         let above = parents[top as usize];
-                        let hinge_frame = if above >= 0 {
-                            world[above as usize].rotation
+                        let parent_frame = if above >= 0 {
+                            world[above as usize]
                         } else {
-                            IDENTITY
+                            root_world
                         };
                         solve_two_joint(
                             &mut world,
                             &locals,
-                            hinge_frame,
+                            [lengths[top as usize], lengths[mid as usize]],
+                            parent_frame,
+                            flags[top as usize] & 3 == 3,
                             [top as usize, mid as usize, j],
                             source.translation,
                         );
@@ -774,38 +779,62 @@ fn from_basis(x: Vec3, y: Vec3, z: Vec3) -> Quat {
     qnorm(q)
 }
 
-/// Two-joint IK matched against the reference evaluation: the hinge is the
-/// chain parent's Y axis projected perpendicular to the target direction;
-/// both joints take that hinge as local Z; the middle bends about it by the
-/// law-of-cosines angle, with the sign of its bind Z rotation.
+/// Two-joint IK following the reference solver: it works in the chain
+/// parent's frame, builds an aim frame (X toward the target, Y = Z x X with
+/// world-up Z in that frame), rolls it by the top joint's animated X
+/// rotation, bends the middle joint about Z by the law-of-cosines angle
+/// (negated for arm chains, ik=3) rolled by the middle joint's own X
+/// rotation, and swings the top joint so the end reaches the target.
+/// Segment lengths come from the bone records (scale.w).
+#[allow(clippy::too_many_arguments)]
 fn solve_two_joint(
     world: &mut [World],
     locals: &[Local],
-    hinge_frame: Quat,
+    lengths: [f32; 2],
+    parent: World,
+    arm: bool,
     [a, b, c]: [usize; 3],
     target: Vec3,
 ) {
-    let l1 = length(locals[b].translation);
-    let l2 = length(locals[c].translation);
-    let pa = world[a].translation;
-    let Some(d) = normalize(sub(target, pa)) else {
-        return;
-    };
+    let [l1, l2] = lengths;
     if l1 < 1e-4 || l2 < 1e-4 {
         return;
     }
-    let z = rotate(hinge_frame, [0., 1., 0.]);
-    let n = normalize(sub(z, d.map(|c| c * dot(z, d)))).unwrap_or(z);
-    let reach = length(sub(target, pa)).clamp((l1 - l2).abs(), l1 + l2);
-    let cos_inner = ((l1 * l1 + l2 * l2 - reach * reach) / (2. * l1 * l2)).clamp(-1., 1.);
-    let bend = std::f32::consts::PI - cos_inner.acos();
-    let sign = if locals[b].rotation[2] < 0. { -1. } else { 1. };
-    let lead = (l2 * bend.sin()).atan2(l1 + l2 * bend.cos());
-    let x1 = rotate(axis_angle(n, -sign * lead), d);
-    let x2 = rotate(axis_angle(n, sign * bend), x1);
-    world[a].rotation = from_basis(x1, cross(n, x1), n);
-    world[b].rotation = from_basis(x2, cross(n, x2), n);
-    world[b].translation = add(pa, rotate(world[a].rotation, locals[b].translation));
+    let inv = qconj(parent.rotation);
+    let p0 = rotate(inv, sub(world[a].translation, parent.translation));
+    let pt = rotate(inv, sub(target, parent.translation));
+    let delta = sub(pt, p0);
+    let dist = length(delta);
+    let Some(dir) = normalize(delta) else {
+        return;
+    };
+    let y = normalize([-dir[1], dir[0], 0.]).unwrap_or([0., 1., 0.]);
+    let z = normalize(cross(dir, y)).unwrap_or([0., 0., 1.]);
+    let frame = qmul(
+        from_basis(dir, y, z),
+        axis_angle([1., 0., 0.], locals[a].rotation[0]),
+    );
+    let cosine = ((dist * dist - l1 * l1 - l2 * l2) / (2. * l1 * l2)).clamp(-1., 1.);
+    let mut sine = (1. - cosine * cosine).max(0.).sqrt();
+    if arm {
+        sine = -sine;
+    }
+    let mid = qmul(
+        axis_angle([0., 0., 1.], sine.atan2(cosine)),
+        axis_angle([1., 0., 0.], locals[b].rotation[0]),
+    );
+    let u = (l1 + l2 * cosine) * dist;
+    let v = -(l2 * sine) * dist;
+    let upper = qmul(frame, axis_angle([0., 0., 1.], v.atan2(u)));
+    world[a].rotation = qnorm(qmul(parent.rotation, upper));
+    let mid_local = Local {
+        scale: locals[b].scale,
+        rotation: [0.; 3],
+        translation: locals[b].translation,
+    };
+    let mut mid_world = World::compose(&world[a], &mid_local);
+    mid_world.rotation = qnorm(qmul(world[a].rotation, mid));
+    world[b] = mid_world;
     world[c] = World::compose(&world[b], &locals[c]);
 }
 
@@ -966,13 +995,29 @@ mod tests {
         world.push(World::compose(&world[0], &locals[1]));
         world.push(World::compose(&world[1], &locals[2]));
         let target = [10., 50., 20.];
-        solve_two_joint(&mut world, &locals, IDENTITY, [0, 1, 2], target);
+        solve_two_joint(
+            &mut world,
+            &locals,
+            [30., 40.],
+            root,
+            false,
+            [0, 1, 2],
+            target,
+        );
         let d = length(sub(world[2].translation, target));
         assert!(d < 1e-3, "end misses target by {d}");
         // Segment lengths are preserved.
         assert!((length(sub(world[1].translation, world[0].translation)) - 30.).abs() < 1e-3);
         // Unreachable targets stretch to full extension toward the target.
-        solve_two_joint(&mut world, &locals, IDENTITY, [0, 1, 2], [0., -100., 0.]);
+        solve_two_joint(
+            &mut world,
+            &locals,
+            [30., 40.],
+            root,
+            false,
+            [0, 1, 2],
+            [0., -100., 0.],
+        );
         assert!((length(sub(world[2].translation, world[0].translation)) - 70.).abs() < 0.01);
     }
 
