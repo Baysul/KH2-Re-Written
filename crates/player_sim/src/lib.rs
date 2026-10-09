@@ -7,6 +7,8 @@
 //! triggers). Gravity, step height, body size, walk threshold and the
 //! collision response are explicit test-room choices, not observed KH2 rules.
 
+pub mod camera;
+
 pub type Vec3 = [f32; 3];
 
 /// One update is one 60 Hz global frame, matching the public ANB note that

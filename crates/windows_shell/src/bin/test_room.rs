@@ -20,7 +20,10 @@ use package_reader::{
     bar, model_inspection, model_inspection_textures::TextureMode, motion, objentry, original,
     preferences, probe::ProbeSource, ptya, sklt,
 };
-use player_sim::{Action, AttackStep, Clip, Clips, Input, Params, Player, TriangleWorld, World};
+use player_sim::{
+    Action, AttackStep, Clip, Clips, Input, Params, Player, TriangleWorld, World,
+    camera::{self, CameraInput, FollowCamera},
+};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -143,12 +146,35 @@ struct Game {
     autoplay_failed: bool,
 }
 
+/// The original's default follow camera, ticked with the simulation in the
+/// game's own world space (Y down: scene (x, -y, -z)).
 #[derive(Resource)]
 struct CameraRig {
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
-    target: Vec3,
+    camera: FollowCamera,
+    previous_position: [f32; 3],
+    /// Right-drag turn not yet consumed by a tick, in manual-turn units.
+    pending_turn: f32,
+    recenter_queued: bool,
+}
+
+/// Scene (Y up) to game world (Y down) and back; the map is converted with
+/// (x, -y, -z).
+fn to_world(p: [f32; 3]) -> [f32; 3] {
+    [p[0], -p[1], -p[2]]
+}
+fn from_world(p: [f32; 3]) -> Vec3 {
+    Vec3::new(p[0], -p[1], -p[2])
+}
+
+fn camera_input(player: &Player, previous: [f32; 3], speed: f32) -> CameraInput {
+    let [s, c] = [player.yaw.sin(), player.yaw.cos()];
+    CameraInput {
+        player_position: to_world(player.position),
+        player_forward: to_world([s, 0., c]),
+        moved: player.position[0] != previous[0] || player.position[2] != previous[2],
+        speed,
+        ..Default::default()
+    }
 }
 
 #[derive(Component)]
@@ -935,7 +961,7 @@ fn setup(
     commands.spawn((
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
-            fov: 50f32.to_radians(),
+            fov: FollowCamera::new(camera::OUTDOOR, &CameraInput::default()).vertical_fov(),
             near: 5.,
             far: 200_000.,
             ..default()
@@ -992,7 +1018,7 @@ const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 fn simulate(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
-    rig: Res<CameraRig>,
+    mut rig: ResMut<CameraRig>,
     mut game: ResMut<Game>,
 ) {
     let tick = game.tick;
@@ -1031,10 +1057,12 @@ fn simulate(
         game.attack_queued = false;
         (stick, queued.0, queued.1)
     };
-    // Camera-relative stick: forward points from the camera toward Sora.
-    let forward = Vec2::new(-rig.yaw.sin(), -rig.yaw.cos());
-    let right = Vec2::new(rig.yaw.cos(), -rig.yaw.sin());
-    // The camera works in displayed (mirrored) space; map back to source.
+    // Camera-relative stick in displayed (mirrored) space: forward is the
+    // view direction on the ground, right is screen right.
+    let eye = from_world(rig.camera.eye) * MIRROR;
+    let look_at = from_world(rig.camera.look_at) * MIRROR;
+    let forward = (look_at - eye).xz().normalize_or(Vec2::NEG_Y);
+    let right = Vec2::new(-forward.y, forward.x);
     let direction = (forward * stick.y + right * stick.x) * MIRROR.xz();
     let input = Input {
         direction: direction.to_array(),
@@ -1049,6 +1077,51 @@ fn simulate(
         ..
     } = &mut *game;
     let step = player.tick(&input, params, clips, world);
+    // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
+    // recenters (test-room bindings for the original's camera buttons).
+    let mut turn = 0f32;
+    let mut zoom = 0f32;
+    if game.autoplay.is_some() {
+        // Unattended runs orbit 180 degrees to check Sora from the front.
+        if (660..720).contains(&tick) {
+            turn = 1.;
+        }
+    } else {
+        if keys.pressed(KeyCode::KeyQ) || keys.pressed(KeyCode::KeyJ) {
+            turn -= 1.;
+        }
+        if keys.pressed(KeyCode::KeyE) || keys.pressed(KeyCode::KeyL) {
+            turn += 1.;
+        }
+        if keys.pressed(KeyCode::Minus) {
+            zoom += 1.;
+        }
+        if keys.pressed(KeyCode::Equal) {
+            zoom -= 1.;
+        }
+        if game.gamepad {
+            for pad in &pads {
+                let s = pad.right_stick();
+                if s.length() > 0.2 {
+                    turn = s.x;
+                    zoom = -s.y;
+                }
+            }
+        }
+        let pending = rig.pending_turn.clamp(-1., 1.);
+        if turn == 0. && pending != 0. {
+            turn = pending;
+            rig.pending_turn -= pending;
+        }
+    }
+    let mut camera = camera_input(&game.player, rig.previous_position, game.params.run_speed);
+    camera.stick = [stick.x, -stick.y];
+    camera.magnitude = stick.length().min(1.);
+    camera.turn = turn.clamp(-1., 1.);
+    camera.zoom = zoom.clamp(-1., 1.);
+    camera.recenter = std::mem::take(&mut rig.recenter_queued);
+    rig.camera.tick(&camera);
+    rig.previous_position = game.player.position;
     game.tick += 1;
     if let Some(action) = step.started {
         let position = game.player.position;
@@ -1073,61 +1146,23 @@ type WeaponOnly = (With<WeaponRoot>, Without<SoraRoot>);
 /// The camera never shares a transform with Sora's hierarchy.
 type CameraOnly = (With<Camera3d>, Without<SoraRoot>, Without<WeaponRoot>);
 
-// Bevy systems take each resource as a parameter.
-#[allow(clippy::too_many_arguments)]
 fn camera_control(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
-    pads: Query<&Gamepad>,
-    time: Res<Time<Real>>,
-    game: Res<Game>,
     mut rig: ResMut<CameraRig>,
     mut camera: Query<&mut Transform, CameraOnly>,
 ) {
-    let dt = time.delta_secs().min(0.1);
-    let mut turn = 0.;
-    if keys.pressed(KeyCode::KeyQ) || keys.pressed(KeyCode::KeyJ) {
-        turn -= 2.;
-    }
-    if keys.pressed(KeyCode::KeyE) || keys.pressed(KeyCode::KeyL) {
-        turn += 2.;
-    }
-    // Unattended runs swing the camera to Sora's front for a facing check.
-    if game.autoplay.is_some() && (660..760).contains(&game.tick) {
-        rig.yaw = std::f32::consts::PI * (1. - (game.tick - 660) as f32 / 100.);
-    }
-    rig.yaw += turn * dt;
     if mouse.pressed(MouseButton::Right) {
-        rig.yaw -= motion.delta.x * 0.005;
-        rig.pitch = (rig.pitch + motion.delta.y * 0.003).clamp(-0.2, 1.2);
+        rig.pending_turn = (rig.pending_turn + motion.delta.x * 0.1).clamp(-30., 30.);
     }
-    if game.gamepad {
-        for pad in &pads {
-            let s = pad.right_stick();
-            if s.length() > 0.2 {
-                rig.yaw += s.x * 2.5 * dt;
-                rig.pitch = (rig.pitch - s.y * 1.5 * dt).clamp(-0.2, 1.2);
-            }
-        }
+    if keys.just_pressed(KeyCode::KeyC) {
+        rig.recenter_queued = true;
     }
-    if keys.just_pressed(KeyCode::Equal) {
-        rig.distance = (rig.distance * 0.85).max(150.);
-    }
-    if keys.just_pressed(KeyCode::Minus) {
-        rig.distance = (rig.distance * 1.18).min(3000.);
-    }
-    let focus = Vec3::from_array(game.player.position) * MIRROR + Vec3::Y * 90.;
-    let follow = 1. - (-dt * 10.).exp();
-    rig.target = rig.target.lerp(focus, follow);
-    let offset = Vec3::new(
-        rig.yaw.sin() * rig.pitch.cos(),
-        rig.pitch.sin(),
-        rig.yaw.cos() * rig.pitch.cos(),
-    ) * rig.distance;
+    let eye = from_world(rig.camera.eye) * MIRROR;
+    let look_at = from_world(rig.camera.look_at) * MIRROR;
     if let Ok(mut transform) = camera.single_mut() {
-        *transform =
-            Transform::from_translation(rig.target + offset).looking_at(rig.target, Vec3::Y);
+        *transform = Transform::from_translation(eye).looking_at(look_at, Vec3::Y);
     }
 }
 
@@ -1461,8 +1496,17 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         autoplay_failed: false,
     };
     game.event(loaded.summary);
+    let rig = CameraRig {
+        camera: FollowCamera::new(
+            camera::OUTDOOR,
+            &camera_input(&game.player, game.player.position, game.params.run_speed),
+        ),
+        previous_position: game.player.position,
+        pending_turn: 0.,
+        recenter_queued: false,
+    };
     eprintln!(
-        "Test room ready. WASD/arrows move (Shift walks), Space jumps, Enter/K/left-click attacks, Q/E or right-drag turns the camera, Esc exits."
+        "Test room ready. WASD/arrows move (Shift walks), Space jumps, Enter/K/left-click attacks, Q/E or right-drag turns the camera, -/= zoom, C recenters, Esc exits."
     );
     Ok(App::new()
         .insert_resource(game)
@@ -1471,12 +1515,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             actor: Some(loaded.actor),
             weapon: Some(loaded.weapon),
         })
-        .insert_resource(CameraRig {
-            yaw: std::f32::consts::PI,
-            pitch: 0.35,
-            distance: 520.,
-            target: loaded.spawn * MIRROR + Vec3::Y * 90.,
-        })
+        .insert_resource(rig)
         .insert_resource(Time::<Fixed>::from_hz(60.))
         .insert_resource(ClearColor(Color::srgb(0.06, 0.07, 0.09)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
