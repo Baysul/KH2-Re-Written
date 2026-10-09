@@ -5,6 +5,7 @@
 !/.gitattributes
 !/AGENTS.md
 !/README.md
+!/ARCHITECTURE.md
 !/LICENSE
 !/NOTICE
 !/Cargo.toml
