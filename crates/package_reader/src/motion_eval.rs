@@ -75,25 +75,6 @@ fn normalize(a: Vec3) -> Option<Vec3> {
     let n = length(a);
     (n > 1e-6 && n.is_finite()).then(|| a.map(|c| c / n))
 }
-/// Shortest-arc rotation taking direction `u` onto direction `v`.
-fn arc(u: Vec3, v: Vec3) -> Quat {
-    let (Some(u), Some(v)) = (normalize(u), normalize(v)) else {
-        return IDENTITY;
-    };
-    let d = dot(u, v);
-    if d < -0.999_999 {
-        let mut axis = cross([1., 0., 0.], u);
-        if length(axis) < 1e-6 {
-            axis = cross([0., 1., 0.], u);
-        }
-        return axis_angle(
-            normalize(axis).unwrap_or([0., 0., 1.]),
-            std::f32::consts::PI,
-        );
-    }
-    let c = cross(u, v);
-    qnorm([c[0], c[1], c[2], 1. + d])
-}
 /// Local rotation composed as model_pose does: Rz * Ry * Rx.
 fn from_euler(r: Vec3) -> Quat {
     let q = qmul(
@@ -270,7 +251,8 @@ struct Constraint {
     constrained: usize,
     source: usize,
     limiter: Option<usize>,
-    activations: Vec<(f32, bool)>,
+    /// Validated but unused: the reference gates on `temporary_active` only.
+    _activations: Vec<(f32, bool)>,
     temporary_active: bool,
 }
 struct Limiter {
@@ -279,18 +261,68 @@ struct Limiter {
     enabled: [bool; 6],
     min: Vec3,
     max: Vec3,
+    width: f32,
+    strength: f32,
 }
 impl Limiter {
-    /// Clamps each axis against its enabled minimum/maximum.
-    fn clamp_axes(&self, values: &mut Vec3) {
-        for (axis, v) in values.iter_mut().enumerate() {
+    /// The reference limiter: clamps `value` relative to `center` (zero for
+    /// type 0 or global limiters). Type 1 limits the distance to min.x;
+    /// other types limit each enabled axis. A non-zero strength softens the
+    /// last `width` units with an exponential falloff.
+    fn apply(&self, center: Vec3, value: Vec3) -> Vec3 {
+        let center = if self.kind == 0 || self.global {
+            [0.; 3]
+        } else {
+            center
+        };
+        let d = sub(value, center);
+        let (w, s) = (self.width, self.strength);
+        if self.kind == 1 {
+            let dist = length(d);
+            let radius = self.min[0];
+            let len = if s == 0. {
+                if radius < dist { dist } else { return value }
+            } else {
+                let excess = dist - (radius - w);
+                if excess <= 0. {
+                    return value;
+                }
+                let fall = ((s - 1.) * (excess / w)).exp();
+                (radius - w) + w * (1. - fall)
+            };
+            return match normalize(d) {
+                Some(n) => add(center, n.map(|c| c * len)),
+                None => value,
+            };
+        }
+        let mut out = value;
+        for axis in 0..3 {
+            let (lo, hi) = (self.min[axis], self.max[axis]);
+            if s == 0. {
+                if self.enabled[axis * 2] && d[axis] < lo {
+                    out[axis] = center[axis] + lo;
+                } else if self.enabled[axis * 2 + 1] && hi < d[axis] {
+                    out[axis] = center[axis] + hi;
+                }
+                continue;
+            }
             if self.enabled[axis * 2] {
-                *v = v.max(self.min[axis]);
+                let pen = (lo + w) - d[axis];
+                if pen > 0. {
+                    let fall = ((s - 1.) * (pen / w)).exp();
+                    out[axis] = center[axis] + (lo + w) + w * (1. - fall);
+                    continue;
+                }
             }
             if self.enabled[axis * 2 + 1] {
-                *v = v.min(self.max[axis]);
+                let pen = d[axis] - (hi - w);
+                if pen > 0. {
+                    let fall = ((s - 1.) * (pen / w)).exp();
+                    out[axis] = center[axis] + (hi - w) + w * (1. - fall);
+                }
             }
         }
+        out
     }
 }
 
@@ -432,7 +464,7 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
             constrained,
             source,
             limiter: usize::try_from(half(b, 6)).ok(),
-            activations,
+            _activations: activations,
             temporary_active: b[1] != 0,
         });
     }
@@ -450,6 +482,8 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
                 enabled: std::array::from_fn(|i| bits & (16 << i) != 0),
                 min: [float(b, 16), float(b, 20), float(b, 24)],
                 max: [float(b, 32), float(b, 36), float(b, 40)],
+                width: float(b, 8),
+                strength: float(b, 12),
             }
         })
         .collect();
@@ -557,6 +591,12 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
                     frame,
                 };
                 if let Some(v) = ctx.eval(node, 0).filter(|v| v.is_finite()) {
+                    // Expression rotations are degrees (reference converts).
+                    let v = if (3..=5).contains(&channel) {
+                        v * 0.017_453_3
+                    } else {
+                        v
+                    };
                     set_channel(&mut locals[j], channel, v);
                     stats.expressions_applied += 1;
                 }
@@ -568,14 +608,10 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
         } else {
             World::compose(&world[parent as usize], &locals[j])
         };
+        let mut first_position: Option<Vec3> = None;
         for c in constraints.iter().filter(|c| c.constrained == j) {
-            let active = c
-                .activations
-                .iter()
-                .rev()
-                .find(|(t, _)| *t <= frame)
-                .map_or(c.temporary_active || !c.activations.is_empty(), |a| a.1);
-            if !active {
+            // The reference evaluator gates on the temporary-active byte only.
+            if !c.temporary_active {
                 continue;
             }
             let source = world[c.source];
@@ -609,34 +645,67 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
                             // its own local rotation in character space.
                             world[j].rotation = from_euler(locals[j].rotation);
                         }
+                    } else if let Some(first) = first_position {
+                        // Two Position sources: the midpoint.
+                        world[j].translation = add(first, source.translation).map(|v| v * 0.5);
                     } else {
+                        first_position = Some(source.translation);
                         world[j].translation = source.translation;
                     }
                 }
                 2 => world[j].rotation = source.rotation,
                 3 => {
-                    // Aim the joint's local +X (KH2 bone length axis).
-                    let x = rotate(world[j].rotation, [1., 0., 0.]);
-                    let to = sub(source.translation, world[j].translation);
-                    if length(to) > 1e-4 {
-                        world[j].rotation = qnorm(qmul(arc(x, to), world[j].rotation));
+                    // Reference aim: in the parent frame, local +X points from
+                    // the joint's local translation to the source, the up
+                    // reference is the parent's +Y, and the joint's own
+                    // animated X rotation is applied as roll about the aim.
+                    let (pr, pt) = if parent < 0 {
+                        (IDENTITY, [0.; 3])
+                    } else {
+                        (
+                            world[parent as usize].rotation,
+                            world[parent as usize].translation,
+                        )
+                    };
+                    let target = rotate(qconj(pr), sub(source.translation, pt));
+                    let here = rotate(qconj(pr), sub(world[j].translation, pt));
+                    let to = sub(target, here);
+                    if let Some(x) = normalize(to) {
+                        let side = cross(to, [0., 1., 0.]);
+                        if let Some(y) = normalize(cross(side, to)) {
+                            let z = normalize(cross(x, y)).unwrap_or([0., 0., 1.]);
+                            let aim = from_basis(x, y, z);
+                            let local = qmul(aim, axis_angle([1., 0., 0.], locals[j].rotation[0]));
+                            world[j].rotation = qnorm(qmul(pr, local));
+                        }
                     }
                 }
                 12 => {
+                    // Limited in the parent frame around the source position.
                     if let Some(l) = c.limiter.and_then(|i| limiters.get(i)) {
-                        world[j].translation = limit_position(l, &source, world[j].translation);
+                        let (pr, pt) = if parent < 0 {
+                            (IDENTITY, [0.; 3])
+                        } else {
+                            (
+                                world[parent as usize].rotation,
+                                world[parent as usize].translation,
+                            )
+                        };
+                        let local = rotate(qconj(pr), sub(world[j].translation, pt));
+                        let center = rotate(qconj(pr), sub(source.translation, pt));
+                        world[j].translation = add(pt, rotate(pr, l.apply(center, local)));
                     }
                 }
                 13 => {
+                    // Limits the joint's local rotation channels.
                     if let Some(l) = c.limiter.and_then(|i| limiters.get(i)) {
                         let parent_rotation = if parent < 0 {
                             IDENTITY
                         } else {
                             world[parent as usize].rotation
                         };
-                        let local = qmul(qconj(parent_rotation), world[j].rotation);
-                        let mut e = to_euler(local);
-                        l.clamp_axes(&mut e);
+                        let e = l.apply(locals[j].rotation, locals[j].rotation);
+                        locals[j].rotation = e;
                         world[j].rotation = qnorm(qmul(parent_rotation, from_euler(e)));
                     }
                 }
@@ -662,26 +731,6 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
         root_translation: root.translation,
         stats,
     })
-}
-
-fn limit_position(l: &Limiter, source: &World, position: Vec3) -> Vec3 {
-    let (origin, rotation) = if l.global {
-        ([0.; 3], IDENTITY)
-    } else {
-        (source.translation, source.rotation)
-    };
-    let mut local = rotate(qconj(rotation), sub(position, origin));
-    if l.kind == 1 {
-        // Distance limit: keep the joint within [min.x, max.x] of the source.
-        let d = length(local);
-        if d > 1e-6 {
-            let clamped = d.clamp(l.min[0].min(l.max[0]), l.max[0].max(l.min[0]));
-            local = local.map(|c| c * clamped / d);
-        }
-    } else {
-        l.clamp_axes(&mut local);
-    }
-    add(origin, rotate(rotation, local))
 }
 
 /// Rotation whose images of the unit X/Y/Z axes are `x`, `y`, `z`.
@@ -816,7 +865,7 @@ impl ExprContext<'_> {
             };
             Some(match kind {
                 32..=34 => translation[(kind - 32) as usize],
-                35..=37 => rotation[(kind - 35) as usize],
+                35..=37 => rotation[(kind - 35) as usize].to_degrees(),
                 _ => 1.,
             })
         };
@@ -890,15 +939,6 @@ mod tests {
     }
 
     #[test]
-    fn arc_maps_direction() {
-        let q = arc([1., 0., 0.], [0., 0., -2.]);
-        let v = rotate(q, [1., 0., 0.]);
-        assert!((v[2] + 1.).abs() < 1e-5);
-        let q = arc([1., 0., 0.], [-1., 0., 0.]);
-        assert!((rotate(q, [1., 0., 0.])[0] + 1.).abs() < 1e-5);
-    }
-
-    #[test]
     fn two_joint_ik_reaches_reachable_target() {
         let locals = [
             Local {
@@ -937,28 +977,36 @@ mod tests {
     }
 
     #[test]
-    fn distance_and_box_limits() {
-        let source = World {
-            rotation: IDENTITY,
-            translation: [0.; 3],
-            scale: [1.; 3],
-        };
-        let distance = Limiter {
+    fn reference_limiter_rules() {
+        let base = Limiter {
             kind: 1,
             global: false,
             enabled: [false; 6],
             min: [75.; 3],
             max: [75.; 3],
+            width: 10.,
+            strength: 0.,
         };
-        let p = limit_position(&distance, &source, [0., 150., 0.]);
-        assert!((p[1] - 75.).abs() < 1e-4);
+        // Hard sphere limits leave the value unchanged (reference behaviour).
+        assert_eq!(base.apply([0.; 3], [0., 150., 0.]), [0., 150., 0.]);
+        // Soft sphere limits approach the radius.
+        let soft = Limiter {
+            strength: 0.2,
+            ..base
+        };
+        let p = soft.apply([0.; 3], [0., 150., 0.]);
+        assert!(p[1] > 65. && p[1] < 75., "{p:?}");
+        // Axis limits clamp relative to the centre.
         let floor = Limiter {
             kind: 2,
-            global: false,
             enabled: [false, false, true, false, false, false],
             min: [-999., 15., -999.],
             max: [999.; 3],
+            ..base
         };
-        assert_eq!(limit_position(&floor, &source, [3., 2., 1.]), [3., 15., 1.]);
+        assert_eq!(floor.apply([1., 1., 1.], [3., 2., 1.]), [3., 16., 1.]);
+        // Type 0 limiters ignore the centre.
+        let rotation = Limiter { kind: 0, ..floor };
+        assert_eq!(rotation.apply([1., 1., 1.], [3., 2., 1.]), [3., 15., 1.]);
     }
 }
