@@ -109,14 +109,15 @@ pub struct World {
     pub scale: Vec3,
 }
 impl World {
+    /// World scale accumulates (tmpb[j] = tmpb[p] * S[j], 0x129cf8) and the
+    /// local translation goes through the parent's scaled matrix
+    /// ((T, 1) * tmp4[p]).
     fn compose(parent: &World, local: &Local) -> World {
+        let scaled: Vec3 = std::array::from_fn(|k| local.translation[k] * parent.scale[k]);
         World {
             rotation: qnorm(qmul(parent.rotation, from_euler(local.rotation))),
-            translation: add(
-                parent.translation,
-                rotate(parent.rotation, local.translation),
-            ),
-            scale: local.scale,
+            translation: add(parent.translation, rotate(parent.rotation, scaled)),
+            scale: std::array::from_fn(|k| parent.scale[k] * local.scale[k]),
         }
     }
     /// Row-vector matrix words in the layout model_pose's skinning expects.
@@ -612,7 +613,18 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
             World::compose(&world[parent as usize], &locals[j])
         };
         let mut first_position: Option<Vec3> = None;
-        for c in constraints.iter().filter(|c| c.constrained == j) {
+        // The reference collects a joint's constraints first and then applies
+        // them in a fixed order: position sources, the position limit, the
+        // rotation limit, then rotation constraints (opt1_fk_translation
+        // 0x12bb34 runs the limit after the position source).
+        let mut own: Vec<&Constraint> = constraints.iter().filter(|c| c.constrained == j).collect();
+        own.sort_by_key(|c| match c.kind {
+            0 => 0,
+            12 => 1,
+            13 => 2,
+            _ => 3,
+        });
+        for c in own {
             // The reference evaluator gates on the temporary-active byte only.
             if !c.temporary_active {
                 continue;
@@ -838,6 +850,10 @@ fn solve_two_joint(
     world[c] = World::compose(&world[b], &locals[c]);
 }
 
+/// Degree/radian factors used by the reference (0x1405b15b4, 0x1405b4a18).
+const DEG_TO_RAD: f32 = 0.017_453_3;
+const RAD_TO_DEG: f32 = 57.295_776;
+
 struct ExprContext<'a> {
     nodes: &'a [Node],
     locals: &'a [Local],
@@ -886,33 +902,81 @@ impl ExprContext<'_> {
             let j = usize::try_from(n.element)
                 .ok()
                 .filter(|&j| j < self.locals.len())?;
-            let (rotation, translation) = if n.global {
-                (to_euler(self.world[j].rotation), self.world[j].translation)
+            let (rotation, translation, scale) = if n.global {
+                let w = &self.world[j];
+                (to_euler(w.rotation), w.translation, w.scale)
             } else {
                 let l = self.local(j);
-                (l.rotation, l.translation)
+                (l.rotation, l.translation, l.scale)
             };
+            // FCURVE_ETRN*, FCURVE_ROT* (degrees) and FCURVE_SCAL*.
             Some(match kind {
                 32..=34 => translation[(kind - 32) as usize],
                 35..=37 => rotation[(kind - 35) as usize].to_degrees(),
-                _ => 1.,
+                _ => scale[(kind - 38) as usize],
             })
         };
         Some(match n.kind {
-            0 => a()?.sin(),
-            1 => a()?.cos(),
-            2 => a()?.tan(),
-            3 => a()?.clamp(-1., 1.).asin(),
-            4 => a()?.clamp(-1., 1.).acos(),
-            5 => a()?.atan(),
+            // Operators follow the PC evaluator FUN_1401d9950: trigonometry
+            // takes and returns degrees.
+            0 => (a()? * DEG_TO_RAD).sin(),
+            1 => (a()? * DEG_TO_RAD).cos(),
+            2 => (a()? * DEG_TO_RAD).tan(),
+            3 => {
+                let x = a()?;
+                if x > 1. {
+                    std::f32::consts::FRAC_PI_2 * RAD_TO_DEG
+                } else if x < -1. {
+                    -std::f32::consts::FRAC_PI_2 * RAD_TO_DEG
+                } else {
+                    x.asin() * RAD_TO_DEG
+                }
+            }
+            4 => {
+                let x = a()?;
+                if x > 1. {
+                    0.
+                } else if x < -1. {
+                    std::f32::consts::PI * RAD_TO_DEG
+                } else {
+                    x.acos() * RAD_TO_DEG
+                }
+            }
+            5 => a()?.atan() * RAD_TO_DEG,
             6 => a()?.ln(),
             7 => a()?.exp(),
             8 => a()?.abs(),
             9 => a()?.powf(b()?),
-            10 => a()?.max(0.).sqrt(),
+            10 => a()?.abs().sqrt(),
             11 => a()?.min(b()?),
             12 => a()?.max(b()?),
-            13 => (a()? + b()?) * 0.5,
+            13 => {
+                // AV: mean of the list's values.
+                let (mut sum, mut count) = (0f32, 0u32);
+                let mut cell = self.cell(n.car);
+                while let Some(c) = cell {
+                    if usize::try_from(c.car)
+                        .ok()
+                        .is_none_or(|i| i >= self.nodes.len())
+                    {
+                        break;
+                    }
+                    sum += self.child(c.car, depth)?;
+                    count += 1;
+                    cell = self.cell(c.cdr);
+                }
+                sum / count as f32
+            }
+            16 => {
+                // CTR_DIST: distance between two joints' world positions.
+                let at = |e: i16| {
+                    usize::try_from(e)
+                        .ok()
+                        .and_then(|j| self.world.get(j))
+                        .map(|w| w.translation)
+                };
+                length(sub(at(n.car)?, at(n.cdr)?))
+            }
             14 => {
                 // (cond . (then . (else . nil)))
                 let list = self.cell(n.car)?;
@@ -930,7 +994,14 @@ impl ExprContext<'_> {
             19 => a()? - b()?,
             20 => a()? * b()?,
             21 => a()? / b()?,
-            22 => a()? % b()?,
+            22 => {
+                let d = b()? as i32;
+                let v = a()? as i32;
+                if d == 0 {
+                    return None;
+                }
+                (v % d) as f32
+            }
             23 => f32::from(a()? == b()?),
             24 => f32::from(a()? > b()?),
             25 => f32::from(a()? >= b()?),
@@ -941,7 +1012,7 @@ impl ExprContext<'_> {
             30 => self.frame,
             31 => n.value,
             32..=40 => channel(n.kind)?,
-            41 => a()?,
+            41 | 42 => 0.,
             15 | 43 => a()?,
             _ => return None,
         })
