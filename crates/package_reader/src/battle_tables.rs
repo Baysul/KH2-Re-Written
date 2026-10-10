@@ -50,40 +50,107 @@ pub struct Attack {
     pub reflect_hit_back: i8,
     pub reflect_range: u8,
     pub reflect_angle: i8,
+    /// Level-variant selection (executable FUN_1403eb230): the row applies
+    /// from this consecutive-hit count (+0), with Switch (+0x25) choosing
+    /// odd (1) or even (2) hits past it, 0 for every hit.
+    pub step: u8,
+    pub switch: u8,
+    /// Interval (+0x26): ticks before the same attack may hit again.
+    pub interval: u8,
+    /// ComboGroup (+0x2c).
+    pub combo_group: u8,
+    /// DriveDrain (+0x29), RevengeDamage (+0x2a), HpDrain (+0x2f).
+    pub drive_drain: u8,
+    pub revenge: u8,
+    pub hp_drain: u8,
+    /// Kind (+0x2e): 1 ground finisher, 2 air finisher, 4 reaction command
+    /// (the damage routine's combo-boost terms, FUN_1403c12f0).
+    pub combo_kind: u8,
+}
+
+fn parse_row(rec: &[u8]) -> io::Result<Attack> {
+    Ok(Attack {
+        id: u16_at(rec, 2)?,
+        kind: rec[4],
+        stat: rec[5],
+        power: u16_at(rec, 6)?,
+        element: rec[9],
+        reaction: rec[10],
+        knockback: [i16_at(rec, 12)?, i16_at(rec, 14)?],
+        flags: rec[18],
+        hit_sound: u32_at(rec, 0x1c)? as i32,
+        hit_effect: rec[0xb],
+        hit_effect_random: rec[0x2d],
+        refact_self: rec[0x13],
+        refact_other: rec[0x14],
+        reflect_motion: rec[0x15],
+        reflect_hit_back: rec[0x16] as i8,
+        reflect_range: rec[0x22],
+        reflect_angle: rec[0x23] as i8,
+        step: rec[0],
+        switch: rec[0x25],
+        interval: rec[0x26],
+        combo_group: rec[0x2c],
+        drive_drain: rec[0x29],
+        revenge: rec[0x2a],
+        hp_drain: rec[0x2f],
+        combo_kind: rec[0x2e],
+    })
 }
 
 /// The ATKP row for `id` at sub-table 0, hit step 0 (record bytes 0 and 1
 /// zero), as the executable's search key ((id << 8) | sub) << 8 selects.
 pub fn attack(atkp: &[u8], id: u16) -> io::Result<Attack> {
+    attack_steps(atkp, id)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| invalid("ATKP id absent"))
+}
+
+/// Every sub-table 0 row of `id` in file order: step 0 first, then the
+/// level variants that follow it (FUN_1403eafc0 finds the first, FUN_1403eb230
+/// walks the rest while Id and sub-table match).
+pub fn attack_steps(atkp: &[u8], id: u16) -> io::Result<Vec<Attack>> {
     let count = u32_at(atkp, 4)? as usize;
+    let mut out = Vec::new();
     for k in 0..count {
         let r = 8 + k * 48;
         let rec = atkp
             .get(r..r + 48)
             .ok_or_else(|| invalid("ATKP truncated"))?;
-        if u16_at(rec, 2)? == id && rec[0] == 0 && rec[1] == 0 {
-            return Ok(Attack {
-                id,
-                kind: rec[4],
-                stat: rec[5],
-                power: u16_at(rec, 6)?,
-                element: rec[9],
-                reaction: rec[10],
-                knockback: [i16_at(rec, 12)?, i16_at(rec, 14)?],
-                flags: rec[18],
-                hit_sound: u32_at(rec, 0x1c)? as i32,
-                hit_effect: rec[0xb],
-                hit_effect_random: rec[0x2d],
-                refact_self: rec[0x13],
-                refact_other: rec[0x14],
-                reflect_motion: rec[0x15],
-                reflect_hit_back: rec[0x16] as i8,
-                reflect_range: rec[0x22],
-                reflect_angle: rec[0x23] as i8,
-            });
+        if u16_at(rec, 2)? == id && rec[1] == 0 {
+            if out.is_empty() && rec[0] != 0 {
+                continue;
+            }
+            out.push(parse_row(rec)?);
+        } else if !out.is_empty() {
+            break;
         }
     }
-    Err(invalid("ATKP id absent"))
+    if out.is_empty() {
+        return Err(invalid("ATKP id absent"));
+    }
+    Ok(out)
+}
+
+/// FUN_1403eb230: the row used for the `count`-th consecutive hit of a
+/// combo group (0-based).
+pub fn step_row(rows: &[Attack], count: u32) -> &Attack {
+    &rows[step_index(rows, count)]
+}
+
+/// The index of [`step_row`]'s row.
+pub fn step_index(rows: &[Attack], count: u32) -> usize {
+    let mut best = 0;
+    for (i, r) in rows.iter().enumerate().skip(1) {
+        if count < r.step as u32 {
+            break;
+        }
+        if r.switch == 0 || ((count - r.step as u32) & 1) + 1 == r.switch as u32 {
+            best = i;
+        }
+    }
+    best
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,6 +268,25 @@ mod tests {
         assert_eq!((a.power, a.reaction, a.knockback), (100, 3, [125, 0]));
         assert_eq!((a.hit_sound, a.hit_effect), (-1, 0));
         assert!(attack(&atkp, 127).is_err());
+
+        // Level variants: step 0 Power 150, step 1 Power 25 (a switch
+        // row applies on every other hit past its step).
+        let mut atkp = vec![6, 0, 0, 0, 3, 0, 0, 0];
+        for (step, power, switch) in [(0u8, 150u16, 0u8), (1, 25, 0), (3, 40, 2)] {
+            let mut rec = [0u8; 48];
+            rec[0] = step;
+            rec[2] = 19;
+            rec[6..8].copy_from_slice(&power.to_le_bytes());
+            rec[0x25] = switch;
+            atkp.extend(rec);
+        }
+        let rows = attack_steps(&atkp, 19).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(step_row(&rows, 0).power, 150);
+        assert_eq!(step_row(&rows, 1).power, 25);
+        assert_eq!(step_row(&rows, 3).power, 25);
+        assert_eq!(step_row(&rows, 4).power, 40);
+        assert_eq!(step_row(&rows, 5).power, 25);
 
         let mut lvpm = vec![0u8; 24];
         lvpm[12..14].copy_from_slice(&21u16.to_le_bytes());

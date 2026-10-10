@@ -213,7 +213,9 @@ pub struct Shadow {
     weave: f32,
     act: Option<Act>,
     queue: Vec<ActKind>,
-    hit_by: Vec<u32>,
+    /// Hit-once mask, combo-group counter and interval slots
+    /// (FUN_1403cf600); enemies never lock.
+    pub record: combat::HitRecord,
     gone_ticks: u32,
     /// Last tick's moved distance, for the slither's stuck test.
     moved: f32,
@@ -246,7 +248,7 @@ impl Shadow {
             weave: 0.,
             act: None,
             queue: Vec::new(),
-            hit_by: Vec::new(),
+            record: combat::HitRecord::new(false),
             gone_ticks: 0,
             moved: 0.,
             wished: 0.,
@@ -326,21 +328,26 @@ impl Shadow {
         [self.yaw.sin(), 0., self.yaw.cos()]
     }
 
-    /// Engine hit handling for one attack instance; returns the damage, or
-    /// None if this instance already hit or the Shadow cannot be hit.
+    /// Engine hit handling for a hit the object's `record` counted
+    /// (FUN_1403cf600 says new); returns the damage, or None if the Shadow
+    /// cannot be hit.
     pub fn hit(
         &mut self,
-        instance: u32,
         direction: Vec3,
         high: bool,
         attack: &AttackParams,
         attacker: &AttackerStats,
+        difficulty: combat::Difficulty,
     ) -> Option<i32> {
-        if !self.targetable() || self.hit_by.contains(&instance) {
+        if !self.targetable() {
             return None;
         }
-        self.hit_by.push(instance);
-        let dmg = combat::damage(attacker, attack, &self.stats);
+        let state = combat::TargetState {
+            hp: self.hp,
+            difficulty,
+            ..combat::TargetState::full(self.stats.max_hp)
+        };
+        let dmg = combat::damage_with(attacker, attack, &self.stats, &state);
         self.hp = (self.hp - dmg).max(0);
         let back = self.forward()[0] * direction[0] + self.forward()[2] * direction[2] >= 0.;
         let class = combat::reaction_class(attack.reaction);
@@ -1041,16 +1048,26 @@ mod tests {
             element: 0,
             reaction: 7,
             knockback: [3, 45],
+            ..AttackParams::default()
         };
         let sora = AttackerStats {
             strength: 5,
             magic: 7,
             max: 99999,
             min: 1,
+            ..AttackerStats::default()
         };
-        assert!(s.hit(1, [0., 0., 1.], true, &finisher, &sora).is_some());
+        let standard = combat::Difficulty::Standard;
+        assert!(
+            s.hit([0., 0., 1.], true, &finisher, &sora, standard)
+                .is_some()
+        );
         assert_eq!(s.current_act(), Some(ActKind::Dead));
-        assert!(s.hit(1, [0., 0., 1.], true, &finisher, &sora).is_none());
+        // Dead objects cannot be hit again.
+        assert!(
+            s.hit([0., 0., 1.], true, &finisher, &sora, standard)
+                .is_none()
+        );
         for _ in 0..60 {
             s.tick(&mut rng, &clips, &Flat, [0., 0., 500.], [0., 0., 500.]);
         }

@@ -283,8 +283,15 @@ struct ArenaConfig {
     tile: f32,
 }
 
+fn standard_difficulty() -> u8 {
+    1
+}
+
 #[derive(Deserialize)]
 struct EnemyConfig {
+    /// DAT_1409abd48: 0 Beginner, 1 Standard (default), 2 Proud, 3 Critical.
+    #[serde(default = "standard_difficulty")]
+    difficulty: u8,
     /// Model selection (relative to this configuration), e.g. M_EX020.mdlx.
     model_selection: PathBuf,
     /// The same mdlx as a locator, for its object-collision table.
@@ -580,6 +587,20 @@ fn bar_entry<'a>(bytes: &'a [u8], name: &[u8; 4]) -> Result<&'a [u8], Box<dyn st
 
 /// Clip timing and honoured range triggers from one decoded motion.
 /// Clip timing relative to FrameStart, plus the key time of FrameStart.
+/// The damage routine's view of an ATKP row.
+fn params_of(a: &package_reader::battle_tables::Attack) -> combat::AttackParams {
+    combat::AttackParams {
+        power: a.power,
+        stat: a.stat,
+        element: a.element,
+        reaction: a.reaction,
+        knockback: a.knockback,
+        attack_type: a.kind,
+        combo_kind: a.combo_kind,
+        flags: a.flags,
+    }
+}
+
 /// A PTYA record for the attack chooser (the 0x44 bytes as read).
 fn ptya_record(e: &ptya::PtyaEntry) -> player_sim::ptya::Record {
     let f = |k: usize| f32::from_bits(e.float_bits[k]);
@@ -860,11 +881,12 @@ const ABILITY_MESSAGES: [u32; 15] = [
 /// decoded]: Guard (0x52) equipped, as the guard-01 recipe asks, and the
 /// combo abilities unequipped so they can be tried from the camp: the
 /// Square abilities, the combo finishers and starters (PTYA ability bits
-/// 90–101, 177–180, 18), and the combo supports.
-const ROOM_ABILITIES: [u16; 27] = [
+/// 90–101, 177–180, 18), the combo supports, and the damage supports
+/// (Defender, Second Chance, Once More, the element boosts, MP Rage).
+const ROOM_ABILITIES: [u16; 34] = [
     0x8052, 0x0089, 0x010f, 0x010b, 0x0111, 0x010c, 0x0106, 0x0107, 0x022f, 0x0108, 0x0232, 0x0109,
     0x010a, 0x010d, 0x0230, 0x010e, 0x0110, 0x0231, 0x00a2, 0x00a3, 0x0186, 0x0187, 0x0188, 0x0189,
-    0x018a, 0x018b, 0x021b,
+    0x018a, 0x018b, 0x021b, 0x019e, 0x019f, 0x01a0, 0x0198, 0x0199, 0x019a, 0x019c,
 ];
 /// [test-room value] AP added to Sora's level-1 AP so the room's abilities
 /// fit, giving 50 like the Critical start record (plrp id 7).
@@ -1089,19 +1111,25 @@ struct EnemyRuntime {
     body: Vec<(usize, Vec3, f32, bool)>,
     targets: Vec<(usize, Vec3, f32, f32)>,
     blade: HashMap<u8, Vec<(Vec3, f32)>>,
-    attacks: HashMap<u16, combat::AttackParams>,
+    /// Every ATKP step row by id (FUN_1403eb230 picks one per hit count).
+    steps: HashMap<u16, Vec<package_reader::battle_tables::Attack>>,
     sora: combat::AttackerStats,
     enemy: Shadow,
     rng: ScriptRandom,
     claws: HashMap<u8, Vec<(usize, Vec3, f32)>>,
-    claw_attacks: HashMap<u16, combat::AttackParams>,
     shadow_attacker: combat::AttackerStats,
     sora_target: combat::TargetStats,
     sora_body: Vec<(usize, Vec3, f32, bool)>,
     /// Summed TARGET radii for aerial hops (FUN_1403d7520).
     target_reach: f32,
-    /// Claw instances that already hit Sora, and last claw centres.
-    sora_hit_by: Vec<u64>,
+    /// Sora's hit record (obj+0xc98): the claws' hit-once mask and the
+    /// 30-tick group lock of a player-type object.
+    sora_record: combat::HitRecord,
+    /// Attack ids and combo groups of live attack instances.
+    ids: combat::AttackIds,
+    instance_ids: HashMap<u64, (u8, i32)>,
+    next_group: i32,
+    difficulty: combat::Difficulty,
     claw_previous: HashMap<(u64, usize), Vec3>,
     /// Sora's HP and KO timer (test room refills after a KO).
     sora_hp: i32,
@@ -1135,12 +1163,12 @@ struct EnemySource {
     targets: Vec<(usize, Vec3, f32, f32)>,
     /// Keyblade attack spheres by collision group: offset, radius.
     blade: HashMap<u8, Vec<(Vec3, f32)>>,
-    attacks: HashMap<u16, combat::AttackParams>,
+    steps: HashMap<u16, Vec<package_reader::battle_tables::Attack>>,
+    difficulty: combat::Difficulty,
     sora: combat::AttackerStats,
     stats: combat::TargetStats,
     offset: Vec3,
     claws: HashMap<u8, Vec<(usize, Vec3, f32)>>,
-    claw_attacks: HashMap<u16, combat::AttackParams>,
     shadow_attacker: combat::AttackerStats,
     sora_target: combat::TargetStats,
     sora_body: Vec<(usize, Vec3, f32, bool)>,
@@ -2250,41 +2278,24 @@ fn load_enemy(
         );
     }
     let atkp = bar_entry(battle, b"atkp")?;
-    let mut attacks = HashMap::new();
+    let mut steps = HashMap::new();
     let mut hit_sounds = HashMap::new();
     let mut hit_effects = HashMap::new();
     let mut rows = HashMap::new();
     for (_, _, id, _) in clip_poses.iter().flat_map(|c| &c.hits) {
-        let a = battle_tables::attack(atkp, *id)?;
+        let all = battle_tables::attack_steps(atkp, *id)?;
+        let a = all[0];
+        steps.insert(*id, all);
         rows.insert(*id, a);
         hit_sounds.insert(*id, a.hit_sound);
         hit_effects.insert(*id, (a.hit_effect, a.hit_effect_random));
-        attacks.insert(
-            *id,
-            combat::AttackParams {
-                power: a.power,
-                stat: a.stat,
-                element: a.element,
-                reaction: a.reaction,
-                knockback: a.knockback,
-            },
-        );
     }
-    let mut claw_attacks = HashMap::new();
     for (_, _, id, _) in clips.values().flat_map(|c: &EnemyClip| &c.windows) {
-        let a = battle_tables::attack(atkp, *id)?;
+        let all = battle_tables::attack_steps(atkp, *id)?;
+        let a = all[0];
+        steps.insert(*id, all);
         hit_sounds.insert(*id, a.hit_sound);
         rows.insert(*id, a);
-        claw_attacks.insert(
-            *id,
-            combat::AttackParams {
-                power: a.power,
-                stat: a.stat,
-                element: a.element,
-                reaction: a.reaction,
-                knockback: a.knockback,
-            },
-        );
     }
     let enemy = battle_tables::enemy(bar_entry(battle, b"enmp")?, config.enmp_id)?;
     let level = if enemy.level == 0 {
@@ -2313,6 +2324,7 @@ fn load_enemy(
         magic: lv.magic as i32 + plrp_mag + 1,
         max: 99999,
         min: 1,
+        ..combat::AttackerStats::default()
     };
     // Enemy as attacker: LVPM Str with its max/min clamps; Sora as target:
     // LVUP + PLRP defence, player clamps 99999/1, weaknesses 100.
@@ -2321,6 +2333,7 @@ fn load_enemy(
         magic: row.strength as i32,
         max: row.max_strength as i32,
         min: row.min_strength as i32,
+        ..combat::AttackerStats::default()
     };
     let plrp_hp = plrp.get(8 + 3).copied().unwrap_or(20) as i32;
     let plrp_def = plrp.get(8 + 8).copied().unwrap_or(0) as i32;
@@ -2337,12 +2350,17 @@ fn load_enemy(
         body,
         targets,
         blade,
-        attacks,
+        steps,
+        difficulty: match config.difficulty {
+            0 => combat::Difficulty::Beginner,
+            2 => combat::Difficulty::Proud,
+            3 => combat::Difficulty::Critical,
+            _ => combat::Difficulty::Standard,
+        },
         sora,
         stats,
         offset: Vec3::from_array(config.offset),
         claws,
-        claw_attacks,
         shadow_attacker,
         sora_target,
         sora_body,
@@ -4204,6 +4222,22 @@ fn combat_tick(game: &mut Game, tick: u64) {
             let instance = (*action_started << 4) | w as u64;
             // Guard types never test bodies (FUN_1403cff40).
             let guard = rt.rows.get(&atkp).is_some_and(|r| matches!(r.kind, 2 | 3));
+            // FUN_1403cf400 / FUN_1403cf490: the attack's id and combo
+            // group (ATKP ComboGroup, else a fresh one per attack).
+            let (aid, _) = *rt.instance_ids.entry(instance).or_insert_with(|| {
+                let combo = rt.steps.get(&atkp).map_or(0, |r| r[0].combo_group as i32);
+                let group = if combo != 0 {
+                    combo
+                } else {
+                    rt.next_group += 1;
+                    rt.next_group
+                };
+                (rt.ids.allocate(), group)
+            });
+            // FUN_1403d2060: an attack hits a target once per record bit.
+            if !guard && rt.enemy.record.has(aid) {
+                continue;
+            }
             for (i, &(offset, radius)) in rt.blade.get(&group).into_iter().flatten().enumerate() {
                 let centre = sora_at + sora_turn * to_model.transform_point3(offset);
                 let previous = rt.previous.insert((instance, i), centre);
@@ -4221,20 +4255,49 @@ fn combat_tick(game: &mut Game, tick: u64) {
                             .find(|(b, r, _)| combat::spheres_overlap(c, radius, b.to_array(), *r))
                     {
                         let at = (Vec3::from_array(c), target, target_radius);
-                        hit = Some((instance as u32, atkp, high, at));
+                        hit = Some((instance, atkp, high, at));
                     }
                 }
             }
         }
     }
+    // The enemy's record advances once a tick (FUN_1403cf4b0), like Sora's.
+    let in_damage_motion = (10..=39).contains(&player.motion_id(clips));
+    rt.sora_record.tick(1., in_damage_motion);
+    rt.enemy.record.tick(1., false);
     if let Some((instance, atkp, high, (attack_centre, target, target_radius))) = hit
-        && let Some(attack) = rt.attacks.get(&atkp)
+        && let Some(rows) = rt.steps.get(&atkp)
+        && let Some(&(aid, group)) = rt.instance_ids.get(&instance)
     {
         let d = (enemy_at - sora_at) * Vec3::new(1., 0., 1.);
         let dir = d.normalize_or(Vec3::new(player.yaw.sin(), 0., player.yaw.cos()));
-        if let Some(damage) = rt
-            .enemy
-            .hit(instance, dir.to_array(), high, attack, &rt.sora)
+        // FUN_1403cf600: record the hit; the consecutive-hit count of its
+        // combo group picks the ATKP level row (FUN_1403eb230).
+        let cure = matches!(rows[0].kind, 5 | 6);
+        let (counted, row) = rt.enemy.record.hit(aid, group, cure, |count| {
+            let r = package_reader::battle_tables::step_index(rows, count);
+            (r, rows[r].interval)
+        });
+        let attack = params_of(&rows[row]);
+        // The attacker's ability terms (FUN_1403c12f0).
+        let ab = &player.abilities;
+        rt.sora.mods = combat::AttackerMods {
+            player_type: true,
+            mp_charging: player.mp_charging,
+            berserk_strength: ab.berserk_strength as i32,
+            element_percent: ab.element.map(i32::from),
+            combo_step: player.combo.step as i32,
+            ground_limit: ab.ground_combo as i32,
+            air_limit: ab.air_combo as i32,
+            combo_boost: ab.combo_boost as i32,
+            air_combo_boost: ab.air_combo_boost as i32,
+            reaction_boost: ab.reaction_boost as i32,
+        };
+        if !counted {
+            // Recorded but not counted: no damage and no reaction.
+        } else if let Some(damage) =
+            rt.enemy
+                .hit(dir.to_array(), high, &attack, &rt.sora, rt.difficulty)
         {
             // FUN_1403d12c0: the attacker's obj+0x120 bit 25, which lets
             // the next press chain the combo.
@@ -4265,7 +4328,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
                 });
             }
             let record = serde_json::json!({"event":"hit","tick":tick,"atkp":atkp,"damage":damage,
-                "enemy_hp":rt.enemy.hp,"reaction":format!("{:?}", rt.enemy.reaction),
+                "step":row,"combo":player.combo.step,"enemy_hp":rt.enemy.hp,"reaction":format!("{:?}", rt.enemy.reaction),
                 "act":format!("{:?}", rt.enemy.current_act()),"high":high});
             if let Some(file) = log.as_mut() {
                 let _ = serde_json::to_writer(&mut *file, &record);
@@ -4319,7 +4382,17 @@ fn combat_tick(game: &mut Game, tick: u64) {
                 continue;
             }
             let instance = ((e.motion_serial as u64) << 4) | w as u64;
-            if rt.sora_hit_by.contains(&instance) {
+            let (aid, _) = *rt.instance_ids.entry(instance).or_insert_with(|| {
+                let combo = rt.steps.get(&atkp).map_or(0, |r| r[0].combo_group as i32);
+                let group = if combo != 0 {
+                    combo
+                } else {
+                    rt.next_group += 1;
+                    rt.next_group
+                };
+                (rt.ids.allocate(), group)
+            });
+            if rt.sora_record.has(aid) {
                 continue;
             }
             for (i, &(b, offset, radius)) in rt.claws.get(&group).into_iter().flatten().enumerate()
@@ -4354,7 +4427,9 @@ fn combat_tick(game: &mut Game, tick: u64) {
     if let Some((instance, claw, guard, claw_at, g, gr)) = clash
         && let (Some(&gr_row), Some(&claw_row)) = (rt.rows.get(&guard), rt.rows.get(&claw))
     {
-        rt.sora_hit_by.push(instance);
+        if let Some(&(aid, _)) = rt.instance_ids.get(&instance) {
+            rt.sora_record.mark(aid);
+        }
         // FUN_1403d61d0 first sets obj+0x120 bit 25 ("connected").
         player.connected = true;
         // FUN_1403d0f00: at the guard sphere's surface toward the claw.
@@ -4406,25 +4481,58 @@ fn combat_tick(game: &mut Game, tick: u64) {
     if let Some((instance, atkp, _)) = sora_hit
         && rt.sora_invulnerable > 0.
     {
-        // FUN_1403d65a0: no damage while +0xd70 runs.
-        rt.sora_hit_by.push(instance);
+        // FUN_1403d65a0: no damage while +0xd70 runs (the hit is still
+        // recorded).
+        if let Some(&(aid, group)) = rt.instance_ids.get(&instance) {
+            rt.sora_record.hit(aid, group, false, |_| (0, 0));
+        }
         let record = serde_json::json!({"event":"sora_hit_invulnerable","tick":tick,"atkp":atkp});
         if let Some(file) = log.as_mut() {
             let _ = serde_json::to_writer(&mut *file, &record);
             let _ = std::io::Write::write_all(file, b"\n");
         }
     } else if let Some((instance, atkp, high)) = sora_hit
-        && let Some(attack) = rt.claw_attacks.get(&atkp)
+        && let Some(rows) = rt.steps.get(&atkp)
+        && let Some(&(aid, group)) = rt.instance_ids.get(&instance)
         && rt.sora_hp > 0
     {
-        rt.sora_hit_by.push(instance);
+        // FUN_1403cf600 on Sora's record (obj+0xc98): a player-type object
+        // locks out other attack groups for 30 ticks.
+        let cure = matches!(rows[0].kind, 5 | 6);
+        let (counted, row) = rt.sora_record.hit(aid, group, cure, |count| {
+            let r = package_reader::battle_tables::step_index(rows, count);
+            (r, rows[r].interval)
+        });
+        let attack = params_of(&rows[row]);
         if let Some(&id) = rt.hit_sounds.get(&atkp)
             && id >= 0
         {
             sound_queue.push((id as u32, "sora_hit"));
         }
-        let damage = combat::damage(&rt.shadow_attacker, attack, &rt.sora_target);
-        rt.sora_hp = (rt.sora_hp - damage).max(0);
+        let ab = &player.abilities;
+        let state = combat::TargetState {
+            hp: rt.sora_hp,
+            player_type: true,
+            defender: ab.defender as i32,
+            damage_control: ab.damage_control,
+            damage_control_ratio: 50,
+            difficulty: rt.difficulty,
+        };
+        let damage = if counted {
+            combat::damage_with(&rt.shadow_attacker, &attack, &rt.sora_target, &state)
+        } else {
+            0
+        };
+        // FUN_1403d6670: Second Chance (ability 127) and Once More (128).
+        let veto = combat::sora_veto(ab.has(127), ab.has(128), rt.sora_hp, 0, in_damage_motion);
+        rt.sora_hp = combat::apply_damage(
+            rt.sora_hp,
+            0,
+            rt.sora_target.max_hp,
+            damage,
+            veto && counted,
+        );
+
         let d = (sora_at - enemy_at) * Vec3::new(1., 0., 1.);
         let dir = d.normalize_or(Vec3::Z);
         let facing = Vec3::new(player.yaw.sin(), 0., player.yaw.cos());
@@ -4437,12 +4545,16 @@ fn combat_tick(game: &mut Game, tick: u64) {
             .sstm
             .knock_strength(attack.knockback[0], class, attack.reaction);
         let index = (back as usize) * 2 + (!high) as usize;
-        let started = player.hurt(index, [dir.x, dir.z], strength, clips);
+        let started = if counted {
+            player.hurt(index, [dir.x, dir.z], strength, clips)
+        } else {
+            None
+        };
         if started.is_some() {
             *action_started = tick;
         }
         let record = serde_json::json!({"event":"sora_hit","tick":tick,"atkp":atkp,"damage":damage,
-            "sora_hp":rt.sora_hp,"reaction":format!("{started:?}")});
+            "counted":counted,"step":row,"sora_hp":rt.sora_hp,"reaction":format!("{started:?}")});
         if let Some(file) = log.as_mut() {
             let _ = serde_json::to_writer(&mut *file, &record);
             let _ = std::io::Write::write_all(file, b"\n");
@@ -5733,17 +5845,20 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             body: e.body,
             targets: e.targets,
             blade: e.blade,
-            attacks: e.attacks,
+            steps: e.steps,
+            difficulty: e.difficulty,
             sora: e.sora,
             enemy,
             rng: ScriptRandom::default(),
             claws: e.claws,
-            claw_attacks: e.claw_attacks,
             shadow_attacker: e.shadow_attacker,
             sora_target: e.sora_target,
             sora_body: e.sora_body,
             target_reach: e.target_reach,
-            sora_hit_by: Vec::new(),
+            sora_record: combat::HitRecord::new(true),
+            ids: combat::AttackIds::default(),
+            instance_ids: HashMap::new(),
+            next_group: 0x100,
             claw_previous: HashMap::new(),
             sora_hp: e.sora_target.max_hp,
             ko_ticks: 0,
