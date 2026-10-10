@@ -11,6 +11,11 @@
 pub const DT: f32 = 1.0;
 /// Gravity, units per tick squared (`DAT_1405ce184` = 0x3ed0fac7).
 pub const G: f32 = 0.408_163_28;
+/// Air steering: the share of last tick's velocity kept while the stick is
+/// held (`DAT_1405aaa40`, passed by FUN_1403cb360).
+pub const AIR_INERTIA: f32 = 0.9;
+/// Air drag with the stick released (`DAT_1405b1c74`, FUN_1403cb360).
+pub const AIR_DRAG: f32 = 0.95;
 /// Motion blend for locomotion and the fall motion (`DAT_140623bac`,
 /// FUN_140422520 / FUN_1403cb610), in motion-clock ticks: FUN_1403c6dc0
 /// adds it to the motion time, which advances by DT per tick.
@@ -248,6 +253,29 @@ pub fn rise_time(height: f32) -> f32 {
     ((height + height) / G).abs().sqrt()
 }
 
+/// FUN_1403b7ad0 (horizontal part): with a stick velocity (`speed` > 0)
+/// the velocity moves toward `direction × speed` keeping `inertia` of
+/// itself; otherwise it is scaled by `drag`. Returns the new velocity; the
+/// displacement is velocity × DT.
+pub fn steer(
+    velocity: [f32; 2],
+    direction: [f32; 2],
+    speed: f32,
+    inertia: f32,
+    drag: f32,
+) -> [f32; 2] {
+    if speed <= 0. {
+        velocity.map(|v| v * drag)
+    } else {
+        let target = [direction[0] * speed, direction[1] * speed];
+        // FUN_140141ae0(out, a, b, t) = b·(1 − t) + a·t.
+        [
+            target[0] * (1. - inertia) + velocity[0] * inertia,
+            target[1] * (1. - inertia) + velocity[1] * inertia,
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +362,13 @@ mod tests {
         let dy = arc.step(50., 16., false);
         // Starts at speed g·t0 = √(2·100·g) ≈ 9.0 downward.
         assert!(dy < -9. && dy > -9.5, "{dy}");
+    }
+
+    #[test]
+    fn air_steering_lerps_and_drags() {
+        let v = steer([0., 0.], [1., 0.], 8., AIR_INERTIA, AIR_DRAG);
+        assert!((v[0] - 0.8).abs() < 1e-6);
+        let v = steer([8., 0.], [0., 0.], 0., AIR_INERTIA, AIR_DRAG);
+        assert!((v[0] - 7.6).abs() < 1e-6);
     }
 }

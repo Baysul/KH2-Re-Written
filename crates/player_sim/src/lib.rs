@@ -197,6 +197,8 @@ pub struct Player {
     pub vertical_speed: f32,
     /// Jump/fall curve while airborne (obj+0xf0..+0xfc).
     pub arc: physics::Arc,
+    /// Horizontal velocity while airborne (obj+0x20 x/z), units per tick.
+    pub air_velocity: [f32; 2],
     pub action: Action,
     /// Ticks since the current action started.
     pub frame: u32,
@@ -251,6 +253,7 @@ impl Player {
             yaw,
             vertical_speed: 0.,
             arc: physics::Arc::default(),
+            air_velocity: [0.; 2],
             action: Action::Idle,
             frame: 0,
             armed: false,
@@ -376,24 +379,39 @@ impl Player {
     }
 
     /// Jump (mode 0 slot +0x48, FUN_140422630 → FUN_1403cbb00): the arc
-    /// of the PRTY jump height from the current position.
-    fn jump(&mut self, p: &Params, step: &mut Step) {
+    /// of the PRTY jump height from the current position, taking off with
+    /// the stick velocity (obj+0xe0 → +0x20 in FUN_1403cbd30).
+    fn jump(&mut self, p: &Params, velocity: [f32; 2], step: &mut Step) {
         self.arc = physics::Arc::launch(self.position[1], p.jump_height);
+        self.air_velocity = velocity;
         self.vertical_speed = 0.;
         self.air_combo_spent = false;
         self.start(Action::Jump, step);
     }
 
-    /// Leaving the ground without jumping (FUN_1403b4780 / FUN_1403b8150).
-    fn drop_off(&mut self, step: &mut Step) {
+    /// Leaving the ground without jumping (FUN_1403b4780 / FUN_1403b8150),
+    /// keeping the ground velocity (obj+0xa38 → +0x20 [I: +0xa38 is the
+    /// last ground velocity]).
+    fn drop_off(&mut self, velocity: [f32; 2], step: &mut Step) {
         self.arc = physics::Arc::fall(self.position[1], 0.);
+        self.air_velocity = velocity;
         self.vertical_speed = 0.;
         self.air_combo_spent = false;
         self.start(Action::Fall, step);
     }
 
-    fn facing(&self) -> [f32; 2] {
-        [self.yaw.sin(), self.yaw.cos()]
+    /// FUN_1403a8fa0's move request: the stick direction at the walk speed
+    /// below magnitude 0.8 and the run speed from it; zero without a stick.
+    fn stick_velocity(direction: [f32; 2], magnitude: f32, p: &Params) -> [f32; 2] {
+        if magnitude <= 0. {
+            return [0.; 2];
+        }
+        let speed = if magnitude < p.walk_threshold {
+            p.walk_speed
+        } else {
+            p.run_speed
+        };
+        [direction[0] * speed, direction[1] * speed]
     }
 
     /// Moves horizontally, keeping the body out of walls and off ledges that
@@ -449,7 +467,7 @@ impl Player {
                     self.arm();
                     self.start(Action::Attack(0), &mut step);
                 } else if input.jump {
-                    self.jump(p, &mut step);
+                    self.jump(p, Self::stick_velocity(direction, magnitude, p), &mut step);
                 } else {
                     // Landing holds until its "Blend to idle" range starts.
                     let landing = self.action == Action::Land
@@ -489,13 +507,9 @@ impl Player {
                         } else {
                             p.run_speed
                         };
-                        if !self.travel(
-                            [direction[0] * speed, direction[1] * speed],
-                            p,
-                            world,
-                            true,
-                        ) {
-                            self.drop_off(&mut step);
+                        let velocity = [direction[0] * speed, direction[1] * speed];
+                        if !self.travel(velocity, p, world, true) {
+                            self.drop_off(velocity, &mut step);
                         }
                     }
                 }
@@ -513,7 +527,7 @@ impl Player {
                     let (dx, dz) = (now[0] - before[0], now[2] - before[2]);
                     let delta = [dx * c + dz * s, -dx * s + dz * c];
                     if (delta[0] != 0. || delta[1] != 0.) && !self.travel(delta, p, world, true) {
-                        self.drop_off(&mut step);
+                        self.drop_off(delta, &mut step);
                         return step;
                     }
                 }
@@ -525,7 +539,7 @@ impl Player {
                     }
                     self.start(Action::Attack(i + 1), &mut step);
                 } else if recovery && input.jump {
-                    self.jump(p, &mut step);
+                    self.jump(p, Self::stick_velocity(direction, magnitude, p), &mut step);
                 } else if recovery && moving {
                     self.start(Action::Idle, &mut step);
                 } else if self.frame >= clip.end {
@@ -557,7 +571,7 @@ impl Player {
                     } else if input.guard && clips.guard.is_some() {
                         self.start_guard(input, &mut step);
                     } else if input.jump {
-                        self.jump(p, &mut step);
+                        self.jump(p, Self::stick_velocity(direction, magnitude, p), &mut step);
                     } else if moving || self.frame >= end {
                         self.start(Action::Idle, &mut step);
                     }
@@ -652,11 +666,30 @@ impl Player {
             _ => false,
         };
         self.vertical_speed = self.arc.step(self.position[1], p.fall_max, floating);
-        if moving && !matches!(self.action, Action::AirAttack(_)) {
+        // Mode 1 horizontal (FUN_1403cb360 → FUN_1403b7ad0 with 0.9, 0.95):
+        // the velocity keeps 90% of itself and takes 10% of the stick
+        // velocity, or decays ×0.95 without a stick. Attacks take no stick
+        // [I: the move request is idle during an attack motion].
+        let attacking = matches!(self.action, Action::AirAttack(_));
+        if moving && !attacking {
             self.turn_toward(direction, p.turn_speed);
-            let speed = p.run_speed * magnitude.max(p.walk_threshold);
-            let facing = self.facing();
-            self.travel([facing[0] * speed, facing[1] * speed], p, world, false);
+        }
+        let (dir, speed) = if attacking || !moving {
+            ([0.; 2], 0.)
+        } else {
+            let v = Self::stick_velocity(direction, magnitude, p);
+            (direction, v[0].hypot(v[1]))
+        };
+        self.air_velocity = physics::steer(
+            self.air_velocity,
+            dir,
+            speed,
+            physics::AIR_INERTIA,
+            physics::AIR_DRAG,
+        );
+        let v = self.air_velocity.map(|c| c * physics::DT);
+        if v[0] != 0. || v[1] != 0. {
+            self.travel(v, p, world, false);
         }
         let [x, y, z] = self.position;
         let next = y + self.vertical_speed;
@@ -940,6 +973,27 @@ mod tests {
         };
         player.tick(&jump, &p, &c, &w);
         assert_eq!(player.blend, 0.);
+    }
+
+    #[test]
+    fn running_jump_carries_momentum_then_drags() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([-900., 0., 0.], 0.);
+        let run_jump = Input {
+            direction: [0., 1.],
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&run_jump, &p, &c, &w);
+        assert_eq!(player.air_velocity, [0., 8.]);
+        // Stick released: FUN_1403b7ad0 scales the velocity by 0.95.
+        let z = player.position[2];
+        player.tick(&Input::default(), &p, &c, &w);
+        assert!((player.position[2] - z - 7.6).abs() < 1e-4);
+        // Stick sideways: 10% of the stick velocity per tick.
+        player.tick(&hold([1., 0.]), &p, &c, &w);
+        assert!((player.air_velocity[0] - 0.8).abs() < 1e-5);
+        assert!((player.air_velocity[1] - 7.6 * 0.9).abs() < 1e-4);
     }
 
     #[test]

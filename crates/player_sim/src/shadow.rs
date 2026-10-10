@@ -448,6 +448,20 @@ impl Shadow {
             self.slide = self.slide.map(|v| v * SLIDE_BRAKE);
         }
         if self.airborne {
+            if self.arc.is_some() {
+                // Mode 1 horizontal (FUN_1403b7ad0): no move request during
+                // the jump claw, so the take-off velocity decays ×0.95 [I:
+                // the AI leaves obj+0x1c at 0 here].
+                let [x, z] = physics::steer(
+                    [self.velocity[0], self.velocity[2]],
+                    [0.; 2],
+                    0.,
+                    physics::AIR_INERTIA,
+                    physics::AIR_DRAG,
+                );
+                self.velocity[0] = x;
+                self.velocity[2] = z;
+            }
             self.position[0] += self.velocity[0];
             self.position[2] += self.velocity[2];
             match self.arc.as_mut() {
