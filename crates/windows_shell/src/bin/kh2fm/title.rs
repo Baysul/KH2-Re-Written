@@ -562,6 +562,10 @@ fn finish(
             session.exit_code = Some(code);
             let tick = session.tick;
             session.event(serde_json::json!({"event":"exit","tick":tick,"code":code}));
+            // For the launcher: New Game continues in the test room.
+            if handed_off && let Some(a) = session.handoff {
+                println!("kh2fm-handoff {a:?}");
+            }
             exit.write(if code == 0 {
                 AppExit::Success
             } else {
