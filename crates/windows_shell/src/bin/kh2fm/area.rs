@@ -145,6 +145,8 @@ impl AreaSource {
                 }
             }
         }
+        // Every area is reachable: no story-blocked destination.
+        progress.unblock_all();
         let objects = objentry::read(&library.read("00objentry.bin")?)?;
         let object_index = objects
             .iter()
@@ -250,17 +252,44 @@ impl AreaSource {
             programs,
         };
         let scripts = ["map", "btl", "evt"].map(|n| entry(13, tag(n)));
-        let mut game = Flags(&self.progress);
-        let setup = script::run(&location, scripts, &mut self.rng, &mut game)?;
-        let mut state = Area::new(world, area, entrance, setup, |n| {
-            entry(12, n).and_then(|d| ard::spawn_set(d).ok())
-        });
         let types: HashMap<u32, u8> = self
             .objects
             .iter()
             .map(|o| (o.object_id, o.object_type))
             .collect();
-        let spawns = state.activate(|id| types.get(&id).copied());
+        // The story point's map program; when it places no player at this
+        // entrance (an area its story state has not opened) the area's other
+        // map programs are tried in file order so every area can be entered.
+        let mut candidates = vec![location.programs[0]];
+        if let Some(group) = scripts[0]
+            && let Ok(ids) = ard::program_ids(group)
+        {
+            candidates.extend(ids.into_iter().filter(|&i| i != location.programs[0]));
+        }
+        let mut chosen = None;
+        for (n, &candidate) in candidates.iter().enumerate() {
+            let mut location = Location {
+                world,
+                area,
+                entrance,
+                programs: location.programs,
+            };
+            location.programs[0] = candidate;
+            let mut game = Flags(&self.progress);
+            let Ok(setup) = script::run(&location, scripts, &mut self.rng, &mut game) else {
+                continue;
+            };
+            let mut state = Area::new(world, area, entrance, setup, |n| {
+                entry(12, n).and_then(|d| ard::spawn_set(d).ok())
+            });
+            let spawns = state.activate(|id| types.get(&id).copied()).to_vec();
+            if Area::player_spawn(&spawns).is_some() || n + 1 == candidates.len() {
+                chosen = Some((state, spawns, location));
+                break;
+            }
+        }
+        let (state, spawns, location) = chosen.ok_or("area scripts did not run")?;
+        let programs = location.programs;
         let (npcs, deferred, scripts, lines) =
             self.townspeople(code, area, &state, &spawns, &types);
         let music = self.music_change(world, area, state.setup.bgm);
