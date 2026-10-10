@@ -1,6 +1,6 @@
 # Repository reorganization plan
 
-Status: **proposal, nothing moved, deleted or created yet.** Every move, deletion and new file below needs approval in the project thread before it runs. The current layout is described in [ARCHITECTURE.md](../ARCHITECTURE.md).
+Status: **partly applied; see [Status](#status) at the end.** Items not marked done there were held, and each held item says why. The current layout is described in [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 Checked 2026-10-09 on branch `claude/project-thread-98hhql` (in sync with origin). Uncommitted work from the "1:1 title sequence" thread (`windows_shell/src/bin/kh2fm/title.rs`, `src/lib.rs`, untracked `src/splash.rs`) and the "Playable Sora test room" thread (camp, test room, music) is in progress. Phases avoid those files until those threads push.
 
@@ -76,14 +76,14 @@ KH2FinalRewrite/
     (about 50 entries: Verify-*, Build-*, Invoke-*, Inspect-*, native/managed readers, C++ references)
   .local/                     ignored; development outputs only
     test-room/                launch*.json only (double-click bundles; they point outside)
-  %LOCALAPPDATA%/KH2FinalRewrite/   private, outside the checkout
-    test-room/                source manifests, selections, configs, map-survey, autoplay runs
+  %USERPROFILE%/KH2FinalRewrite-private/   private, outside the checkout and OneDrive
     research/                 research outputs
     research/requested-repos/ pinned reference snapshots
     research/tools/openkh/    OpenKH clone
     logs/                     launcher and smoke logs
       evidence-2026-10-03/    smoke and metadata files cited by T001 and T023
     handoff/HANDOFF.md        optional
+  (test-room source manifests stay in .local/test-room/: LOCALAPPDATA is virtualized for user launches)
 ```
 
 ## New files (proposed)
@@ -121,16 +121,16 @@ Not proposed for deletion: `crates/package_reader/src/bin/motion_sample_probe.rs
 
 | # | From | To | Phase | Reference updates needed |
 |---|---|---|---|---|
-| M1 | `.local/test-room/source-manifest-01.json`, `source-manifest-02.json`, `test-room-*.json`, `title-01.json`, `actor-selection-01.json`, `axel-selection-01.json`, `shadow-selection-01.json`, `weapon-selection-01.json`, `map-survey-01/` | `%LOCALAPPDATA%/KH2FinalRewrite/test-room/` (or another private directory the user names) | 1 (after the playable room thread pushes; it uses these files now) | Update the `.local/test-room/launch*.json` files (local, untracked) and README launch instructions; the `docs/tasks/T056` pointer if it names the path |
-| M2 | `.local/tools/requested-repos/` | `%LOCALAPPDATA%/KH2FinalRewrite/research/requested-repos/` | 1 | `docs/tool-prerequisites.md` and `docs/bridge-inspection.md` mention this path |
-| M3 | `.local/tools/openkh/` (126 MB) | `%LOCALAPPDATA%/KH2FinalRewrite/research/tools/openkh/` | 1 | `docs/tasks/T058-motion-reference-match.md` cites the local OpenKH checkout |
-| M4 | `HANDOFF.md` (repo root, ignored) | `%LOCALAPPDATA%/KH2FinalRewrite/handoff/HANDOFF.md` | 1, optional | None tracked; a stale note from 2026-10-08 |
+| M1 | `.local/test-room/source-manifest-01.json`, `source-manifest-02.json`, `test-room-*.json`, `title-01.json`, `actor-selection-01.json`, `axel-selection-01.json`, `shadow-selection-01.json`, `weapon-selection-01.json`, `map-survey-01/` | `.local/test-room/` (stays; corrected from LOCALAPPDATA, which is virtualized for user launches) | 1 (after the playable room thread pushes; it uses these files now) | Update the `.local/test-room/launch*.json` files (local, untracked) and README launch instructions; the `docs/tasks/T056` pointer if it names the path |
+| M2 | `.local/tools/requested-repos/` | `%USERPROFILE%/KH2FinalRewrite-private/research/requested-repos/` | 1 | `docs/tool-prerequisites.md` and `docs/bridge-inspection.md` mention this path |
+| M3 | `.local/tools/openkh/` (126 MB) | `%USERPROFILE%/KH2FinalRewrite-private/research/tools/openkh/` | 1 | `docs/tasks/T058-motion-reference-match.md` cites the local OpenKH checkout |
+| M4 | `HANDOFF.md` (repo root, ignored) | `%USERPROFILE%/KH2FinalRewrite-private/handoff/HANDOFF.md` | 1, optional | None tracked; a stale note from 2026-10-08 |
 | M5 | `docs/*-inspection.md`, `docs/tool-*.md`, `docs/bridge-inspection.md`, `docs/environment.md`, `docs/references.md`, `docs/source-manifest-schema.md`, `docs/supported-builds.md`, `docs/source-and-release-policy.md`, `docs/*.csv` | `docs/research/` | 2 | Every `docs/...` link in the repo, README included. One link sweep, then `git grep` for old paths |
 | M6 | `crates/windows_shell/src/bin/{room_scene,model_inspector,image_inspector,motion_eval_compare,motion_ik_probe}.rs` | `crates/research_tools/src/bin/` (new) | 3 (after the title and playable-room threads push) | README and task records (T026, T034, T041, T056, T057, T058, T063) cite `cargo run -p windows_shell --bin ...`; update the citations. `room_scene` is the documented preview |
 | M7 | `crates/package_reader/src/bin/*_probe.rs` (nine) | `crates/research_probes/src/bin/` | 3, optional | Many task records cite `cargo run -p package_reader --bin ...`. Recommend leaving them unless the split is needed |
 | M8 | `windows_shell` game-state modules: `camp.rs` + `camp/`, `command.rs`, `dialogue.rs`, `newgame.rs`, `gauge.rs`, `fade.rs`, `effects.rs`, state part of `title.rs` | `crates/game_core/` (new) | 4, only when a tested behavior requires the boundary | Bevy imports removed or moved to presentation first; the launcher and test room import these |
 | M9 | Flat `tools/` (about 50 entries) into subfolders | Not recommended now. The A3 index gives the navigation instead | Deferred | Many task records cite scripts by name; the link sweep is not worth it yet |
-| M10 | `.local/smoke-*.log`, `.local/smoke-*.stdout.log`, `.local/smoke-*.stderr.log` (D2), `.local/cargo-metadata.json`, `.local/dependency-licenses.json` (D3) | `%LOCALAPPDATA%/KH2FinalRewrite/logs/evidence-2026-10-03/` | 1 | T001 and T023 record paths: update those path lines, keep the evidence |
+| M10 | `.local/smoke-*.log`, `.local/smoke-*.stdout.log`, `.local/smoke-*.stderr.log` (D2), `.local/cargo-metadata.json`, `.local/dependency-licenses.json` (D3) | `%USERPROFILE%/KH2FinalRewrite-private/logs/evidence-2026-10-03/` | 1 | T001 and T023 record paths: update those path lines, keep the evidence |
 | M11 | `crates/package_reader/src/*.rs` (flat, 44 modules) | `src/archive/`, `src/text/`, `src/tables/`, `src/image/`, `src/model/`, `src/vu/`, `src/motion/`, `src/room/`, `src/audio/`, `src/effect/`, `src/inspection/` (table below) | 5 | Callers in `windows_shell`, `effect_vm`, `source_identity` and the probes update their `use` paths in the same commit. Module doc headers stay as they are |
 | M12 | `crates/windows_shell/src/` presentation modules: `hud.rs`, `layout2d.rs`, `sprite2d.rs`, `ui2d.rs`, `ui2d.wgsl`, `input.rs`, `pad.rs`, `room.rs`, `title.rs` (presentation part), `splash.rs`, `sound.rs` | `render/` (hud, layout2d, sprite2d, ui2d, ui2d.wgsl), `input/` (input, pad), `screens/` (room, title, splash), `sound.rs` stays at the root | 5 (after M8) | Call sites in `lib.rs` and `bin/kh2fm`; no logic changes |
 
@@ -202,3 +202,27 @@ Status: the recommendations below are recorded as the working decisions. Recordi
 ## Approval needed
 
 Reply in the project thread with the item numbers you approve (for example "D1, M10, M1 to M4, phase 2 as proposed") and decisions D-1 to D-5. Nothing in phases 1 to 5 runs before that reply.
+
+## Status
+
+Applied in one batch on 2026-10-09 (uncommitted at the time of writing).
+
+Done:
+
+- Deleted: D4 (root `gb_splash.png`, byte-identical to the crate asset; the title-thread check in its row was not run separately), D5 and D6 (`.local/tools/iw4l/`, `.local/tools/skate3/`, not KH2 Final Mix; `.local/tools/` removed), D7 (`docs/architecture.md`, replaced by `ARCHITECTURE.md`).
+- Moved: D2, D3 and M10 (14 evidence files to `%USERPROFILE%/KH2FinalRewrite-private/logs/evidence-2026-10-03/`), M2 (requested repositories), M3 (OpenKH checkout), M4 (`HANDOFF.md`).
+- M5: 13 markdown files and 3 CSV ledgers moved to `docs/research/`. All 126 relative links in tracked markdown resolve. `.gitignore` allows `docs/research/*.csv`.
+- A2, A3, A4: `docs/README.md`, `tools/README.md`, and `docs/tasks/README.md` (generated by `tools/New-TaskIndex.ps1`; 7 of 88 records have no verdict line, and the index says so).
+- A1, A5 and `ARCHITECTURE.md` were added earlier in this thread.
+
+Kept:
+
+- D1 (`target/`): kept at the user's request.
+- D8 (`texa_graphs.rs`) and D9 (`bc3_mip_boundaries.rs`): they write the input files that `tools/Verify-ModelTextureAnimations.ps1` and `tools/Verify-Bc3MipImages.ps1` read. Deleting them would break those verifiers.
+- D10 (six `tools/*.ps1` files): no task record cites them. `tools/README.md` lists them with no citation or with only this plan as the citation. Each needs a review of whether it is a gate check before deletion. Not reviewed yet.
+
+Held:
+
+- M1 (test-room launch files): the playable-room thread is still using them in `.local/test-room/`, and that folder stays because LOCALAPPDATA is virtualized for user launches.
+- M6, M7, M8, M11, M12 (code moves): they wait for the title, launcher and playable-room threads to push, so they do not conflict with in-flight work.
+- M9 (flat `tools/` folder): deferred, as the plan recommends.
