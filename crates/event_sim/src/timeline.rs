@@ -66,8 +66,18 @@ pub struct Fade {
     pub kind: i16,
 }
 
+/// `AttachEffect` type 1: `child` rides `parent`'s `bone` from `frame`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Attachment {
+    pub frame: i32,
+    pub parent: i16,
+    pub child: i16,
+    pub bone: i16,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Timeline {
+    pub attachments: Vec<Attachment>,
     pub end_frame: i32,
     pub fade_in: i32,
     pub actors: Vec<ActorTrack>,
@@ -190,6 +200,19 @@ impl Timeline {
                     duration: *duration as i32,
                     kind: *kind,
                 }),
+                Command::AttachEffect {
+                    start,
+                    attach,
+                    actor,
+                    bone,
+                    kind: 1,
+                    ..
+                } => t.attachments.push(Attachment {
+                    frame: *start as i32,
+                    parent: *attach,
+                    child: *actor,
+                    bone: *bone,
+                }),
                 Command::WideMask { frame, flag } => t.wide_masks.push((*frame as i32, *flag)),
                 Command::SetBgm { frame, bank, bgm } => {
                     t.set_bgm.push((*frame as i32, *bank, *bgm))
@@ -204,6 +227,7 @@ impl Timeline {
             a.leaves.sort_unstable();
         }
         t.cuts.sort_by_key(|c| c.start);
+        t.attachments.sort_by_key(|a| a.frame);
         t
     }
 

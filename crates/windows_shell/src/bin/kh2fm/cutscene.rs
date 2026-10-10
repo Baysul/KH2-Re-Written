@@ -2,8 +2,11 @@
 //! installation — tt19 event 613 by default, the scene before the Roxas vs
 //! Axel fight in Betwixt and Between — from the event script's own cameras,
 //! actors, motions, voices, music and subtitles.
+mod blur;
 mod fx;
 mod load;
+mod screen;
+mod texa;
 
 use bevy::{
     app::AppExit,
@@ -25,7 +28,7 @@ use windows_shell::dialogue;
 use windows_shell::hud::SystemFont;
 use windows_shell::room::{mesh, rgba_image, upload};
 use windows_shell::sound;
-use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
+use windows_shell::ui2d::{LayoutMaterial, Ui2dFrame, Ui2dPlugin};
 
 /// Event frames per second.
 const EVENT_FPS: f32 = 30.;
@@ -123,6 +126,7 @@ fn setup(
     mut overlay: ResMut<Overlay>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut layout_materials: ResMut<Assets<LayoutMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut frame: ResMut<Ui2dFrame>,
     windows: Query<&Window>,
@@ -181,6 +185,9 @@ fn setup(
             ));
         }
     }
+    // One image per (actor, texture environment), shared by its parts so a
+    // texture animation repaints them all.
+    let mut shared: HashMap<(usize, usize), (Handle<Image>, u32)> = HashMap::new();
     for (ai, actor) in event.actors.iter().enumerate() {
         let root = commands
             .spawn((
@@ -192,6 +199,13 @@ fn setup(
             .id();
         let model = &actor.model;
         let pose = &model.poses[0];
+        eprintln!(
+            "actor {} {}: mesh groups {:?}, texture patches {}",
+            actor.id,
+            actor.name,
+            model.parts.iter().map(|p| p.mesh_group).collect::<Vec<_>>(),
+            model.textures.as_ref().map_or(0, |t| t.play.len())
+        );
         for (pi, part) in model.parts.iter().enumerate() {
             if part.indices.is_empty() {
                 continue;
@@ -215,12 +229,20 @@ fn setup(
                     && let Some(image) = binding.image_index
                 {
                     let level = &set.images[image].levels[0];
-                    texture = Some(rgba_image(
-                        level.width,
-                        level.height,
-                        level.pixels_rgba.clone(),
-                        &mut images,
-                    ));
+                    let (handle, _) = shared
+                        .entry((ai, route.environment_ordinal))
+                        .or_insert_with(|| {
+                            (
+                                rgba_image(
+                                    level.width,
+                                    level.height,
+                                    level.pixels_rgba.clone(),
+                                    &mut images,
+                                ),
+                                level.width,
+                            )
+                        });
+                    texture = Some(handle.clone());
                 }
             }
             commands.spawn((
@@ -257,6 +279,22 @@ fn setup(
         None,
     ));
     overlay.scene_sheet = Some(frame.add_image(overlay.scene.clone(), size, true));
+    let blur = blur::Blur::spawn(
+        &mut commands,
+        &mut meshes,
+        &mut layout_materials,
+        &mut images,
+        &mut frame,
+        &overlay.scene,
+        size,
+        blur::Blur::switches(&event.timeline.other),
+    );
+    commands.insert_resource(blur);
+    commands.insert_resource(texa::Texa::new(
+        &event.actors,
+        &shared,
+        &event.timeline.other,
+    ));
     overlay.font_sheet = Some(frame.add_sheet(
         &mut images,
         overlay.font.rgba.clone(),
@@ -426,14 +464,19 @@ fn tick(
 fn present(
     event: Res<Event>,
     fixed: Res<Time<Fixed>>,
-    mut roots: Query<(&ActorRoot, &mut Transform, &mut Visibility)>,
-    parts: Query<(&ActorPart, &Mesh3d)>,
+    mut roots: Query<(&ActorRoot, &mut Transform, &mut Visibility), Without<ActorPart>>,
+    mut parts: Query<(&ActorPart, &Mesh3d, &mut Visibility), Without<ActorRoot>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut cameras: Query<(&mut Transform, &mut Projection), (With<EventCamera>, Without<ActorRoot>)>,
 ) {
     let frame = event.frame + fixed.overstep_fraction() * (EVENT_FPS / TICK_HZ as f32);
     let frame = frame.min(event.timeline.end_frame.max(1) as f32);
     let mut poses: HashMap<usize, Vec<[f32; 3]>> = HashMap::new();
+    // Bone matrices and root transforms for AttachEffect type 1.
+    let mut bones: HashMap<usize, Vec<Mat4>> = HashMap::new();
+    let mut placed: HashMap<usize, Transform> = HashMap::new();
+    // Visible mesh groups per actor (SeqPart lists), where one applies.
+    let mut visible_groups: HashMap<usize, Vec<i16>> = HashMap::new();
     for (root, mut transform, mut visibility) in &mut roots {
         let actor = &event.actors[root.0];
         let Some(state) = event.timeline.actor_at(actor.id, frame) else {
@@ -458,6 +501,13 @@ fn present(
         let Ok((pose, _)) = actor.model.skinning.sample_evaluated(motion, sample) else {
             continue;
         };
+        bones.insert(
+            root.0,
+            pose.matrix_bits
+                .iter()
+                .map(|m| Mat4::from_cols_array(&m.map(f32::from_bits)))
+                .collect(),
+        );
         poses.insert(
             root.0,
             pose.position_bits
@@ -472,14 +522,15 @@ fn present(
             .find(|a| a.id == actor.id)
             .and_then(|a| a.parts.iter().rev().find(|(at, _)| *at as f32 <= frame))
             .map(|(_, list)| list.as_slice());
-        // Part lists are visible mesh groups (core/screen spec); w_ex010's
-        // meshes are all group 0, so a list without 0 hides it.
-        let hidden = actor.name.starts_with("w_") && listed.is_some_and(|l| !l.contains(&0));
-        *visibility = if hidden {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
-        };
+        // A part list names the VISIBLE mesh groups (bits 6..10 of the mesh
+        // descriptor); every other group is hidden (screen-spec 4).
+        if let Some(list) = listed {
+            visible_groups.insert(
+                root.0,
+                list.iter().copied().take_while(|&g| g >= 0).collect(),
+            );
+        }
+        *visibility = Visibility::Inherited;
         if let Some(p) = state.placement {
             transform.translation = Vec3::from_array(p.position);
             transform.rotation = Quat::from_euler(
@@ -491,8 +542,37 @@ fn present(
         } else {
             *transform = Transform::default();
         }
+        placed.insert(root.0, *transform);
     }
-    for (part, handle) in &parts {
+    // AttachEffect type 1 (FUN_1402d07d0 -> FUN_1403d9fe0): the child's
+    // origin sits at the parent's bone; its own motion animates from there.
+    for (root, mut transform, _) in &mut roots {
+        let child_id = event.actors[root.0].id;
+        let Some(att) = event
+            .timeline
+            .attachments
+            .iter()
+            .rev()
+            .find(|a| a.child == child_id && a.frame as f32 <= frame)
+        else {
+            continue;
+        };
+        let Some(parent) = event.actors.iter().position(|a| a.id == att.parent) else {
+            continue;
+        };
+        if let (Some(m), Some(base)) = (
+            bones.get(&parent).and_then(|b| b.get(att.bone as usize)),
+            placed.get(&parent),
+        ) {
+            *transform = *base * Transform::from_matrix(*m);
+        }
+    }
+    for (part, handle, mut visibility) in &mut parts {
+        let group = event.actors[part.actor].model.parts[part.part].mesh_group as i16;
+        *visibility = match visible_groups.get(&part.actor) {
+            Some(list) if !list.contains(&group) => Visibility::Hidden,
+            _ => Visibility::Inherited,
+        };
         let Some(pose) = poses.get(&part.actor) else {
             continue;
         };
@@ -522,30 +602,62 @@ fn compose(
     overlay: Res<Overlay>,
     audio: Res<Audio>,
     mut frame: ResMut<Ui2dFrame>,
+    blur: Res<blur::Blur>,
 ) {
-    let (Some(scene), Some(font_sheet)) = (overlay.scene_sheet, overlay.font_sheet) else {
+    let (Some(_), Some(font_sheet)) = (overlay.scene_sheet, overlay.font_sheet) else {
         return;
     };
-    frame.full_screen(scene, [1.; 4]);
-    let f = event.frame;
-    let bars = event
-        .timeline
-        .wide_masks
-        .iter()
-        .rev()
-        .find(|(at, _)| *at as f32 <= f)
-        .is_some_and(|(_, flag)| *flag != 0);
-    if bars && let Some(white) = overlay.white_sheet {
-        let quad = |top: f32, bottom: f32| package_reader::sequence::Quad {
-            corners: [[-86., top], [598., top], [-86., bottom], [598., bottom]],
-            uv: [0, 0, 1, 1],
-            colors: [[0., 0., 0., 1.]; 4],
-            blend: 0,
-        };
-        frame
-            .draws
-            .push((white, vec![quad(-1., 35.), quad(381., 417.)]));
+    // The scene with the SeqBlur feedback pass applied.
+    // The exe's world is left-handed; the scene is rendered right-handed,
+    // so the image is mirrored in x when composed.
+    {
+        let sheet = blur.sheet();
+        let [w, h] = frame.sheets[sheet].size;
+        let half = windows_shell::ui2d::WIDE_WIDTH / 2.;
+        let (l, r) = (256. - half, 256. + half);
+        frame.draws.push((
+            sheet,
+            vec![package_reader::sequence::Quad {
+                corners: [
+                    [r, 0.],
+                    [l, 0.],
+                    [r, windows_shell::ui2d::HEIGHT],
+                    [l, windows_shell::ui2d::HEIGHT],
+                ],
+                uv: [0, 0, w as i32, h as i32],
+                colors: [[1.; 4]; 4],
+                blend: 0,
+            }],
+        ));
     }
+    let f = event.frame;
+    // Fade layers B and A, then the letterbox bars on top (screen-spec 1).
+    let fades = &event.timeline.fades;
+    let layer = |frame: &mut Ui2dFrame, index: usize| {
+        let start = if index == 2 {
+            event.timeline.fade_in
+        } else {
+            0
+        };
+        if let (Some(c), Some(white)) = (
+            screen::layer_colour(fades, index, start, f),
+            overlay.white_sheet,
+        ) {
+            let tone = if c.white { 1. } else { 0. };
+            let (l, r) = (-86., 598.);
+            frame.draws.push((
+                white,
+                vec![package_reader::sequence::Quad {
+                    corners: [[l, -1.], [r, -1.], [l, 417.], [r, 417.]],
+                    uv: [0, 0, 1, 1],
+                    colors: [[tone, tone, tone, c.alpha]; 4],
+                    blend: u8::from(c.white).into(),
+                }],
+            ));
+        }
+    };
+    layer(&mut frame, 1);
+    layer(&mut frame, 0);
     for (_slot, message) in event.timeline.subtitles_at(f) {
         let Some(bytes) = overlay.messages.get(&message) else {
             continue;
@@ -609,26 +721,8 @@ fn compose(
                 .push((font_sheet, dialogue::glyph_quads(&glyphs)));
         }
     }
-    // Fade-in at the start and the scripted fades.
-    if let Some(white) = overlay.white_sheet {
-        let mut alpha: f32 = 0.;
-        if (f as i32) < event.timeline.fade_in {
-            alpha = 1. - f / event.timeline.fade_in as f32;
-        }
-        for fade in &event.timeline.fades {
-            let (s, d) = (fade.frame as f32, fade.duration.max(1) as f32);
-            if f >= s {
-                let k = ((f - s) / d).clamp(0., 1.);
-                alpha = match fade.kind {
-                    0 | 3 | 5 | 7 => 1. - k,
-                    _ => k,
-                };
-            }
-        }
-        if alpha > 0. {
-            frame.fill(white, [0., 0., 0., alpha.clamp(0., 1.)]);
-        }
-    }
+    // The event curtain (layer C): the start fade-in and types 6/7.
+    layer(&mut frame, 2);
 }
 
 fn finish(
@@ -876,7 +970,18 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     })
     .add_systems(Startup, setup)
     .add_systems(FixedUpdate, tick)
-    .add_systems(Update, (present, fx::present, compose, finish).chain());
+    .add_systems(
+        Update,
+        (
+            present,
+            fx::present,
+            texa::animate,
+            blur::drive,
+            compose,
+            finish,
+        )
+            .chain(),
+    );
     if autoplaying {
         app.add_systems(Startup, |mut time: ResMut<Time<Virtual>>| time.pause());
     }

@@ -142,6 +142,14 @@ pub struct InspectionTextures {
     pub modes: Vec<TextureMode>,
     pub images: Vec<TextureImage>,
     pub links: TextureLinks,
+    /// Playable TEXA patches with the palette of the texture they paint.
+    #[serde(skip)]
+    pub play: Vec<TexturePlay>,
+}
+/// A TEXA patch and the CLUT (256 RGBA entries) of its target environment.
+pub struct TexturePlay {
+    pub patch: crate::model_texture_play::Patch,
+    pub clut_rgba: Vec<u8>,
 }
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -176,7 +184,23 @@ pub fn read_textures(
     reserve(total_rgba, original_bytes)?;
     let metadata: Vec<_> = replacements.iter().map(|r| r.metadata.clone()).collect();
     let links = model_texture_routing::read_links(payload, asset_offset, &metadata)?;
-    let mut images: Vec<_> = crate::model_texture_pixels::decode_images(payload)?
+    let decoded = crate::model_texture_pixels::decode_images(payload)?;
+    let play = crate::model_texture_play::read_patches(payload)?
+        .into_iter()
+        .filter_map(|patch| {
+            let target = decoded
+                .iter()
+                .find(|d| d.environment_ordinal == patch.environment)?;
+            (target.indexed_bits_per_pixel == 8
+                && patch.x + patch.width <= target.width
+                && patch.y + patch.height <= target.height)
+                .then(|| TexturePlay {
+                    clut_rgba: target.clut_rgba.clone(),
+                    patch,
+                })
+        })
+        .collect();
+    let mut images: Vec<_> = decoded
         .into_iter()
         .map(|i| TextureImage {
             identity: ImageIdentity::Original {
@@ -261,6 +285,7 @@ pub fn read_textures(
         modes: modes.to_vec(),
         images,
         links,
+        play,
     })
 }
 
@@ -372,6 +397,7 @@ mod tests {
                 duplicate_candidate_offsets: vec![],
                 runtime_verified: false,
             },
+            play: Vec::new(),
         }
     }
     #[test]

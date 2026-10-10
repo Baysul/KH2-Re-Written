@@ -29,6 +29,7 @@ pub mod model_skeleton;
 pub mod model_texture;
 pub mod model_texture_animation;
 pub mod model_texture_pixels;
+pub mod model_texture_play;
 pub mod model_texture_routing;
 pub mod motion;
 pub mod motion_eval;

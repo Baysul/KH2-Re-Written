@@ -43,6 +43,10 @@ pub struct InspectionPart {
     pub source_is_opaque: bool,
     pub indices: Vec<u32>,
     pub cross_part_corners: usize,
+    /// The mesh's part group, bits 6..10 of its descriptor word 0 (what a
+    /// script's `SeqPart` list names); filled by `read_models`.
+    #[serde(skip)]
+    pub mesh_group: u8,
 }
 pub struct InspectionModel {
     pub index: String,
@@ -121,6 +125,7 @@ fn parts(geometry: &Geometry, poses: &[ModelPose]) -> io::Result<Vec<InspectionP
             source_is_opaque: part.is_opaque,
             indices,
             cross_part_corners,
+            mesh_group: 0,
         });
         vertex_base = end;
     }
@@ -318,7 +323,17 @@ pub fn read_models(
                     .iter()
                     .map(|&profile| skinning.bind_pose(profile))
                     .collect::<io::Result<_>>()?;
-                let mesh_parts = parts(&geometry, &poses)?;
+                let mut mesh_parts = parts(&geometry, &poses)?;
+                if let Some(root) = crate::model_skeleton::read_model_structure(payload)?
+                    .blocks
+                    .first()
+                {
+                    for part in &mut mesh_parts {
+                        if let Some(header) = root.group_headers.get(part.group_ordinal) {
+                            part.mesh_group = ((header[0] >> 6) & 0x1f) as u8;
+                        }
+                    }
+                }
                 let texture_routes = if let Some(set) = &textures {
                     let environments = set
                         .images

@@ -25,7 +25,7 @@ Steam app 2552430, build 15194255, content identity `a9ca1e03…`, quarantined; 
 ## Added in the second pass
 
 - Effects from `tt_event_613.pax` (effect elements 0, 1, 4, 5, 6) through new `effect_vm` programs (VtMime, MatrixZXY, DrawMatrix, DrawMdl3, DrawMdlTs3, VertexAp, MegaBirthModel, MngFlag) and an OMD mesh reader.
-- Letterbox bars (WideMask): opaque black, y -1..35 and 381..417 in the 512x416 space, no slide.
+- WideMask bars are NOT drawn (owner request: no cinematic bars in cutscenes).
 - Subtitles at 0.8x about the bottom-centre anchor; Keyblade actors hidden while the part list lacks group 0.
 
 ## Not done / uncertain (verdict: PARTIAL, not a 1:1 pass)
@@ -34,3 +34,10 @@ Steam app 2552430, build 15194255, content identity `a9ca1e03…`, quarantined; 
 - SeqBlur feedback pass (equation known: out = prev*a/128 + cur*(1-a/128), previous frame zoomed ~1.004) and SeqTextureAnim (talk/blink patches) not built; SeqPart is only applied to the Keyblade actors, not Axel/the Roxas copy mesh groups.
 - [U] music after the event ends and what clears the black fade; pause menu art (plain list, not pause.2ld); cursor sounds.
 - No comparison against a real capture of the original.
+
+## Third pass (owner feedback: Axel backwards, Keyblades not on Roxas, no bars)
+
+- Keyblade actors now ride Roxas's bones 63 / 172 (AttachEffect type 1, `Timeline::attachments`).
+- The composed scene is mirrored in x (the exe world is left-handed, the render right-handed); this turns Axel (and the whole scene) the way the original shows it. [I] confirmed by framing, not by an original capture.
+- Letterbox bars removed.
+- Partial worker output kept: SeqBlur feedback pass, fade layers, TEXA mouth/eye animations, mesh-group visibility (compiles, unit tests pass; not independently checked frame by frame).
