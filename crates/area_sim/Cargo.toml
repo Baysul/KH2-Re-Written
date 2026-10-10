@@ -1,0 +1,12 @@
+[package]
+name = "area_sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+package_reader = { path = "../package_reader" }
+
+[lints]
+workspace = true
