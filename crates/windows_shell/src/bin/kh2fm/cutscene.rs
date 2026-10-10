@@ -533,12 +533,33 @@ fn present(
         *visibility = Visibility::Inherited;
         if let Some(p) = state.placement {
             transform.translation = Vec3::from_array(p.position);
-            transform.rotation = Quat::from_euler(
+            // The script's yaw is a heading in the exe's left-handed
+            // world; here it is the same angle with the opposite sense
+            // (ry 180 stays, -90 becomes +90). The turn is made about the
+            // body's centre so the framed body stays where the script's
+            // camera expects it.
+            let base = Quat::from_euler(
                 EulerRot::YXZ,
                 p.rotation[1].to_radians(),
                 p.rotation[0].to_radians(),
                 p.rotation[2].to_radians(),
             );
+            let turned = Quat::from_euler(
+                EulerRot::YXZ,
+                (-p.rotation[1]).to_radians(),
+                p.rotation[0].to_radians(),
+                p.rotation[2].to_radians(),
+            );
+            // The body's horizontal centre in model space.
+            let n = pose.position_bits.len().max(1) as f32;
+            let (mut cx, mut cz) = (0f32, 0f32);
+            for q in &pose.position_bits {
+                cx += f32::from_bits(q[0]);
+                cz += f32::from_bits(q[2]);
+            }
+            let c = Vec3::new(cx / n, 0., cz / n);
+            transform.translation = Vec3::from_array(p.position) + base * c - turned * c;
+            transform.rotation = turned;
         } else {
             *transform = Transform::default();
         }
