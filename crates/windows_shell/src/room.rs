@@ -77,7 +77,24 @@ pub fn load_rooms(
         return Err("room identity mismatch".into());
     }
     let archive = original::read_original(&mut index.reader, entry)?;
-    let table = bar::read_bar(&archive.bytes)?;
+    let ground = item
+        .get("inspection_ground_polygon")
+        .map(|p| p.as_u64().ok_or("inspection polygon ordinal invalid"))
+        .transpose()?;
+    let room = load_room_archive(&archive.bytes, ground)?;
+    index.verify_unchanged()?;
+    Ok(room)
+}
+
+/// Decodes a map archive (`map/<world><nn>.map`): its map models with their
+/// textures, the type-6 collision and the type-11 camera collision.
+/// `inspection_ground` optionally names a horizontal collision polygon
+/// whose height is reported for inspection framing.
+pub fn load_room_archive(
+    bytes: &[u8],
+    inspection_ground_polygon: Option<u64>,
+) -> Result<LoadedRoom, Box<dyn std::error::Error>> {
+    let table = bar::read_bar(bytes)?;
     let mut rooms = Vec::new();
     let mut frame_points = Vec::new();
     let mut inspection_ground = None;
@@ -88,7 +105,7 @@ pub fn load_rooms(
         .filter(|e| e.entry_type == 6 && e.offset > 0 && e.size > 0)
     {
         let collision = room_collision::read(
-            &archive.bytes[entry.offset as usize..entry.offset as usize + entry.size as usize],
+            &bytes[entry.offset as usize..entry.offset as usize + entry.size as usize],
         )?;
         frame_points.extend(collision.vertex_bits.iter().map(|&p| scene_point(p)));
         for (polygon, [a, b, c]) in collision.triangle_indices()? {
@@ -104,15 +121,11 @@ pub fn load_rooms(
                 corners: [a, b, c].map(|i| scene_point(collision.vertex_bits[i as usize])),
             });
         }
-        if let Some(polygon) = item.get("inspection_ground_polygon") {
+        if let Some(polygon) = inspection_ground_polygon {
             if inspection_ground.is_some() {
                 return Err("inspection ground polygon ambiguous across collision blocks".into());
             }
-            let ordinal = usize::try_from(
-                polygon
-                    .as_u64()
-                    .ok_or("inspection polygon ordinal invalid")?,
-            )?;
+            let ordinal = usize::try_from(polygon)?;
             let polygon = collision
                 .polygons
                 .get(ordinal)
@@ -139,7 +152,7 @@ pub fn load_rooms(
         .filter(|e| e.entry_type == 11 && e.offset > 0 && e.size > 0)
     {
         let collision = room_collision::read(
-            &archive.bytes[entry.offset as usize..entry.offset as usize + entry.size as usize],
+            &bytes[entry.offset as usize..entry.offset as usize + entry.size as usize],
         )?;
         for (_, corners) in collision.triangle_indices()? {
             camera_triangles.push(corners.map(|i| scene_point(collision.vertex_bits[i as usize])));
@@ -151,8 +164,7 @@ pub fn load_rooms(
         .iter()
         .filter(|e| e.entry_type == 4 && e.offset > 0 && e.size > 0)
     {
-        let payload =
-            &archive.bytes[entry.offset as usize..entry.offset as usize + entry.size as usize];
+        let payload = &bytes[entry.offset as usize..entry.offset as usize + entry.size as usize];
         if payload.get(0x90..0x94) != Some(2u32.to_le_bytes().as_slice()) {
             continue;
         }
@@ -169,7 +181,7 @@ pub fn load_rooms(
         }
         let entry = textures[0];
         let textures = model_texture_pixels::decode_images(
-            &archive.bytes[entry.offset as usize..entry.offset as usize + entry.size as usize],
+            &bytes[entry.offset as usize..entry.offset as usize + entry.size as usize],
         )?;
         rgba_bytes += textures.iter().map(|t| t.pixels_rgba.len()).sum::<usize>();
         if rgba_bytes > 128 * 1024 * 1024 {
@@ -177,7 +189,6 @@ pub fn load_rooms(
         }
         rooms.push(Room { model, textures });
     }
-    index.verify_unchanged()?;
     if rooms.is_empty() {
         return Err("no decoded room model".into());
     }
