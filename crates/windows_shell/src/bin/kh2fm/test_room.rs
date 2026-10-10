@@ -7,6 +7,7 @@
 //! controller (`player_sim`) is a test-room profile: data-backed where a
 //! public lead exists, explicit choices elsewhere. It is not a measured
 //! reproduction of the installed game's movement or combat rules.
+use crate::area::{self, AreaSource, LoadedArea, MapWorld};
 use bevy::{
     app::AppExit,
     asset::RenderAssetUsages,
@@ -72,6 +73,9 @@ struct Config {
     /// A generated test arena instead of a game room.
     #[serde(default)]
     arena: Option<ArenaConfig>,
+    /// A field area loaded by name the way the game loads it.
+    #[serde(default)]
+    area: Option<AreaConfig>,
     actor_selection: PathBuf,
     motion_set: Locator,
     battle_mode: bool,
@@ -153,6 +157,17 @@ struct JournalConfig {
     worlds: Locator,
     tops: std::collections::BTreeMap<String, Locator>,
     curtain: Locator,
+}
+
+/// The area to start in and the story point that fixes its programs.
+#[derive(Deserialize)]
+struct AreaConfig {
+    /// World code (`tt`).
+    world: String,
+    area: u8,
+    entrance: u8,
+    /// Progress flag ranges set in ascending order before loading.
+    story: Vec<[u32; 2]>,
 }
 
 #[derive(Deserialize)]
@@ -395,11 +410,51 @@ const WEAPON_BANK: i16 = 500;
 const SE_CURSOR: u32 = 1;
 const SE_LOW_HP: u32 = 9;
 
+/// The room collision the controller and the enemy read: the generated
+/// arena's triangles, or a game map's COCT through the exe's routines.
+enum RoomWorld {
+    Triangles(TriangleWorld),
+    Map(MapWorld),
+}
+
+impl World for RoomWorld {
+    fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        match self {
+            RoomWorld::Triangles(w) => w.floor(x, z, top),
+            RoomWorld::Map(w) => w.floor(x, z, top),
+        }
+    }
+    fn resolve_walls(&self, position: [f32; 2], radius: f32, low: f32, high: f32) -> [f32; 2] {
+        match self {
+            RoomWorld::Triangles(w) => w.resolve_walls(position, radius, low, high),
+            RoomWorld::Map(w) => w.resolve_walls(position, radius, low, high),
+        }
+    }
+}
+
+/// The current area and the files to load the next one.
+#[derive(Resource)]
+struct AreaRes {
+    source: AreaSource,
+    current: LoadedArea,
+    /// The area before this one (unattended runs avoid going back).
+    previous: Option<u8>,
+    /// A jump requested by an exit: world, area, entrance.
+    pending: Option<(u8, u8, u8)>,
+}
+
+/// The scene root every room part hangs under.
+#[derive(Resource)]
+struct SceneRoot(Entity);
+
+#[derive(Component)]
+struct RoomPart;
+
 #[derive(Resource)]
 struct Game {
     params: Params,
     clips: Clips,
-    world: TriangleWorld,
+    world: RoomWorld,
     player: Player,
     poses: HashMap<(Action, bool), usize>,
     clip_poses: Vec<ClipPoses>,
@@ -619,7 +674,11 @@ struct Loaded {
     actions: Vec<((Action, bool), usize)>,
     clip_poses: Vec<ClipPoses>,
     spawn: Vec3,
-    world: TriangleWorld,
+    /// Sora's facing at the spawn (scene yaw).
+    yaw: f32,
+    world: RoomWorld,
+    /// The field area, when the room is a game area.
+    area: Option<(AreaSource, LoadedArea)>,
     summary: serde_json::Value,
     hud: Option<HudSource>,
     enemy: Option<EnemySource>,
@@ -980,7 +1039,7 @@ impl shadow::Clips for EnemyClips {
     }
 }
 
-struct RoomFloor<'a>(&'a TriangleWorld);
+struct RoomFloor<'a>(&'a RoomWorld);
 impl shadow::Env for RoomFloor<'_> {
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         self.0.floor(x, z, top)
@@ -1135,13 +1194,27 @@ fn load(
     if weapon_joint >= actor.skinning.bones.len() {
         return Err("weapon joint outside the actor skeleton".into());
     }
+    let mut area_load: Option<(AreaSource, LoadedArea)> = None;
     let (room, arena_mesh) = match (&config.arena, &config.room_selection) {
         (Some(a), _) => {
             let (room, mesh) = windows_shell::room::arena(a.half_size, a.wall_height, a.tile);
             (room, Some(mesh))
         }
         (None, Some(path)) => (load_rooms(source, &base.join(path))?, None),
-        (None, None) => return Err("configuration needs a room selection or an arena".into()),
+        (None, None) => match &config.area {
+            Some(a) => {
+                let world =
+                    area_sim::progress::world_index(&a.world).ok_or("unknown world code")?;
+                let story: Vec<(u32, u32)> = a.story.iter().map(|r| (r[0], r[1])).collect();
+                let mut src = AreaSource::open(source, &story)?;
+                let (room, loaded) = src.load(world, a.area, a.entrance)?;
+                area_load = Some((src, loaded));
+                (room, None)
+            }
+            None => {
+                return Err("configuration needs a room selection, an area or an arena".into());
+            }
+        },
     };
 
     // Movement block (obj+0x128): FUN_14040a440 defaults with SSTM
@@ -1561,7 +1634,7 @@ fn load(
     }
 
     // Floors must carry partyStand and walls partyCollide (public labels).
-    let world = TriangleWorld::new(
+    let triangles = TriangleWorld::new(
         room.collision_triangles
             .iter()
             .filter(|t| t.surface_flags & (PARTY_STAND | PARTY_COLLIDE) != 0)
@@ -1574,6 +1647,11 @@ fn load(
             }),
         FLOOR_MIN_NORMAL_Y,
     );
+    let (floors, walls) = triangles.counts();
+    let world = match &mut area_load {
+        Some((_, a)) => RoomWorld::Map(MapWorld(a.take_collision())),
+        None => RoomWorld::Triangles(triangles),
+    };
     let mut flag_counts: HashMap<u32, usize> = HashMap::new();
     for t in &room.collision_triangles {
         *flag_counts.entry(t.surface_flags).or_default() += 1;
@@ -1608,16 +1686,23 @@ fn load(
     ];
     let idle_hand = clip_poses[clip_list[0].1].weapon[0].to_cols_array();
     let weapon_root = weapon.poses[0].matrix_bits[0].map(f32::from_bits);
-    let [sx, sy, sz] = match config.spawn {
-        Some(spawn) => spawn,
+    let [sx, sy, sz] = match (config.spawn, &area_load) {
+        (_, Some((_, a))) => a.player.0.to_array(),
+        (Some(spawn), None) => spawn,
         // Default: the walkable level with the most floor area.
-        None => levels.first().map(|l| l.1).ok_or("no walkable floor")?,
+        (None, None) => levels.first().map(|l| l.1).ok_or("no walkable floor")?,
     };
-    let ground_height = world
-        .floor(sx, sz, sy)
-        .ok_or("no walkable collision floor below the spawn point")?;
-    let spawn = Vec3::new(sx, ground_height, sz);
-    let (floors, walls) = world.counts();
+    // An area places Sora at the entrance's authored point without a
+    // ground snap (FUN_1403b3200); the first physics frames settle him.
+    let (spawn, yaw) = match &area_load {
+        Some((_, a)) => (a.player.0, a.player.1),
+        None => {
+            let ground_height = world
+                .floor(sx, sz, sy)
+                .ok_or("no walkable collision floor below the spawn point")?;
+            (Vec3::new(sx, ground_height, sz), 0.)
+        }
+    };
     let summary = serde_json::json!({"event":"admission","source_qualification":"quarantined_unqualified",
         "params":{"walk_speed":params.walk_speed,"run_speed":params.run_speed,"jump_height":params.jump_height,
             "turn_speed":params.turn_speed,"fall_max":params.fall_max,"gravity":physics::G,"run_magnitude":WALK_THRESHOLD,
@@ -1919,7 +2004,9 @@ fn load(
         actions,
         clip_poses,
         spawn,
+        yaw,
         world,
+        area: area_load,
         summary,
         hud,
         enemy,
@@ -2266,6 +2353,176 @@ fn spawn_model(
 
 // Bevy systems take each resource as a parameter.
 #[allow(clippy::too_many_arguments)]
+/// Loads the area an exit asked for and swaps the room, the collision, the
+/// camera collision and Sora's placement (FUN_140152a90 → FUN_140152be0 →
+/// FUN_140152680; the iris presentation is not drawn yet).
+#[allow(clippy::too_many_arguments)]
+fn area_transition(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut game: ResMut<Game>,
+    mut rig: ResMut<CameraRig>,
+    area: Option<ResMut<AreaRes>>,
+    root: Option<Res<SceneRoot>>,
+    parts: Query<Entity, With<RoomPart>>,
+) {
+    let (Some(mut area), Some(root)) = (area, root) else {
+        return;
+    };
+    let Some((world, number, entrance)) = area.pending.take() else {
+        return;
+    };
+    let (room, mut next) = match area.source.load(world, number, entrance) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            eprintln!("Area {world}/{number} entrance {entrance} failed to load: {e}");
+            game.event(
+                serde_json::json!({"event":"area_error","world":world,"area":number,
+                "entrance":entrance,"error":e.to_string()}),
+            );
+            return;
+        }
+    };
+    for part in &parts {
+        commands.entity(part).despawn();
+    }
+    let show = game.show_collision;
+    spawn_room(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &room,
+        root.0,
+        show,
+    );
+    game.world = RoomWorld::Map(MapWorld(next.take_collision()));
+    let (position, yaw) = next.player;
+    game.player = Player::new(position.to_array(), yaw);
+    rig.collision = room
+        .camera_triangles
+        .iter()
+        .map(|t| t.map(|p| to_world(p.to_array())))
+        .collect();
+    rig.camera = FollowCamera::new(
+        camera::OUTDOOR,
+        &camera_input(&game.player, game.player.position, game.params.run_speed),
+    );
+    rig.previous_position = game.player.position;
+    game.event(serde_json::json!({"event":"area_enter","world":world,"area":number,
+        "entrance":entrance,"programs":next.programs,"bg_mask":format!("{:#x}", next.state.setup.bg_mask),
+        "spawn":position.to_array(),"yaw":yaw}));
+    area.previous = Some(area.current.area);
+    area.current = next;
+}
+
+/// Spawns a room's map models and its collision overlay under `parent`,
+/// tagged so an area change can remove them.
+fn spawn_room(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    room: &LoadedRoom,
+    parent: Entity,
+    show_collision: bool,
+) {
+    for part in &room.rooms {
+        let handles: Vec<_> = part.textures.iter().map(|t| upload(t, images)).collect();
+        for chunk in &part.model.chunks {
+            if chunk.indices.is_empty() {
+                continue;
+            }
+            let vertex = |i: &u32| &chunk.vertices[*i as usize];
+            let positions = chunk
+                .indices
+                .iter()
+                .map(|i| vertex(i).position_bits.map(f32::from_bits))
+                .collect();
+            let uvs = chunk
+                .indices
+                .iter()
+                .map(|i| vertex(i).uv_bits.map(f32::from_bits))
+                .collect();
+            let colors = chunk
+                .indices
+                .iter()
+                .map(|i| vertex(i).color_bits.map(f32::from_bits))
+                .collect();
+            let texture = part
+                .textures
+                .iter()
+                .position(|t| t.environment_ordinal as i16 == chunk.texture_index)
+                .map(|i| handles[i].clone());
+            commands.spawn((
+                ChildOf(parent),
+                RoomPart,
+                Mesh3d(meshes.add(mesh(positions, uvs, colors))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: if texture.is_some() {
+                        Color::WHITE
+                    } else {
+                        Color::srgb(1., 0., 1.)
+                    },
+                    base_color_texture: texture,
+                    unlit: true,
+                    cull_mode: None,
+                    alpha_mode: if chunk.transparency_flag == 0 {
+                        AlphaMode::Opaque
+                    } else {
+                        AlphaMode::Blend
+                    },
+                    ..default()
+                })),
+                Transform::default(),
+            ));
+        }
+    }
+    // Collision overlay (F1): walkable floors green, walls red.
+    let mut positions = Vec::new();
+    let mut colors = Vec::new();
+    for triangle in &room.collision_triangles {
+        let t = &triangle.corners;
+        let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+        let stand = triangle.surface_flags & PARTY_STAND != 0;
+        let collide = triangle.surface_flags & PARTY_COLLIDE != 0;
+        let color = if normal.y.abs() >= FLOOR_MIN_NORMAL_Y && stand {
+            [0.1, 1., 0.2, 0.35]
+        } else if collide {
+            [1., 0.15, 0.1, 0.35]
+        } else {
+            // Not used by the player controller.
+            [0.2, 0.4, 1., 0.15]
+        };
+        for v in t {
+            positions.push((*v + Vec3::Y * 2.).to_array());
+            colors.push(color);
+        }
+    }
+    let corners = positions.len();
+    commands.spawn((
+        CollisionOverlay,
+        RoomPart,
+        ChildOf(parent),
+        Mesh3d(meshes.add(mesh(positions, vec![[0., 0.]; corners], colors))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            unlit: true,
+            cull_mode: None,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        })),
+        Transform::default(),
+        if show_collision {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        },
+    ));
+}
+
 fn setup(
     mut commands: Commands,
     mut startup: ResMut<Startup>,
@@ -2377,100 +2634,16 @@ fn setup(
             Transform::default(),
         ));
     }
-    for room in &room.rooms {
-        let handles: Vec<_> = room
-            .textures
-            .iter()
-            .map(|t| upload(t, &mut images))
-            .collect();
-        for chunk in &room.model.chunks {
-            if chunk.indices.is_empty() {
-                continue;
-            }
-            let vertex = |i: &u32| &chunk.vertices[*i as usize];
-            let positions = chunk
-                .indices
-                .iter()
-                .map(|i| vertex(i).position_bits.map(f32::from_bits))
-                .collect();
-            let uvs = chunk
-                .indices
-                .iter()
-                .map(|i| vertex(i).uv_bits.map(f32::from_bits))
-                .collect();
-            let colors = chunk
-                .indices
-                .iter()
-                .map(|i| vertex(i).color_bits.map(f32::from_bits))
-                .collect();
-            let texture = room
-                .textures
-                .iter()
-                .position(|t| t.environment_ordinal as i16 == chunk.texture_index)
-                .map(|i| handles[i].clone());
-            commands.spawn((
-                ChildOf(world),
-                Mesh3d(meshes.add(mesh(positions, uvs, colors))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: if texture.is_some() {
-                        Color::WHITE
-                    } else {
-                        Color::srgb(1., 0., 1.)
-                    },
-                    base_color_texture: texture,
-                    unlit: true,
-                    cull_mode: None,
-                    alpha_mode: if chunk.transparency_flag == 0 {
-                        AlphaMode::Opaque
-                    } else {
-                        AlphaMode::Blend
-                    },
-                    ..default()
-                })),
-                Transform::default(),
-            ));
-        }
-    }
-    // Collision overlay (F1): walkable floors green, walls red.
-    let mut positions = Vec::new();
-    let mut colors = Vec::new();
-    for triangle in &room.collision_triangles {
-        let t = &triangle.corners;
-        let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
-        let stand = triangle.surface_flags & PARTY_STAND != 0;
-        let collide = triangle.surface_flags & PARTY_COLLIDE != 0;
-        let color = if normal.y.abs() >= FLOOR_MIN_NORMAL_Y && stand {
-            [0.1, 1., 0.2, 0.35]
-        } else if collide {
-            [1., 0.15, 0.1, 0.35]
-        } else {
-            // Not used by the player controller.
-            [0.2, 0.4, 1., 0.15]
-        };
-        for v in t {
-            positions.push((*v + Vec3::Y * 2.).to_array());
-            colors.push(color);
-        }
-    }
-    let corners = positions.len();
-    commands.spawn((
-        CollisionOverlay,
-        ChildOf(world),
-        Mesh3d(meshes.add(mesh(positions, vec![[0., 0.]; corners], colors))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            unlit: true,
-            cull_mode: None,
-            alpha_mode: AlphaMode::Blend,
-            ..default()
-        })),
-        Transform::default(),
-        if game.show_collision {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        },
-    ));
+    spawn_room(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &room,
+        world,
+        game.show_collision,
+    );
+    commands.insert_resource(SceneRoot(world));
     let actor = startup.actor.take().expect("actor retained for setup");
     let weapon = startup.weapon.take().expect("weapon retained for setup");
     let pose = game.clip_poses[game.poses[&(Action::Idle, false)]].frames[0].clone();
@@ -2944,7 +3117,12 @@ const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 const AUTOPLAY_END: u64 = 6860;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
-fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
+fn simulate(
+    mut rig: ResMut<CameraRig>,
+    mut game: ResMut<Game>,
+    hud: Option<ResMut<Hud>>,
+    mut area: Option<ResMut<AreaRes>>,
+) {
     let tick = game.tick;
     let (up, down) = if game.autoplay.is_some() {
         (false, tick == 980)
@@ -2986,6 +3164,18 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
     let forward = (look_at - eye).xz().normalize_or(Vec2::NEG_Y);
     let right = Vec2::new(-forward.y, forward.x);
     let direction = forward * stick.y + right * stick.x;
+    // Unattended area runs head for an exit that does not lead back to the
+    // previous area, so each run walks a chain of areas.
+    let (direction, stick) = match area.as_deref().filter(|_| game.autoplay.is_some()) {
+        Some(a) if a.pending.is_none() => {
+            let p = game.player.position;
+            match area::exit_target(&a.current.state, a.previous, [p[0], p[2]]) {
+                Some(d) => (Vec2::from_array(d), Vec2::Y),
+                None => (direction, stick),
+            }
+        }
+        _ => (direction, stick),
+    };
     // The decide button executes the command under the cursor; Attack
     // (icon 1) is the only command this room implements.
     let mut cursor_moved = false;
@@ -3036,6 +3226,33 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
         ..
     } = &mut *game;
     let step = player.tick(&input, params, clips, world);
+    // The area's zone task (FUN_1403a4f90, priority 12000) runs after the
+    // objects: exits are tested against Sora's new position.
+    if let Some(a) = area.as_deref_mut()
+        && a.pending.is_none()
+    {
+        let moving = (direction.length() > 0.).then(|| direction.normalize().to_array());
+        let running = stick.length() >= WALK_THRESHOLD;
+        let probe = area::probe(
+            Vec3::from_array(game.player.position),
+            game.player.yaw,
+            moving,
+            running,
+        );
+        for request in area::requests(&mut a.current.state, &probe) {
+            if let area_sim::Request::Jump {
+                world,
+                area,
+                entrance,
+                ..
+            } = request
+            {
+                game.event(serde_json::json!({"event":"exit","tick":tick,"world":world,
+                    "area":area,"entrance":entrance}));
+                a.pending = Some((world, area, entrance));
+            }
+        }
+    }
     combat_tick(&mut game, tick);
     // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
     // recenters (test-room bindings for the original's camera buttons).
@@ -5314,12 +5531,18 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     for (action, clip) in &loaded.actions {
         poses.insert(*action, *clip);
     }
+    let area_res = loaded.area.map(|(source, current)| AreaRes {
+        source,
+        current,
+        previous: None,
+        pending: None,
+    });
     let talk_room = loaded.npc.is_some();
     let mut game = Game {
         params: loaded.params,
         clips: loaded.clips,
         world: loaded.world,
-        player: Player::new(loaded.spawn.to_array(), 0.),
+        player: Player::new(loaded.spawn.to_array(), loaded.yaw),
         poses,
         clip_poses: loaded.clip_poses,
         part_indices: Vec::new(),
@@ -5530,6 +5753,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         "Test room ready (the original PC bindings). WASD moves (Left Alt walks), Space/Backspace jump, Enter/left-click decides (Attack), Up/Down choose a command, right-click/Right Shift guards, F/Right Ctrl reacts (Talk), M opens the menu, the mouse turns the camera, middle-click/Right Alt recentres, Esc exits."
     );
     let mut app = App::new();
+    if let Some(area) = area_res {
+        app.insert_resource(area);
+    }
     if let Some(talk) = talk {
         app.insert_resource(talk);
     }
@@ -5634,6 +5860,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .add_systems(
             Update,
             (
+                area_transition,
                 dissolve_present,
                 camera_control,
                 present,

@@ -8,6 +8,7 @@
 //! launcher; output still reaches a pipe or redirect (the launcher reads
 //! its tests' output that way).
 #![cfg_attr(windows, windows_subsystem = "windows")]
+mod area;
 mod launcher;
 mod test_room;
 mod title;
