@@ -84,9 +84,7 @@ impl Progress {
     /// Opens every 'dsa' destination (all areas reachable regardless of
     /// the story point).
     pub fn unblock_all(&mut self) {
-        for s in &mut self.dsa_state {
-            *s = [0; 2];
-        }
+        self.dsa_state.fill([0; 2]);
     }
 
     /// Destinations whose 'dsa' state word is set.
