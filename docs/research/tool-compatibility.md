@@ -2,7 +2,7 @@
 
 For the nine additional repositories requested on 2026-10-07, see [prerequisite checks](tool-prerequisites.md) and T009. Mixed native/CLR evidence prevents routing the Steam executable as a native-only target. T008's font oracle validates finite pixels/spacing bytes, not glyph or runtime behavior. No additional engine or MCP integration is claimed installed.
 
-Static audit performed 2026-10-03. Private checkouts: `.local/tools/`. Only the attributed public OpenKH package transform is adapted into the inspection library (T005); no complete research application is linked. Upstream claims are leads until independently measured.
+Static audit performed 2026-10-03. Private checkouts: `%USERPROFILE%/KH2FinalRewrite-private/research/`. Only the attributed public OpenKH package transform is adapted into the inspection library (T005); no complete research application is linked. Upstream claims are leads until independently measured.
 
 | Project / commit | Inspected operation | License / dependencies | Evidence and gap | Decision |
 |---|---|---|---|---|

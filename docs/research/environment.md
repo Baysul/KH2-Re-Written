@@ -1,6 +1,6 @@
 # P03 measured development environment
 
-Measured 2026-10-03 on this machine. Private local logs: `.local/smoke-*.{log,stdout.log,stderr.log}`. Source hashes and package records are in external `%LOCALAPPDATA%/KH2FinalRewrite/research/foundation-20261003/`.
+Measured 2026-10-03 on this machine. Private local logs: `%USERPROFILE%/KH2FinalRewrite-private/logs/evidence-2026-10-03/smoke-*.{log,stdout.log,stderr.log}`. Source hashes and package records are in external `%LOCALAPPDATA%/KH2FinalRewrite/research/foundation-20261003/`.
 
 | Item | Observation |
 |---|---|
