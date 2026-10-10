@@ -7,8 +7,16 @@
 //! so callers stay in the simulation's Y-up space. One tick is one 60 Hz
 //! frame; `DT` is the frame time `DAT_140717480` (1.0 at normal speed).
 
-/// Frame time per tick (`DAT_140717480`, statically 1.0).
+/// Frame time per tick (`DAT_140717480`): FUN_140154740 sets it to the
+/// vsyncs elapsed × game speed, 1.0 per 60 Hz frame.
 pub const DT: f32 = 1.0;
+/// FUN_1403b89a0 runs a physics mode's velocity routine only every
+/// `PHYSICS_STEP` frames (`DAT_1405b18ec` = 2.0), passing it that span as
+/// its time step, and spreads the result evenly over the frames until the
+/// next run. A move request faster than `EVERY_FRAME_SPEED` (`DAT_140623be4`
+/// = 100) runs it every frame.
+pub const PHYSICS_STEP: f32 = 2.0;
+pub const EVERY_FRAME_SPEED: f32 = 100.0;
 /// Gravity, units per tick squared (`DAT_1405ce184` = 0x3ed0fac7).
 pub const G: f32 = 0.408_163_28;
 /// Air steering: the share of last tick's velocity kept while the stick is
@@ -234,17 +242,17 @@ impl Arc {
         }
     }
 
-    /// FUN_1403cb360 / FUN_1403cb500, one tick: advance `t`, then return
+    /// FUN_1403cb360 / FUN_1403cb500 over `dt`: advance `t`, then return
     /// the Y-up vertical displacement toward the curve, with downward
     /// motion capped at `fall_max` per tick. `frozen` is the no-gravity
     /// state (obj+0x18c & 0x1000020 or bit 6), which holds the height while
     /// `t` keeps running.
-    pub fn step(&mut self, y: f32, fall_max: f32, frozen: bool) -> f32 {
-        self.t += DT;
+    pub fn step(&mut self, y: f32, fall_max: f32, frozen: bool, dt: f32) -> f32 {
+        self.t += dt;
         if frozen {
             return 0.;
         }
-        let dy = (self.target() - -y).min(fall_max * DT);
+        let dy = (self.target() - -y).min(fall_max * dt);
         -dy
     }
 
@@ -279,6 +287,45 @@ pub fn steer(
             target[0] * (1. - inertia) + velocity[0] * inertia,
             target[1] * (1. - inertia) + velocity[1] * inertia,
         ]
+    }
+}
+
+/// The velocity sampling of FUN_1403b89a0 (timer obj+0xba8, per-frame
+/// velocity obj+0xb98).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Sampler {
+    pub timer: f32,
+    /// Displacement per frame until the next run.
+    pub velocity: [f32; 3],
+}
+
+impl Sampler {
+    /// FUN_1403b4da0 clears the timer on every physics-mode change, so the
+    /// new mode's routine runs on the next frame.
+    pub fn reset(&mut self) {
+        self.timer = 0.;
+    }
+
+    /// One frame: true when the mode's velocity routine runs now (with
+    /// `PHYSICS_STEP` as its time step); its result goes to `store`.
+    pub fn due(&mut self, move_speed: f32) -> bool {
+        self.timer -= DT;
+        if EVERY_FRAME_SPEED < move_speed {
+            self.timer = -PHYSICS_STEP;
+        }
+        self.timer < 0.
+    }
+
+    /// Keeps the routine's displacement over `PHYSICS_STEP` as a per-frame
+    /// velocity (× 1/step) and restarts the timer.
+    pub fn store(&mut self, displacement: [f32; 3]) {
+        self.velocity = displacement.map(|c| c * (1. / PHYSICS_STEP));
+        self.timer += PHYSICS_STEP;
+    }
+
+    /// This frame's displacement (velocity × DT).
+    pub fn displacement(&self) -> [f32; 3] {
+        self.velocity.map(|c| c * DT)
     }
 }
 
@@ -343,7 +390,7 @@ impl Blow {
     /// down to the floor; a rising speed brakes by BlowBrakeUp; gravity is
     /// added with the downward speed capped at `fall_max`. Returns the
     /// displacement.
-    pub fn step(&mut self, sstm: &Sstm, fall_max: f32) -> [f32; 3] {
+    pub fn step(&mut self, sstm: &Sstm, fall_max: f32, dt: f32) -> [f32; 3] {
         let [x, y, z] = self.velocity;
         let len = x.hypot(z);
         let (nx, nz) = if len > 0. {
@@ -359,7 +406,7 @@ impl Blow {
         }
         let down = (down + G).min(fall_max);
         self.velocity = [speed * nx, -down, speed * nz];
-        self.velocity.map(|c| c * DT)
+        self.velocity.map(|c| c * dt)
     }
 }
 
@@ -402,7 +449,7 @@ mod tests {
         let mut heights = Vec::new();
         let mut landed = None;
         for tick in 1..200 {
-            y += arc.step(y, 16., false);
+            y += arc.step(y, 16., false, DT);
             heights.push(y);
             if y <= 0. && tick > 1 {
                 landed = Some(tick);
@@ -429,7 +476,7 @@ mod tests {
         let mut y = 1000.;
         let mut last = 0.;
         for _ in 0..80 {
-            last = arc.step(y, 16., false);
+            last = arc.step(y, 16., false, DT);
             y += last;
         }
         assert_eq!(last, -16.);
@@ -438,7 +485,7 @@ mod tests {
     #[test]
     fn frozen_ticks_hold_height_but_advance_time() {
         let mut arc = Arc::launch(0., 185.);
-        assert_eq!(arc.step(0., 16., true), 0.);
+        assert_eq!(arc.step(0., 16., true, DT), 0.);
         assert_eq!(arc.t, 1.);
     }
 
@@ -446,7 +493,7 @@ mod tests {
     fn negative_launch_starts_already_falling() {
         let mut arc = Arc::launch(50., -100.);
         assert_eq!(arc.rise, 0.);
-        let dy = arc.step(50., 16., false);
+        let dy = arc.step(50., 16., false, DT);
         // Starts at speed g·t0 = √(2·100·g) ≈ 9.0 downward.
         assert!(dy < -9. && dy > -9.5, "{dy}");
     }
@@ -488,15 +535,35 @@ mod tests {
         };
         let mut b = Blow::new([40., 24., 0.], &s);
         assert!((b.min_xz - 4.).abs() < 1e-6);
-        let d = b.step(&s, 16.);
+        let d = b.step(&s, 16., DT);
         assert!((d[0] - 32.).abs() < 1e-5);
         assert!((d[1] - (24. * 0.8 - G)).abs() < 1e-5);
         for _ in 0..60 {
-            b.step(&s, 16.);
+            b.step(&s, 16., DT);
         }
         assert!((b.velocity[0] - 4.).abs() < 1e-5);
         assert_eq!(b.velocity[1], -16.);
         assert_eq!(s.knock_strength(0x7fff, 3, 3), 200.);
         assert_eq!(s.knock_strength(80, 3, 12), 40.);
+    }
+
+    #[test]
+    fn sampler_runs_every_second_frame() {
+        let mut s = Sampler::default();
+        let mut runs = Vec::new();
+        for frame in 0..6 {
+            if s.due(8.) {
+                runs.push(frame);
+                s.store([16., 0., 0.]);
+            }
+            assert_eq!(s.displacement(), [8., 0., 0.]);
+        }
+        assert_eq!(runs, [0, 2, 4]);
+        let mut fast = Sampler::default();
+        assert!((0..3).all(|_| {
+            let due = fast.due(150.);
+            fast.store([0.; 3]);
+            due
+        }));
     }
 }

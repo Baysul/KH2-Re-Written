@@ -202,6 +202,8 @@ pub struct Player {
     pub arc: physics::Arc,
     /// Horizontal velocity while airborne (obj+0x20 x/z), units per tick.
     pub air_velocity: [f32; 2],
+    /// Physics-mode velocity sampling (FUN_1403b89a0, obj+0xba8/+0xb98).
+    pub sampler: physics::Sampler,
     pub action: Action,
     /// Ticks since the current action started.
     pub frame: u32,
@@ -252,6 +254,7 @@ impl Player {
             vertical_speed: 0.,
             arc: physics::Arc::default(),
             air_velocity: [0.; 2],
+            sampler: physics::Sampler::default(),
             action: Action::Idle,
             frame: 0,
             armed: false,
@@ -387,6 +390,7 @@ impl Player {
                 0.
             };
             self.air_velocity = [self.yaw.sin() * speed, self.yaw.cos() * speed];
+            self.sampler.reset();
         }
     }
 
@@ -396,6 +400,7 @@ impl Player {
     fn jump(&mut self, p: &Params, velocity: [f32; 2], step: &mut Step) {
         self.arc = physics::Arc::launch(self.position[1], p.jump_height);
         self.air_velocity = velocity;
+        self.sampler.reset();
         self.vertical_speed = 0.;
         self.air_combo_spent = false;
         self.start(Action::Jump, step);
@@ -407,6 +412,7 @@ impl Player {
     fn drop_off(&mut self, velocity: [f32; 2], step: &mut Step) {
         self.arc = physics::Arc::fall(self.position[1], 0.);
         self.air_velocity = velocity;
+        self.sampler.reset();
         self.vertical_speed = 0.;
         self.air_combo_spent = false;
         self.start(Action::Fall, step);
@@ -456,6 +462,10 @@ impl Player {
     pub fn tick(&mut self, input: &Input, p: &Params, clips: &Clips, world: &impl World) -> Step {
         let mut step = Step::default();
         self.frame = self.frame.saturating_add(1);
+        // Mode 0 move request this tick (obj+0x10 × +0x1c); zero outside
+        // locomotion [I: other actions leave the request idle].
+        let mut ground_request = [0f32; 2];
+        let was_airborne = self.action.airborne();
         let magnitude = input.direction[0].hypot(input.direction[1]).min(1.);
         // Any stick past the pad's dead zone moves (FUN_1403a8fa0: speed is
         // set whenever the stick magnitude is above 0).
@@ -512,17 +522,9 @@ impl Player {
                     if moving {
                         // FUN_1403b4780 turns the facing at +0x134 per tick;
                         // FUN_140422350 moves along the stick direction at
-                        // the full walk/run speed the same tick.
+                        // the full walk/run speed.
                         self.turn_toward(direction, p.turn_speed);
-                        let speed = if target == Action::Walk {
-                            p.walk_speed
-                        } else {
-                            p.run_speed
-                        };
-                        let velocity = [direction[0] * speed, direction[1] * speed];
-                        if !self.travel(velocity, p, world, true) {
-                            self.drop_off(velocity, &mut step);
-                        }
+                        ground_request = Self::stick_velocity(direction, magnitude, p);
                     }
                 }
             }
@@ -588,6 +590,20 @@ impl Player {
                         self.start(Action::Idle, &mut step);
                     }
                 }
+            }
+        }
+        if !was_airborne && !self.action.airborne() {
+            // Mode 0 (FUN_140422350) sampled by FUN_1403b89a0: the request
+            // × the two-frame step, spread over two frames.
+            let speed = ground_request[0].hypot(ground_request[1]);
+            if self.sampler.due(speed) {
+                let dt = physics::PHYSICS_STEP;
+                self.sampler
+                    .store([ground_request[0] * dt, 0., ground_request[1] * dt]);
+            }
+            let [vx, _, vz] = self.sampler.displacement();
+            if (vx != 0. || vz != 0.) && !self.travel([vx, vz], p, world, true) {
+                self.drop_off([vx, vz], &mut step);
             }
         }
         if let Some(knock) = self.knock.as_mut() {
@@ -673,7 +689,6 @@ impl Player {
             Action::AirAttack(i) => Clip::within(&clips.air_combo[i].clip.no_gravity, self.frame),
             _ => false,
         };
-        self.vertical_speed = self.arc.step(self.position[1], p.fall_max, floating);
         // Mode 1 horizontal (FUN_1403cb360 → FUN_1403b7ad0 with 0.9, 0.95):
         // the velocity keeps 90% of itself and takes 10% of the stick
         // velocity, or decays ×0.95 without a stick. Attacks take no stick
@@ -688,16 +703,25 @@ impl Player {
             let v = Self::stick_velocity(direction, magnitude, p);
             (direction, v[0].hypot(v[1]))
         };
-        self.air_velocity = physics::steer(
-            self.air_velocity,
-            dir,
-            speed,
-            physics::AIR_INERTIA,
-            physics::AIR_DRAG,
-        );
-        let v = self.air_velocity.map(|c| c * physics::DT);
-        if v[0] != 0. || v[1] != 0. {
-            self.travel(v, p, world, false);
+        // FUN_1403b89a0: the mode routine runs every second frame with a
+        // two-frame step; its displacement is spread over those frames.
+        if self.sampler.due(speed) {
+            let dt = physics::PHYSICS_STEP;
+            let dy = self.arc.step(self.position[1], p.fall_max, floating, dt);
+            self.air_velocity = physics::steer(
+                self.air_velocity,
+                dir,
+                speed,
+                physics::AIR_INERTIA,
+                physics::AIR_DRAG,
+            );
+            self.sampler
+                .store([self.air_velocity[0] * dt, dy, self.air_velocity[1] * dt]);
+        }
+        let [vx, vy, vz] = self.sampler.displacement();
+        self.vertical_speed = vy;
+        if vx != 0. || vz != 0. {
+            self.travel([vx, vz], p, world, false);
         }
         let [x, y, z] = self.position;
         let next = y + self.vertical_speed;
@@ -707,6 +731,8 @@ impl Player {
         {
             self.position[1] = floor;
             self.vertical_speed = 0.;
+            // Landing switches to the ground mode (FUN_1403cb940).
+            self.sampler = physics::Sampler::default();
             if matches!(self.action, Action::AirAttack(_)) {
                 // Test-room choice: let the aerial swing play out on the ground.
                 return;
@@ -951,15 +977,21 @@ mod tests {
         player.tick(&hold([0., 0.3]), &p, &c, &w);
         assert_eq!(player.action, Action::Walk);
         assert!((player.position[2] - 2.).abs() < 1e-5);
+        // FUN_1403b89a0 samples the move request every second frame: the
+        // run starts next frame, the walk velocity carries this one.
         player.tick(&hold([0., 1.]), &p, &c, &w);
         assert_eq!(player.action, Action::Run);
-        assert!((player.position[2] - 10.).abs() < 1e-5);
+        assert!((player.position[2] - 4.).abs() < 1e-5);
+        player.tick(&hold([0., 1.]), &p, &c, &w);
+        assert!((player.position[2] - 12.).abs() < 1e-5);
         // Facing +X requires a quarter turn: limited per tick, while the
-        // body already moves along the stick (FUN_140422350).
+        // body moves along the stick (FUN_140422350) at the next sample.
         player.tick(&hold([1., 0.]), &p, &c, &w);
         assert!((player.yaw - 0.2618).abs() < 1e-5);
+        assert!((player.position[2] - 20.).abs() < 1e-5);
+        player.tick(&hold([1., 0.]), &p, &c, &w);
         assert!((player.position[0] - 8.).abs() < 1e-5);
-        assert!((player.position[2] - 10.).abs() < 1e-5);
+        assert!((player.position[2] - 20.).abs() < 1e-5);
         player.tick(&Input::default(), &p, &c, &w);
         assert_eq!(player.action, Action::Idle);
     }
@@ -995,11 +1027,13 @@ mod tests {
         };
         player.tick(&run_jump, &p, &c, &w);
         assert_eq!(player.air_velocity, [0., 8.]);
-        // Stick released: FUN_1403b7ad0 scales the velocity by 0.95.
+        // Stick released: FUN_1403b7ad0 scales the velocity by 0.95 per
+        // two-frame sample, moving 7.6 on each of those frames.
         let z = player.position[2];
         player.tick(&Input::default(), &p, &c, &w);
-        assert!((player.position[2] - z - 7.6).abs() < 1e-4);
-        // Stick sideways: 10% of the stick velocity per tick.
+        player.tick(&Input::default(), &p, &c, &w);
+        assert!((player.position[2] - z - 15.2).abs() < 1e-4);
+        // Stick sideways: 10% of the stick velocity at the next sample.
         player.tick(&hold([1., 0.]), &p, &c, &w);
         assert!((player.air_velocity[0] - 0.8).abs() < 1e-5);
         assert!((player.air_velocity[1] - 7.6 * 0.9).abs() < 1e-4);
@@ -1022,9 +1056,9 @@ mod tests {
                 break;
             }
         }
-        // rise √(2·185/g) = 30.1 ticks; FALL starts when rise ≤ t + 5,
-        // tested before this tick's t advances (t = 26 on tick 27).
-        assert_eq!(fell, Some(27));
+        // rise √(2·185/g) = 30.1 ticks; FALL starts when rise ≤ t + 5. The
+        // curve's t advances by 2 every second frame (t = 26 on tick 26).
+        assert_eq!(fell, Some(26));
         assert_eq!(player.blend, 8.);
         assert!(player.position[1] < 185.);
     }

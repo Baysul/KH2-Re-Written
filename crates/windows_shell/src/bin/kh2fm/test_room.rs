@@ -1487,7 +1487,9 @@ fn load(
         };
         slots.push(serde_json::json!({"motion_id":ids[clip_list.len()],"slot":selected.slot,"sha256":selected.sha256,
             "end_ticks":clip.end,"loop_start":clip.loop_start,"combo_windows":clip.combo_windows,
-            "blend_to_idle":clip.blend_to_idle,"no_gravity":clip.no_gravity}));
+            "blend_to_idle":clip.blend_to_idle,"no_gravity":clip.no_gravity,
+            "root_start":clip_poses[index].root.first().map(|r| r.to_array()),
+            "root_end":clip_poses[index].root.last().map(|r| r.to_array())}));
         clip_list.push((clip, index));
     }
     let step = |entry: &ptya::PtyaEntry, (clip, index): &(Clip, usize)| AttackStep {
