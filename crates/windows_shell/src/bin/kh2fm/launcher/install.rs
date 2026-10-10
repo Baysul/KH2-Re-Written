@@ -294,7 +294,7 @@ pub struct Test {
     pub program: &'static str,
 }
 
-pub const TESTS: [Test; 2] = [
+pub const TESTS: [Test; 3] = [
     Test {
         name: "Title screen",
         blurb: "Disney, Square Enix and GLURBUS logos, intro, title menu",
@@ -305,7 +305,46 @@ pub const TESTS: [Test; 2] = [
         blurb: "Sora, a Shadow to fight and Axel to talk to",
         program: "play",
     },
+    Test {
+        name: "Twilight Town",
+        blurb: "Station Plaza and the areas its exits lead to",
+        program: "tt",
+    },
 ];
+
+/// Where the Twilight Town test starts: Station Plaza (tt08) entrance 0,
+/// with the story flags 0x800..=0x895 set (Sora's first visit; area-01 §6).
+const TT_START: (u8, u8) = (8, 0);
+const TT_STORY: [u32; 2] = [0x800, 0x895];
+
+/// The Twilight Town config: the arena config's actor, HUD, menu and sound
+/// sources with a field area in place of the arena and its enemy.
+pub fn tt_room_config(arena: &Path) -> Result<PathBuf, String> {
+    let bytes =
+        read_limited(arena, CONFIG_LIMIT).map_err(|e| format!("{}: {e}", arena.display()))?;
+    let mut room: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", arena.display()))?;
+    let o = room
+        .as_object_mut()
+        .ok_or("The arena config is not an object.")?;
+    for key in ["arena", "enemy", "spawn", "npc", "room_selection"] {
+        o.remove(key);
+    }
+    o.insert(
+        "area".into(),
+        serde_json::json!({"world":"tt","area":TT_START.0,"entrance":TT_START.1,"story":[TT_STORY]}),
+    );
+    let dir = arena.parent().unwrap_or(Path::new("."));
+    let (out, next) = (
+        dir.join("test-room-tt.json"),
+        dir.join("test-room-tt.json.new"),
+    );
+    let bytes = serde_json::to_vec_pretty(&room).map_err(|e| e.to_string())?;
+    fs::write(&next, bytes)
+        .and_then(|()| fs::rename(&next, &out))
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
 
 /// A developer viewer over one private selection file.
 #[derive(Debug, Clone, PartialEq)]
@@ -439,6 +478,14 @@ pub fn test_args(dir: &Path, program: &str, b: &Bound) -> Result<Vec<String>, St
             let config = combined_room_config(&dir.join(arena.config), &dir.join(talk.config))?;
             ("room", config, arena.options)
         }
+        "tt" => {
+            let arena = launch_file(dir, "launch")?;
+            (
+                "room",
+                tt_room_config(&dir.join(arena.config))?,
+                arena.options,
+            )
+        }
         other => return Err(format!("unknown test {other}")),
     };
     if config_identity(&config).as_deref() != Some(b.identity.as_str()) {
@@ -453,6 +500,20 @@ pub fn test_args(dir: &Path, program: &str, b: &Bound) -> Result<Vec<String>, St
         config.to_string_lossy().into_owned(),
     ];
     args.extend(options);
+    Ok(args)
+}
+
+/// `kh2fm tt` without arguments: the Twilight Town config with the arena
+/// launch file's source paths.
+pub fn tt_args() -> Result<Vec<PathBuf>, String> {
+    let dir = data_dir();
+    let arena = launch_file(&dir, "launch")?;
+    let (Some(root), Some(manifest)) = (arena.steam_root, arena.manifest) else {
+        return Err("launch.json names no steam_root/manifest".into());
+    };
+    let config = tt_room_config(&dir.join(arena.config))?;
+    let mut args = vec![root, manifest, config];
+    args.extend(arena.options.into_iter().map(PathBuf::from));
     Ok(args)
 }
 

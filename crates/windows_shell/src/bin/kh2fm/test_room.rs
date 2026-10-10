@@ -24,7 +24,7 @@ use bevy::{
 };
 use package_reader::{
     bar, effect, model_inspection, model_inspection_textures::TextureMode, motion,
-    object_collision, objentry, original, preferences, probe::ProbeSource, ptya, sklt,
+    object_collision, objentry, original, preferences, probe::ProbeSource, ptya, sequence, sklt,
 };
 use player_sim::shadow::{self, ScriptRandom, Shadow};
 use player_sim::{
@@ -43,7 +43,8 @@ use std::{
 use windows_shell::camp::journal::{self, Curtain, Journal};
 use windows_shell::camp::{self, Camp};
 use windows_shell::command::{self, CommandMenu, Decision, Item};
-use windows_shell::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
+use windows_shell::fade::{self, Fade};
+use windows_shell::gauge::{self, Canvas, Draw, Gauge, GaugeStats, Texture};
 use windows_shell::hud::{self, Sheet, SystemFont};
 use windows_shell::input;
 use windows_shell::layout2d::{self, Menu2ld};
@@ -327,6 +328,8 @@ struct MenuSources {
 /// HUD sources loaded with the session.
 struct HudSource {
     sheets: Vec<Sheet>,
+    /// The field 2D archive's 'mapj' area-change iris (areas only).
+    iris: Option<Sheet>,
     stats: (i32, i32),
     menu: Option<(Sheet, SystemFont, Vec<Vec<u8>>)>,
 }
@@ -441,6 +444,27 @@ struct AreaRes {
     previous: Option<u8>,
     /// A jump requested by an exit: world, area, entrance.
     pending: Option<(u8, u8, u8)>,
+    /// The area-change presentation in progress.
+    transition: Option<Transition>,
+}
+
+/// Same-world area change (FUN_140156520 mode 0 / FUN_1401561b0): the
+/// 'mapj' iris closes (group 1, 71 frames), a 2-frame fade to black
+/// (FUN_140156ce0(fade, 1)), the next area loads, then a fade in
+/// (128, 128, 64, 0) while the iris opens (group 0) [exit-01 §4].
+struct Transition {
+    stage: Stage,
+    iris: Option<sequence::Player>,
+    fade: Fade,
+    target: (u8, u8, u8),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Stage {
+    Closing,
+    Black,
+    Loading,
+    Opening,
 }
 
 /// The scene root every room part hangs under.
@@ -524,6 +548,8 @@ struct MenuState {
 struct Hud {
     /// Gauge sheet, then the face sheet when configured.
     sheets: Vec<Sheet>,
+    /// The area-change iris layout.
+    iris: Option<Sheet>,
     menu: Option<MenuState>,
     gauge: Gauge,
     stats: GaugeStats,
@@ -1311,8 +1337,21 @@ fn load(
                 )),
                 None => None,
             };
+            // The same field2d archive (<world>0field.2dd) holds 'mapj', the
+            // area-change iris (FUN_140153e50 table entry 2) [exit-01 §4.2].
+            let iris = match config.area {
+                Some(_) => Some(hud::load(
+                    source,
+                    &l.index,
+                    l.ordinal,
+                    l.name_hash,
+                    b"mapj",
+                )?),
+                None => None,
+            };
             Some(HudSource {
                 sheets,
+                iris,
                 stats: hud::starting_stats(bar_entry(&battle, b"plrp")?)?,
                 menu,
             })
@@ -2353,6 +2392,62 @@ fn spawn_model(
 
 // Bevy systems take each resource as a parameter.
 #[allow(clippy::too_many_arguments)]
+/// Advances the area-change presentation one tick (FUN_14015f690 /
+/// FUN_14015f5f0 with the fade task FUN_140156f10).
+fn area_tick(area: Option<ResMut<AreaRes>>, hud: Option<ResMut<Hud>>) {
+    let Some(mut area) = area else { return };
+    let AreaRes {
+        transition,
+        pending,
+        ..
+    } = &mut *area;
+    let Some(t) = transition.as_mut() else { return };
+    let seq = hud
+        .as_ref()
+        .and_then(|h| h.iris.as_ref())
+        .map(|s| &s.sequence);
+    match t.stage {
+        Stage::Closing => match seq {
+            Some(seq) => {
+                let p = t.iris.get_or_insert_with(|| sequence::Player::new(seq, 1));
+                p.update(seq, 1.0);
+                if p.finished() {
+                    t.fade.fade_out(1, false);
+                    t.stage = Stage::Black;
+                }
+            }
+            None => {
+                t.fade.fade_out(1, false);
+                t.stage = Stage::Black;
+            }
+        },
+        Stage::Black => {
+            t.fade.update(1.0);
+            if t.fade.state == fade::State::Held {
+                t.stage = Stage::Loading;
+                *pending = Some(t.target);
+            }
+        }
+        Stage::Loading => {}
+        Stage::Opening => {
+            t.fade.update(1.0);
+            let iris_done = match (seq, t.iris.as_mut()) {
+                (Some(seq), Some(p)) => {
+                    p.update(seq, 1.0);
+                    p.finished()
+                }
+                _ => true,
+            };
+            if iris_done && t.fade.state == fade::State::Idle {
+                *transition = None;
+            }
+        }
+    }
+    if let Some(mut h) = hud {
+        h.updated = true;
+    }
+}
+
 /// Loads the area an exit asked for and swaps the room, the collision, the
 /// camera collision and Sora's placement (FUN_140152a90 → FUN_140152be0 →
 /// FUN_140152680; the iris presentation is not drawn yet).
@@ -2367,6 +2462,7 @@ fn area_transition(
     area: Option<ResMut<AreaRes>>,
     root: Option<Res<SceneRoot>>,
     parts: Query<Entity, With<RoomPart>>,
+    hud: Option<Res<Hud>>,
 ) {
     let (Some(mut area), Some(root)) = (area, root) else {
         return;
@@ -2377,6 +2473,7 @@ fn area_transition(
     let (room, mut next) = match area.source.load(world, number, entrance) {
         Ok(loaded) => loaded,
         Err(e) => {
+            area.transition = None;
             eprintln!("Area {world}/{number} entrance {entrance} failed to load: {e}");
             game.event(
                 serde_json::json!({"event":"area_error","world":world,"area":number,
@@ -2416,6 +2513,14 @@ fn area_transition(
         "spawn":position.to_array(),"yaw":yaw}));
     area.previous = Some(area.current.area);
     area.current = next;
+    if let Some(t) = area.transition.as_mut() {
+        t.stage = Stage::Opening;
+        t.iris = hud
+            .as_ref()
+            .and_then(|h| h.iris.as_ref())
+            .map(|s| sequence::Player::new(&s.sequence, 0));
+        t.fade.fade_in(1, false);
+    }
 }
 
 /// Spawns a room's map models and its collision overlay under `parent`,
@@ -2545,6 +2650,7 @@ fn setup(
     let enemy_model = startup.enemy_model.take();
     if let Some(HudSource {
         sheets,
+        iris,
         stats: (hp, mp),
         menu,
     }) = startup.hud.take()
@@ -2588,6 +2694,7 @@ fn setup(
                 &stats,
             ),
             sheets,
+            iris,
             menu: menu.map(|(sheet, font, labels)| {
                 // Test-room choices for the opening state: Magic and Drive
                 // have no entries yet (colour 5), Items is usable.
@@ -3149,8 +3256,9 @@ fn simulate(
         game.attack_queued = false;
         (stick, queued.0, queued.1)
     };
-    // Field talk locks control (player+0xdc8 → +0x40 bit 0).
-    let talking = game.talking;
+    // Field talk locks control (player+0xdc8 → +0x40 bit 0); an area
+    // change zeroes the pad while DAT_142a10500 is set (FUN_1403b2340).
+    let talking = game.talking || area.as_deref().is_some_and(|a| a.transition.is_some());
     let (stick, jump, decide) = if talking {
         (Vec2::ZERO, false, false)
     } else {
@@ -3167,7 +3275,7 @@ fn simulate(
     // Unattended area runs head for an exit that does not lead back to the
     // previous area, so each run walks a chain of areas.
     let (direction, stick) = match area.as_deref().filter(|_| game.autoplay.is_some()) {
-        Some(a) if a.pending.is_none() => {
+        Some(a) if a.pending.is_none() && a.transition.is_none() => {
             let p = game.player.position;
             match area::exit_target(&a.current.state, a.previous, [p[0], p[2]]) {
                 Some(d) => (Vec2::from_array(d), Vec2::Y),
@@ -3230,6 +3338,7 @@ fn simulate(
     // objects: exits are tested against Sora's new position.
     if let Some(a) = area.as_deref_mut()
         && a.pending.is_none()
+        && a.transition.is_none()
     {
         let moving = (direction.length() > 0.).then(|| direction.normalize().to_array());
         let running = stick.length() >= WALK_THRESHOLD;
@@ -3249,7 +3358,12 @@ fn simulate(
             {
                 game.event(serde_json::json!({"event":"exit","tick":tick,"world":world,
                     "area":area,"entrance":entrance}));
-                a.pending = Some((world, area, entrance));
+                a.transition = Some(Transition {
+                    stage: Stage::Closing,
+                    iris: None,
+                    fade: Fade::default(),
+                    target: (world, area, entrance),
+                });
             }
         }
     }
@@ -4056,6 +4170,7 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
 fn hud_present(
     hud: Option<ResMut<Hud>>,
     talk: Option<Res<Talk>>,
+    area: Option<Res<AreaRes>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut hud) = hud else { return };
@@ -4064,6 +4179,7 @@ fn hud_present(
     }
     let Hud {
         sheets,
+        iris,
         gauge,
         canvas,
         image,
@@ -4119,6 +4235,44 @@ fn hud_present(
         });
         for w in t.closing.iter().chain(&t.current) {
             draws.extend(w.draw(first, first + 1));
+        }
+    }
+    // The area-change iris (task priority 120000) and the fade (330000)
+    // draw over the HUD.
+    let white = [255u8; 16];
+    if let Some(t) = area.as_ref().and_then(|a| a.transition.as_ref()) {
+        if let (Some(sheet), Some(player)) = (iris.as_ref(), t.iris.as_ref()) {
+            textures.push(Texture {
+                rgba: &sheet.texture_rgba,
+                size: sheet.texture_size.map(|v| v as usize),
+                texel_scale: sheet.texel_scale as f32,
+            });
+            draws.push(Draw::Quads {
+                quads: sheet
+                    .sequence
+                    .quads(player, [0., 0.], &sequence::Modifiers::default()),
+                z: 0,
+                sheet: textures.len() - 1,
+            });
+        }
+        if t.fade.state != fade::State::Idle {
+            textures.push(Texture {
+                rgba: &white,
+                size: [2, 2],
+                texel_scale: 1.,
+            });
+            let a = t.fade.alpha as f32 / 128.;
+            let (x0, x1) = (-gauge::CANVAS_PAD, 512. + gauge::CANVAS_PAD);
+            draws.push(Draw::Quads {
+                quads: vec![sequence::Quad {
+                    corners: [[x0, 0.], [x1, 0.], [x0, 416.], [x1, 416.]],
+                    uv: [0, 0, 2, 2],
+                    colors: [[0., 0., 0., a]; 4],
+                    blend: 0,
+                }],
+                z: 0,
+                sheet: textures.len() - 1,
+            });
         }
     }
     canvas.render(&draws, &textures);
@@ -5536,6 +5690,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         current,
         previous: None,
         pending: None,
+        transition: None,
     });
     let talk_room = loaded.npc.is_some();
     let mut game = Game {
@@ -5851,7 +6006,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             (
                 read_pad,
                 camp_tick,
-                (simulate, talk_tick, effects_tick, hud_tick, play_sounds, music_tick)
+                (
+                    simulate,
+                    area_tick,
+                    talk_tick,
+                    effects_tick,
+                    hud_tick,
+                    play_sounds,
+                    music_tick,
+                )
                     .chain()
                     .run_if(field_running),
             )

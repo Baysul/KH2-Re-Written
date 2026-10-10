@@ -1,6 +1,6 @@
 //! One launcher for the rewrite's programs. Started without arguments (a
 //! double-click) it opens the launcher window: choose the game folder, then
-//! a test. `kh2fm title|room|talk|play [arguments]` runs one directly with
+//! a test. `kh2fm title|room|talk|play|tt [arguments]` runs one directly with
 //! the program's own arguments (none = its launch file; `play` is the room
 //! with both the Shadow and Axel).
 //!
@@ -31,8 +31,16 @@ fn run(program: &str, args: Vec<PathBuf>) -> ExitCode {
             }
         },
         "play" => test_room::main(args, false),
+        "tt" if args.is_empty() => match launcher::tt_args() {
+            Ok(args) => test_room::main(args, false),
+            Err(e) => {
+                eprintln!("Twilight Town rejected: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        "tt" => test_room::main(args, false),
         _ => {
-            eprintln!("usage: kh2fm [title|room|talk|play] [program arguments]");
+            eprintln!("usage: kh2fm [title|room|talk|play|tt] [program arguments]");
             ExitCode::FAILURE
         }
     }
