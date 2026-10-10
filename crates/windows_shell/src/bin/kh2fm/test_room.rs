@@ -613,6 +613,8 @@ struct Loaded {
     actor: model_inspection::InspectionModel,
     weapon: model_inspection::InspectionModel,
     params: Params,
+    /// SSTM battle parameters (blow, hit-back, fall max).
+    sstm: physics::Sstm,
     clips: Clips,
     actions: Vec<((Action, bool), usize)>,
     clip_poses: Vec<ClipPoses>,
@@ -1491,6 +1493,7 @@ fn load(
     let step = |entry: &ptya::PtyaEntry, (clip, index): &(Clip, usize)| AttackStep {
         clip: clip.clone(),
         hop: f32::from_bits(entry.float_bits[0]),
+        hop_speed: f32::from_bits(entry.float_bits[4]),
         blend: f32::from_bits(entry.float_bits[11]),
         root: clip_poses[*index]
             .root
@@ -1618,7 +1621,7 @@ fn load(
     let summary = serde_json::json!({"event":"admission","source_qualification":"quarantined_unqualified",
         "params":{"walk_speed":params.walk_speed,"run_speed":params.run_speed,"jump_height":params.jump_height,
             "turn_speed":params.turn_speed,"fall_max":params.fall_max,"gravity":physics::G,"run_magnitude":WALK_THRESHOLD,
-            "prty_index":prty_index,"prty_offset":prty_offset},
+            "prty_index":prty_index,"prty_offset":prty_offset,"sstm":format!("{sstm:?}")},
         "test_room_choices":{"step_height":STEP_HEIGHT,
             "body_radius":BODY_RADIUS,"body_height":BODY_HEIGHT,"floor_min_normal_y":FLOOR_MIN_NORMAL_Y,
             "blend_ticks":"per action (player_sim::blend_for, PTYA +0x38 after attacks)","clock":"fixed 60 Hz, one motion tick per update"},
@@ -1911,6 +1914,7 @@ fn load(
         actor,
         weapon,
         params,
+        sstm,
         clips,
         actions,
         clip_poses,
@@ -4187,14 +4191,15 @@ fn combat_tick(game: &mut Game, tick: u64) {
         let dir = d.normalize_or(Vec3::Z);
         let facing = Vec3::new(player.yaw.sin(), 0., player.yaw.cos());
         let back = facing.dot(dir) >= 0.;
-        // Knock-back: KB1 0x7fff selects SSTM HitBackSmall (200), x 0.1.
-        let kb = if attack.knockback[0] == 0x7fff {
-            200.
-        } else {
-            attack.knockback[0] as f32
-        } * 0.1;
+        // Knock-slide strength (FUN_1403ceab0): KB1 0x7fff selects SSTM
+        // HitBackSmall for class 3, HitBack otherwise; ×0.5 for 12/13.
+        let class = combat::reaction_class(attack.reaction);
+        let strength = rt
+            .enemy
+            .sstm
+            .knock_strength(attack.knockback[0], class, attack.reaction);
         let index = (back as usize) * 2 + (!high) as usize;
-        let started = player.hurt(index, [dir.x * kb, dir.z * kb], clips);
+        let started = player.hurt(index, [dir.x, dir.z], strength, clips);
         if started.is_some() {
             *action_started = tick;
         }
@@ -5466,9 +5471,12 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     if let Some(e) = loaded.enemy {
         let spawn = loaded.spawn + e.offset;
         let to_sora = loaded.spawn - spawn;
-        let mut enemy = Shadow::new(spawn.to_array(), to_sora.x.atan2(to_sora.z), e.stats);
-        // obj+0x138: SSTM FallMax for every object (FUN_14040a440).
-        enemy.fall_max = loaded.params.fall_max;
+        let enemy = Shadow::new(
+            spawn.to_array(),
+            to_sora.x.atan2(to_sora.z),
+            e.stats,
+            loaded.sstm,
+        );
         game.event(serde_json::json!({"event":"enemy","hp":e.stats.max_hp,"defense":e.stats.defense,
             "damage_cap":e.stats.cap,"damage_min":e.stats.min,"sora_strength":e.sora.strength,
             "hit_spheres":e.body.len(),"blade_groups":e.blade.keys().collect::<Vec<_>>(),"position":spawn,

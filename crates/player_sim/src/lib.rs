@@ -111,6 +111,9 @@ pub struct AttackStep {
     /// PTYA "Jump" field, applied as a lift height when an aerial step starts
     /// (public label only; the installed use is unobserved).
     pub hop: f32,
+    /// PTYA +0x1c (speed maximum): horizontal speed of a hop without a
+    /// target (FUN_1403d78d0).
+    pub hop_speed: f32,
     /// PTYA +0x38: blend into the next motion when this one ends
     /// (FUN_1403d78d0 → FUN_1403c8310).
     pub blend: f32,
@@ -209,18 +212,13 @@ pub struct Player {
     idle_ticks: u32,
     queued_attack: bool,
     air_combo_spent: bool,
-    /// Knock-back slide per tick while hurt.
-    slide: [f32; 2],
-    /// Knock-slide (FUN_1403d4960/FUN_1403d4570): unit direction and speed.
-    knock: Option<([f32; 2], f32)>,
+    /// Knock-slide (FUN_1403d4960 / FUN_1403d4570), for hits and the guard
+    /// recoil alike.
+    knock: Option<physics::Knock>,
 }
 
-/// Knock-back slide brake per tick [test-room choice; SSTM brake 0.8].
-pub const HURT_SLIDE_BRAKE: f32 = 0.8;
-/// Guard recoil knock strength (DAT_140585efc) and knock-slide decay
-/// (DAT_1405aaa40).
+/// Guard recoil knock strength (DAT_140585efc).
 pub const GUARD_KNOCK: f32 = 200.;
-pub const KNOCK_DECAY: f32 = 0.9;
 
 /// What changed during one tick, for logging and presentation.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -261,15 +259,22 @@ impl Player {
             idle_ticks: 0,
             queued_attack: false,
             air_combo_spent: false,
-            slide: [0.; 2],
             knock: None,
         }
     }
 
-    /// Starts a grounded damage reaction with a knock-back slide (per tick,
-    /// decaying). Airborne actions only take the slide.
-    pub fn hurt(&mut self, index: usize, slide: [f32; 2], clips: &Clips) -> Option<Action> {
-        self.slide = slide;
+    /// Starts a grounded damage reaction with a knock-slide away along
+    /// `direction` (XZ) at `strength` × 0.1 per tick, ×0.9 per tick until
+    /// below 1 (FUN_1403d4960 / FUN_1403d4570). Airborne actions only take
+    /// the slide.
+    pub fn hurt(
+        &mut self,
+        index: usize,
+        direction: [f32; 2],
+        strength: f32,
+        clips: &Clips,
+    ) -> Option<Action> {
+        self.knock = physics::Knock::new([direction[0], 0., direction[1]], strength, 0.);
         if self.action.airborne() || index >= clips.hurt.len() {
             return None;
         }
@@ -289,7 +294,7 @@ impl Player {
             return None;
         }
         self.yaw = (-away[0]).atan2(-away[1]);
-        self.knock = Some((away, GUARD_KNOCK * 0.1));
+        self.knock = physics::Knock::new([away[0], 0., away[1]], GUARD_KNOCK, 0.);
         self.action = Action::GuardRecoil;
         self.frame = 0;
         self.blend = 0.;
@@ -370,11 +375,18 @@ impl Player {
         self.yaw = wrap_angle(self.yaw + delta.clamp(-rate, rate));
     }
 
-    /// PTYA attack start with a positive Jump field (FUN_1403d78d0): a new
-    /// jump arc of that height from the current position.
-    fn lift(&mut self, height: f32) {
-        if height.is_finite() && height > 0. {
-            self.arc = physics::Arc::launch(self.position[1], height);
+    /// PTYA attack start with a positive Jump field (FUN_1403d78d0, no
+    /// target): a new jump arc of that height from the current position,
+    /// moving along the facing at the PTYA speed maximum (+0x1c).
+    fn lift(&mut self, step: &AttackStep) {
+        if step.hop.is_finite() && step.hop > 0. {
+            self.arc = physics::Arc::launch(self.position[1], step.hop);
+            let speed = if step.hop_speed.is_finite() {
+                step.hop_speed
+            } else {
+                0.
+            };
+            self.air_velocity = [self.yaw.sin() * speed, self.yaw.cos() * speed];
         }
     }
 
@@ -578,20 +590,14 @@ impl Player {
                 }
             }
         }
-        if let Some((dir, v)) = self.knock {
-            if v < 1. {
-                self.knock = None;
-            } else {
-                let grounded = !self.action.airborne();
-                self.travel([dir[0] * v, dir[1] * v], p, world, grounded);
-                self.knock = Some((dir, v * KNOCK_DECAY));
+        if let Some(knock) = self.knock.as_mut() {
+            match knock.step() {
+                Some(d) => {
+                    let grounded = !self.action.airborne();
+                    self.travel([d[0], d[2]], p, world, grounded);
+                }
+                None => self.knock = None,
             }
-        }
-        if self.slide[0].hypot(self.slide[1]) > 1e-3 {
-            let grounded = !self.action.airborne();
-            let slide = self.slide;
-            self.travel(slide, p, world, grounded);
-            self.slide = slide.map(|v| v * HURT_SLIDE_BRAKE);
         }
         step
     }
@@ -632,7 +638,7 @@ impl Player {
                     self.yaw = direction[0].atan2(direction[1]);
                 }
                 self.start(Action::AirAttack(i + 1), step);
-                self.lift(clips.air_combo[i + 1].hop);
+                self.lift(&clips.air_combo[i + 1]);
             } else if self.frame >= clip.end {
                 let [x, y, z] = self.position;
                 // A swing that touched down finishes on the ground.
@@ -654,7 +660,7 @@ impl Player {
             }
             self.arm();
             self.start(Action::AirAttack(0), step);
-            self.lift(clips.air_combo[0].hop);
+            self.lift(&clips.air_combo[0]);
         } else if self.action == Action::Jump && self.arc.falling_motion() {
             // FUN_1403cb680 → FUN_1403cb610: FALL (motion 4) blended over 8
             // once the apex is within 5 ticks.
@@ -857,6 +863,7 @@ mod tests {
                 no_gravity: vec![],
             },
             hop,
+            hop_speed: 0.,
             blend: 0.,
             root: Vec::new(),
         }
@@ -1291,11 +1298,13 @@ mod tests {
         let c = clips();
         let world = room();
         let mut player = Player::new([0.; 3], 0.);
-        assert_eq!(player.hurt(1, [0., -10.], &c), Some(Action::Hurt(1)));
+        assert_eq!(player.hurt(1, [0., -1.], 100., &c), Some(Action::Hurt(1)));
         assert!(player.armed);
         let p = params();
         player.tick(&Input::default(), &p, &c, &world);
         assert!((player.position[2] + 10.).abs() < 1e-3);
+        player.tick(&Input::default(), &p, &c, &world);
+        assert!((player.position[2] + 19.).abs() < 1e-3);
         for _ in 0..30 {
             player.tick(&Input::default(), &p, &c, &world);
         }

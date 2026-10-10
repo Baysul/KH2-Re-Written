@@ -16,6 +16,12 @@ pub const G: f32 = 0.408_163_28;
 pub const AIR_INERTIA: f32 = 0.9;
 /// Air drag with the stick released (`DAT_1405b1c74`, FUN_1403cb360).
 pub const AIR_DRAG: f32 = 0.95;
+/// Knock-slide: strength × 0.1 (`DAT_1406239f8`, FUN_1403d4960), decaying
+/// ×0.9 per tick (`DAT_1405aaa40`) until below 1.0 (`DAT_140623a80`,
+/// FUN_1403d4570).
+pub const KNOCK_SCALE: f32 = 0.1;
+pub const KNOCK_DECAY: f32 = 0.9;
+pub const KNOCK_STOP: f32 = 1.0;
 /// Motion blend for locomotion and the fall motion (`DAT_140623bac`,
 /// FUN_140422520 / FUN_1403cb610), in motion-clock ticks: FUN_1403c6dc0
 /// adds it to the motion time, which advances by DT per tick.
@@ -276,6 +282,87 @@ pub fn steer(
     }
 }
 
+/// A knock-slide (obj+0xd24 direction, +0xd30 speed).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Knock {
+    pub direction: [f32; 3],
+    pub speed: f32,
+}
+
+impl Knock {
+    /// FUN_1403d4960: a negative strength flips the direction; the
+    /// direction is normalised and the speed is (strength + bonus) × 0.1.
+    pub fn new(direction: [f32; 3], strength: f32, bonus: f32) -> Option<Self> {
+        let (mut d, mut s) = (direction, strength);
+        if s < 0. {
+            s = -s;
+            d = d.map(|c| -c);
+        }
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if len <= 0. || !len.is_finite() {
+            return None;
+        }
+        Some(Knock {
+            direction: d.map(|c| c / len),
+            speed: (s + bonus) * KNOCK_SCALE,
+        })
+    }
+
+    /// FUN_1403d4570, one tick: the displacement, or None once the speed
+    /// has dropped below 1 (the slide then ends).
+    pub fn step(&mut self) -> Option<[f32; 3]> {
+        if self.speed <= 0. || self.speed < KNOCK_STOP {
+            self.speed = 0.;
+            return None;
+        }
+        let v = self.speed * DT;
+        let out = self.direction.map(|c| c * v);
+        self.speed *= KNOCK_DECAY.powf(DT);
+        Some(out)
+    }
+}
+
+/// Blow flight (physics mode 4), Y-up velocity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Blow {
+    pub velocity: [f32; 3],
+    /// +0x10c: the horizontal speed floor.
+    pub min_xz: f32,
+}
+
+impl Blow {
+    /// FUN_1404228b0 (mode 4 enter): floor = |v_xz| × BlowMinXZ.
+    pub fn new(velocity: [f32; 3], sstm: &Sstm) -> Self {
+        Blow {
+            velocity,
+            min_xz: velocity[0].hypot(velocity[2]) * sstm.blow_min_xz,
+        }
+    }
+
+    /// FUN_140422780, one tick: the horizontal speed brakes by BlowBrakeXZ
+    /// down to the floor; a rising speed brakes by BlowBrakeUp; gravity is
+    /// added with the downward speed capped at `fall_max`. Returns the
+    /// displacement.
+    pub fn step(&mut self, sstm: &Sstm, fall_max: f32) -> [f32; 3] {
+        let [x, y, z] = self.velocity;
+        let len = x.hypot(z);
+        let (nx, nz) = if len > 0. {
+            (x / len, z / len)
+        } else {
+            (0., 0.)
+        };
+        let speed = (len * sstm.blow_brake_xz).max(self.min_xz);
+        // Y-down: rising is negative.
+        let mut down = -y;
+        if down < 0. {
+            down *= sstm.blow_brake_up;
+        }
+        let down = (down + G).min(fall_max);
+        self.velocity = [speed * nx, -down, speed * nz];
+        self.velocity.map(|c| c * DT)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +457,46 @@ mod tests {
         assert!((v[0] - 0.8).abs() < 1e-6);
         let v = steer([8., 0.], [0., 0.], 0., AIR_INERTIA, AIR_DRAG);
         assert!((v[0] - 7.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn knock_slide_decays_and_stops_below_one() {
+        let mut k = Knock::new([0., 0., -2.], 200., 0.).unwrap();
+        let mut total = 0.;
+        let mut n = 0;
+        while let Some(d) = k.step() {
+            total += -d[2];
+            n += 1;
+        }
+        assert_eq!(n, 29);
+        assert!((total - 190.58).abs() < 0.05, "{total}");
+        let flipped = Knock::new([1., 0., 0.], -50., 0.).unwrap();
+        assert_eq!(flipped.direction, [-1., 0., 0.]);
+    }
+
+    #[test]
+    fn blow_brakes_to_its_floor_and_falls() {
+        let s = Sstm {
+            fall_max: 16.,
+            blow_brake_xz: 0.8,
+            blow_min_xz: 0.1,
+            blow_brake_up: 0.8,
+            blow_up: 24.,
+            blow_speed: 40.,
+            hit_back: 200.,
+            hit_back_small: 200.,
+        };
+        let mut b = Blow::new([40., 24., 0.], &s);
+        assert!((b.min_xz - 4.).abs() < 1e-6);
+        let d = b.step(&s, 16.);
+        assert!((d[0] - 32.).abs() < 1e-5);
+        assert!((d[1] - (24. * 0.8 - G)).abs() < 1e-5);
+        for _ in 0..60 {
+            b.step(&s, 16.);
+        }
+        assert!((b.velocity[0] - 4.).abs() < 1e-5);
+        assert_eq!(b.velocity[1], -16.);
+        assert_eq!(s.knock_strength(0x7fff, 3, 3), 200.);
+        assert_eq!(s.knock_strength(80, 3, 12), 40.);
     }
 }
