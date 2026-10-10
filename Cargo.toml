@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/source_identity", "crates/windows_shell", "crates/package_reader", "crates/player_sim", "crates/audio_out", "crates/effect_vm", "crates/area_sim"]
+members = ["crates/source_identity", "crates/windows_shell", "crates/package_reader", "crates/player_sim", "crates/audio_out", "crates/effect_vm", "crates/area_sim", "crates/field_collision"]
 resolver = "3"
 
 [workspace.package]
