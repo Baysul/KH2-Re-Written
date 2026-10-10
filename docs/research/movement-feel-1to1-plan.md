@@ -179,3 +179,12 @@ Branch `claude/project-thread-dhv9n6`, one commit per step. Evidence runs go in 
 Checks after step 6: PASS fmt, clippy, workspace tests (36 in `player_sim`), build, smoke (`--frames 180`), and `autoplay-s6` (arena-07: exit 0, 81 non-uniform captures, Shadow hits at 417/448/486, jump on tick 300 → FALL 327 at 185.0 → LAND 361). `autoplay-s3` (after step 3) also exited 0. A hands-on play check with a pad and a side-by-side against the installed game are NOT RUN.
 
 Still open (step 7): the targeted hop and ground lunge, the desired-yaw writer, the ANB trigger → obj+0x18c bits (landing recovery, hitstun), the JUMP 03A frame-35 trigger, and the collision radius, height and step.
+
+### Second pass (2026-10-10)
+
+The user reported the feel still differed. Tracing the position integrator FUN_1403b89a0 (called from the per-object update FUN_1403bfd30) found that a physics mode's velocity routine does not run every frame. It runs when the timer obj+0xba8 drops below 0, every `DAT_1405b18ec` = 2.0 frames (every frame only for move requests faster than `DAT_140623be4` = 100), with that 2-frame span as its time step. The result divided by 2 is stored at obj+0xb98 and applied each frame × frame time. Root motion (FUN_1403b7ca0), the knock-slide (FUN_1403d4570), slope slide (FUN_1403b81d0) and force fields (FUN_1403f9130) are added every frame. Collision (FUN_1403b9090) follows. FUN_1403b4da0 clears the timer on every mode change.
+
+`physics::Sampler` translates this. Ground movement, the jump curve (t advances 2 per run), air steering (0.9/0.95 once per 2 frames) and the Shadow's blow (gravity and brakes once per 2 frames) now run through it. Frame time is confirmed: FUN_140154740 sets `DAT_140717480` to the vsyncs elapsed × game speed (`DAT_140717424` = 1.0), so it is 1.0 per 60 Hz frame. FUN_140154600 doubles it only in 30 fps mode. Sora's locomotion, jump, fall, land and hurt clips carry no root motion (logged as `root_start`/`root_end`), so velocity alone moves him there.
+
+Checks: PASS fmt, clippy, workspace tests (37 in `player_sim`), build, smoke, and `autoplay-s7` (exit 0, 81 non-uniform captures; jump at 300 → FALL 326 at 184.9 → LAND 361).
+
