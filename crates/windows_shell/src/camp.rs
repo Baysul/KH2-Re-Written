@@ -15,6 +15,7 @@ pub mod customize;
 pub mod equip;
 pub mod items;
 pub mod journal;
+pub mod notice;
 pub mod party;
 pub mod picture;
 
@@ -216,6 +217,8 @@ pub struct Data {
     pub equip: equip::EquipData,
     /// 03system.bin `ipic`: the item pictures' sequence (FUN_1403b0c90).
     pub picture_sequence: Option<Sequence>,
+    /// The tutorial notices' flags, texts and callouts.
+    pub notice: notice::NoticeData,
 }
 
 /// Cursor memory kept between camp openings (DAT_140beec30 / 7c).
@@ -239,6 +242,8 @@ pub struct Memory {
     pub customize_list: (usize, usize),
     /// mem[2]: the Equip slot list's cursor and scroll.
     pub equip: (usize, usize),
+    /// save+0x4270: the notices already seen (bit per `notice::ROWS`).
+    pub notices_seen: u16,
 }
 
 /// Tz::MenuObj's pastes: priority and (member, layout offset, alpha).
@@ -246,7 +251,7 @@ pub type ModelLayer = (u32, Vec<(usize, [f32; 2], f32)>);
 
 /// What a draw item samples: the camp sheet, the system font, or member
 /// `i`'s off-screen model render (Tz::MenuObj's paste, prio 0x7538).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sheet {
     Art,
     Font,
@@ -255,6 +260,8 @@ pub enum Sheet {
     Model(usize),
     /// `itempic/item-%03d.imd`.
     Picture(u16),
+    /// A notice file (`menu/<lang>/<name>_<v>.bar`).
+    Notice(String),
 }
 
 /// The menu model's layout offset for member `i` of `n` (FUN_140306400):
@@ -314,17 +321,30 @@ pub enum State {
     StatusList,
     StatusBrowse,
     Config,
+    /// 0x25: the tutorial notices.
+    Notice,
 }
 
-/// FUN_1403adcc0: sprintf digits, '/', '%' and spaces into the font's
-/// encoding.
+/// FUN_1403adcc0: ASCII into the font's encoding (digits, upper-case
+/// letters and the listed marks; anything else is the 0x7f blank).
 pub fn encode_number(s: &str) -> Vec<u8> {
     s.bytes()
         .map(|b| match b {
             b'0'..=b'9' => 0x21 + (b - b'0'),
-            b'/' => 0x4b,
+            b'A'..=b'Z' => 0x2e + (b - b'A'),
+            b' ' => 0x01,
+            b'!' => 0x48,
+            b'"' => 0x61,
             b'%' => 0x4a,
-            _ => 0x01,
+            b'\'' => 0x57,
+            b'*' => 0x2d,
+            b'+' => 0x2b,
+            b'-' => 0x2c,
+            b'.' => 0x4f,
+            b'/' => 0x4b,
+            b':' => 0x52,
+            b'?' => 0x49,
+            _ => 0x7f,
         })
         .collect()
 }
@@ -599,6 +619,9 @@ pub struct Camp {
     /// The item picture and the images the caller has loaded for it.
     picture: picture::Picture,
     pub pictures: picture::PictureCache,
+    // Notices.
+    notice: notice::Ui,
+    pub notice_files: notice::NoticeCache,
 }
 
 impl Camp {
@@ -656,8 +679,12 @@ impl Camp {
             equip_ui: equip::Ui::default(),
             picture: picture::Picture::default(),
             pictures: picture::PictureCache::default(),
+            notice: notice::Ui::default(),
+            notice_files: notice::NoticeCache::default(),
         };
         camp.build_top(seq);
+        // FUN_140306790: pending notices open over the camp.
+        camp.start_notices(seq, None, State::Top);
         camp.munny_digits = digits(seq, &munny_groups(camp.data.panels.munny), Vec::new());
         let t = time_groups(camp.data.panels.time_frames);
         camp.time_digits = digits(seq, &t, Vec::new());
@@ -848,6 +875,7 @@ impl Camp {
                     State::StatusList => self.status_list(seq, &pad, &mut sounds),
                     State::StatusBrowse => self.status_browse(seq, &pad, &mut sounds),
                     State::Config => self.config(seq, &pad, &mut sounds),
+                    State::Notice => self.notice(layout, &pad, &mut sounds),
                 };
                 self.driver(seq, moved);
             }
@@ -857,6 +885,7 @@ impl Camp {
         }
         self.layout.update(layout, 1.);
         self.sprites.update(seq);
+        self.notice_update(layout);
         if let Some(ipic) = &self.data.picture_sequence {
             self.picture.update(ipic, &self.sprites);
         }
@@ -909,6 +938,7 @@ impl Camp {
             State::StatusList => (&self.status_list, RowGroupsFor::Status),
             State::StatusBrowse => (&self.columns[self.column], RowGroupsFor::None),
             State::Config => (&self.config_list, RowGroupsFor::None),
+            State::Notice => (&self.top, RowGroupsFor::None),
         }
     }
 
@@ -2048,6 +2078,7 @@ impl Camp {
         }
         self.model_time = None;
         self.picture.kill(&mut self.sprites);
+        self.notice.kill();
         self.closed = true;
     }
 
@@ -2083,6 +2114,7 @@ impl Camp {
             .as_ref()
             .and_then(|ipic| self.picture.quads(ipic, &self.sprites));
         let mut cuts: Vec<(u32, Cut)> = vec![(PRIO_PANEL + 1, Cut::Digits)];
+        cuts.push((0x7547, Cut::Notice));
         if let Some((prio, _)) = &layer {
             cuts.push((*prio, Cut::Models));
         }
@@ -2103,6 +2135,7 @@ impl Camp {
                     }
                 }
                 Cut::Digits => out.push((Sheet::Art, self.digit_quads(seq))),
+                Cut::Notice => out.extend(self.notice_draw(layout, font)),
                 Cut::Picture => {
                     if let Some((id, _, quads)) = &picture {
                         out.push((Sheet::Picture(*id), quads.clone()));
@@ -2203,6 +2236,7 @@ enum Cut {
     Digits,
     Models,
     Picture,
+    Notice,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

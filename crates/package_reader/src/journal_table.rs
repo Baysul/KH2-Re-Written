@@ -92,6 +92,113 @@ pub fn read_limits(bytes: &[u8]) -> io::Result<Vec<Limit>> {
         .collect())
 }
 
+/// A `char` record (36 B): a Journal character.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Char {
+    /// +0: journal world (0..14, 0x10 Character Links, 0x11 Heartless, 0x12
+    /// Nobodies).
+    pub world: i8,
+    /// +1: the face's IMGD in its `jmface` file.
+    pub image: u8,
+    /// +2: the portrait frame type 0..5.
+    pub frame: u8,
+    /// +4: the seen / NEW bit.
+    pub bit: u16,
+    /// +6 / +8: name and description messages.
+    pub name: u16,
+    pub description: u16,
+}
+
+pub fn read_chars(bytes: &[u8]) -> io::Result<Vec<Char>> {
+    Ok(records(bytes, 36)?
+        .map(|r| Char {
+            world: r[0] as i8,
+            image: r[1],
+            frame: r[2],
+            bit: u16_at(r, 4),
+            name: u16_at(r, 6),
+            description: u16_at(r, 8),
+        })
+        .collect())
+}
+
+/// One `diag` entry (8 B): a character placed on a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiagEntry {
+    /// `char` row.
+    pub character: u16,
+    pub at: [i16; 2],
+    /// 0 = only feeds the availability bitmap.
+    pub visible: bool,
+}
+
+/// A `diag` record (12 B): the layout of a world's Characters page, or an
+/// extra that joins it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Diag {
+    /// +0: the story flag (kind 0 / 1) or item id (kind 2) that activates it.
+    pub cond: u16,
+    /// +2: a story flag that switches it off (0 = none).
+    pub off: u16,
+    /// +4: journal world, 0x10 Character Links.
+    pub world: i8,
+    /// +6: 0 base layout, 1 extra by flag, 2 extra by item.
+    pub kind: i8,
+    pub entries: Vec<DiagEntry>,
+}
+
+pub fn read_diag(bytes: &[u8]) -> io::Result<Vec<Diag>> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "diag table truncated");
+    let mut out = Vec::new();
+    for r in records(bytes, 12)? {
+        let count = r[5] as usize;
+        let at = u32::from_le_bytes([r[8], r[9], r[10], r[11]]) as usize;
+        let body = bytes.get(at..at + count * 8).ok_or_else(invalid)?;
+        out.push(Diag {
+            cond: u16_at(r, 0),
+            off: u16_at(r, 2),
+            world: r[4] as i8,
+            kind: r[6] as i8,
+            entries: body
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|e| DiagEntry {
+                    character: u16_at(e, 0),
+                    at: [u16_at(e, 2) as i16, u16_at(e, 4) as i16],
+                    visible: e[6] != 0,
+                })
+                .collect(),
+        });
+    }
+    Ok(out)
+}
+
+/// An `albu` record (12 B): an Album photo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Album {
+    /// +0: journal world.
+    pub world: i8,
+    /// +1: the two-digit photo suffix (`menu/<lang>/jm_photo/<code><nn>.bin`).
+    pub suffix: String,
+    /// +6: the story flag that unlocks it.
+    pub flag: u16,
+    /// +8 / +0xa: title and caption messages.
+    pub title: u16,
+    pub caption: u16,
+}
+
+pub fn read_albums(bytes: &[u8]) -> io::Result<Vec<Album>> {
+    Ok(records(bytes, 12)?
+        .map(|r| Album {
+            world: r[0] as i8,
+            suffix: r[1..3].iter().map(|&b| b as char).collect(),
+            flag: u16_at(r, 6),
+            title: u16_at(r, 8),
+            caption: u16_at(r, 0xa),
+        })
+        .collect())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +235,38 @@ mod tests {
         let l = [0x1a, 0x01, 0xd4, 0x4a, 0xd5, 0x4a, 0, 0];
         assert_eq!(read_limits(&table(1, &l)).unwrap()[0].id, 0x11a);
         assert!(read_limits(&table(2, &l)).is_err());
+    }
+
+    #[test]
+    fn reads_chars_diag_and_albums() {
+        let mut c = vec![0u8; 36];
+        c[0] = 4;
+        c[1] = 2;
+        c[2] = 1;
+        c[4..6].copy_from_slice(&9u16.to_le_bytes());
+        c[6..8].copy_from_slice(&0x2e9eu16.to_le_bytes());
+        let chars = read_chars(&table(1, &c)).unwrap();
+        assert_eq!((chars[0].world, chars[0].image, chars[0].frame), (4, 2, 1));
+        assert_eq!((chars[0].bit, chars[0].name), (9, 0x2e9e));
+        // One record at +0x10 + 12 whose single entry follows it.
+        let mut d = vec![0u8; 12];
+        d[0..2].copy_from_slice(&0x895u16.to_le_bytes());
+        d[4] = 0;
+        d[5] = 1;
+        d[8..12].copy_from_slice(&0x1cu32.to_le_bytes());
+        d.extend([0x8b, 0, 0xed, 0, 0xfd, 0, 1, 0]);
+        let diag = read_diag(&table(1, &d)).unwrap();
+        assert_eq!(diag[0].cond, 0x895);
+        assert_eq!(diag[0].entries[0].character, 0x8b);
+        assert_eq!(diag[0].entries[0].at, [237, 253]);
+        assert!(diag[0].entries[0].visible);
+        let mut a = vec![0u8; 12];
+        a[0] = 4;
+        a[1..3].copy_from_slice(b"11");
+        a[6..8].copy_from_slice(&0x1c14u16.to_le_bytes());
+        a[8..10].copy_from_slice(&0x2c46u16.to_le_bytes());
+        let albums = read_albums(&table(1, &a)).unwrap();
+        assert_eq!(albums[0].suffix, "11");
+        assert_eq!(albums[0].flag, 0x1c14);
     }
 }

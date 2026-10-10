@@ -362,6 +362,17 @@ impl Camp {
             .copied()
     }
 
+    /// The notice category of the slot under the cursor, when one has its
+    /// flag.
+    fn notice_for_slot(&self) -> Option<u8> {
+        let c = match self.equip_cursor()?.sec {
+            4 => 0,
+            1 => 3,
+            _ => return None,
+        };
+        self.notice_available(c).then_some(c)
+    }
+
     fn equip_mask(&mut self) {
         let mut mask = 0x73 | 0x3000 | 0xc000;
         if self.entry_enabled(1) {
@@ -369,6 +380,11 @@ impl Camp {
         }
         if self.equip_cursor().is_some_and(|s| s.sec == 4) {
             mask |= 0x200;
+        }
+        // SELECT: the Auto-Reload notice on the Items section (0), the
+        // Sub-Weapons notice on a form row (3).
+        if self.notice_for_slot().is_some() {
+            mask |= 0x400;
         }
         self.equip_ui.list.list.mask = mask;
     }
@@ -732,6 +748,12 @@ impl Camp {
                         self.equip_fill(seq);
                     }
                 }
+                Pick::Select => {
+                    self.memory.equip = memo;
+                    if let Some(c) = self.notice_for_slot() {
+                        self.start_notices(seq, Some(c), State::Equip);
+                    }
+                }
                 Pick::Square => {
                     self.memory.equip = memo;
                     self.equip_tidy();
@@ -977,6 +999,16 @@ impl Camp {
         let mut list = MenuList::new(rows, k);
         list.total = total;
         list.page = Some(rows_n);
+        // SELECT: the Auto-Reload notice from the item pick list (0), the
+        // Sub-Weapons one from the form pick list (3).
+        let cat = match sec {
+            4 => Some(0),
+            1 => Some(3),
+            _ => None,
+        };
+        if cat.is_some_and(|c| self.notice_available(c)) {
+            list.mask |= 0x400;
+        }
         self.equip_ui.pick = Grid {
             list,
             scroll: sc,
@@ -1353,6 +1385,10 @@ impl Camp {
                     self.exit = true;
                 }
                 Pick::Cancel => leave = true,
+                Pick::Select => {
+                    let cat = if sec == 4 { 0 } else { 3 };
+                    self.start_notices(seq, Some(cat), State::EquipPick(sec as u8));
+                }
                 Pick::Row(r) => {
                     let new = if sec <= 1 {
                         self.equip_ui.picks[r].0

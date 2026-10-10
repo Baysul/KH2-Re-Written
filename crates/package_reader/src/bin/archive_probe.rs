@@ -56,9 +56,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if original.bytes.len() > 32 * 1024 * 1024 {
         return Err("archive exceeds bounded output profile".into());
     }
-    let table = bar::read_bar(&original.bytes)?;
+    // A plain (non-BAR) original is retained as it is, with no inventory.
+    let table = bar::read_bar(&original.bytes).ok();
     let mut pref_tables = Vec::new();
-    for entry in &table.entries {
+    for entry in table.iter().flat_map(|t| &t.entries) {
         if entry.entry_type != 1 || entry.name_bytes != *b"pref" || entry.offset < 0 {
             continue;
         }
