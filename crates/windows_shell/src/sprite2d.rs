@@ -32,6 +32,8 @@ pub struct Text {
     /// Flag 4: colour from the animation; flag 8: keep +0x208's RGB.
     pub anim_colour: bool,
     pub keep_rgb: bool,
+    /// Line spacing override (else the group's UiPadding).
+    pub extra: Option<f32>,
 }
 
 impl Text {
@@ -46,6 +48,7 @@ impl Text {
             group_position: true,
             anim_colour: true,
             keep_rgb: true,
+            extra: None,
         }
     }
 }
@@ -356,7 +359,7 @@ impl Sprites {
             [x, y],
             t.size,
             t.align,
-            g.ui_padding as f32,
+            t.extra.unwrap_or(g.ui_padding as f32),
             rgba,
             true,
             font,

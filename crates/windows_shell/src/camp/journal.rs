@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 mod album;
 mod category;
 mod characters;
+mod files;
 
 /// The journal sprites' SEQD (DAT_1407434e8) and image (DAT_1407434e4).
 pub const SEQUENCE: usize = 5;
@@ -170,7 +171,10 @@ pub const MESSAGES: [u16; 52] = [
     0x26b3,
 ];
 /// Messages of the category pages (help lines and the empty album).
-pub const PAGE_MESSAGES: [u16; 5] = [0x48d5, 0x48d6, 0x48d8, 0x48d9, 0x32dd];
+pub const PAGE_MESSAGES: [u16; 13] = [
+    0x48d5, 0x48d6, 0x48d8, 0x48d9, 0x32dd, 0x48ee, 0x48ef, 0x48f0, 0x48f1, 0x48f2, 0x36b3, 0x2874,
+    0x2dc6,
+];
 
 /// FUN_1402f5db0: the "show everything" story flag.
 const SHOW_ALL: u16 = 0x4837;
@@ -514,6 +518,10 @@ pub struct Journal {
     pub top: Option<String>,
     /// The category pages' pill and the pages' own state.
     cat: category::Category,
+    files: files::Page,
+    /// First list entry shown by the 10-row file lists (the hand follows
+    /// the row `cursor − scroll`).
+    scroll: usize,
     chars: characters::Page,
     album: album::Page,
     /// Files loaded for the pages and the ones to load next.
@@ -602,6 +610,8 @@ impl Journal {
             memory: [0; 0x29],
             top: None,
             cat: category::Category::default(),
+            files: files::Page::default(),
+            scroll: 0,
             chars: characters::Page::default(),
             album: album::Page::default(),
             cache: JournalCache::default(),
@@ -848,6 +858,7 @@ impl Journal {
     fn reset_list(&mut self) {
         self.list = MenuList::default();
         self.list.mask = 0x73;
+        self.scroll = 0;
         self.grid = None;
         self.cells.clear();
         self.options.clear();
@@ -870,6 +881,9 @@ impl Journal {
             4 => self.build_album_list(layout),
             5 => self.build_album_photo(layout),
             6 | 0xc | 0x28 => self.build_characters(layout),
+            0xe => self.build_files_menu(layout),
+            0xf | 0x12 | 0x15 => self.build_files_list(layout),
+            0x10 | 0x13 | 0x16 => self.build_files_detail(layout),
             // Pages not built yet go back to the Notes of the world.
             _ => self.build_notes(layout),
         }
@@ -1264,6 +1278,9 @@ impl Journal {
                     4 => self.album_list(layout, &pad, &mut sounds),
                     5 => self.album_photo(layout, &pad, &mut sounds),
                     6 | 0xc | 0x28 => self.characters(layout, &pad, &mut sounds),
+                    0xe => self.files_menu(layout, &pad, &mut sounds),
+                    0xf | 0x12 | 0x15 => self.files_list(layout, &pad, &mut sounds),
+                    0x10 | 0x13 | 0x16 => self.files_detail(layout, &pad, &mut sounds),
                     _ => self.option_page(layout, &pad, &mut sounds),
                 };
                 self.driver(seq, moved);
@@ -1419,7 +1436,7 @@ impl Journal {
                 };
                 if let Some(&o) = self.options.get(k) {
                     let (label, _, state) = table[o];
-                    if matches!(state, 4 | 6 | 0xc | 0x28) {
+                    if matches!(state, 4 | 6 | 0xc | 0x28 | 0xe | 0x12 | 0x15) {
                         self.enter_category(seq, state, label, k);
                     }
                 }
@@ -1453,7 +1470,11 @@ impl Journal {
         let live = self.list.rows[..self.list.total.min(self.list.rows.len())]
             .iter()
             .any(|&r| self.sprites.alive(r));
-        let row = self.list.rows.get(self.list.cursor).copied();
+        let row = self
+            .list
+            .rows
+            .get(self.list.cursor.saturating_sub(self.scroll))
+            .copied();
         if !self.no_cursor && live && self.substate == 1 {
             if self.hand.is_none_or(|h| !self.sprites.alive(h))
                 && let Some(row) = row

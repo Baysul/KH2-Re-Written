@@ -168,7 +168,7 @@ impl Journal {
 
     /// FUN_1403444f0's character bits: an entry of a record whose
     /// condition holds (the off flag is not tested).
-    fn char_available(&self, character: u16) -> bool {
+    pub(super) fn char_available(&self, character: u16) -> bool {
         self.data.diag.iter().any(|r| {
             let cond = if r.kind == 2 {
                 false
@@ -360,8 +360,20 @@ impl Journal {
             if self.chars.sel < 0 {
                 sounds.push(SOUND_INVALID);
             } else {
-                // The Character File page (state 0x10) is not built.
+                // FUN_140331ce0: the Character File page (state 0x10).
                 sounds.push(SOUND_DECIDE);
+                let rows: Vec<usize> = self
+                    .chars
+                    .entries
+                    .iter()
+                    .map(|e| e.character as usize)
+                    .collect();
+                let sel = self.chars.sel as usize;
+                if let Some(h) = self.chars.hand.take() {
+                    self.sprites.kill(h);
+                }
+                self.kill_highlight();
+                self.files_from_characters(seq, rows, sel);
             }
         }
         false

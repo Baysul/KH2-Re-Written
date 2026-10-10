@@ -52,10 +52,19 @@ NOT RUN: a committed walk step that triggers a tutorial notice (SELECT on an Equ
 - **[I]** The analog stick curve for the Characters hand is `|s|*6 + 0.5` px/frame from the decompile; the room's walk used the digital pad only.
 - The notices' once-only flags are not written to a save.
 
+## Addendum: Character Files family (same task)
+
+Source: `journal-03/files-treasures-spec.md` §2.2, §3.1–§3.4.
+
+- **Built:** world menu (state 0xe), the lists (0xf Character Files, 0x12 The Heartless, 0x15 The Nobodies) with a 10-row scrolling window, NEW / viewed marks, "There's nothing yet!", the second-level tab with the world name, and the detail page (0x10 / 0x13 / 0x16): portrait from `menu/jmface_<code>.2ld` (codes `heart`, `no`, `ex` added) in its frame, name, origin note, description in 7-line windows with the scroll arrow, R2 / L2 to the next / previous seen entry, back to the list or to the Characters page it came from. The Characters page's decide now opens the detail.
+- **Evidence (private):** `autoplay-91` (arena-10, exit 0): the Character Files world menu, the Other list (Sora, Donald Duck, Goofy, Kairi …) with its "Other" tab, the Sora detail with portrait, the Donald Duck detail after R2 (origin note "The Wise Little Hen (1934)"). `autoplay-90`: The Heartless shows "There's nothing yet!" (no kill counters in the room, as the spec gives for a fresh save).
+- **Also fixed:** the face cache was not reused when the journal reopened, so portraits were missing on the second opening.
+- **Not built:** the 3D model and the full-model pages (0x11 / 0x14 / 0x17, TRIANGLE), the "Slain" count and reaction rows (kill counters and `rcct` are not in the room's data), the list scroll bar G95.
+
 ## Not built yet
 
-Journal Character File detail (states 0x10..0x17), Story, Treasures / Maps / Pieces (7, 8, 9, 0x1a, 0x22), Ansem Reports, Missions, Minigames, Limits, Synthesis, Puzzles; form sub-weapons on Equip (state 6); NEW! badges on the main menu rows; party members' models; Load / Save (`save.2ld`); item shop (`itemshop.2ld`); mission and minigame 2LDs.
+Character File 3D models / full-model pages, Story, Treasures / Maps / Pieces (7, 8, 9, 0x1a, 0x22), Ansem Reports, Missions, Minigames, Limits, Synthesis, Puzzles; form sub-weapons on Equip (state 6); NEW! badges on the main menu rows; party members' models; Load / Save (`save.2ld`); item shop (`itemshop.2ld`); mission and minigame 2LDs.
 
 ## Next task
 
-Character File detail and the Files / Treasures / Maps pages from the journal specs, then Puzzles and the remaining Journal pages.
+Treasures / Maps / Pieces grid and Ansem Reports from the same spec (§4, §5), then Puzzles and the remaining Journal pages.

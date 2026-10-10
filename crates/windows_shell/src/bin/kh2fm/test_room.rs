@@ -697,13 +697,13 @@ fn load_journal(
     let mut ids: Vec<u32> = journal::MESSAGES.iter().map(|&i| i as u32).collect();
     ids.extend(journal::PAGE_MESSAGES.map(u32::from));
     for c in &chars {
-        ids.extend([c.name, c.description].map(u32::from));
+        ids.extend([c.name, c.description, c.origin].map(u32::from));
     }
     for a in &albums {
         ids.extend([a.title, a.caption].map(u32::from));
     }
     for w in &worlds {
-        ids.extend([w.names[0], w.alt_names[0]].map(u32::from));
+        ids.extend([w.names[0], w.alt_names[0], w.names[1], w.alt_names[1]].map(u32::from));
     }
     for s in &stories {
         ids.extend([s.summary, s.objective].map(u32::from));
@@ -3001,7 +3001,7 @@ const AUTOPLAY_CAPTURES: &[u64] = &[
     2690, 2715, 2760, 2780, 2840, 2880, 2915, 2950, 3000, 3110, 3230, 3250, 3300, 3330, 3590, 3690,
     3720, 3760, 3830, 3860, 3930, 4090, 4180, 4450, 4480, 4830, 4910, 5030, 5130, 5590, 5650, 5740,
     5780, 5890, 5930, 6030, 6090, 6330, 6430, 6475, 6560, 6670, 6790, 6900, 7000, 7160, 7200, 7240,
-    7330,
+    7330, 7560, 7640, 7720, 7800, 7880, 7960, 8060, 8160,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -3015,7 +3015,7 @@ const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 /// The last stretch leaves Sora standing so an enemy can attack him.
 /// The index that holds the item pictures.
 const PICTURE_INDEX: &str = "Image/dt/kh2_fifth.hed";
-const AUTOPLAY_END: u64 = 7400;
+const AUTOPLAY_END: u64 = 8550;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
@@ -4836,6 +4836,20 @@ const AUTOPLAY_CAMP: &[(u64, u64)] = &[
     (7110, 0x8),
     (7180, 0x8),
     (7270, 0x2),
+    // Character Files: reopen, Journal (Notes), R1 to Collection, the
+    // first option (Character Files), the world menu, the list, a detail page, R2, then
+    // back out and close.
+    (7450, 0x2),
+    (7500, 0x4),
+    (7580, 0x4000),
+    (7740, 0x4),
+    (7820, 0x4),
+    (7900, 0x4),
+    (7980, 0x1_0000),
+    (8120, 0x8),
+    (8190, 0x8),
+    (8260, 0x8),
+    (8400, 0x2),
 ];
 fn camp_setup(
     camp: Option<ResMut<CampRes>>,
@@ -5241,34 +5255,44 @@ fn load_wanted_journal(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asse
         return;
     };
     let code_of = |world: u8| {
-        if world == 0x10 {
-            return Some("ex".to_owned());
+        match world {
+            0x10 => return Some("ex".to_owned()),
+            0x11 => return Some("heart".to_owned()),
+            0x12 => return Some("no".to_owned()),
+            _ => {}
         }
         j.worlds
             .iter()
             .find(|w| w.world as u8 == world)
             .map(|w| w.code.clone())
     };
-    if let Some(key) = open.cache.wanted_face.take()
-        && !c.journal_sheets.faces.contains_key(&key)
-    {
-        let faces = code_of(key).and_then(|code| {
-            let path = format!("menu/jmface_{code}.2ld");
-            match layout2d::load_images_named(source, PICTURE_INDEX, &path) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("Journal faces {path} rejected: {e}");
-                    None
+    if let Some(key) = open.cache.wanted_face.take() {
+        if let std::collections::hash_map::Entry::Vacant(slot) = c.journal_sheets.faces.entry(key) {
+            let faces = code_of(key).and_then(|code| {
+                let path = format!("menu/jmface_{code}.2ld");
+                match layout2d::load_images_named(source, PICTURE_INDEX, &path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("Journal faces {path} rejected: {e}");
+                        None
+                    }
                 }
-            }
-        });
-        let sheets = faces
-            .into_iter()
-            .flatten()
-            .map(|t| frame.add_sheet(images, t.rgba, t.size, t.texel_scale))
-            .collect();
-        c.journal_sheets.faces.insert(key, sheets);
+            });
+            slot.insert(
+                faces
+                    .into_iter()
+                    .flatten()
+                    .map(|t| frame.add_sheet(images, t.rgba, t.size, t.texel_scale))
+                    .collect(),
+            );
+        }
         open.cache.faces.insert(key);
+    }
+    if let Some(row) = open.cache.wanted_photo
+        && c.journal_sheets.photos.contains_key(&row)
+    {
+        open.cache.wanted_photo = None;
+        open.cache.photos.insert(row);
     }
     if let Some(row) = open.cache.wanted_photo.take()
         && !c.journal_sheets.photos.contains_key(&row)

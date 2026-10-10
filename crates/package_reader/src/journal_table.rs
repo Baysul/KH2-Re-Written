@@ -107,6 +107,10 @@ pub struct Char {
     /// +6 / +8: name and description messages.
     pub name: u16,
     pub description: u16,
+    /// +0xa: the origin note message (0 = none).
+    pub origin: u16,
+    /// +0x10: flag 0x800 = a kill counter exists.
+    pub flags: u16,
 }
 
 pub fn read_chars(bytes: &[u8]) -> io::Result<Vec<Char>> {
@@ -118,6 +122,8 @@ pub fn read_chars(bytes: &[u8]) -> io::Result<Vec<Char>> {
             bit: u16_at(r, 4),
             name: u16_at(r, 6),
             description: u16_at(r, 8),
+            origin: u16_at(r, 0xa),
+            flags: u16_at(r, 0x10),
         })
         .collect())
 }
@@ -245,9 +251,12 @@ mod tests {
         c[2] = 1;
         c[4..6].copy_from_slice(&9u16.to_le_bytes());
         c[6..8].copy_from_slice(&0x2e9eu16.to_le_bytes());
+        c[0xa..0xc].copy_from_slice(&0x2868u16.to_le_bytes());
+        c[0x10..0x12].copy_from_slice(&0x800u16.to_le_bytes());
         let chars = read_chars(&table(1, &c)).unwrap();
         assert_eq!((chars[0].world, chars[0].image, chars[0].frame), (4, 2, 1));
         assert_eq!((chars[0].bit, chars[0].name), (9, 0x2e9e));
+        assert_eq!((chars[0].origin, chars[0].flags), (0x2868, 0x800));
         // One record at +0x10 + 12 whose single entry follows it.
         let mut d = vec![0u8; 12];
         d[0..2].copy_from_slice(&0x895u16.to_le_bytes());
