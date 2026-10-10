@@ -93,6 +93,9 @@ pub mod bit {
     /// Stats +0x1e4 bit 13 (item 0x21b "Combo Master"): a combo keeps going
     /// after a miss (FUN_1403d6fc0).
     pub const COMBO_MASTER: u16 = 0xad;
+    /// Item 0x9e "Aerial Recovery" (FUN_1403d6d50 tests stats +0x1d0 bit
+    /// 20): a Jump press in a blow flight.
+    pub const AERIAL_RECOVERY: u16 = 20;
 }
 
 /// Ability items whose effect FUN_140401730 applies beyond setting the bit

@@ -332,9 +332,9 @@ struct HudSource {
 /// Top-menu labels: Attack, Magic, Items, Drive (03system 'cmd' message ids).
 const MENU_MESSAGES: [u32; 4] = [0x81e0, 0x81e1, 0x81e2, 0x81e3];
 
-/// Sora's grounded damage motions: front-high, front-low, back-high,
-/// back-low (motion ids 10..13).
-const SORA_HURT: [u16; 4] = [10, 11, 12, 13];
+/// Sora's damage motions (10..19, Aerial Recovery 40, DEAD 54), in
+/// `Clips::hurt` order.
+const SORA_HURT: [u16; 12] = player_sim::HURT_MOTIONS;
 
 /// Guard (PTYA 0x0b) and its success recoil (guard-01).
 const SORA_GUARD: [u16; 2] = [173, 42];
@@ -438,6 +438,9 @@ struct Game {
     shortcuts: [u16; 4],
     /// The back button (Circle, logical bit 3) pressed this tick.
     back_queued: bool,
+    /// Test-room aid (F4): a blow-reaction hit with no damage, to try the
+    /// blow, Aerial Recovery and Retaliating Slash without a blowing enemy.
+    debug_blow: bool,
     /// Sora's magic: owned spells, running casts and their volumes.
     magic: Option<magic_room::MagicRt>,
     /// Guard's ability is equipped (the camp's Abilities screen sets it).
@@ -690,6 +693,7 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
             }
             0 | 1 => clip.actionable.push((start, stop)),
             3 => clip.no_gravity.push((start, stop)),
+            27 => clip.invulnerable.push((start, stop)),
             42 => clip.inertia.push((start, stop)),
             // 28 turns toward the lock-on target, 22 toward the command
             // target; one enemy here, so they are the same.
@@ -938,14 +942,14 @@ const ABILITY_MESSAGES: [u32; 15] = [
 /// Square abilities, the combo finishers and starters (PTYA ability bits
 /// 90–101, 177–180, 18), the combo supports, and the damage supports
 /// (Defender, Second Chance, Once More, the element boosts, MP Rage).
-const ROOM_ABILITIES: [u16; 34] = [
-    0x8052, 0x0089, 0x010f, 0x010b, 0x0111, 0x010c, 0x0106, 0x0107, 0x022f, 0x0108, 0x0232, 0x0109,
-    0x010a, 0x010d, 0x0230, 0x010e, 0x0110, 0x0231, 0x00a2, 0x00a3, 0x0186, 0x0187, 0x0188, 0x0189,
-    0x018a, 0x018b, 0x021b, 0x019e, 0x019f, 0x01a0, 0x0198, 0x0199, 0x019a, 0x019c,
+const ROOM_ABILITIES: [u16; 35] = [
+    0x8052, 0x809e, 0x0089, 0x010f, 0x010b, 0x0111, 0x010c, 0x0106, 0x0107, 0x022f, 0x0108, 0x0232,
+    0x0109, 0x010a, 0x010d, 0x0230, 0x010e, 0x0110, 0x0231, 0x00a2, 0x00a3, 0x0186, 0x0187, 0x0188,
+    0x0189, 0x018a, 0x018b, 0x021b, 0x019e, 0x019f, 0x01a0, 0x0198, 0x0199, 0x019a, 0x019c,
 ];
 /// [test-room value] AP added to Sora's level-1 AP so the room's abilities
-/// fit, giving 50 like the Critical start record (plrp id 7).
-const ROOM_EXTRA_AP: i32 = 48;
+/// fit (the Critical start record's 50 plus Aerial Recovery's 2).
+const ROOM_EXTRA_AP: i32 = 50;
 /// The Kingdom Key (its stat record gives the weapon ability).
 const KINGDOM_KEY: u16 = 0x29;
 
@@ -3308,17 +3312,23 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
         240..270 => Vec2::new(1., 0.),
         _ => Vec2::ZERO,
     };
-    let jump = matches!(tick, 300 | 560);
+    // (1520: Aerial Recovery out of the blow struck at 1500.)
+    let jump = matches!(tick, 300 | 560 | 1520);
     // (spell slots are scripted in `simulate`)
-    let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
+    // (1720: Retaliating Slash out of the blow struck at 1700.)
+    let attack = matches!(
+        tick,
+        400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630 | 1720
+    );
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 81] = [
+const AUTOPLAY_CAPTURES: [u64; 85] = [
     90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1198, 1300, 1500,
-    1700, 1830, 1900, 1930, 1990, 2030, 2050, 2070, 2110, 2230, 2310, 2330, 2390, 2420, 2450, 2520,
-    2690, 2715, 2760, 2780, 2840, 2880, 2920, 2970, 3080, 3200, 3220, 3270, 3300, 3560, 3660, 3690,
-    3730, 3800, 3830, 3900, 4060, 4150, 4420, 4450, 4800, 4880, 5000, 5100, 5500, 5560, 5650, 5690,
-    5800, 5840, 5940, 6000, 6210, 6270, 6300, 6390, 6460, 6530, 6600, 6670, 6705, 6725, 6760,
+    1512, 1530, 1700, 1712, 1730, 1830, 1900, 1930, 1990, 2030, 2050, 2070, 2110, 2230, 2310, 2330,
+    2390, 2420, 2450, 2520, 2690, 2715, 2760, 2780, 2840, 2880, 2920, 2970, 3080, 3200, 3220, 3270,
+    3300, 3560, 3660, 3690, 3730, 3800, 3830, 3900, 4060, 4150, 4420, 4450, 4800, 4880, 5000, 5100,
+    5500, 5560, 5650, 5690, 5800, 5840, 5940, 6000, 6210, 6270, 6300, 6390, 6460, 6530, 6600, 6670,
+    6705, 6725, 6760,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -3326,6 +3336,8 @@ const AUTOPLAY_TALK: [u64; 1] = [60];
 const AUTOPLAY_ADVANCE: [u64; 1] = [150];
 const AUTOPLAY_TALK_CAPTURES: [u64; 10] = [40, 61, 68, 84, 100, 140, 156, 164, 172, 200];
 const AUTOPLAY_TALK_END: u64 = 260;
+/// Debug blow hits of the unattended run (see `Game::debug_blow`).
+const AUTOPLAY_BLOWS: [u64; 2] = [1500, 1700];
 /// Guard presses ahead of the Shadow's claws seen at ticks 1194 and 1361
 /// in earlier unattended runs.
 const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
@@ -4291,9 +4303,12 @@ fn play_sounds(mut game: ResMut<Game>, mut audio: ResMut<Audio>, hud: Option<Res
     }
 }
 
-/// HUD frame: test-room debug keys (F5/F6 HP -/+2, F7/F8 MP -/+10, F9 drive +10)
+/// HUD frame: test-room debug keys (F4 blow hit, F5/F6 HP -/+2, F7/F8 MP -/+10, F9 drive +10)
 /// or the unattended script change stats, then the gauge logic runs.
 fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
+    if keys.just_pressed(KeyCode::F4) && game.autoplay.is_none() {
+        game.debug_blow = true;
+    }
     let Some(mut hud) = hud else { return };
     let mut s = hud.stats;
     if let Some(rt) = game.enemy.as_mut() {
@@ -4466,9 +4481,12 @@ fn combat_tick(game: &mut Game, tick: u64) {
         sound_queue,
         effect_queue,
         magic,
+        debug_blow,
         ..
     } = game;
     let Some(rt) = enemy.as_mut() else { return };
+    let debug_blow =
+        std::mem::take(debug_blow) || (autoplay.is_some() && AUTOPLAY_BLOWS.contains(&tick));
     let act_at_start = rt.enemy.current_act();
     if autoplay.is_some() && tick == 380 {
         // Unattended runs place the target just ahead of Sora.
@@ -4859,6 +4877,32 @@ fn combat_tick(game: &mut Game, tick: u64) {
         }
     }
     rt.sora_invulnerable = (rt.sora_invulnerable - 1.).max(0.);
+    if debug_blow && rt.sora_hp > 0 {
+        // Reaction 4 with KB1 and KB2 both 0 (the SSTM blow), away from
+        // the enemy; no damage.
+        let d = ((sora_at - enemy_at) * Vec3::new(1., 0., 1.)).normalize_or(Vec3::Z);
+        let hit = player_sim::Hit {
+            reaction: 4,
+            original: 4,
+            direction: [d.x, d.z],
+            high: true,
+            knockback: [0, 0],
+        };
+        let started = player.react(&hit, &rt.enemy.sstm, clips);
+        if started.is_some() {
+            *action_started = tick;
+        }
+        let record = serde_json::json!({"event":"sora_blow_debug","tick":tick,
+            "reaction":format!("{started:?}")});
+        if let Some(file) = log.as_mut() {
+            let _ = serde_json::to_writer(&mut *file, &record);
+            let _ = std::io::Write::write_all(file, b"\n");
+        }
+    }
+    // Aerial Recovery's range 27 (obj+0x18c bit 22) takes no damage.
+    if player.range_invulnerable(clips) {
+        rt.sora_invulnerable = rt.sora_invulnerable.max(1.);
+    }
     if let Some((instance, atkp, _)) = sora_hit
         && rt.sora_invulnerable > 0.
     {
@@ -4916,22 +4960,34 @@ fn combat_tick(game: &mut Game, tick: u64) {
 
         let d = (sora_at - enemy_at) * Vec3::new(1., 0., 1.);
         let dir = d.normalize_or(Vec3::Z);
-        let facing = Vec3::new(player.yaw.sin(), 0., player.yaw.cos());
-        let back = facing.dot(dir) >= 0.;
-        // Knock-slide strength (FUN_1403ceab0): KB1 0x7fff selects SSTM
-        // HitBackSmall for class 3, HitBack otherwise; ×0.5 for 12/13.
-        let class = combat::reaction_class(attack.reaction);
-        let strength = rt
-            .enemy
-            .sstm
-            .knock_strength(attack.knockback[0], class, attack.reaction);
-        let index = (back as usize) * 2 + (!high) as usize;
+        // FUN_1403d2fe0: the reaction class picks the motion and physics
+        // (flinch and slide, air flinch and hop, blow).
+        let hit = player_sim::Hit {
+            reaction: attack.reaction,
+            original: attack.reaction,
+            direction: [dir.x, dir.z],
+            high,
+            knockback: attack.knockback,
+        };
         let started = if counted {
-            player.hurt(index, [dir.x, dir.z], strength, clips)
+            player.react(&hit, &rt.enemy.sstm, clips)
         } else {
             None
         };
         if started.is_some() {
+            *action_started = tick;
+        }
+        // MP Rage (FUN_1403d5e50): damage taken outside MP Charge gives
+        // MP by its share of max HP × the ability's value.
+        if damage > 0 && !player.mp.charging() && player.abilities.mp_rage > 0. {
+            let gain =
+                (damage as f32 / rt.sora_target.max_hp as f32 * player.abilities.mp_rage) as i32;
+            if gain > 0 {
+                player.mp.add(gain);
+            }
+        }
+        // FUN_140404d60: HP 0 plays DEAD.
+        if rt.sora_hp == 0 && player.die(clips).is_some() {
             *action_started = tick;
         }
         let record = serde_json::json!({"event":"sora_hit","tick":tick,"atkp":atkp,"damage":damage,
@@ -4944,9 +5000,15 @@ fn combat_tick(game: &mut Game, tick: u64) {
     if rt.sora_hp == 0 {
         rt.ko_ticks += 1;
         if rt.ko_ticks >= 120 {
+            // [test-room] No game-over flow: stand up with full HP.
             rt.sora_hp = rt.sora_target.max_hp;
             rt.ko_ticks = 0;
         }
+    }
+    // Healed while dead (the camp, a Cure): FUN_1403c3c30 stands him up.
+    if player.dead() && rt.sora_hp > 0 {
+        player.revive();
+        *action_started = tick;
     }
     // A Magnet's hold follows its volume and ends with it.
     if let Some(h) = rt.enemy.held {
@@ -6116,6 +6178,12 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let talk_room = loaded.npc.is_some();
     let mut player = Player::new(loaded.spawn.to_array(), 0.);
     player.abilities = loaded.abilities.build(&ROOM_ABILITIES);
+    if autoplay.is_some() {
+        // The unattended run strikes Sora with blows and recovers with
+        // Retaliating Slash (ability bit 101), which is unequipped by
+        // default.
+        player.abilities.set(101);
+    }
     if let Some(h) = &loaded.hud {
         player.mp = magic::Mp::new(h.stats.1);
     }
@@ -6142,6 +6210,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         guard_queued: false,
         shortcut_queued: 0,
         back_queued: false,
+        debug_blow: false,
         shortcuts: ROOM_SHORTCUTS,
         magic: loaded.magic.map(|src| {
             let mut levels = [0u8; 6];

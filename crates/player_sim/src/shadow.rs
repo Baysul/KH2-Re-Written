@@ -1112,6 +1112,8 @@ mod tests {
             blow_speed: 40.,
             hit_back: 200.,
             hit_back_small: 200.,
+            blow_to_hit_back: 8.,
+            hit_back_to_jump: 0.048,
         }
     }
 
