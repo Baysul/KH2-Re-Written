@@ -162,3 +162,12 @@ Each step keeps the translated routine's structure and constants and names the o
 8. **Side-by-side check.** Run a scripted jump, a run-and-turn, a ledge fall and a Shadow claw hit in the rewrite. Log per-tick position, and compare against the curves above and, if the user provides one, a capture from the installed game. Nothing claims 1:1 until this step passes.
 
 Steps 1–6 can land as one change each, in order. Step 7 can run in parallel with steps 3–6.
+
+## Implementation status
+
+Branch `claude/project-thread-dhv9n6`, one commit per step. Evidence runs go in `research\playable-room-20261008\movement-01\autoplay-sN`.
+
+| Step | State | What changed (value, source) |
+| --- | --- | --- |
+| 1 | Done | `player_sim::physics::ObjParams` (FUN_14040a440 defaults, FUN_14040a480 PRTY copy), `prty_offset` (FUN_1403e9590), `Sstm` (SSTM +0x14..+0x34). The room now picks the PRTY record from the player objentry's +0x4e (`P_EX100` → index 1, offset 284; it was config `prty_pointer` 1 before, so the values are unchanged: walk 2, run 8, jump 185, turn 0.2618, fall max 16). Gravity is G = 0.40816328 (`DAT_1405ce184`) in place of the test-room 0.8. `autoplay-s1`: 7 hits, as in `autoplay-76`. Captures after tick 594 came out black because the display went dark (window not drawn), and the run exited 1 for that reason only. |
+| 2–6 | Open | — |

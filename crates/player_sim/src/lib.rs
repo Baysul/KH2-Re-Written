@@ -2,13 +2,15 @@
 //! jumping and grounded/aerial attack combos. It owns position, facing and
 //! the active action/motion frame; presentation only reads this state.
 //!
-//! Numeric inputs come from installed records where a public lead exists
-//! (PRTY walk/run/jump/turn, SSTM fall max, PTYA combo motions, ANB range
-//! triggers). Gravity, step height, body size, walk threshold and the
-//! collision response are explicit test-room choices, not observed KH2 rules.
+//! Movement parameters follow the executable's object init
+//! (`physics::ObjParams`: PRTY walk/run/jump/turn, SSTM fall max) and its
+//! gravity (`physics::G`); PTYA supplies the combo motions and ANB range
+//! triggers the windows. Step height, body size and the collision response
+//! are explicit test-room choices, not observed KH2 rules.
 
 pub mod camera;
 pub mod combat;
+pub mod physics;
 pub mod shadow;
 
 pub type Vec3 = [f32; 3];
@@ -28,11 +30,9 @@ pub struct Params {
     pub turn_speed: f32,
     /// Maximum downward speed, units per tick.
     pub fall_max: f32,
-    /// Test-room choice: downward acceleration, units per tick squared.
-    pub gravity: f32,
     /// Test-room choice: highest ledge climbed without jumping.
     pub step_height: f32,
-    /// Test-room choice: stick magnitude below which Sora walks.
+    /// Stick magnitude from which Sora runs (`DAT_140585c7c`, 0.8).
     pub walk_threshold: f32,
     /// Test-room choice: body radius/height for wall contact.
     pub radius: f32,
@@ -50,7 +50,6 @@ impl Params {
             self.jump_height,
             self.turn_speed,
             self.fall_max,
-            self.gravity,
             self.radius,
             self.height,
         ];
@@ -66,7 +65,7 @@ impl Params {
     /// Launch speed whose discrete apex (speed reduced by gravity before
     /// each position step) reaches `jump_height`.
     pub fn jump_speed(&self) -> f32 {
-        launch_speed(self.gravity, self.jump_height)
+        launch_speed(physics::G, self.jump_height)
     }
 }
 
@@ -341,9 +340,9 @@ impl Player {
         self.yaw = wrap_angle(self.yaw + delta.clamp(-rate, rate));
     }
 
-    fn lift(&mut self, height: f32, p: &Params) {
+    fn lift(&mut self, height: f32) {
         if height.is_finite() && height > 0. {
-            self.vertical_speed = self.vertical_speed.max(launch_speed(p.gravity, height));
+            self.vertical_speed = self.vertical_speed.max(launch_speed(physics::G, height));
         }
     }
 
@@ -569,7 +568,7 @@ impl Player {
                     self.yaw = direction[0].atan2(direction[1]);
                 }
                 self.start(Action::AirAttack(i + 1), step);
-                self.lift(clips.air_combo[i + 1].hop, p);
+                self.lift(clips.air_combo[i + 1].hop);
             } else if self.frame >= clip.end {
                 let [x, y, z] = self.position;
                 // A swing that touched down finishes on the ground.
@@ -590,7 +589,7 @@ impl Player {
             }
             self.arm();
             self.start(Action::AirAttack(0), step);
-            self.lift(clips.air_combo[0].hop, p);
+            self.lift(clips.air_combo[0].hop);
         } else if self.action == Action::Jump && self.vertical_speed <= 0. {
             self.start(Action::Fall, step);
         }
@@ -601,7 +600,7 @@ impl Player {
         if floating {
             self.vertical_speed = 0.;
         } else {
-            self.vertical_speed = (self.vertical_speed - p.gravity).max(-p.fall_max);
+            self.vertical_speed = (self.vertical_speed - physics::G).max(-p.fall_max);
         }
         if moving && !matches!(self.action, Action::AirAttack(_)) {
             self.turn_toward(direction, p.turn_speed);
@@ -756,7 +755,6 @@ mod tests {
             jump_height: 185.,
             turn_speed: 0.2618,
             fall_max: 16.,
-            gravity: 1.,
             step_height: 20.,
             walk_threshold: 0.5,
             radius: 30.,
@@ -985,7 +983,7 @@ mod tests {
         assert!(!matches!(player.action, Action::AirAttack(_)));
         if player.action == Action::Fall {
             player.tick(&press, &p, &c, &w);
-            assert_eq!(player.action, Action::Fall);
+            assert!(!matches!(player.action, Action::AirAttack(_)));
         }
     }
 

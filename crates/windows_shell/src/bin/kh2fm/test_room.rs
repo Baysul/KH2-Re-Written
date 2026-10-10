@@ -25,12 +25,12 @@ use package_reader::{
     bar, effect, model_inspection, model_inspection_textures::TextureMode, motion,
     object_collision, objentry, original, preferences, probe::ProbeSource, ptya, sklt,
 };
-use player_sim::combat;
 use player_sim::shadow::{self, ScriptRandom, Shadow};
 use player_sim::{
     Action, AttackStep, Clip, Clips, Input, Params, Player, TriangleWorld, World,
     camera::{self, CameraInput, FollowCamera},
 };
+use player_sim::{combat, physics};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -57,6 +57,10 @@ struct Locator {
     ordinal: usize,
     name_hash: [u8; 16],
 }
+fn player_object_default() -> String {
+    "P_EX100".into()
+}
+
 #[derive(Deserialize)]
 struct Config {
     schema_version: u32,
@@ -77,7 +81,10 @@ struct Config {
     ground_combo_ids: Vec<u8>,
     air_combo_ids: Vec<u8>,
     system: Locator,
-    prty_pointer: usize,
+    /// The player's own 00objentry model name; its +0x4e PRTY index selects
+    /// the movement record (FUN_1403da940 → FUN_14040a480).
+    #[serde(default = "player_object_default")]
+    player_object_name: String,
     /// 00objentry locator and the object model name whose WeaponJoint byte
     /// names the actor joint carrying the weapon. Weapon-type entries carry
     /// a hand-like joint while player entries carry 1; that reading is a
@@ -329,10 +336,9 @@ const LOCOMOTION: [(&str, u16); 6] = [
     ("LAND", 5),
 ];
 /// Test-room choices, recorded in the startup log.
-const GRAVITY: f32 = 0.8;
 const STEP_HEIGHT: f32 = 24.;
 /// Run at stick magnitude 0.8 (DAT_140585c7c).
-const WALK_THRESHOLD: f32 = 0.8;
+const WALK_THRESHOLD: f32 = physics::RUN_MAGNITUDE;
 const BODY_RADIUS: f32 = 30.;
 const BODY_HEIGHT: f32 = 140.;
 const FLOOR_MIN_NORMAL_Y: f32 = 0.5;
@@ -565,19 +571,6 @@ fn bar_entry<'a>(bytes: &'a [u8], name: &[u8; 4]) -> Result<&'a [u8], Box<dyn st
     bytes
         .get(entry.offset as usize..entry.offset as usize + entry.size as usize)
         .ok_or_else(|| "BAR entry exceeds archive".into())
-}
-
-fn word_f32(bytes: &[u8], at: usize) -> Result<f32, Box<dyn std::error::Error>> {
-    let value = f32::from_le_bytes(
-        bytes
-            .get(at..at + 4)
-            .ok_or("truncated parameter word")?
-            .try_into()?,
-    );
-    if !value.is_finite() {
-        return Err("nonfinite parameter word".into());
-    }
-    Ok(value)
 }
 
 /// Clip timing and honoured range triggers from one decoded motion.
@@ -1150,29 +1143,40 @@ fn load(
         (None, None) => return Err("configuration needs a room selection or an arena".into()),
     };
 
+    // Movement block (obj+0x128): FUN_14040a440 defaults with SSTM
+    // FallMax, then FUN_14040a480 copies the PRTY record named by the
+    // player's objentry +0x4e (FUN_1403e9590 lookup) when it is nonzero.
     let pref = bar_entry(&system, b"pref")?;
-    let prty_bytes = bar_entry(pref, b"prty")?;
-    let prty = preferences::read_prty(prty_bytes)?;
-    let offset = *prty
-        .offsets
-        .get(config.prty_pointer)
-        .ok_or("PRTY pointer absent")?;
-    let record = prty
-        .records
+    let sstm_bytes = bar_entry(pref, b"sstm")?;
+    let sstm_offset = u32::from_le_bytes(sstm_bytes.get(4..8).ok_or("SSTM pointer")?.try_into()?);
+    let sstm = sstm_bytes
+        .get(sstm_offset as usize..)
+        .and_then(physics::Sstm::read)
+        .ok_or("SSTM record truncated")?;
+    let mut obj_params = physics::ObjParams::defaults(sstm.fall_max);
+    let player_object = objects
         .iter()
-        .find(|r| r.offset == offset && !r.overlaps_table)
-        .ok_or("PRTY record absent or overlaps table")?;
-    let prty_value = |i: usize| f32::from_bits(record.words[i]);
-    let sstm = bar_entry(pref, b"sstm")?;
-    let sstm_offset = u32::from_le_bytes(sstm.get(4..8).ok_or("SSTM pointer")?.try_into()?);
-    let fall_max = word_f32(sstm, sstm_offset as usize + 20)?;
+        .find(|o| o.model_name == config.player_object_name.as_bytes())
+        .ok_or("player object entry absent")?;
+    let prty_index = player_object.neo_moveset as i16 as i32;
+    let mut prty_offset = None;
+    if prty_index != 0 {
+        let prty = preferences::read_prty(bar_entry(pref, b"prty")?)?;
+        let offset = physics::prty_offset(&prty.offsets, prty_index).ok_or("PRTY record absent")?;
+        let record = prty
+            .records
+            .iter()
+            .find(|r| r.offset == offset && !r.overlaps_table)
+            .ok_or("PRTY record absent or overlaps table")?;
+        obj_params.apply_prty(&record.words);
+        prty_offset = Some(offset);
+    }
     let params = Params {
-        walk_speed: prty_value(0),
-        run_speed: prty_value(1),
-        jump_height: prty_value(2),
-        turn_speed: prty_value(3),
-        fall_max,
-        gravity: GRAVITY,
+        walk_speed: obj_params.walk,
+        run_speed: obj_params.run,
+        jump_height: obj_params.jump,
+        turn_speed: obj_params.turn,
+        fall_max: obj_params.fall_max,
         step_height: STEP_HEIGHT,
         walk_threshold: WALK_THRESHOLD,
         radius: BODY_RADIUS,
@@ -1613,8 +1617,9 @@ fn load(
     let (floors, walls) = world.counts();
     let summary = serde_json::json!({"event":"admission","source_qualification":"quarantined_unqualified",
         "params":{"walk_speed":params.walk_speed,"run_speed":params.run_speed,"jump_height":params.jump_height,
-            "turn_speed":params.turn_speed,"fall_max":params.fall_max},
-        "test_room_choices":{"gravity":GRAVITY,"step_height":STEP_HEIGHT,"walk_threshold":WALK_THRESHOLD,
+            "turn_speed":params.turn_speed,"fall_max":params.fall_max,"gravity":physics::G,"run_magnitude":WALK_THRESHOLD,
+            "prty_index":prty_index,"prty_offset":prty_offset},
+        "test_room_choices":{"step_height":STEP_HEIGHT,
             "body_radius":BODY_RADIUS,"body_height":BODY_HEIGHT,"floor_min_normal_y":FLOOR_MIN_NORMAL_Y,
             "blend_ticks":BLEND_TICKS,"clock":"fixed 60 Hz, one motion tick per update"},
         "ptya":{"ground":ground.iter().map(|e| serde_json::json!({"id":e.id,"kind":e.kind,"flag":e.flag,"motion_id":e.motion_id})).collect::<Vec<_>>(),
