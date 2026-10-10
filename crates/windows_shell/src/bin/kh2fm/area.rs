@@ -262,8 +262,7 @@ impl AreaSource {
                     }
                 },
             };
-            let path = state.objects[s.point].point.walk_paths.first();
-            npcs.push(FieldNpc::spawn(kind, &s.entity, i, path, &mut random));
+            npcs.push(build_npc(state, kind, s, i, &mut random));
         }
         let mut deferred = Vec::new();
         for s in state.zone_spawns(|id| types.get(&id).copied()) {
@@ -349,6 +348,45 @@ impl LoadedArea {
     pub fn take_collision(&mut self) -> field_collision::World {
         self.collision.take().expect("area collision taken once")
     }
+}
+
+/// A townsperson from a spawn entity: its route, behaviour zones and
+/// action records come from its spawn point (FUN_1404168c0).
+pub fn build_npc(
+    state: &Area,
+    kind: usize,
+    spawn: &Spawn,
+    entity_index: usize,
+    random: &mut Lcg,
+) -> FieldNpc {
+    let object = &state.objects[spawn.point];
+    let mut npc = FieldNpc::spawn(
+        kind,
+        &spawn.entity,
+        entity_index,
+        object.point.walk_paths.first(),
+        random,
+    );
+    let zones = object
+        .zones
+        .iter()
+        .filter(|z| {
+            let raw = &object.point.activators[z.activator].raw;
+            u16::from_le_bytes([raw[0x2c], raw[0x2d]]) == 0
+        })
+        .map(|z| crate::npcs::NpcZone {
+            id: z.option,
+            zone: z.clone(),
+        })
+        .collect();
+    let actions = object
+        .point
+        .return_params
+        .iter()
+        .map(crate::npcs::Action::read)
+        .collect();
+    npc.set_behaviour(zones, actions);
+    npc
 }
 
 struct Flags<'a>(&'a Progress);

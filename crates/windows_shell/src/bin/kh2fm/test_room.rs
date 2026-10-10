@@ -490,8 +490,6 @@ struct AreaRes {
     /// The townsperson the talk resource currently points at.
     talk_npc: Option<usize>,
     was_talking: bool,
-    /// Ticks an NPC keeps still after a talk (after_talk waits 60).
-    hold: Vec<u32>,
 }
 
 /// Same-world area change (FUN_140156520 mode 0 / FUN_1401561b0): the
@@ -2865,21 +2863,15 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
         current,
         talk_npc,
         was_talking,
-        hold,
         ..
     } = &mut *area;
-    if hold.len() < current.npcs.len() {
-        hold.resize(current.npcs.len(), 0);
-    }
     let sora = Vec3::from_array(game.player.position);
     let talking = talk.active.is_some();
     if *was_talking
         && !talking
         && let Some(i) = *talk_npc
     {
-        let to = sora - current.npcs[i].position;
-        current.npcs[i].yaw = to.x.atan2(to.z);
-        hold[i] = 60;
+        current.npcs[i].after_talk(sora);
     }
     *was_talking = talking;
     if !talking {
@@ -2954,31 +2946,22 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
             d.away = 0;
             match d.npc {
                 None => {
-                    let path = current.state.objects[d.spawn.point]
-                        .point
-                        .walk_paths
-                        .first();
-                    let mut n = crate::npcs::FieldNpc::spawn(
+                    let n = crate::area::build_npc(
+                        &current.state,
                         d.kind,
-                        &d.spawn.entity,
+                        &d.spawn,
                         d.spawn.point,
-                        path,
                         &mut random,
                     );
-                    n.alive = true;
                     current.npcs.push(n);
                     d.npc = Some(current.npcs.len() - 1);
                 }
                 Some(i) if !current.npcs[i].alive => {
-                    let path = current.state.objects[d.spawn.point]
-                        .point
-                        .walk_paths
-                        .first();
-                    current.npcs[i] = crate::npcs::FieldNpc::spawn(
+                    current.npcs[i] = crate::area::build_npc(
+                        &current.state,
                         d.kind,
-                        &d.spawn.entity,
+                        &d.spawn,
                         d.spawn.point,
-                        path,
                         &mut random,
                     );
                 }
@@ -2991,9 +2974,6 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
             }
         }
     }
-    if hold.len() != current.npcs.len() {
-        hold.resize(current.npcs.len(), 0);
-    }
     for (i, n) in current.npcs.iter_mut().enumerate() {
         if !n.alive {
             continue;
@@ -3002,10 +2982,8 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
         if is_target {
             n.yaw = talk.yaw;
         }
-        let held = is_target || hold[i] > 0;
-        hold[i] = hold[i].saturating_sub(1);
         let kind = &source.kinds[n.kind];
-        n.tick(&kind.anims, held);
+        n.tick(&kind.anims, sora, is_target, &mut random);
     }
 }
 
@@ -4040,7 +4018,7 @@ fn simulate(
             "npcs":area.as_deref().map(|a| a.current.npcs.iter().map(|n| serde_json::json!({
                 "kind":a.source.kinds[n.kind].name,"position":n.position.to_array(),"yaw":n.yaw,
                 "pose":format!("{:?}", n.pose),"talk":n.talk,"reaction":n.reaction,"alive":n.alive,
-                "serial":n.serial,"point":n.entity,
+                "serial":n.serial,"point":n.entity,"act":n.act_name(),
                 "script":a.current.scripts.contains_key(&n.talk),
                 "target":a.source.kinds[n.kind].target.is_some()})).collect::<Vec<_>>())}),
         );
@@ -6333,7 +6311,6 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         explore: !stay,
         talk_npc: None,
         was_talking: false,
-        hold: Vec::new(),
     });
     let talk_room = loaded.npc.is_some();
     let mut player = Player::new(loaded.spawn.to_array(), loaded.yaw);
