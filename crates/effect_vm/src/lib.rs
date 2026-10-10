@@ -1,4 +1,4 @@
-//! The "ppp" particle VM of the PC exe, translated: an effect instance runs
+﻿//! The "ppp" particle VM of the PC exe, translated: an effect instance runs
 //! one PDATA program block. Each entry is a part type whose programs
 //! (keyframed adds, integrators, matrix builders, emitters and draws) act
 //! on a per-part work block at the byte offsets the data names.
@@ -12,6 +12,7 @@ mod mega_birth;
 mod mega_model;
 mod models;
 mod programs;
+mod ribbon;
 
 use math::{IDENTITY, Mat, Vec4};
 use package_reader::effect::{Dpd, Program, i32_at, u32_at};
@@ -54,7 +55,7 @@ pub struct Quad {
     pub corners: [[f32; 3]; 4],
     /// Texel coordinates (u = S/16, v = T/8 in the effect atlas).
     pub uv: [[f32; 2]; 4],
-    /// Sprite colour × part colour, 1.0 = PS2 0x80.
+    /// Sprite colour Ã— part colour, 1.0 = PS2 0x80.
     pub colour: [f32; 4],
     /// GS ALPHA register byte: 0x48 additive, 0x44 alpha blend.
     pub blend: u8,
@@ -65,7 +66,7 @@ pub struct Quad {
 }
 
 /// One OMD model draw (pppDrawMdl3 / pppDrawMdlTs3): the model of the
-/// instance's DPD through draw matrix `a` (view space: position = a·v).
+/// instance's DPD through draw matrix `a` (view space: position = aÂ·v).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelDraw {
     /// DPD-local model id.
@@ -77,7 +78,7 @@ pub struct ModelDraw {
     pub b: Option<Mat>,
     /// Part colour bytes, 0x80 = 1.0.
     pub rgba: [u8; 4],
-    /// UV scroll ints (texels × 65536, as the exe's cvttss2si gives them).
+    /// UV scroll ints (texels Ã— 65536, as the exe's cvttss2si gives them).
     pub scroll: [i32; 2],
 }
 
@@ -96,6 +97,12 @@ pub(crate) struct Part {
     pub mega_model: std::collections::HashMap<usize, mega_model::Pool>,
     /// Work +0x90 vertex handle: the array pppVtMime morphed this frame.
     pub vertex_override: Option<Arc<Vec<[i16; 3]>>>,
+    /// pppEiDrawShipoly ribbon state by work offset u3.
+    pub ribbons: std::collections::HashMap<usize, ribbon::Ribbon>,
+    /// Handle serial (the exe's generational handles, FUN_1404ad240).
+    pub serial: u64,
+    /// Work +4: the part that birthed this one, if it is still alive.
+    pub parent: Option<(usize, u64)>,
 }
 
 impl Part {
@@ -157,7 +164,7 @@ struct Group {
 /// Matrices the exe keeps in globals while an instance runs.
 pub(crate) struct Ctx<'a> {
     pub dpd: &'a Dpd,
-    /// ec20 instance world, ec60 view, ed60 = view·world, ede0 draw space.
+    /// ec20 instance world, ec60 view, ed60 = viewÂ·world, ede0 draw space.
     pub world: Mat,
     pub view: Mat,
     pub ed60: Mat,
@@ -165,6 +172,8 @@ pub(crate) struct Ctx<'a> {
     /// f010..f018: lengths of the instance world axes.
     pub scales: [f32; 3],
     pub colour: Vec4,
+    /// The current part's parent `cur` matrix (work +4 handle; +0x10).
+    pub parent_cur: Option<Mat>,
     /// Instance skip flag (+0xc4): odd half of a VM tick.
     pub skip: bool,
     pub rng: &'a mut Rng,
@@ -197,6 +206,11 @@ pub struct Instance {
     pub model_draws: Vec<ModelDraw>,
     /// pppRyjMngFlag bytes: draw layer, pause, camera offset.
     flags: [u8; 3],
+    next_serial: u64,
+    /// SeqEffect EndType 2: a looping effect ends when its parts are gone.
+    released: bool,
+    /// SeqEffect EndType 3: remaining alpha and its per-frame step.
+    fade: Option<(f32, f32)>,
 }
 
 impl Instance {
@@ -231,6 +245,9 @@ impl Instance {
             unsupported: Vec::new(),
             model_draws: Vec::new(),
             flags: [0; 3],
+            next_serial: 1,
+            released: false,
+            fade: None,
         })
     }
 
@@ -248,6 +265,23 @@ impl Instance {
     /// The PDATA header's loop flag (a looping effect runs until stopped).
     pub fn looping(&self) -> bool {
         self.looping
+    }
+
+    /// SeqEffect EndType 2 (FUN_1402be8f0): a looping effect now ends as
+    /// soon as its parts are gone.
+    pub fn release(&mut self) {
+        self.released = true;
+    }
+
+    /// SeqEffect EndType 3 (FUN_1402be6a0): the colour alpha falls to zero
+    /// over `frames` event frames (two game frames each), then the effect
+    /// ends.
+    pub fn fade_out(&mut self, frames: f32) {
+        if frames > 0. {
+            self.fade = Some((1., 1. / (frames * 2.)));
+        } else {
+            self.finished = true;
+        }
     }
 
     pub fn finished(&self) -> bool {
@@ -278,6 +312,19 @@ impl Instance {
         if self.finished {
             return quads;
         }
+        if let Some((level, step)) = self.fade {
+            let level = level - step;
+            if level <= 0. {
+                self.finished = true;
+                self.parts.clear();
+                for g in &mut self.groups {
+                    g.parts.clear();
+                }
+                return quads;
+            }
+            self.fade = Some((level, step));
+            self.colour[3] = level;
+        }
         if self.wait > 0. {
             self.wait -= 1.;
             if self.wait > 0. {
@@ -306,6 +353,7 @@ impl Instance {
             ede0: IDENTITY,
             scales,
             colour: self.colour,
+            parent_cur: None,
             skip,
             rng,
             quads: &mut quads,
@@ -321,7 +369,8 @@ impl Instance {
         self.flags = flags;
         if !skip {
             self.time += 0x1000;
-            if !self.looping && self.end <= self.time {
+            let drained = self.released && self.looping && self.parts.iter().all(Option::is_none);
+            if (!self.looping && self.end <= self.time) || drained {
                 self.finished = true;
                 self.parts.clear();
                 for g in &mut self.groups {
@@ -339,8 +388,16 @@ impl Instance {
     /// FUN_1404b02f0 / FUN_1404aff20: a new part of `group` at frame 0,
     /// cursors on the first keyframes, create hooks run. A spawned part is
     /// inserted after the group's first part.
-    fn create(&mut self, group: usize, ctx: &mut Ctx) -> usize {
+    fn create(&mut self, group: usize, ctx: &mut Ctx, parent: Option<usize>) -> usize {
         let entry = &ctx.dpd.pdata[self.pdata].entries[self.groups[group].entry];
+        let serial = self.next_serial;
+        self.next_serial += 1;
+        let parent = parent.and_then(|id| {
+            self.parts
+                .get(id)
+                .and_then(Option::as_ref)
+                .map(|p| (id, p.serial))
+        });
         let mut part = Part {
             frame: 0,
             cur: IDENTITY,
@@ -351,6 +408,9 @@ impl Instance {
             mega: Default::default(),
             mega_model: Default::default(),
             vertex_override: None,
+            ribbons: Default::default(),
+            serial,
+            parent,
         };
         for p in &entry.programs {
             programs::create(p, &mut part, ctx);
@@ -375,7 +435,7 @@ impl Instance {
         for g in 0..self.groups.len() {
             if self.groups[g].start <= self.time {
                 self.groups[g].start = i32::MAX;
-                let id = self.create(g, ctx);
+                let id = self.create(g, ctx, None);
                 if let Some(p) = self.parts[id].as_mut() {
                     p.just_created = false;
                 }
@@ -383,12 +443,14 @@ impl Instance {
         }
     }
 
-    fn births(&mut self, ctx: &mut Ctx) {
+    /// Births queued by the program that just ran on part `emitter`: the
+    /// children keep the emitter as their parent handle (work +4).
+    fn births(&mut self, ctx: &mut Ctx, emitter: usize) {
         for b in std::mem::take(&mut ctx.births) {
             if b.entry >= self.groups.len() {
                 continue;
             }
-            let id = self.create(b.entry, ctx);
+            let id = self.create(b.entry, ctx, Some(emitter));
             if let Some(p) = self.parts[id].as_mut() {
                 for (i, v) in b.position.iter().take(b.position_len).enumerate() {
                     p.set_f32(b.position_var + 4 * i, *v);
@@ -396,8 +458,21 @@ impl Instance {
                 if let Some(var) = b.velocity_var {
                     p.set_vec4(var, b.velocity);
                 }
+                for (offset, value) in b.ints {
+                    p.set_i32(offset, value);
+                }
             }
         }
+    }
+
+    /// The `cur` matrix of part `id`'s parent while that part is alive.
+    fn parent_matrix(&self, id: usize) -> Option<Mat> {
+        let (pid, serial) = self.parts.get(id)?.as_ref()?.parent?;
+        self.parts
+            .get(pid)?
+            .as_ref()
+            .filter(|p| p.serial == serial)
+            .map(|p| p.cur)
     }
 
     /// Cursor advance: when the next keyframe's time word equals the part
@@ -421,6 +496,7 @@ impl Instance {
                     continue;
                 }
                 for id in self.groups[g].parts.clone() {
+                    let parent_cur = self.parent_matrix(id);
                     let Some(part) = self.parts[id].as_mut() else {
                         continue;
                     };
@@ -429,10 +505,11 @@ impl Instance {
                     }
                     Self::advance(ctx.dpd, part, j, p);
                     let cursor = part.cursors[j];
+                    ctx.parent_cur = parent_cur;
                     if ctx.flags[1] == 0 || p.kind == programs::MNG_FLAG {
                         programs::update(p, cursor, part, ctx);
                     }
-                    self.births(ctx);
+                    self.births(ctx, id);
                 }
             }
         }
@@ -451,6 +528,7 @@ impl Instance {
                     continue;
                 }
                 for id in self.groups[g].parts.clone() {
+                    let parent_cur = self.parent_matrix(id);
                     let Some(part) = self.parts[id].as_mut() else {
                         continue;
                     };
@@ -459,6 +537,7 @@ impl Instance {
                     }
                     Self::advance(ctx.dpd, part, j, p);
                     let cursor = part.cursors[j];
+                    ctx.parent_cur = parent_cur;
                     if programs::has_update(p.kind) && ctx.flags[1] == 0 {
                         programs::update(p, cursor, part, ctx);
                     }
@@ -522,7 +601,7 @@ fn mul_world(world: &Mat, local: &Mat) -> Mat {
 }
 
 /// The instance world matrix for translation `t`, radians `r` and scale
-/// `s` (FUN_1404b1280: identity → RotX → RotY → RotZ, axes scaled).
+/// `s` (FUN_1404b1280: identity â†’ RotX â†’ RotY â†’ RotZ, axes scaled).
 pub fn instance_matrix(t: [f32; 3], r: [f32; 3], s: [f32; 3]) -> Mat {
     let mut m = math::rot_radians(&IDENTITY, r);
     for c in 0..3 {

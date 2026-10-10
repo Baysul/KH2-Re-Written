@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use package_reader::effect::read_dpd;
 
 fn put(b: &mut [u8], at: usize, v: u32) {
@@ -337,4 +337,162 @@ fn vertex_ap_births_children_at_model_vertices() {
         .collect();
     assert!(positions.contains(&[4., 5., 6.]), "{positions:?}");
     assert!(positions.contains(&[1., 2., 3.]), "{positions:?}");
+}
+
+fn point(var: u32) -> Prog {
+    Prog {
+        kind: 40,
+        size: 16,
+        keys: vec![0, f(0.), f(0.), f(0.)],
+        use_val: vec![var],
+    }
+}
+
+fn unit_scale(var: u32) -> Prog {
+    Prog {
+        kind: 42,
+        size: 16,
+        keys: vec![0, f(1.), f(1.), f(1.)],
+        use_val: vec![var],
+    }
+}
+
+#[test]
+fn par_matrix_places_a_child_in_its_parents_space() {
+    // The emitter sits at (10, 0, 0) and births a child at raw vertex
+    // (1, 2, 3) (VertexApLc); the child's ParMatrix moves its position
+    // through the parent's matrix.
+    let emitter = vec![
+        Prog {
+            kind: 40,
+            size: 16,
+            keys: vec![0, f(10.), f(0.), f(0.)],
+            use_val: vec![0],
+        },
+        unit_scale(32),
+        Prog {
+            kind: 87,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0, 16, 32],
+        },
+        Prog {
+            kind: 177,
+            size: 20,
+            keys: vec![0, 0x0101_0000, 0, 1, 0],
+            use_val: vec![64, 64],
+        },
+    ];
+    let child = vec![
+        point(0),
+        unit_scale(32),
+        Prog {
+            kind: 87,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0, 16, 32],
+        },
+        Prog {
+            kind: 105,
+            size: 12,
+            keys: vec![0, 0, 0],
+            use_val: vec![],
+        },
+    ];
+    let dpd = build(
+        &[(0, 8, emitter), (i32::MAX, 8, child)],
+        &[(0, vec![[1, 2, 3], [4, 5, 6]])],
+        &[(0, 0, vec![0])],
+    );
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    for _ in 0..4 {
+        inst.frame(&math::IDENTITY, &mut rng);
+    }
+    // Children born on the last frame have not run their matrices yet.
+    let children: Vec<_> = inst.parts.iter().flatten().skip(1).collect();
+    assert!(children.iter().all(|c| c.parent.is_some()));
+    assert!(children.iter().any(|c| c.cur[3][..3] == [11., 2., 3.]));
+}
+
+#[test]
+fn ke_born_rnd6_gives_the_child_the_vertex_direction() {
+    // One birth per tick at VSF vertex (10, 0, 0): position var 0, angle
+    // var 16 gets (a0 = 0, 0, a8 = 90 degrees = 0x4000).
+    let emitter = vec![
+        point(0),
+        unit_scale(32),
+        Prog {
+            kind: 184,
+            size: 28,
+            keys: vec![0, 0x0101_0000, 0, 1, 0, 1, 16],
+            use_val: vec![64],
+        },
+    ];
+    let child = vec![point(0), unit_scale(32)];
+    let dpd = build(
+        &[(0, 8, emitter), (i32::MAX, 8, child)],
+        &[(0, vec![[10, 0, 0]])],
+        &[(0, 0, vec![0])],
+    );
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    for _ in 0..4 {
+        inst.frame(&math::IDENTITY, &mut rng);
+    }
+    let born = inst.parts.iter().flatten().nth(1).expect("a child");
+    assert_eq!([born.f32(0), born.f32(4), born.f32(8)], [10., 0., 0.]);
+    assert_eq!(born.f32(12), 1.);
+    assert_eq!((born.i32(16), born.i32(20), born.i32(24)), (0, 0, 0x4000));
+    assert!(born.parent.is_some());
+}
+
+#[test]
+fn eidrawshipoly_ribbon_follows_the_part() {
+    // A part moving +1 x per tick; the ribbon keeps 8 samples, fits a spline
+    // through the newest ones and emits 4 steps x 1 cross cell per frame.
+    let mut ribbon = vec![0u32; 41];
+    ribbon[1] = 1;
+    ribbon[2] = 0x0800_0100; // +9 single, +0xb ring size 8
+    ribbon[3] = f(4.); // width
+    ribbon[4] = 0x0104_0000; // +0x12 4 steps, +0x13 cross 2
+    ribbon[36] = f(100.); // +0x90 uv length
+    let progs = vec![
+        Prog {
+            kind: 36,
+            size: 16,
+            keys: vec![0, f(1.), f(0.), f(0.)],
+            use_val: vec![0, 96],
+        },
+        point(100),
+        unit_scale(48),
+        colour(60),
+        Prog {
+            kind: 87,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0, 16, 48],
+        },
+        Prog {
+            kind: 241,
+            size: 164,
+            keys: ribbon,
+            use_val: vec![0, 48, 60, 120],
+        },
+    ];
+    let dpd = build(&[(0, 40, progs)], &[(1, vec![[0, 0, 0]])], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    let mut last = Vec::new();
+    for _ in 0..24 {
+        last = inst.frame(&math::IDENTITY, &mut rng);
+    }
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    assert_eq!(last.len(), 4);
+    // The head is the newest (largest x); the path runs back along -x.
+    let xs: Vec<f32> = last.iter().map(|q| q.corners[0][0]).collect();
+    assert!(xs.windows(2).all(|w| w[0] >= w[1]), "{xs:?}");
+    // Width: the two edges of a row are 2 x 4 apart in y.
+    let q = &last[0];
+    assert!((q.corners[0][1] - q.corners[1][1]).abs() > 1.);
 }

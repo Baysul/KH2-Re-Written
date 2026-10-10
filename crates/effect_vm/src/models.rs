@@ -27,6 +27,8 @@ pub(crate) const DRAW_MATRIX: u32 = 112;
 pub(crate) const DRAW_MDL3: u32 = 137;
 pub(crate) const DRAW_MDL_TS3: u32 = 139;
 pub(crate) const VERTEX_AP: u32 = 174;
+/// pppVertexApLc (FUN_1404d3e00): VertexAp with raw (untransformed) vertices.
+pub(crate) const VERTEX_AP_LC: u32 = 177;
 
 /// x86 `cvttss2si`: out-of-range and NaN give 0x80000000.
 pub(crate) fn cvtt(f: f32) -> i32 {
@@ -48,7 +50,7 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
             let o = use_val(ctx, p, 2);
             part.zero(o, 0x18);
         }
-        VERTEX_AP => {
+        VERTEX_AP | VERTEX_AP_LC => {
             let o = use_val(ctx, p, 0);
             part.zero(o, 4);
         }
@@ -74,7 +76,7 @@ pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx)
             part.draw = math::mul(&ctx.ede0, &math::mul(&ctx.ed60, &part.cur));
         }
         DRAW_MDL_TS3 => ts3_update(p, cursor, part, ctx),
-        VERTEX_AP => vertex_ap(p, cursor, part, ctx),
+        VERTEX_AP | VERTEX_AP_LC => vertex_ap(p, cursor, part, ctx),
         _ => {}
     }
 }
@@ -238,6 +240,7 @@ fn vertex_ap(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
                     position_len: 3,
                     velocity_var: None,
                     velocity: [0.; 4],
+                    ints: Vec::new(),
                 });
             }
         }

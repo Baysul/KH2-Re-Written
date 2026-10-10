@@ -41,3 +41,10 @@ Steam app 2552430, build 15194255, content identity `a9ca1e03…`, quarantined; 
 - The composed scene is mirrored in x (the exe world is left-handed, the render right-handed); this turns Axel (and the whole scene) the way the original shows it. [I] confirmed by framing, not by an original capture.
 - Letterbox bars removed.
 - Partial worker output kept: SeqBlur feedback pass, fade layers, TEXA mouth/eye animations, mesh-group visibility (compiles, unit tests pass; not independently checked frame by frame).
+
+## Fourth pass (owner: Axel opposite direction, Roxas hands, Axel summon effect)
+
+- Actor yaw: the script heading is applied with the opposite sense (ry -> -ry, 180 unchanged) and the actor turns about its body centre, so Axel faces Roxas/camera in the talking shots (frames ~168-341 and 713-745 checked by capture).
+- Keyblades: the attach matrix includes the exe's y/z flip (diag(1,-1,-1,1), FUN_1401a7af0 / FUN_1403ccb90); both blades now sit in Roxas's fists. The grip is not a separate pose, the fingers come from Roxas's own motion.
+- Axel's summon effects: elements 7/8/9 start from the h_ex520 motion trigger records (ETT61305A: ticks 210, 210, 246 at 60 Hz, so event frames ~851/869), via new effect programs (SRandFV, SMatrix, ParMatrix, KeParMatR, KeDMatFr, VertexApLc, KeBornRnd6, EiDrawShipoly ribbon).
+- Open: ribbon pair mode, layer draw direction (inferred), fade-rate of EndType 3, frame ~700 summon blade scale, compared to no ground-truth capture.

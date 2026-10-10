@@ -1,4 +1,4 @@
-//! Reads everything one event needs from the bound installation, by the
+﻿//! Reads everything one event needs from the bound installation, by the
 //! names the event script itself gives.
 use package_reader::{
     effect,
@@ -7,6 +7,7 @@ use package_reader::{
     model_inspection_textures::{TextureMode, UvProfile},
     model_pose::PoseProfile,
     motion::{self, InterpolatedMotion},
+    motion_trigger,
     named::Library,
     objentry,
     probe::ProbeSource,
@@ -33,6 +34,24 @@ pub struct Actor {
     pub model: InspectionModel,
 }
 
+/// One motion frame trigger (the type-16 entry of an ANB): fires when the
+/// motion time passes `frame` (FUN_14040e960 → FUN_14040dd70).
+#[derive(Clone, Debug)]
+pub struct FrameTrigger {
+    pub frame: f32,
+    pub id: u8,
+    pub parameters: Vec<i16>,
+}
+
+/// What the effect presentation reads: the ReadEffect PAX files and the
+/// motion triggers of the event's animations.
+pub struct EffectFiles {
+    /// ReadEffect PAX files (`event/effect/<name>.pax`) by their Id.
+    pub paxes: Vec<(i16, effect::Pax)>,
+    /// Frame triggers by (actor id, script animation path).
+    pub triggers: HashMap<(i16, String), Vec<FrameTrigger>>,
+}
+
 pub struct Loaded {
     pub commands: Vec<Command>,
     pub room: LoadedRoom,
@@ -50,8 +69,8 @@ pub struct Loaded {
     /// Pause menu rows: "Continue" and "Skip Scene" (sys.bar 0x8ab4, 0x8ab3).
     pub pause_labels: [Vec<u8>; 2],
     pub font: SystemFont,
-    /// ReadEffect PAX files (`event/effect/<name>.pax`) by their Id.
-    pub paxes: Vec<(i16, effect::Pax)>,
+    /// ReadEffect PAX files and motion triggers for the effect player.
+    pub paxes: EffectFiles,
     /// The resident common effect textures (`effect/texcommon.dpd`).
     pub texcommon: Option<effect::Dpd>,
     pub summary: serde_json::Value,
@@ -164,6 +183,7 @@ pub fn load(source: &ProbeSource, id: &EventId) -> Result<Loaded> {
     }
 
     let mut motions = HashMap::new();
+    let mut triggers: HashMap<(i16, String), Vec<FrameTrigger>> = HashMap::new();
     for (actor, script) in motion_requests {
         if motions.contains_key(&(actor, script.clone())) {
             continue;
@@ -175,6 +195,24 @@ pub fn load(source: &ProbeSource, id: &EventId) -> Result<Loaded> {
         let path = motion_path(&script, actor_name, LANGUAGE)
             .ok_or_else(|| format!("motion name {script} has no anm_ prefix"))?;
         let anb = library.read(&path)?;
+        // The ANB's trigger entry (BAR type 16): its frame records.
+        match motion_trigger::inspect_anb(&anb) {
+            Ok(entries) => {
+                let list: Vec<FrameTrigger> = entries
+                    .iter()
+                    .flat_map(|e| e.records.frames.iter())
+                    .map(|f| FrameTrigger {
+                        frame: f.frame as f32,
+                        id: f.trigger,
+                        parameters: f.parameters.clone(),
+                    })
+                    .collect();
+                if !list.is_empty() {
+                    triggers.insert((actor, script.clone()), list);
+                }
+            }
+            Err(e) => eprintln!("{path}: motion triggers unreadable: {e}"),
+        }
         motions.insert((actor, script), motion::read_anb(&anb, 0)?.motion);
     }
 
@@ -214,11 +252,15 @@ pub fn load(source: &ProbeSource, id: &EventId) -> Result<Loaded> {
         b"evt\0",
     )?;
 
-    let mut paxes = Vec::new();
+    let mut pax_files = Vec::new();
     for (id, name) in effect_files {
         let bytes = library.read(&format!("event/effect/{name}.pax"))?;
-        paxes.push((id, effect::read_pax(&bytes)?));
+        pax_files.push((id, effect::read_pax(&bytes)?));
     }
+    let paxes = EffectFiles {
+        paxes: pax_files,
+        triggers,
+    };
     let texcommon = match library.read("effect/texcommon.dpd") {
         Ok(bytes) => Some(effect::read_dpd(&bytes)?),
         Err(e) => {
@@ -238,8 +280,9 @@ pub fn load(source: &ProbeSource, id: &EventId) -> Result<Loaded> {
         "music": music.keys().collect::<Vec<_>>(),
         "messages": message_ids,
         "room_models": room.rooms.len(),
-        "effect_paxes": paxes.iter().map(|(i, p)| (*i, p.name.clone(), p.elements.len())).collect::<Vec<_>>(),
+        "effect_paxes": paxes.paxes.iter().map(|(i, p)| (*i, p.name.clone(), p.elements.len())).collect::<Vec<_>>(),
         "texcommon_textures": texcommon.as_ref().map(|d| d.textures.len()),
+        "motion_triggers": paxes.triggers.iter().map(|((a, n), t)| (format!("{a}:{n}"), t.iter().map(|t| (t.frame, t.id, t.parameters.clone())).collect::<Vec<_>>())).collect::<BTreeMap<_, _>>(),
     });
     Ok(Loaded {
         commands,

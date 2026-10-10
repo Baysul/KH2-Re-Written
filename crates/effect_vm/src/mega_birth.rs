@@ -940,6 +940,9 @@ mod tests {
             mega: HashMap::new(),
             mega_model: HashMap::new(),
             vertex_override: None,
+            ribbons: HashMap::new(),
+            serial: 1,
+            parent: None,
         };
         // Colour variable u1 = 44: bytes +8..+0xb = 1.0 each.
         part.vars[52..56].fill(0x80);
@@ -974,6 +977,7 @@ mod tests {
                     ede0: IDENTITY,
                     scales: [1.; 3],
                     colour: [1.; 4],
+                    parent_cur: None,
                     skip,
                     rng: &mut rng,
                     quads: &mut quads,

@@ -452,7 +452,7 @@ fn tick(
             mixer.play(m.0, MUSIC_KEY, m.1 * 0x3000 as f32 / 16383., 1.);
         }
     }
-    fx.step(frame, &event.timeline);
+    fx.step(frame, &event.timeline, &event.actors);
     let logged = std::mem::take(&mut fx.log);
     event.log.extend(logged);
     if event.timeline.end_frame > 0 && frame >= event.timeline.end_frame as f32 {
@@ -585,7 +585,17 @@ fn present(
             bones.get(&parent).and_then(|b| b.get(att.bone as usize)),
             placed.get(&parent),
         ) {
-            *transform = *base * Transform::from_matrix(*m);
+            // FUN_1401a7af0 reads the parent's bone matrix and negates its
+            // y and z columns (DAT_140623c48 = -1.0): the bone table is in
+            // the data's y-down space and the child object is y-up. The
+            // child's own vertices are converted the same way before its
+            // local matrix (FUN_1403ccb90: identity here, local position
+            // +0x670 zeroed by FUN_1403d9fe0), so in the parent's data
+            // space the child sits at  v * M_child * F * M_bone  with
+            // F = diag(1,-1,-1). Matrices are row-vector words, hence the
+            // product order for the column-major Mat4.
+            let flip = Mat4::from_diagonal(Vec4::new(1., -1., -1., 1.));
+            *transform = *base * Transform::from_matrix(*m * flip);
         }
     }
     for (part, handle, mut visibility) in &mut parts {
