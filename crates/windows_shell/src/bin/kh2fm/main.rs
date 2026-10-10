@@ -10,6 +10,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod area;
 mod launcher;
+mod npcs;
 mod test_room;
 mod title;
 

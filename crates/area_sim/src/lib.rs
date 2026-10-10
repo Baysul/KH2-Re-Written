@@ -52,6 +52,7 @@ pub struct SpawnObject {
 #[derive(Clone, Debug)]
 pub struct Spawn {
     pub set: u32,
+    /// Index into `Area::objects` of the spawn point that holds it.
     pub point: usize,
     pub entity: Entity,
     /// `wrap(π − rotY)`.
@@ -151,7 +152,7 @@ impl Area {
     /// 00objentry type byte, `None` when the id has no record.
     pub fn activate(&mut self, objentry_type: impl Fn(u32) -> Option<u8>) -> Vec<Spawn> {
         let mut out = Vec::new();
-        for o in self.objects.iter_mut().filter(|o| !o.deferred) {
+        for (object, o) in self.objects.iter_mut().enumerate().filter(|(_, o)| !o.deferred) {
             o.flags |= 2;
             for (i, a) in o.point.activators.iter().enumerate() {
                 if (o.point.kind == 6 || a.option.wrapping_sub(3) > 1)
@@ -179,7 +180,7 @@ impl Area {
                 if matches!(e.spawn_type, 0 | 1 | 3) && o.flags & 1 == 0 {
                     out.push(Spawn {
                         set: o.set,
-                        point: 0,
+                        point: object,
                         entity: e.clone(),
                         yaw: wrap(PI - e.rotation[1]),
                     });

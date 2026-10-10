@@ -17,8 +17,13 @@ use package_reader::{
     probe::ProbeSource,
     room_collision,
 };
-use std::collections::HashMap;
-use windows_shell::room::{LoadedRoom, load_room_archive};
+use crate::npcs::{FieldNpc, Lcg, NpcKind};
+use std::{collections::HashMap, sync::Arc};
+use windows_shell::{
+    dialogue::{self, Op},
+    hud,
+    room::{LoadedRoom, load_room_archive},
+};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -34,10 +39,15 @@ pub const SORA_BODY: Body = Body {
 
 /// The installed files an area needs, opened once per session.
 pub struct AreaSource {
+    source: Arc<ProbeSource>,
     library: Library,
     progress: Progress,
-    /// 00objentry type byte per object id.
-    object_types: HashMap<u32, u8>,
+    /// 00objentry records and their index by object id.
+    objects: Vec<objentry::ObjectEntry>,
+    object_index: HashMap<u32, usize>,
+    /// Loaded townsperson models (kept across area changes) by objentry id.
+    pub kinds: Vec<NpcKind>,
+    kind_index: HashMap<u32, usize>,
     rng: ScriptRandom,
     /// The ARD language directory (`*0x1408ec5d0`; "us" in this build).
     language: &'static str,
@@ -45,14 +55,20 @@ pub struct AreaSource {
 
 /// One loaded area.
 pub struct LoadedArea {
+    pub world: u8,
     pub area: u8,
     pub programs: [i16; 3],
     /// Taken by the field when the area becomes current.
     collision: Option<field_collision::World>,
     pub state: Area,
-    /// Entities the scripts created, for the NPC port to place.
+    /// Entities the scripts created.
     #[allow(dead_code)]
     pub spawns: Vec<Spawn>,
+    /// The townspeople of this area (objentry type 15, spawn types 0/1/3).
+    pub npcs: Vec<FieldNpc>,
+    /// Libretto scripts by talk id and their message texts.
+    pub scripts: HashMap<u16, Vec<Op>>,
+    pub lines: HashMap<u32, Vec<u8>>,
     /// Player spawn in scene coordinates (Y up) and scene yaw.
     pub player: (Vec3, f32),
 }
@@ -61,8 +77,8 @@ impl AreaSource {
     /// Opens the indexes and sets story flags `first..=last` of the world in
     /// ascending order (FUN_14039afc0 each), which fixes every area's
     /// programs for that point of the story.
-    pub fn open(source: &ProbeSource, story: &[(u32, u32)]) -> Result<Self> {
-        let mut library = Library::open(source)?;
+    pub fn open(source: Arc<ProbeSource>, story: &[(u32, u32)]) -> Result<Self> {
+        let mut library = Library::open(&source)?;
         let progress_bytes = library.read("00progress.bin")?;
         let table = bar::read_bar(&progress_bytes)?;
         let scripts = progress::WORLDS
@@ -90,13 +106,19 @@ impl AreaSource {
             }
         }
         let objects = objentry::read(&library.read("00objentry.bin")?)?;
+        let object_index = objects
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (o.object_id, i))
+            .collect();
         Ok(Self {
+            source,
             library,
             progress,
-            object_types: objects
-                .iter()
-                .map(|o| (o.object_id, o.object_type))
-                .collect(),
+            objects,
+            object_index,
+            kinds: Vec::new(),
+            kind_index: HashMap::new(),
             rng: ScriptRandom::default(),
             language: "us",
         })
@@ -133,8 +155,13 @@ impl AreaSource {
         let mut state = Area::new(world, area, entrance, setup, |n| {
             entry(12, n).and_then(|d| ard::spawn_set(d).ok())
         });
-        let types = &self.object_types;
+        let types: HashMap<u32, u8> = self
+            .objects
+            .iter()
+            .map(|o| (o.object_id, o.object_type))
+            .collect();
         let spawns = state.activate(|id| types.get(&id).copied());
+        let (npcs, scripts, lines) = self.townspeople(code, area, &state, &spawns);
         let room = load_room_archive(&map, None)?;
         let collision = map_collision(&map, state.setup.bg_mask)?;
         let player = Area::player_spawn(&spawns)
@@ -148,14 +175,110 @@ impl AreaSource {
         Ok((
             room,
             LoadedArea {
+                world,
                 area,
                 programs,
                 collision: Some(collision),
                 state,
                 spawns,
+                npcs,
+                scripts,
+                lines,
                 player,
             },
         ))
+    }
+
+    /// The (index, ordinal, hash) of an installed file for the HUD loaders.
+    pub fn locate(&self, name: &str) -> Option<(String, usize, [u8; 16])> {
+        self.library
+            .find(name)
+            .map(|f| (f.index.to_owned(), f.ordinal, f.name_hash))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn townspeople(
+        &mut self,
+        code: &str,
+        area: u8,
+        state: &Area,
+        spawns: &[Spawn],
+    ) -> (
+        Vec<FieldNpc>,
+        HashMap<u16, Vec<Op>>,
+        HashMap<u32, Vec<u8>>,
+    ) {
+        let mut random = Lcg(0x4b1d_0000 ^ (area as u32) << 8 ^ 0x2545);
+        let mut npcs = Vec::new();
+        for (i, s) in spawns.iter().enumerate() {
+            let Some(&oi) = self.object_index.get(&s.entity.object) else {
+                continue;
+            };
+            if self.objects[oi].object_type != 15 {
+                continue;
+            }
+            let kind = match self.kind_index.get(&s.entity.object) {
+                Some(&k) => k,
+                None => match NpcKind::load(&self.source, &mut self.library, &self.objects[oi]) {
+                    Ok(kind) => {
+                        self.kinds.push(kind);
+                        self.kind_index.insert(s.entity.object, self.kinds.len() - 1);
+                        self.kinds.len() - 1
+                    }
+                    Err(e) => {
+                        eprintln!("NPC {} not loaded: {e}", s.entity.object);
+                        continue;
+                    }
+                },
+            };
+            let path = state.objects[s.point].point.walk_paths.first();
+            npcs.push(FieldNpc::spawn(kind, &s.entity, i, path, &mut random));
+        }
+        // Talk scripts: libretto-<world>.bar type-2 entry (kh2_first #474 for
+        // tt): {u32 3, i32 count, count × {u16 talk, u16 kind, u32 offset}}.
+        let mut scripts = HashMap::new();
+        if let Ok(bytes) = self.library.read(&format!("libretto-{code}.bar"))
+            && let Ok(table) = bar::read_bar(&bytes)
+            && let Some(e) = table.entries.iter().find(|e| e.entry_type == 2)
+            && let Some(entry) = bytes.get(e.offset as usize..e.offset as usize + e.size as usize)
+            && entry.len() >= 8
+        {
+            let count = i32::from_le_bytes(entry[4..8].try_into().unwrap()).max(0) as usize;
+            for r in 0..count {
+                let Some(rec) = entry.get(8 + r * 8..16 + r * 8) else {
+                    break;
+                };
+                let id = u16::from_le_bytes([rec[0], rec[1]]);
+                let off = u32::from_le_bytes(rec[4..8].try_into().unwrap()) as usize;
+                if npcs.iter().any(|n| n.talk == id)
+                    && let Some(code) = entry.get(off..)
+                {
+                    scripts.insert(id, dialogue::read_script(code));
+                }
+            }
+        }
+        let mut ids: Vec<u32> = scripts
+            .values()
+            .flatten()
+            .filter_map(|op| match op {
+                Op::Message(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut lines = HashMap::new();
+        if let (false, Some((index, ordinal, hash))) =
+            (ids.is_empty(), self.locate(&format!("msg/{}/{code}.bar", self.language)))
+            && let Ok(texts) = hud::load_messages_optional(&self.source, &index, ordinal, hash, &ids)
+        {
+            for (id, text) in ids.iter().zip(texts) {
+                if let Some(t) = text {
+                    lines.insert(*id, t);
+                }
+            }
+        }
+        (npcs, scripts, lines)
     }
 }
 

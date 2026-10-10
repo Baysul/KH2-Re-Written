@@ -143,6 +143,41 @@ pub fn read_selected_models(
         return Err("model selection exceeds 1 MiB".into());
     }
     let selection: SelectionFile = serde_json::from_slice(&bytes)?;
+    read_models(source, selection)
+}
+
+/// One installed model by its HED identity, with the explicit profiles the
+/// viewers and the test room use (legacy bind, original indexed textures,
+/// integer-truncated UVs). Used for models named at run time.
+pub fn read_model_at(
+    source: &ProbeSource,
+    index: &str,
+    ordinal: usize,
+    name_hash: [u8; 16],
+) -> Result<Vec<InspectionModel>, Box<dyn std::error::Error>> {
+    read_models(
+        source,
+        SelectionFile {
+            schema_version: 1,
+            source_content_identity: source.content_identity().to_owned(),
+            selections: vec![Selection {
+                index: index.to_owned(),
+                ordinal,
+                name_hash,
+            }],
+            inspect_model_geometry: true,
+            model_pose_profiles: vec![PoseProfile::Legacy],
+            inspect_model_textures: true,
+            model_texture_modes: vec![TextureMode::OriginalIndexed],
+            model_uv_profiles: vec![UvProfile::Kkdf2IntegerTruncated],
+        },
+    )
+}
+
+fn read_models(
+    source: &ProbeSource,
+    selection: SelectionFile,
+) -> Result<Vec<InspectionModel>, Box<dyn std::error::Error>> {
     if selection.schema_version != 1
         || selection.source_content_identity != source.content_identity()
         || !selection.inspect_model_geometry

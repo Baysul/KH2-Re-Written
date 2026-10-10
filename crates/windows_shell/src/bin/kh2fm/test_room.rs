@@ -173,6 +173,9 @@ struct AreaConfig {
     entrance: u8,
     /// Progress flag ranges set in ascending order before loading.
     story: Vec<[u32; 2]>,
+    /// Unattended runs stand still instead of walking to an exit.
+    #[serde(default)]
+    stay: bool,
 }
 
 #[derive(Deserialize)]
@@ -451,6 +454,14 @@ impl World for RoomWorld {
     }
 }
 
+/// Window art, font, text colour and the Talk label for field talks.
+struct AreaTalk {
+    sheet: Sheet,
+    font: SystemFont,
+    colour: u32,
+    label: Vec<u8>,
+}
+
 /// The current area and the files to load the next one.
 #[derive(Resource)]
 struct AreaRes {
@@ -462,6 +473,13 @@ struct AreaRes {
     pending: Option<(u8, u8, u8)>,
     /// The area-change presentation in progress.
     transition: Option<Transition>,
+    /// Unattended runs walk toward an exit (false = stand still).
+    explore: bool,
+    /// The townsperson the talk resource currently points at.
+    talk_npc: Option<usize>,
+    was_talking: bool,
+    /// Ticks an NPC keeps still after a talk (after_talk waits 60).
+    hold: Vec<u32>,
 }
 
 /// Same-world area change (FUN_140156520 mode 0 / FUN_1401561b0): the
@@ -805,6 +823,9 @@ struct Loaded {
     world: RoomWorld,
     /// The field area, when the room is a game area.
     area: Option<(AreaSource, LoadedArea)>,
+    /// Message window art, font and labels for townspeople talk.
+    area_talk: Option<AreaTalk>,
+    stay: bool,
     summary: serde_json::Value,
     hud: Option<HudSource>,
     enemy: Option<EnemySource>,
@@ -1278,7 +1299,7 @@ fn floor_levels(triangles: &[CollisionTriangle]) -> Vec<(f32, [f32; 3])> {
 }
 
 fn load(
-    source: &ProbeSource,
+    source: &Arc<ProbeSource>,
     config_path: &Path,
     basic_fk: bool,
 ) -> Result<Loaded, Box<dyn std::error::Error>> {
@@ -1342,7 +1363,7 @@ fn load(
                 let world =
                     area_sim::progress::world_index(&a.world).ok_or("unknown world code")?;
                 let story: Vec<(u32, u32)> = a.story.iter().map(|r| (r[0], r[1])).collect();
-                let mut src = AreaSource::open(source, &story)?;
+                let mut src = AreaSource::open(Arc::clone(source), &story)?;
                 let (room, loaded) = src.load(world, a.area, a.entrance)?;
                 area_load = Some((src, loaded));
                 (room, None)
@@ -2192,9 +2213,50 @@ fn load(
         )?),
         None => None,
     };
+    let area_talk = match (&area_load, &config.menu) {
+        (Some((src, area)), Some(menu)) => {
+            let loc = |name: &str| src.locate(name).ok_or(format!("{name} is not installed"));
+            let (fi, fm) = (loc("msg/us/fontinfo.bar")?, loc("msg/us/fontimage.bar")?);
+            let code = area_sim::progress::WORLDS[area.world as usize];
+            let wm = loc(&format!("msg/us/{code}.bar"))?;
+            let sheet = hud::load_window_sheet(
+                source,
+                (fi.0.as_str(), fi.1, fi.2),
+                (wm.0.as_str(), wm.1, wm.2),
+            )?;
+            let font = hud::load_font(
+                source,
+                (fm.0.as_str(), fm.1, fm.2),
+                (fi.0.as_str(), fi.1, fi.2),
+                b"evt ",
+            )?;
+            let colour = hud::ftst_colour(
+                &read_archive(source, &config.system)?,
+                5,
+                area.world as usize,
+            )?;
+            let label = hud::load_messages(
+                source,
+                &menu.messages.index,
+                menu.messages.ordinal,
+                menu.messages.name_hash,
+                &[TALK_LABEL],
+            )?
+            .remove(0);
+            Some(AreaTalk {
+                sheet,
+                font,
+                colour,
+                label,
+            })
+        }
+        _ => None,
+    };
     Ok(Loaded {
         room,
         arena_mesh,
+        area_talk,
+        stay: config.area.as_ref().is_some_and(|a| a.stay),
         actor,
         weapon,
         params,
@@ -2684,6 +2746,15 @@ fn area_transition(
         root.0,
         show,
     );
+    spawn_field_npcs(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &area.source,
+        &next,
+        root.0,
+    );
     game.world = RoomWorld::Map(MapWorld::new(next.take_collision()));
     let (position, yaw) = next.player;
     game.player = Player::new(position.to_array(), yaw);
@@ -2709,6 +2780,180 @@ fn area_transition(
             .and_then(|h| h.iris.as_ref())
             .map(|s| sequence::Player::new(&s.sequence, 0));
         t.fade.fade_in(1, false);
+    }
+}
+
+/// Component marking a townsperson's root and its mesh parts.
+#[derive(Component)]
+struct FieldNpcRoot(usize);
+#[derive(Component)]
+struct FieldNpcPart {
+    npc: usize,
+    ordinal: usize,
+}
+
+/// Creates the meshes of an area's townspeople under `parent` (tagged
+/// `RoomPart` so an area change removes them).
+fn spawn_field_npcs(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    source: &AreaSource,
+    area: &LoadedArea,
+    parent: Entity,
+) {
+    for (i, npc) in area.npcs.iter().enumerate() {
+        let kind = &source.kinds[npc.kind];
+        let root = commands
+            .spawn((
+                RoomPart,
+                FieldNpcRoot(i),
+                ChildOf(parent),
+                Transform::from_translation(npc.position)
+                    .with_rotation(Quat::from_rotation_y(npc.yaw)),
+                Visibility::default(),
+            ))
+            .id();
+        for (ordinal, entity) in spawn_model(
+            commands,
+            &kind.model,
+            npc.frame_positions(&kind.anims),
+            root,
+            meshes,
+            materials,
+            images,
+        ) {
+            if let Some(entity) = entity {
+                commands
+                    .entity(entity)
+                    .insert((RoomPart, FieldNpcPart { npc: i, ordinal }));
+            }
+        }
+    }
+}
+
+/// One tick of every townsperson, and the choice of whom Talk addresses:
+/// the nearest with a script whose reaction sphere holds Sora
+/// (FUN_140407de0). Talking NPCs stand still; after a talk they face Sora
+/// and wait 60 ticks (rtn after_talk, npc-01 §2.4).
+fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<ResMut<Talk>>) {
+    let (Some(mut area), Some(mut talk)) = (area, talk) else {
+        return;
+    };
+    let AreaRes {
+        source,
+        current,
+        talk_npc,
+        was_talking,
+        hold,
+        ..
+    } = &mut *area;
+    if hold.len() != current.npcs.len() {
+        *hold = vec![0; current.npcs.len()];
+        *talk_npc = None;
+    }
+    let sora = Vec3::from_array(game.player.position);
+    let talking = talk.active.is_some();
+    if *was_talking
+        && !talking
+        && let Some(i) = *talk_npc
+    {
+        let to = sora - current.npcs[i].position;
+        current.npcs[i].yaw = to.x.atan2(to.z);
+        hold[i] = 60;
+    }
+    *was_talking = talking;
+    if !talking {
+        let mut best: Option<(f32, usize)> = None;
+        for (i, n) in current.npcs.iter().enumerate() {
+            if n.talk == 0 || n.reaction != 0x1f || !current.scripts.contains_key(&n.talk) {
+                continue;
+            }
+            if source.kinds[n.kind].target.is_none() {
+                continue;
+            }
+            let d = (n.position + Vec3::Y * REACTION_SPHERE[2]) - (sora + Vec3::Y * SORA_OBJ[2]);
+            let (r, h) = (
+                REACTION_SPHERE[0] + SORA_OBJ[0],
+                REACTION_SPHERE[1] + SORA_OBJ[1],
+            );
+            if (d.x * d.x + d.z * d.z) / (r * r) + d.y * d.y / (h * h) < 1. {
+                let dist = d.x.hypot(d.z);
+                if best.is_none_or(|(b, _)| dist < b) {
+                    best = Some((dist, i));
+                }
+            }
+        }
+        match best {
+            Some((_, i)) => {
+                let n = &current.npcs[i];
+                let kind = &source.kinds[n.kind];
+                let t = kind.target.as_ref().expect("candidate has a target shape");
+                talk.position = n.position;
+                talk.yaw = n.yaw;
+                talk.home_yaw = n.yaw;
+                talk.target = Shape {
+                    bone: t.bone,
+                    offset: t.offset,
+                    pos_h: t.pos_h,
+                    radius: t.radius,
+                    height: t.height,
+                };
+                talk.bones = vec![n.bone(&kind.anims).map(|m| (t.bone, m)).into_iter().collect()];
+                if *talk_npc != Some(i) {
+                    talk.script = current.scripts[&n.talk].clone();
+                    talk.lines = current.lines.clone();
+                    *talk_npc = Some(i);
+                }
+            }
+            None => {
+                talk.position = Vec3::splat(1.0e9);
+                *talk_npc = None;
+            }
+        }
+    }
+    for (i, n) in current.npcs.iter_mut().enumerate() {
+        let is_target = talking && *talk_npc == Some(i);
+        if is_target {
+            n.yaw = talk.yaw;
+        }
+        let held = is_target || hold[i] > 0;
+        hold[i] = hold[i].saturating_sub(1);
+        let kind = &source.kinds[n.kind];
+        n.tick(&kind.anims, held);
+    }
+}
+
+/// Places and poses the townspeople.
+fn field_npc_present(
+    area: Option<Res<AreaRes>>,
+    mut roots: Query<(&FieldNpcRoot, &mut Transform)>,
+    parts: Query<(&FieldNpcPart, &Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let Some(area) = area else { return };
+    let (kinds, npcs) = (&area.source.kinds, &area.current.npcs);
+    for (root, mut t) in &mut roots {
+        if let Some(n) = npcs.get(root.0) {
+            t.translation = n.position;
+            t.rotation = Quat::from_rotation_y(n.yaw);
+        }
+    }
+    for (part, handle) in &parts {
+        let Some(n) = npcs.get(part.npc) else {
+            continue;
+        };
+        let kind = &kinds[n.kind];
+        let frame = n.frame_positions(&kind.anims);
+        let positions: Vec<[f32; 3]> = kind.model.parts[part.ordinal]
+            .indices
+            .iter()
+            .map(|&i| frame[i as usize].to_array())
+            .collect();
+        if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        }
     }
 }
 
@@ -2828,6 +3073,7 @@ fn setup(
     talk: Option<ResMut<Talk>>,
     mut frame: ResMut<Ui2dFrame>,
     windows: Query<&Window>,
+    area: Option<Res<AreaRes>>,
 ) {
     let room = startup.room.take().expect("room retained for setup");
     let mut compose = Compose {
@@ -2940,6 +3186,17 @@ fn setup(
         world,
         game.show_collision,
     );
+    if let Some(a) = &area {
+        spawn_field_npcs(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+            &a.source,
+            &a.current,
+            world,
+        );
+    }
     commands.insert_resource(SceneRoot(world));
     let actor = startup.actor.take().expect("actor retained for setup");
     let weapon = startup.weapon.take().expect("weapon retained for setup");
@@ -3464,7 +3721,10 @@ fn simulate(
     let direction = forward * stick.y + right * stick.x;
     // Unattended area runs head for an exit that does not lead back to the
     // previous area, so each run walks a chain of areas.
-    let (direction, stick) = match area.as_deref().filter(|_| game.autoplay.is_some()) {
+    let (direction, stick) = match area
+        .as_deref()
+        .filter(|a| a.explore && game.autoplay.is_some())
+    {
         Some(a) if a.pending.is_none() && a.transition.is_none() => {
             let p = game.player.position;
             match area::exit_target(&a.current.state, a.previous, [p[0], p[2]]) {
@@ -3658,7 +3918,10 @@ fn simulate(
             serde_json::json!({"event":"state","tick":tick,"position":position,"yaw":yaw,
             "action":format!("{action:?}"),"camera_eye":rig.camera.eye,"camera_yaw":rig.camera.yaw,
             "camera_collision_triangles":rig.collision.len(),"camera_collision_hits":rig.collision_hits,
-            "enemy":enemy}),
+            "enemy":enemy,
+            "npcs":area.as_deref().map(|a| a.current.npcs.iter().map(|n| serde_json::json!({
+                "kind":a.source.kinds[n.kind].name,"position":n.position.to_array(),"yaw":n.yaw,
+                "pose":format!("{:?}", n.pose),"talk":n.talk})).collect::<Vec<_>>())}),
         );
     }
 }
@@ -5905,7 +6168,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             _ => return Err("unknown/duplicate test room option".into()),
         }
     }
-    let source = ProbeSource::bind_session(&args[0], &args[1])?;
+    let source = Arc::new(ProbeSource::bind_session(&args[0], &args[1])?);
     // Validate the log path now; the file is created only after admission.
     let log_path = match log_path {
         Some(path) => {
@@ -5938,12 +6201,17 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     for (action, clip) in &loaded.actions {
         poses.insert(*action, *clip);
     }
+    let stay = loaded.stay;
     let area_res = loaded.area.map(|(source, current)| AreaRes {
         source,
         current,
         previous: None,
         pending: None,
         transition: None,
+        explore: !stay,
+        talk_npc: None,
+        was_talking: false,
+        hold: Vec::new(),
     });
     let talk_room = loaded.npc.is_some();
     let mut player = Player::new(loaded.spawn.to_array(), loaded.yaw);
@@ -6059,7 +6327,42 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 Some(n.model),
             )
         }
-        None => (None, None),
+        None => (
+            loaded.area_talk.map(|t| Talk {
+                // Pointed at the nearest townsperson by field_npc_tick; far
+                // away until then so no reaction shows.
+                position: Vec3::splat(1.0e9),
+                yaw: 0.,
+                home_yaw: 0.,
+                tick: 0,
+                frames: vec![Vec::new()],
+                bones: vec![HashMap::new()],
+                loop_start: 0,
+                target: Shape {
+                    bone: 0,
+                    offset: Vec3::ZERO,
+                    pos_h: 0.,
+                    radius: 0.,
+                    height: 0.,
+                },
+                indices: Vec::new(),
+                sheet: t.sheet,
+                font: t.font,
+                lines: HashMap::new(),
+                colour: t.colour,
+                label: t.label,
+                script: Vec::new(),
+                active: None,
+                current: None,
+                closing: Vec::new(),
+                wait: 0.,
+                camera: None,
+                dissolve: 0,
+                snapshot: false,
+                reaction: None,
+            }),
+            None,
+        ),
     };
     let (effects, effect_atlas) = match loaded.effects {
         Some(e) => {
@@ -6268,6 +6571,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 (
                     simulate,
                     area_tick,
+                    field_npc_tick,
                     talk_tick,
                     effects_tick,
                     hud_tick,
@@ -6283,6 +6587,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             Update,
             (
                 area_transition,
+                field_npc_present,
                 dissolve_present,
                 camera_control,
                 present,
