@@ -1023,6 +1023,8 @@ struct EnemyRuntime {
     shadow_attacker: combat::AttackerStats,
     sora_target: combat::TargetStats,
     sora_body: Vec<(usize, Vec3, f32, bool)>,
+    /// Summed TARGET radii for aerial hops (FUN_1403d7520).
+    target_reach: f32,
     /// Claw instances that already hit Sora, and last claw centres.
     sora_hit_by: Vec<u64>,
     claw_previous: HashMap<(u64, usize), Vec3>,
@@ -1065,6 +1067,8 @@ struct EnemySource {
     shadow_attacker: combat::AttackerStats,
     sora_target: combat::TargetStats,
     sora_body: Vec<(usize, Vec3, f32, bool)>,
+    /// Summed TARGET radii for aerial hops (FUN_1403d7520).
+    target_reach: f32,
     hit_sounds: HashMap<u16, i32>,
     hit_effects: HashMap<u16, (u8, u8)>,
     rows: HashMap<u16, package_reader::battle_tables::Attack>,
@@ -1348,9 +1352,20 @@ fn load(
     )?);
     ids.extend(SORA_GUARD);
     // Sora's HIT spheres (object collision type 2), for enemy attacks.
+    let mut sora_target_radius = 0f32;
     let sora_body: Vec<(usize, Vec3, f32, bool)> = match &config.enemy {
         Some(e) => {
-            object_collision::read(bar_entry_typed(&read_archive(source, &e.actor_model)?, 23)?)?
+            let shapes = object_collision::read(bar_entry_typed(
+                &read_archive(source, &e.actor_model)?,
+                23,
+            )?)?;
+            // FUN_1403d7520 reads the attacker's TARGET shape (kind 3) via
+            // FUN_1403b5650(obj, 3, -1) / FUN_1403c9c00.
+            sora_target_radius = shapes
+                .iter()
+                .find(|c| c.kind == object_collision::TARGET)
+                .map_or(0., |c| c.radius as f32);
+            shapes
                 .iter()
                 .filter(|c| c.kind == object_collision::HIT && c.group == 0 && c.bone >= 0)
                 .map(|c| {
@@ -1936,6 +1951,7 @@ fn load(
             &battle,
             &clip_poses,
             sora_body,
+            sora_target_radius,
         )?),
         None => None,
     };
@@ -1973,6 +1989,7 @@ fn load_enemy(
     battle: &[u8],
     clip_poses: &[ClipPoses],
     sora_body: Vec<(usize, Vec3, f32, bool)>,
+    sora_target_radius: f32,
 ) -> Result<EnemySource, Box<dyn std::error::Error>> {
     use package_reader::battle_tables;
     let mut models =
@@ -1983,6 +2000,13 @@ fn load_enemy(
     let model = models.remove(0);
     let collision =
         object_collision::read(bar_entry_typed(&read_archive(source, &config.model)?, 23)?)?;
+    // FUN_1403d7520: Sora's TARGET radius plus the target's own shape
+    // radius (FUN_1403be0f0) [I: the enemy's TARGET entry].
+    let target_reach = sora_target_radius
+        + collision
+            .iter()
+            .find(|c| c.kind == object_collision::TARGET)
+            .map_or(0., |c| c.radius as f32);
     let mut claws: HashMap<u8, Vec<(usize, Vec3, f32)>> = HashMap::new();
     for e in collision
         .iter()
@@ -2201,6 +2225,7 @@ fn load_enemy(
         shadow_attacker,
         sora_target,
         sora_body,
+        target_reach,
         hit_sounds,
         hit_effects,
         rows,
@@ -3054,6 +3079,7 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
                 rt.enemy.position[0] - p[0],
                 rt.enemy.position[1] - p[1],
                 rt.enemy.position[2] - p[2],
+                rt.target_reach,
             ]
         });
     let input = Input {
@@ -3063,9 +3089,7 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
         guard,
         target: target.map(|t| [t[0], t[2]]),
         target_rise: target.map_or(0., |t| t[1]),
-        // Test-room choice for FUN_1403d7520's summed body radii: Sora's
-        // body radius twice.
-        target_reach: 2. * BODY_RADIUS,
+        target_reach: target.map_or(0., |t| t[3]),
     };
     let Game {
         player,
@@ -5521,7 +5545,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             "hit_spheres":e.body.len(),"blade_groups":e.blade.keys().collect::<Vec<_>>(),"position":spawn,
             "claw_groups":e.claws.iter().map(|(g, v)| (g.to_string(), v.len())).collect::<HashMap<_, _>>(),
             "claw_windows":e.clips.0.iter().filter(|(_, c)| !c.windows.is_empty()).map(|(s, c)| (s.to_string(), c.windows.clone())).collect::<HashMap<_, _>>(),
-            "sora_hit_spheres":e.sora_body.len(),"sora_target":format!("{:?}", e.sora_target),"shadow_attacker":format!("{:?}", e.shadow_attacker)}));
+            "sora_hit_spheres":e.sora_body.len(),"target_reach":e.target_reach,"sora_target":format!("{:?}", e.sora_target),"shadow_attacker":format!("{:?}", e.shadow_attacker)}));
         enemy_model = Some(e.model);
         game.enemy = Some(EnemyRuntime {
             clips: e.clips,
@@ -5536,6 +5560,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             shadow_attacker: e.shadow_attacker,
             sora_target: e.sora_target,
             sora_body: e.sora_body,
+            target_reach: e.target_reach,
             sora_hit_by: Vec::new(),
             claw_previous: HashMap::new(),
             sora_hp: e.sora_target.max_hp,
