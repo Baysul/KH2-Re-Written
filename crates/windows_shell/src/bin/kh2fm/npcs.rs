@@ -64,6 +64,9 @@ pub struct NpcKind {
     pub model: InspectionModel,
     pub anims: Anims,
     pub target: Option<TargetShape>,
+    /// The type-0 (map collision) shape the meet test overlaps: centre
+    /// height, radius, height (shape 0/3 ellipsoid, npc-01 section 3.5).
+    pub body: [f32; 3],
 }
 
 /// Motion slots of an RTN set: 0 R00A idle, 1 R10A walk, 129 R50A turn in
@@ -206,6 +209,12 @@ impl NpcKind {
                 extra.insert(s, a);
             }
         }
+        let body = collision
+            .iter()
+            .find(|e| e.kind == 0)
+            .map_or([115., 90., 90.], |e| {
+                [e.position_height as f32, e.radius as f32, e.height as f32]
+            });
         let look_limit = collision
             .iter()
             .find(|e| e.kind == LOOK_SHAPE)
@@ -221,6 +230,7 @@ impl NpcKind {
             },
             model,
             target,
+            body,
         })
     }
 }
@@ -542,6 +552,8 @@ enum IrqKind {
     Zone,
     /// A "stop" zone action (type 6): the NPC stays put for good.
     Stop,
+    /// Meeting another townsperson (type 5, kind 1: face the partner).
+    Meet,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -549,6 +561,8 @@ enum Face {
     Keep,
     Sora,
     Point(Vec3),
+    /// The meeting partner (position refreshed each tick).
+    Partner,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -631,6 +645,16 @@ pub struct FieldNpc {
     irq: Irq,
     /// prev.type == 4 and the cooldown (cc8).
     prev_encounter: bool,
+    /// prev.type == 5.
+    prev_meet: bool,
+    /// objentry id (the meet records name partners by it).
+    pub object: u32,
+    /// Index of the meeting partner while a type-5 interrupt runs.
+    pub partner: Option<usize>,
+    /// The partner's position, refreshed by `update_meets` each tick.
+    partner_position: Vec3,
+    /// The partner still points at this NPC and is not talking.
+    partner_active: bool,
     cooldown: f32,
     current_zone: Option<usize>,
     act: Act,
@@ -729,6 +753,11 @@ impl FieldNpc {
             actions: Vec::new(),
             irq: Irq::NONE,
             prev_encounter: false,
+            prev_meet: false,
+            object: entity.object,
+            partner: None,
+            partner_position: Vec3::ZERO,
+            partner_active: false,
             cooldown: 0.,
             current_zone: None,
             act: if fixed { Act::Fixed(0) } else { Act::Static },
@@ -880,6 +909,11 @@ impl FieldNpc {
         if self.irq.kind == IrqKind::Encounter && !self.in_range(sora) {
             return true;
         }
+        // Type 5 goes on only while the partner still points at this NPC
+        // and is not playing the talk motion.
+        if self.irq.kind == IrqKind::Meet && !self.partner_active {
+            return true;
+        }
         !(self.irq.fired && self.irq.timer > 0.)
     }
 
@@ -887,6 +921,8 @@ impl FieldNpc {
     /// type ended (the exe reads the type after clearing it).
     fn end_irq(&mut self) {
         self.prev_encounter = self.irq.kind == IrqKind::Encounter;
+        self.prev_meet = self.irq.kind == IrqKind::Meet;
+        self.partner = None;
         self.irq = Irq::NONE;
         self.cooldown = COOLDOWN;
     }
@@ -895,7 +931,7 @@ impl FieldNpc {
     fn handle(&mut self) {
         match self.irq.kind {
             IrqKind::Encounter => self.act = Act::Encounter(Phase::Wait(20)),
-            IrqKind::Zone => {
+            IrqKind::Zone | IrqKind::Meet => {
                 self.pose = Pose::Slot(self.irq.motion);
                 self.act = Act::Action;
             }
@@ -912,7 +948,9 @@ impl FieldNpc {
         let to = sora - self.position;
         self.yaw = to.x.atan2(to.z);
         self.irq = Irq::NONE;
+        self.partner = None;
         self.prev_encounter = true;
+        self.prev_meet = false;
         self.cooldown = TALK_COOLDOWN;
         self.act = if let Act::Fixed(s) = self.act {
             Act::Fixed(s)
@@ -1020,6 +1058,7 @@ impl FieldNpc {
                             Face::Keep => None,
                             Face::Sora => Some(sora - self.position),
                             Face::Point(p) => Some(p - self.position),
+                            Face::Partner => Some(self.partner_position - self.position),
                         };
                         if let Some(mut d) = to {
                             d.y = 0.;
@@ -1154,6 +1193,120 @@ impl FieldNpc {
     }
 }
 
+/// The meeting time (ce4..ce8, npc-01 section 2.4 timing table).
+const MEET_TIME: (f32, f32) = (360., 720.);
+
+impl FieldNpc {
+    /// FUN_140417fd0: the record with zone 0 naming `other` as partner.
+    fn meet_entry(&self, other: u32) -> Option<Action> {
+        self.actions
+            .iter()
+            .find(|a| a.zone == 0 && a.args[0].to_bits() == other)
+            .copied()
+    }
+
+    /// Whether this NPC's detect takes the "not near Sora" branch and may
+    /// look for a meeting (type not 4 or 5, no meet cooldown running).
+    fn may_meet(&self, sora: Vec3) -> bool {
+        let branch = self.irq.kind == IrqKind::Encounter
+            || (self.prev_encounter && self.cooldown > 0.)
+            || !self.in_range(sora);
+        branch
+            && !matches!(self.irq.kind, IrqKind::Encounter | IrqKind::Meet)
+            && !(self.prev_meet && self.cooldown > 0.)
+            && !matches!(self.act, Act::Fixed(_))
+    }
+
+    fn facing(&self) -> Vec3 {
+        Vec3::new(self.yaw.sin(), 0., self.yaw.cos())
+    }
+
+    /// set5 of FUN_1404179e0.
+    fn start_meet(&mut self, entry: Action, partner: usize, ticks: f32, reverse: bool) {
+        self.irq = Irq {
+            kind: IrqKind::Meet,
+            timer: ticks,
+            immediate: true,
+            face: Face::Partner,
+            reverse_after: reverse,
+            motion: entry.motion(),
+            ..Irq::NONE
+        };
+        self.partner = Some(partner);
+    }
+}
+
+/// The NPC-meet scan of FUN_1404179e0, run for every townsperson before
+/// its tick. `body(kind)` is the kind's type-0 shape [centre height, r, h].
+pub fn update_meets(
+    npcs: &mut [FieldNpc],
+    body: impl Fn(usize) -> [f32; 3],
+    sora: Vec3,
+    rng: &mut Lcg,
+) {
+    // Refresh each running meet's view of its partner first.
+    for i in 0..npcs.len() {
+        if npcs[i].irq.kind != IrqKind::Meet {
+            continue;
+        }
+        let (pos, active) = match npcs[i].partner {
+            Some(j) if j < npcs.len() && npcs[j].alive => (
+                npcs[j].position,
+                npcs[j].irq.kind == IrqKind::Meet
+                    && npcs[j].partner == Some(i)
+                    && npcs[j].pose != Pose::Slot(TALK_SLOT),
+            ),
+            _ => (npcs[i].position, false),
+        };
+        npcs[i].partner_position = pos;
+        npcs[i].partner_active = active;
+    }
+    for i in 0..npcs.len() {
+        if !npcs[i].alive || !npcs[i].may_meet(sora) {
+            continue;
+        }
+        let mine = body(npcs[i].kind);
+        // The first other object whose type-0 shape overlaps.
+        let Some(j) = (0..npcs.len()).find(|&j| {
+            if j == i || !npcs[j].alive {
+                return false;
+            }
+            let theirs = body(npcs[j].kind);
+            let a = npcs[i].position + Vec3::Y * mine[0];
+            let b = npcs[j].position + Vec3::Y * theirs[0];
+            let d = a - b;
+            let (r, h) = (mine[1] + theirs[1], mine[2] + theirs[2]);
+            (d.x * d.x + d.z * d.z) / (r * r) + d.y * d.y / (h * h) < 1.
+        }) else {
+            continue;
+        };
+        if npcs[j].irq.fired {
+            continue;
+        }
+        let (Some(e1), Some(e2)) = (
+            npcs[i].meet_entry(npcs[j].object),
+            npcs[j].meet_entry(npcs[i].object),
+        ) else {
+            continue;
+        };
+        let ticks = range(rng, MEET_TIME);
+        let s = {
+            let (a, b) = (npcs[i].facing(), npcs[j].facing());
+            a.normalize_or_zero().dot(b.normalize_or_zero())
+        };
+        npcs[i].prev_encounter = false;
+        npcs[i].prev_meet = false;
+        npcs[i].start_meet(e1, j, ticks, true);
+        npcs[j].prev_encounter = false;
+        npcs[j].prev_meet = false;
+        npcs[j].start_meet(e2, i, ticks, s < 0.);
+        npcs[i].partner_position = npcs[j].position;
+        npcs[j].partner_position = npcs[i].position;
+        npcs[i].partner_active = true;
+        npcs[j].partner_active = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1232,6 +1385,11 @@ mod tests {
             actions: Vec::new(),
             irq: Irq::NONE,
             prev_encounter: false,
+            prev_meet: false,
+            object: 0,
+            partner: None,
+            partner_position: Vec3::ZERO,
+            partner_active: false,
             cooldown: 0.,
             current_zone: None,
             act: Act::Path,
@@ -1329,5 +1487,72 @@ mod probe_tests {
             assert!(a.dot(b) > 0.9, "forward {forward}: {a:?} {b:?} t {}", r.t);
             eprintln!("forward {forward}: {a:?} {b:?} t {}", r.t);
         }
+    }
+}
+
+#[cfg(test)]
+mod meet_tests {
+    use super::*;
+
+    fn npc(object: u32, at: Vec3, partner_object: u32) -> FieldNpc {
+        let entity = ArdEntity {
+            object,
+            position: [at.x, -at.y, -at.z],
+            rotation: [0.; 3],
+            spawn_type: 0,
+            spawn_arg: 0,
+            serial: 0,
+            arg1: 0,
+            arg2: 0,
+            talk: 0,
+            respawn_delay: 0,
+            reaction: 0,
+            radius: 0,
+            required_count: 0,
+            raw: [0; 0x40],
+        };
+        let mut n = FieldNpc::spawn(0, &entity, 0, None, &mut Lcg(1));
+        n.act = Act::Static;
+        n.set_behaviour(
+            Vec::new(),
+            vec![Action {
+                zone: 0,
+                kind: 5,
+                rate: 0,
+                entry: 1,
+                args: [f32::from_bits(partner_object), 0., 0.],
+            }],
+        );
+        n
+    }
+
+    #[test]
+    fn two_townspeople_with_matching_records_meet() {
+        let far = Vec3::new(1e6, 0., 1e6);
+        let mut npcs = vec![
+            npc(10, Vec3::ZERO, 11),
+            npc(11, Vec3::new(100., 0., 0.), 10),
+            npc(12, Vec3::new(5000., 0., 0.), 10),
+        ];
+        update_meets(&mut npcs, |_| [115., 90., 90.], far, &mut Lcg(5));
+        assert_eq!(npcs[0].irq.kind, IrqKind::Meet);
+        assert_eq!(npcs[1].irq.kind, IrqKind::Meet);
+        assert_eq!(npcs[0].partner, Some(1));
+        assert_eq!(npcs[1].partner, Some(0));
+        assert_eq!(npcs[2].irq.kind, IrqKind::None);
+        // Both stop at once on the meet motion.
+        assert!(npcs[0].pending());
+        assert!(npcs[1].pending());
+    }
+
+    #[test]
+    fn a_meet_needs_both_records() {
+        let far = Vec3::new(1e6, 0., 1e6);
+        let mut npcs = vec![
+            npc(10, Vec3::ZERO, 11),
+            npc(11, Vec3::new(100., 0., 0.), 99),
+        ];
+        update_meets(&mut npcs, |_| [115., 90., 90.], far, &mut Lcg(5));
+        assert_eq!(npcs[0].irq.kind, IrqKind::None);
     }
 }

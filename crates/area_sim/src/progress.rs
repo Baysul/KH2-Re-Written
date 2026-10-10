@@ -41,6 +41,12 @@ pub struct Progress {
     /// world code).
     scripts: Vec<Option<Vec<u8>>>,
     pub skipped: Skipped,
+    /// 00progress.bin 'dsa': `{world, area}` per blockable destination
+    /// (`DAT_142ae5ab8`, FUN_1403f0560).
+    dsa: Vec<[u8; 2]>,
+    /// `{message/flag, message2}` per 'dsa' entry (`DAT_1409ab7a8`); a
+    /// non-zero first word blocks the destination.
+    dsa_state: Vec<[u16; 2]>,
 }
 
 impl Progress {
@@ -53,7 +59,48 @@ impl Progress {
             world_records: [[0; 2]; 19],
             scripts,
             skipped: Vec::new(),
+            dsa: Vec::new(),
+            dsa_state: Vec::new(),
         }
+    }
+
+    /// The 'dsa' entry: `u16 count`, then `count` `{world, area}` bytes.
+    pub fn set_dsa(&mut self, bytes: &[u8]) {
+        let count = bytes
+            .get(..2)
+            .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]) as usize);
+        self.dsa = bytes
+            .get(2..)
+            .unwrap_or(&[])
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .take(count)
+            .copied()
+            .collect();
+        self.dsa_state = vec![[0; 2]; self.dsa.len()];
+    }
+
+    /// Destinations whose 'dsa' state word is set.
+    pub fn blocked_destinations(&self) -> Vec<(u8, u8)> {
+        self.dsa
+            .iter()
+            .zip(&self.dsa_state)
+            .filter(|(_, s)| s[0] != 0)
+            .map(|(&[w, a], _)| (w, a))
+            .collect()
+    }
+
+    /// FUN_1403f0560 / FUN_1403f0470: the message word of the first 'dsa'
+    /// entry for the destination while it is blocked. The exe's second
+    /// route (a world-0x10 special table) does not apply to other worlds.
+    pub fn blocked(&self, world: u8, area: u8) -> Option<u16> {
+        let i = self
+            .dsa
+            .iter()
+            .position(|&[w, a]| w == world && a == area)?;
+        let m = self.dsa_state[i][0];
+        (m != 0).then_some(m)
     }
 
     fn word(flag: u32) -> (usize, u32) {
@@ -114,6 +161,20 @@ impl Progress {
                 .map_while(|i| read(at + 2 + i * 2))
                 .collect();
             match op {
+                // FUN_1403f0430 / FUN_1403f0450 / FUN_1403f0600 /
+                // FUN_1403f0650 on 'dsa' entry `words[0]`.
+                2..=5 => {
+                    if let Some(e) = words
+                        .first()
+                        .and_then(|&i| self.dsa_state.get_mut(i as usize))
+                    {
+                        e[0] = match op {
+                            2 => words.get(1).copied().unwrap_or(0),
+                            3 | 5 => 0,
+                            _ => 0xffff,
+                        };
+                    }
+                }
                 1 => {
                     for r in words.as_chunks::<4>().0.iter().take((n >> 2) as usize) {
                         self.write_programs(world * AREAS_PER_WORLD + r[0] as usize, &r[1..]);
@@ -228,5 +289,30 @@ mod tests {
         p.write_programs(GUARDED_ENTRY - 1, &[3, 0xffff, 0xffff]);
         assert_eq!(p.programs[GUARDED_ENTRY - 1][0], 3);
         assert_eq!(GUARDED_ENTRY, 4 * 0x40 + 18);
+    }
+
+    #[test]
+    fn dsa_ops_block_and_unblock_destinations() {
+        // 'dsa': two entries {tt, 3} and {tt, 4}; slot 0 blocks entry 0
+        // (op 4) and sets entry 1's message (op 2); slot 1 unblocks 0.
+        let mut d: Vec<u8> = vec![4, 0, 0, 0];
+        let slot0 = d.len() as u16;
+        d.extend([4, 1, 0, 0, 2, 2, 1, 0, 0x34, 0x12, 0, 0]);
+        let slot1 = d.len() as u16;
+        d.extend([5, 1, 0, 0, 0, 0]);
+        d[0..2].copy_from_slice(&slot0.to_le_bytes());
+        d[2..4].copy_from_slice(&slot1.to_le_bytes());
+        let mut v = vec![None; 19];
+        v[2] = Some(d);
+        let mut p = Progress::new(v);
+        p.set_dsa(&[2, 0, 2, 3, 2, 4]);
+        assert_eq!(p.blocked(2, 3), None);
+        p.set(0x800);
+        assert_eq!(p.blocked(2, 3), Some(0xffff));
+        assert_eq!(p.blocked(2, 4), Some(0x1234));
+        assert_eq!(p.blocked_destinations(), vec![(2, 3), (2, 4)]);
+        p.set(0x801);
+        assert_eq!(p.blocked(2, 3), None);
+        assert_eq!(p.blocked(2, 9), None);
     }
 }

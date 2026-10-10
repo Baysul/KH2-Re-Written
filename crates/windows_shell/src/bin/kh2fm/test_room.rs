@@ -497,6 +497,8 @@ struct AreaRes {
     banner: Option<(Vec<u8>, u32)>,
     /// The exit's destination name while facing a guide zone.
     guide: Option<Vec<u8>>,
+    /// Ticks left of a story-block disable reason.
+    guide_hold: u32,
     /// Areas Sora has stood in (their names show instead of "???").
     visited: std::collections::HashSet<u8>,
     /// The townsperson the talk resource currently points at.
@@ -3141,6 +3143,14 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
             }
         }
     }
+    if !talking {
+        crate::npcs::update_meets(
+            &mut current.npcs,
+            |k| source.kinds[k].body,
+            sora,
+            &mut random,
+        );
+    }
     for (i, n) in current.npcs.iter_mut().enumerate() {
         if !n.alive {
             continue;
@@ -4215,8 +4225,19 @@ fn simulate(
             moving,
             running,
         );
-        a.guide = None;
-        for request in area::requests(&mut a.current.state, &probe) {
+        // A disable reason stays for 6 s (FUN_140167ef0 param 6.0).
+        if a.guide_hold > 0 {
+            a.guide_hold -= 1;
+        } else {
+            a.guide = None;
+        }
+        let blocked = a.source.blocked_destinations();
+        let is_blocked = |w: u8, d: u8| blocked.contains(&(w, d));
+        for request in area::requests(&mut a.current.state, &probe, is_blocked) {
+            if let area_sim::Request::Blocked { world, area: dest } = &request {
+                a.guide = a.source.blocked_text(*world, *dest);
+                a.guide_hold = 360;
+            }
             if let area_sim::Request::Guide { area: dest, .. } = &request {
                 let known = a.visited.contains(dest);
                 a.guide = if known {
@@ -6653,6 +6674,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             .get(&current.area)
             .map(|t| (t.clone(), 120)),
         guide: None,
+        guide_hold: 0,
         visited: std::iter::once(current.area).collect(),
         source,
         current,

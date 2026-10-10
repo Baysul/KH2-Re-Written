@@ -330,9 +330,32 @@ pub fn tt_room_config(arena: &Path) -> Result<PathBuf, String> {
     for key in ["arena", "enemy", "spawn", "npc", "room_selection"] {
         o.remove(key);
     }
+    // KH2FM_TT_STORY=<last flag, e.g. 0x860> sets tt flags 0x800..=last
+    // (default: the whole first-visit range); KH2FM_TT_AREA=<area>[:<entrance>]
+    // picks the starting area.
+    let story = std::env::var("KH2FM_TT_STORY")
+        .ok()
+        .and_then(|v| {
+            let v = v.trim();
+            let v = v.strip_prefix("0x").map_or_else(
+                || v.parse::<u32>().ok(),
+                |h| u32::from_str_radix(h, 16).ok(),
+            )?;
+            (0x800..0x900).contains(&v).then_some([0x800, v])
+        })
+        .unwrap_or(TT_STORY);
+    let start = std::env::var("KH2FM_TT_AREA")
+        .ok()
+        .and_then(|v| {
+            let mut p = v.split(':');
+            let area = p.next()?.trim().parse::<u8>().ok()?;
+            let entrance = p.next().map_or(Some(0), |e| e.trim().parse::<u8>().ok())?;
+            Some((area, entrance))
+        })
+        .unwrap_or(TT_START);
     o.insert(
         "area".into(),
-        serde_json::json!({"world":"tt","area":TT_START.0,"entrance":TT_START.1,"story":[TT_STORY]}),
+        serde_json::json!({"world":"tt","area":start.0,"entrance":start.1,"story":[story]}),
     );
     let dir = arena.parent().unwrap_or(Path::new("."));
     let (out, next) = (

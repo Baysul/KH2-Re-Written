@@ -86,6 +86,9 @@ pub enum Request {
     /// FUN_140167fc0: show the destination's name this frame (opt 2
     /// appends sys 0x8add).
     Guide { world: u8, area: u8, suffix: bool },
+    /// FUN_140167ef0 with FUN_1403f0470's message: the destination is
+    /// story-blocked and the guide zone is faced (shown for 6 s).
+    Blocked { world: u8, area: u8 },
     /// Type 3: raise signal `signal` with the point id.
     Signal { signal: u32, id: u16 },
     /// Type 8: switch background groups (0-based).
@@ -370,13 +373,15 @@ fn exit(
             let f = forward(player.yaw);
             if v[0] * f[0] + v[1] * f[1] + v[2] * f[2] >= 0.0 {
                 o.flags |= 0x10;
-                if !is_blocked {
-                    return Some(Request::Guide {
+                return Some(if is_blocked {
+                    Request::Blocked { world, area }
+                } else {
+                    Request::Guide {
                         world,
                         area,
                         suffix: z.option == 2,
-                    });
-                }
+                    }
+                });
             }
             None
         }

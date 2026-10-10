@@ -56,6 +56,8 @@ pub struct AreaSource {
     arif: Vec<u8>,
     last_pair: Option<[u16; 2]>,
     pub unknown_place: Vec<u8>,
+    /// Disable-reason texts by 'dsa' message word.
+    reasons: HashMap<u16, Vec<u8>>,
     /// The ARD language directory (`*0x1408ec5d0`; "us" in this build).
     language: &'static str,
 }
@@ -130,6 +132,12 @@ impl AreaSource {
             })
             .collect();
         let mut progress = Progress::new(scripts);
+        if let Some(e) = table.entries.iter().find(|e| e.name_bytes[..3] == *b"dsa")
+            && let Some(b) =
+                progress_bytes.get(e.offset as usize..e.offset as usize + e.size as usize)
+        {
+            progress.set_dsa(b);
+        }
         for &(first, last) in story {
             for flag in first..=last {
                 if !progress.test(flag) {
@@ -193,6 +201,7 @@ impl AreaSource {
             last_pair: None,
             place_names,
             unknown_place,
+            reasons: HashMap::new(),
             objects,
             object_index,
             kinds: Vec::new(),
@@ -336,6 +345,32 @@ impl AreaSource {
         }
         self.last_pair = Some(pair);
         change
+    }
+
+    /// FUN_1403f0560: destinations currently story-blocked ('dsa').
+    pub fn blocked_destinations(&self) -> Vec<(u8, u8)> {
+        self.progress.blocked_destinations()
+    }
+
+    /// FUN_1403f0470 → FUN_1403ad9a0: the disable-reason message of a
+    /// blocked destination; a word with no message falls back to sys 0xadc.
+    pub fn blocked_text(&mut self, world: u8, area: u8) -> Option<Vec<u8>> {
+        let word = self.progress.blocked(world, area)?;
+        if let Some(t) = self.reasons.get(&word) {
+            return Some(t.clone());
+        }
+        let sys = self.library.find("msg/us/sys.bar")?;
+        let texts = hud::load_messages_optional(
+            &self.source,
+            sys.index,
+            sys.ordinal,
+            sys.name_hash,
+            &[word as u32, 0xadc],
+        )
+        .ok()?;
+        let text = texts.into_iter().flatten().next()?;
+        self.reasons.insert(word, text.clone());
+        Some(text)
     }
 
     /// The (index, ordinal, hash) of an installed file for the HUD loaders.
@@ -633,9 +668,12 @@ pub fn probe(position: Vec3, yaw: f32, moving: Option<[f32; 2]>, running: bool) 
 }
 
 /// What the area asks the field to do this tick.
-pub fn requests(area: &mut Area, probe: &PlayerProbe) -> Vec<Request> {
-    // 'dsa' story blocks start unset in this state [exit-01 §2.6 U].
-    area.tick(probe, false, |_, _| false)
+pub fn requests(
+    area: &mut Area,
+    probe: &PlayerProbe,
+    blocked: impl Fn(u8, u8) -> bool,
+) -> Vec<Request> {
+    area.tick(probe, false, blocked)
 }
 
 /// Scene direction (x, z) from `from` toward the nearest unfired exit
