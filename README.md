@@ -28,17 +28,13 @@ One program, `kh2fm`, opens the title screen, the arena test room or the talk te
 cargo run -p windows_shell --bin kh2fm --locked -- room '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/test-room.json'
 ```
 
-<<<<<<< Updated upstream
-`title` and `talk` take the same three paths with their own configuration. To launch by double-clicking, build `cargo build --release -p windows_shell --bin kh2fm --locked` and create `.local/test-room/launch.json`, `launch-talk.json` and `launch-title.json` in the checkout (the exe also checks `%LOCALAPPDATA%/KH2FinalRewrite/test-room-<name>.json`) with `steam_root`, `manifest`, `config` (and optional `options`); `target/release/kh2fm.exe` then opens the launcher window: it finds the Steam install (or lets you browse or drop the folder), checks it against the supported build, remembers it in `.local/test-room/launcher.json`, and offers the Title Screen and the combined Test Room (the arena plus the talk config's NPC; `kh2fm play` from the command line) ([T089](docs/tasks/T089-launcher.md)). `--basic-fk` selects the older T053 FK-only poses for comparison.
-=======
 `title` and `talk` take the same three paths with their own configuration.
->>>>>>> Stashed changes
 
 ### Double-click launch
 
 1. Build: `cargo build --release -p windows_shell --bin kh2fm --locked`
 2. In the checkout, create `.local/test-room/launch.json`, `launch-talk.json` and `launch-title.json` with `steam_root`, `manifest`, `config` (and optional `options`). The exe also checks `%LOCALAPPDATA%/KH2FinalRewrite/test-room-<name>.json`.
-3. Run `target/release/kh2fm.exe`, which shows a menu.
+3. Run `target/release/kh2fm.exe`, which opens the launcher window. It finds the Steam install (or lets you browse or drop the folder), checks it against the supported build, remembers it in `.local/test-room/launcher.json`, and offers the Title Screen and the combined Test Room (the arena plus the talk config's NPC; `kh2fm play` from the command line). See [T089](docs/tasks/T089-launcher.md).
 
 `--basic-fk` selects the older T053 FK-only poses for comparison.
 
