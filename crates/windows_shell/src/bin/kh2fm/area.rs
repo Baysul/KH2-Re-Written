@@ -49,6 +49,10 @@ pub struct AreaSource {
     pub kinds: Vec<NpcKind>,
     kind_index: HashMap<u32, usize>,
     rng: ScriptRandom,
+    /// Place names by area of the story world (msg/us/place.bin → sys.bar)
+    /// and the "???" shown for places not visited yet (sys 0x82b8).
+    pub place_names: HashMap<u8, Vec<u8>>,
+    pub unknown_place: Vec<u8>,
     /// The ARD language directory (`*0x1408ec5d0`; "us" in this build).
     language: &'static str,
 }
@@ -126,10 +130,44 @@ impl AreaSource {
             .enumerate()
             .map(|(i, o)| (o.object_id, i))
             .collect();
+        // place.bin: per world a table of {u16 message, u16 offset}, one
+        // record per area; the text is a sys.bar message.
+        let mut place_names = HashMap::new();
+        let mut unknown_place = Vec::new();
+        if let Ok(place) = library.read("msg/us/place.bin")
+            && let Ok(table) = bar::read_bar(&place)
+            && let Some(e) = table
+                .entries
+                .iter()
+                .find(|e| e.entry_type == 2 && e.name_bytes[..2] == *b"tt")
+            && let Some(rows) = place.get(e.offset as usize..e.offset as usize + e.size as usize)
+            && let Some(sys) = library.find("msg/us/sys.bar")
+        {
+            let ids: Vec<u32> = rows
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|r| u16::from_le_bytes([r[0], r[1]]) as u32)
+                .collect();
+            let mut all = ids.clone();
+            all.push(0x82b8);
+            if let Ok(texts) =
+                hud::load_messages_optional(&source, sys.index, sys.ordinal, sys.name_hash, &all)
+            {
+                for (area, t) in texts.iter().take(ids.len()).enumerate() {
+                    if let Some(t) = t {
+                        place_names.insert(area as u8, t.clone());
+                    }
+                }
+                unknown_place = texts.last().cloned().flatten().unwrap_or_default();
+            }
+        }
         Ok(Self {
             source,
             library,
             progress,
+            place_names,
+            unknown_place,
             objects,
             object_index,
             kinds: Vec::new(),

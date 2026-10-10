@@ -489,6 +489,13 @@ struct AreaRes {
     rendered: usize,
     /// The live background group mask (ARD scripts plus zone switches).
     bg_mask: u64,
+    /// The place name banner (text, frames left) shown on entering an
+    /// area (BILLBOARD_PLACE_M: 120 frames).
+    banner: Option<(Vec<u8>, u32)>,
+    /// The exit's destination name while facing a guide zone.
+    guide: Option<Vec<u8>>,
+    /// Areas Sora has stood in (their names show instead of "???").
+    visited: std::collections::HashSet<u8>,
     /// The townsperson the talk resource currently points at.
     talk_npc: Option<usize>,
     was_talking: bool,
@@ -2696,6 +2703,15 @@ fn spawn_model(
 /// FUN_14015f5f0 with the fade task FUN_140156f10).
 fn area_tick(area: Option<ResMut<AreaRes>>, hud: Option<ResMut<Hud>>) {
     let Some(mut area) = area else { return };
+    // The place name banner lives 120 frames (BILLBOARD_PLACE_M).
+    if area.transition.is_none()
+        && let Some(b) = area.banner.as_mut()
+    {
+        b.1 = b.1.saturating_sub(1);
+        if b.1 == 0 {
+            area.banner = None;
+        }
+    }
     let AreaRes {
         transition,
         pending,
@@ -2833,6 +2849,12 @@ fn area_transition(
         "entrance":entrance,"programs":next.programs,"bg_mask":format!("{:#x}", next.state.setup.bg_mask),
         "spawn":position.to_array(),"yaw":yaw}));
     area.previous = Some(area.current.area);
+    area.visited.insert(next.area);
+    area.banner = area
+        .source
+        .place_names
+        .get(&next.area)
+        .map(|t| (t.clone(), 120));
     area.bg_mask = next.state.setup.bg_mask;
     area.current = next;
     if let Some(t) = area.transition.as_mut() {
@@ -4151,7 +4173,16 @@ fn simulate(
             moving,
             running,
         );
+        a.guide = None;
         for request in area::requests(&mut a.current.state, &probe) {
+            if let area_sim::Request::Guide { area: dest, .. } = &request {
+                let known = a.visited.contains(dest);
+                a.guide = if known {
+                    a.source.place_names.get(dest).cloned()
+                } else {
+                    Some(a.source.unknown_place.clone())
+                };
+            }
             if let area_sim::Request::Jump {
                 world,
                 area,
@@ -5025,8 +5056,10 @@ fn hud_present(
     // The command menu (priorities 0x14b5..0x14b7) draws before the gauge
     // (7000).
     let mut draws: Vec<Draw> = Vec::new();
+    let mut menu_font = None;
     if let Some(m) = menu {
         let first = textures.len();
+        menu_font = Some((first + 1, m.font.widths.clone()));
         textures.push(Texture {
             rgba: &m.sheet.texture_rgba,
             size: m.sheet.texture_size.map(|v| v as usize),
@@ -5068,6 +5101,27 @@ fn hud_present(
     // The area-change iris (task priority 120000) and the fade (330000)
     // draw over the HUD.
     let white = [255u8; 16];
+    // Place name banner and the exit guide (system font, white).
+    if let (Some(a), Some((sheet, widths))) = (area.as_ref(), menu_font.as_ref())
+        && a.transition.is_none()
+    {
+        let sheet = *sheet;
+        let font = command::Font { widths, pad: 1 };
+        for (text, y) in [a.banner.as_ref().map(|b| &b.0), a.guide.as_ref()]
+            .into_iter()
+            .zip([192., 384.])
+            .filter_map(|(t, y)| t.map(|t| (t, y)))
+        {
+            let size = 20.;
+            let width = command::text_width(text, &font, size);
+            let origin = [256. - width / 2., y - 24. * size / 18.];
+            draws.push(Draw::Quads {
+                quads: command::text_quads_sized(text, origin, [1.; 4], &font, size),
+                z: 0,
+                sheet,
+            });
+        }
+    }
     if let Some(t) = area.as_ref().and_then(|a| a.transition.as_ref()) {
         if let (Some(sheet), Some(player)) = (iris.as_ref(), t.iris.as_ref()) {
             textures.push(Texture {
@@ -6551,6 +6605,12 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let area_res = loaded.area.map(|(source, current)| AreaRes {
         rendered: current.npcs.len(),
         bg_mask: current.state.setup.bg_mask,
+        banner: source
+            .place_names
+            .get(&current.area)
+            .map(|t| (t.clone(), 120)),
+        guide: None,
+        visited: std::iter::once(current.area).collect(),
         source,
         current,
         previous: None,
