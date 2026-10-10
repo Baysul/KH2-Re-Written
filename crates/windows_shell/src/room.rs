@@ -1,7 +1,7 @@
 //! Source-bound room loading shared by the room preview and test room.
 use bevy::{
     asset::RenderAssetUsages,
-    image::ImageSampler,
+    image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     prelude::*,
     render::render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat},
 };
@@ -18,6 +18,120 @@ use std::{fs::File, io::Read, path::Path};
 pub struct Room {
     pub model: RoomModel,
     pub textures: Vec<DecodedTexture>,
+    /// Per chunk, the background group bit of its DOCT group (FUN_140186380
+    /// entry byte +1), or `NO_GROUP` for models without a DOCT (sky).
+    pub chunk_bits: Vec<u8>,
+    /// Texture region per environment ordinal (CLAMP register, §4.6).
+    pub regions: std::collections::HashMap<usize, EnvRegion>,
+}
+
+/// A texture environment's CLAMP-register region (draw-01 §4.6): the exe
+/// samples a cropped copy through TexScale; WMS/WMT 0 and 3 wrap, 1 and 2
+/// clamp.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnvRegion {
+    /// Cropped rectangle in texels: x, y, width, height.
+    pub crop: [u32; 4],
+    /// uv' = uv * scale + offset (TexScale xy, zw without scroll).
+    pub scale: [f32; 2],
+    pub offset: [f32; 2],
+    pub wrap: [bool; 2],
+}
+
+impl EnvRegion {
+    /// From the CLAMP register fields and the texture size.
+    pub fn new(wms: u32, wmt: u32, [minu, maxu, minv, maxv]: [u32; 4], [w, h]: [u32; 2]) -> Self {
+        let axis = |mode: u32, min: u32, max: u32, size: u32| -> (u32, u32, f32, f32, bool) {
+            match mode {
+                2 if max >= min && max < size => {
+                    let len = max - min + 1;
+                    let s = size as f32 / len as f32;
+                    (min, len, s, -(min as f32 / size as f32) * s, false)
+                }
+                3 if min < size => {
+                    let len = min + 1;
+                    (0, len, size as f32 / len as f32, 0., true)
+                }
+                0 => (0, size, 1., 0., true),
+                _ => (0, size, 1., 0., false),
+            }
+        };
+        let (x, w2, sx, ox, wu) = axis(wms, minu, maxu, w);
+        let (y, h2, sy, oy, wv) = axis(wmt, minv, maxv, h);
+        Self {
+            crop: [x, y, w2, h2],
+            scale: [sx, sy],
+            offset: [ox, oy],
+            wrap: [wu, wv],
+        }
+    }
+
+    /// The cropped RGBA copy of a decoded texture.
+    pub fn crop_rgba(&self, t: &DecodedTexture) -> (u32, u32, Vec<u8>) {
+        let [x, y, w, h] = self.crop;
+        if (x, y, w, h) == (0, 0, t.width, t.height) {
+            return (t.width, t.height, t.pixels_rgba.clone());
+        }
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for row in y..y + h {
+            let start = ((row * t.width + x) * 4) as usize;
+            out.extend_from_slice(&t.pixels_rgba[start..start + (w * 4) as usize]);
+        }
+        (w, h, out)
+    }
+}
+
+/// Uploads with the exe's sampler: linear filtering and the region's
+/// address modes.
+pub fn region_image(
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    wrap: [bool; 2],
+    images: &mut Assets<Image>,
+) -> Handle<Image> {
+    let handle = rgba_image(width, height, pixels, images);
+    if let Some(mut image) = images.get_mut(&handle) {
+        let mode = |w: bool| {
+            if w {
+                ImageAddressMode::Repeat
+            } else {
+                ImageAddressMode::ClampToEdge
+            }
+        };
+        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: mode(wrap[0]),
+            address_mode_v: mode(wrap[1]),
+            mag_filter: ImageFilterMode::Linear,
+            min_filter: ImageFilterMode::Linear,
+            ..default()
+        });
+    }
+    handle
+}
+
+/// A chunk with no DOCT group: always drawn.
+pub const NO_GROUP: u8 = 0xff;
+
+/// Whether a chunk with background group bit `bit` draws under `mask`
+/// (draw-01 §2.4: the group is enabled iff `bit < 64 && mask >> bit & 1`).
+pub fn chunk_visible(bit: u8, mask: u64) -> bool {
+    bit == NO_GROUP || (bit < 64 && mask >> bit & 1 != 0)
+}
+
+/// The group bit of every DOCT entry (BAR type 5, 0x1c-byte groups at the
+/// offset in header word +0x1c, size in +0x20).
+fn doct_bits(doct: &[u8]) -> Option<Vec<u8>> {
+    if doct.get(..4)? != b"DOCT" {
+        return None;
+    }
+    let word = |o: usize| -> Option<usize> {
+        Some(u32::from_le_bytes(doct.get(o..o + 4)?.try_into().ok()?) as usize)
+    };
+    let (off, bytes) = (word(0x1c)?, word(0x20)?);
+    (0..bytes / 0x1c)
+        .map(|i| doct.get(off + i * 0x1c + 1).copied())
+        .collect()
 }
 pub struct LoadedRoom {
     pub rooms: Vec<Room>,
@@ -169,6 +283,26 @@ pub fn load_room_archive(
             continue;
         }
         let model = room_geometry::read(payload)?;
+        // The DOCT (the BAR's last type-5 entry) binds to the model named
+        // MAP only; its entry i is rendering group i [draw-01 §2].
+        let mut chunk_bits = vec![NO_GROUP; model.chunks.len()];
+        if entry.name_bytes[..3] == *b"MAP"
+            && let Some(doct) = table
+                .entries
+                .iter()
+                .rfind(|e| e.entry_type == 5 && e.size > 0)
+                .and_then(|e| bytes.get(e.offset as usize..e.offset as usize + e.size as usize))
+                .and_then(doct_bits)
+            && doct.len() == model.rendering_groups.len()
+        {
+            for (g, chunks) in model.rendering_groups.iter().enumerate() {
+                for &c in chunks {
+                    if let Some(b) = chunk_bits.get_mut(c as usize) {
+                        *b = doct[g];
+                    }
+                }
+            }
+        }
         let textures: Vec<_> = table
             .entries
             .iter()
@@ -180,14 +314,29 @@ pub fn load_room_archive(
             return Err("room requires unique same-name texture block".into());
         }
         let entry = textures[0];
-        let textures = model_texture_pixels::decode_images(
-            &bytes[entry.offset as usize..entry.offset as usize + entry.size as usize],
-        )?;
+        let bank = &bytes[entry.offset as usize..entry.offset as usize + entry.size as usize];
+        let textures = model_texture_pixels::decode_images(bank)?;
+        let mut regions = std::collections::HashMap::new();
+        if let Ok(layout) = package_reader::model_texture::read_layout(bank) {
+            for (ordinal, env) in layout.environments.iter().enumerate() {
+                let (w, h) = (1u32 << env.tex0[3], 1u32 << env.tex0[4]);
+                let a = env.address;
+                regions.insert(
+                    ordinal,
+                    EnvRegion::new(a[0], a[1], [a[2], a[3], a[4], a[5]], [w, h]),
+                );
+            }
+        }
         rgba_bytes += textures.iter().map(|t| t.pixels_rgba.len()).sum::<usize>();
         if rgba_bytes > 128 * 1024 * 1024 {
             return Err("room textures exceed cumulative limit".into());
         }
-        rooms.push(Room { model, textures });
+        rooms.push(Room {
+            model,
+            textures,
+            chunk_bits,
+            regions,
+        });
     }
     if rooms.is_empty() {
         return Err("no decoded room model".into());

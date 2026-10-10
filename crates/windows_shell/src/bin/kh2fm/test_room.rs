@@ -49,7 +49,7 @@ use windows_shell::hud::{self, Sheet, SystemFont};
 use windows_shell::input;
 use windows_shell::layout2d::{self, Menu2ld};
 use windows_shell::pad::{self, Pad};
-use windows_shell::room::{CollisionTriangle, LoadedRoom, load_rooms, mesh, rgba_image, upload};
+use windows_shell::room::{CollisionTriangle, LoadedRoom, load_rooms, mesh, rgba_image};
 use windows_shell::sound::{self, Banks};
 use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
 
@@ -487,6 +487,8 @@ struct AreaRes {
     explore: bool,
     /// NPC slots that already have meshes.
     rendered: usize,
+    /// The live background group mask (ARD scripts plus zone switches).
+    bg_mask: u64,
     /// The townsperson the talk resource currently points at.
     talk_npc: Option<usize>,
     was_talking: bool,
@@ -517,6 +519,10 @@ struct SceneRoot(Entity);
 
 #[derive(Component)]
 struct RoomPart;
+
+/// A map chunk's background group bit (`NO_GROUP` = always drawn).
+#[derive(Component)]
+struct BgChunk(u8);
 
 #[derive(Resource)]
 struct Game {
@@ -2758,6 +2764,7 @@ fn area_transition(
         &room,
         root.0,
         show,
+        next.state.setup.bg_mask,
     );
     spawn_field_npcs(
         &mut commands,
@@ -2787,6 +2794,7 @@ fn area_transition(
         "entrance":entrance,"programs":next.programs,"bg_mask":format!("{:#x}", next.state.setup.bg_mask),
         "spawn":position.to_array(),"yaw":yaw}));
     area.previous = Some(area.current.area);
+    area.bg_mask = next.state.setup.bg_mask;
     area.current = next;
     if let Some(t) = area.transition.as_mut() {
         t.stage = Stage::Opening;
@@ -2987,6 +2995,27 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
     }
 }
 
+/// Shows and hides map chunks when the background group mask changes.
+fn bg_visibility(
+    area: Option<Res<AreaRes>>,
+    mut last: Local<Option<u64>>,
+    mut chunks: Query<(&BgChunk, &mut Visibility)>,
+    added: Query<(), Added<BgChunk>>,
+) {
+    let Some(area) = area else { return };
+    if *last == Some(area.bg_mask) && added.is_empty() {
+        return;
+    }
+    *last = Some(area.bg_mask);
+    for (chunk, mut v) in &mut chunks {
+        *v = if windows_shell::room::chunk_visible(chunk.0, area.bg_mask) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
 /// Creates meshes for townspeople that appeared since the last frame.
 fn field_npc_spawn_new(
     mut commands: Commands,
@@ -3054,6 +3083,7 @@ fn field_npc_present(
 
 /// Spawns a room's map models and its collision overlay under `parent`,
 /// tagged so an area change can remove them.
+#[allow(clippy::too_many_arguments)]
 fn spawn_room(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -3062,37 +3092,74 @@ fn spawn_room(
     room: &LoadedRoom,
     parent: Entity,
     show_collision: bool,
+    bg_mask: u64,
 ) {
     for part in &room.rooms {
-        let handles: Vec<_> = part.textures.iter().map(|t| upload(t, images)).collect();
-        for chunk in &part.model.chunks {
+        // Each environment's CLAMP region is baked into a cropped copy with
+        // the exe's address modes and linear filter (draw-01 §4.6).
+        let regions: Vec<windows_shell::room::EnvRegion> = part
+            .textures
+            .iter()
+            .map(|t| {
+                part.regions.get(&t.environment_ordinal).copied().unwrap_or(
+                    windows_shell::room::EnvRegion::new(0, 0, [0; 4], [t.width, t.height]),
+                )
+            })
+            .collect();
+        let handles: Vec<_> = part
+            .textures
+            .iter()
+            .zip(&regions)
+            .map(|(t, r)| {
+                let (w, h, px) = r.crop_rgba(t);
+                windows_shell::room::region_image(w, h, px, r.wrap, images)
+            })
+            .collect();
+        for (chunk_index, chunk) in part.model.chunks.iter().enumerate() {
             if chunk.indices.is_empty() {
                 continue;
             }
+            let bit = part
+                .chunk_bits
+                .get(chunk_index)
+                .copied()
+                .unwrap_or(windows_shell::room::NO_GROUP);
             let vertex = |i: &u32| &chunk.vertices[*i as usize];
             let positions = chunk
                 .indices
                 .iter()
                 .map(|i| vertex(i).position_bits.map(f32::from_bits))
                 .collect();
+            let texture_slot = part
+                .textures
+                .iter()
+                .position(|t| t.environment_ordinal as i16 == chunk.texture_index);
+            let (scale, offset) = texture_slot.map_or(([1.; 2], [0.; 2]), |i| {
+                (regions[i].scale, regions[i].offset)
+            });
             let uvs = chunk
                 .indices
                 .iter()
-                .map(|i| vertex(i).uv_bits.map(f32::from_bits))
+                .map(|i| {
+                    let uv = vertex(i).uv_bits.map(f32::from_bits);
+                    [uv[0] * scale[0] + offset[0], uv[1] * scale[1] + offset[1]]
+                })
                 .collect();
             let colors = chunk
                 .indices
                 .iter()
                 .map(|i| vertex(i).color_bits.map(f32::from_bits))
                 .collect();
-            let texture = part
-                .textures
-                .iter()
-                .position(|t| t.environment_ordinal as i16 == chunk.texture_index)
-                .map(|i| handles[i].clone());
+            let texture = texture_slot.map(|i| handles[i].clone());
             commands.spawn((
                 ChildOf(parent),
                 RoomPart,
+                BgChunk(bit),
+                if windows_shell::room::chunk_visible(bit, bg_mask) {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                },
                 Mesh3d(meshes.add(mesh(positions, uvs, colors))),
                 MeshMaterial3d(materials.add(StandardMaterial {
                     base_color: if texture.is_some() {
@@ -3280,6 +3347,7 @@ fn setup(
         &room,
         world,
         game.show_collision,
+        area.as_ref().map_or(!0, |a| a.current.state.setup.bg_mask),
     );
     if let Some(a) = &area {
         spawn_field_npcs(
@@ -3933,6 +4001,19 @@ fn simulate(
                     fade: Fade::default(),
                     target: (world, area, entrance),
                 });
+            } else if let area_sim::Request::BgGroups { on, off } = request {
+                for (bit, state) in [(on, true), (off, false)] {
+                    if let Some(bit) = bit {
+                        if state {
+                            a.bg_mask |= 1 << bit;
+                        } else {
+                            a.bg_mask &= !(1u64 << bit);
+                        }
+                        if let RoomWorld::Map(w) = &mut game.world {
+                            w.set_group(bit, state);
+                        }
+                    }
+                }
             }
         }
     }
@@ -6303,6 +6384,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let stay = loaded.stay;
     let area_res = loaded.area.map(|(source, current)| AreaRes {
         rendered: current.npcs.len(),
+        bg_mask: current.state.setup.bg_mask,
         source,
         current,
         previous: None,
@@ -6686,6 +6768,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             Update,
             (
                 area_transition,
+                bg_visibility,
                 field_npc_spawn_new,
                 field_npc_present,
                 dissolve_present,

@@ -432,6 +432,14 @@ fn engine(v: [f32; 3]) -> [f32; 3] {
     [v[0], -v[1], -v[2]]
 }
 
+impl MapWorld {
+    /// Switches a background group's collision meshes (FUN_140162a00 /
+    /// FUN_1401629b0 → FUN_1401715a0 / FUN_140174440).
+    pub fn set_group(&mut self, group: u8, on: bool) {
+        self.world.set_group(group, on);
+    }
+}
+
 impl player_sim::World for MapWorld {
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         // The exe's floor ray (FUN_140173b30) straight down from `top`.
