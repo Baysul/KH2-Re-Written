@@ -46,7 +46,7 @@ impl Journal {
         self.close_if(seq, self.tabs[1], RIGHT_TAB[2]);
         self.hide_help(seq);
         self.memory[self.state as usize] = row;
-        if matches!(state, 0xe | 0x12 | 0x15) {
+        if matches!(state, 0xe | 0x12 | 0x15 | 0x18) {
             // FUN_1403314e0: the remembered rows start at the top.
             self.memory[0xe] = 0;
             self.memory[0xf] = 0;

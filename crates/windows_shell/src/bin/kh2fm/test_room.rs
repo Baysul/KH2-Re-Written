@@ -673,6 +673,7 @@ struct JournalSource {
     stories: Vec<package_reader::journal_table::Story>,
     texts: HashMap<u16, Vec<u8>>,
     flags: Vec<u16>,
+    reports: Vec<package_reader::journal_table::Report>,
     treasures: Vec<package_reader::journal_table::Treasure>,
     item_names: HashMap<u16, journal::TreasureItem>,
     opened_bits: Vec<u16>,
@@ -705,6 +706,7 @@ fn load_journal(
     let chars = journal_table::read_chars(bar_entry(&tables, b"char")?)?;
     let diag = journal_table::read_diag(bar_entry(&tables, b"diag")?)?;
     let albums = journal_table::read_albums(bar_entry(&tables, b"albu")?)?;
+    let reports = journal_table::read_reports(bar_entry(&tables, b"anse")?)?;
     let mut ids: Vec<u32> = journal::MESSAGES.iter().map(|&i| i as u32).collect();
     ids.extend(journal::PAGE_MESSAGES.map(u32::from));
     for c in &chars {
@@ -712,6 +714,9 @@ fn load_journal(
     }
     for a in &albums {
         ids.extend([a.title, a.caption].map(u32::from));
+    }
+    for r in &reports {
+        ids.extend([r.title, r.text].map(u32::from));
     }
     for w in &worlds {
         ids.extend([w.names[0], w.alt_names[0], w.names[1], w.alt_names[1]].map(u32::from));
@@ -785,6 +790,7 @@ fn load_journal(
         stories,
         texts,
         flags: j.flags.clone(),
+        reports,
         treasures,
         item_names,
         opened_bits: j.opened_bits.clone(),
@@ -5205,6 +5211,7 @@ fn camp_tick(
                     chars: j.chars.clone(),
                     diag: j.diag.clone(),
                     albums: j.albums.clone(),
+                    reports: j.reports.clone(),
                     treasures: j.treasures.clone(),
                     item_names: j.item_names.clone(),
                     opened_bits: j.opened_bits.clone(),

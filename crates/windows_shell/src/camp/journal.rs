@@ -172,9 +172,9 @@ pub const MESSAGES: [u16; 52] = [
     0x26b3,
 ];
 /// Messages of the category pages (help lines and the empty album).
-pub const PAGE_MESSAGES: [u16; 19] = [
+pub const PAGE_MESSAGES: [u16; 21] = [
     0x48d5, 0x48d6, 0x48d8, 0x48d9, 0x32dd, 0x48ee, 0x48ef, 0x48f0, 0x48f1, 0x48f2, 0x36b3, 0x2874,
-    0x2dc6, 0x48f4, 0x48f5, 0x4a0f, 0x4a12, 0x4a11, 0x4a13,
+    0x2dc6, 0x48f4, 0x48f5, 0x4a0f, 0x4a12, 0x4a11, 0x4a13, 0x48ec, 0x48ed,
 ];
 
 /// FUN_1402f5db0: the "show everything" story flag.
@@ -261,6 +261,8 @@ pub struct JournalData {
     pub item_names: HashMap<u16, TreasureItem>,
     pub opened_bits: Vec<u16>,
     pub owned_items: Vec<u16>,
+    /// jiminy.bar `anse`.
+    pub reports: Vec<package_reader::journal_table::Report>,
     /// The `char` rows and `albu` rows already seen (save+0x4c38 / +0x4c7c).
     pub seen_chars: Vec<u16>,
     pub seen_albums: Vec<u16>,
@@ -900,6 +902,8 @@ impl Journal {
             5 => self.build_album_photo(layout),
             6 | 0xc | 0x28 => self.build_characters(layout),
             0xe => self.build_files_menu(layout),
+            0x18 => self.build_reports_list(layout),
+            0x19 => self.build_report_reader(layout),
             7 | 9 | 0x1a | 0x22 => self.build_treasure(layout),
             0xf | 0x12 | 0x15 => self.build_files_list(layout),
             0x10 | 0x13 | 0x16 => self.build_files_detail(layout),
@@ -1298,6 +1302,8 @@ impl Journal {
                     5 => self.album_photo(layout, &pad, &mut sounds),
                     6 | 0xc | 0x28 => self.characters(layout, &pad, &mut sounds),
                     0xe => self.files_menu(layout, &pad, &mut sounds),
+                    0x18 => self.reports_list(layout, &pad, &mut sounds),
+                    0x19 => self.report_reader(layout, &pad, &mut sounds),
                     7 | 9 | 0x1a | 0x22 => self.treasure_page(layout, &pad, &mut sounds),
                     0xf | 0x12 | 0x15 => self.files_list(layout, &pad, &mut sounds),
                     0x10 | 0x13 | 0x16 => self.files_detail(layout, &pad, &mut sounds),
@@ -1458,7 +1464,7 @@ impl Journal {
                     let (label, _, state) = table[o];
                     if matches!(
                         state,
-                        4 | 6 | 0xc | 0x28 | 0xe | 0x12 | 0x15 | 7 | 9 | 0x1a | 0x22
+                        4 | 6 | 0xc | 0x28 | 0xe | 0x12 | 0x15 | 7 | 9 | 0x1a | 0x22 | 0x18
                     ) {
                         self.enter_category(seq, state, label, k);
                     }

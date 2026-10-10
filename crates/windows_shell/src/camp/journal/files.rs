@@ -22,6 +22,11 @@ const HELP_MENU: u16 = 0x48ee;
 const HELP_LIST: [u16; 3] = [0x48ef, 0x48f0, 0x48f1];
 const HELP_DETAIL: u16 = 0x48f2;
 const NOTHING_YET: u16 = 0x36b3;
+const HELP_REPORTS: [u16; 2] = [0x48ec, 0x48ed];
+const REPORT_PANEL: usize = 97;
+const REPORT_TITLE: usize = 98;
+const REPORT_TRACK: usize = 100;
+const REPORT_LINES: usize = 9;
 const ROWS: usize = 10;
 const PITCH: f32 = 26.;
 const SIZE: f32 = 18.;
@@ -57,6 +62,13 @@ pub(super) struct Page {
     face_made: bool,
     up: Option<Id>,
     down: Option<Id>,
+    /// The lists show Ansem Reports (`entries` are `anse` rows).
+    reports: bool,
+    /// Lines the description window shows; whether it has arrows.
+    visible: usize,
+    arrows: bool,
+    seen_reports: HashSet<u16>,
+    seen_reports_at_open: HashSet<u16>,
 }
 
 /// The list state of a kind and the detail state it opens.
@@ -147,6 +159,23 @@ impl Journal {
                     }
                     None => (Vec::new(), ROW),
                 }
+            } else if self.files.reports {
+                match self.files.entries.get(k).copied() {
+                    Some(i) => {
+                        let a = self.data.reports[i];
+                        if self.report_owned(i) {
+                            let new = !self.files.seen_reports_at_open.contains(&(i as u16));
+                            let seen = self.files.seen_reports.contains(&(i as u16));
+                            (
+                                self.msg(a.title),
+                                if new { MARK[seen as usize] } else { ROW },
+                            )
+                        } else {
+                            (Self::locked_text(), ROW)
+                        }
+                    }
+                    None => (Vec::new(), ROW),
+                }
             } else if self.files.entries.is_empty() {
                 (
                     if j == 0 {
@@ -216,6 +245,7 @@ impl Journal {
         self.no_light = true;
         self.cat.detail = false;
         self.files.ret = None;
+        self.files.reports = false;
         self.category_frame(seq);
         self.files_panel(seq);
         let mut kinds = vec![OTHER];
@@ -249,6 +279,7 @@ impl Journal {
         self.no_light = true;
         self.cat.detail = false;
         self.files.ret = None;
+        self.files.reports = false;
         match self.state {
             0x12 => self.files.kind = HEARTLESS,
             0x15 => self.files.kind = NOBODIES,
@@ -289,6 +320,19 @@ impl Journal {
     /// FUN_140332820: the entry under the cursor counts as viewed.
     fn files_view(&mut self, seq: &Sequence) {
         let k = self.list.cursor;
+        if self.files.reports {
+            let Some(&i) = self.files.entries.get(k) else {
+                return;
+            };
+            if self.report_owned(i)
+                && self.files.seen_reports.insert(i as u16)
+                && let Some(&m) = self.files.marks.get(k.saturating_sub(self.files.scroll))
+                && !self.files.seen_reports_at_open.contains(&(i as u16))
+            {
+                self.sprites.set(seq, m, MARK[1], None);
+            }
+            return;
+        }
         let Some(&r) = self.files.entries.get(k) else {
             return;
         };
@@ -475,6 +519,9 @@ impl Journal {
         let text = ch.map(|c| self.msg(c.description)).unwrap_or_default();
         self.files.lines = text.split(|&b| b == 0x02).map(<[u8]>::to_vec).collect();
         self.files.top = 0;
+        self.files.visible = LINES;
+        self.files.arrows = true;
+        self.files.reports = false;
         let mut t = Self::text(Vec::new(), Self::size(seq, DETAIL_PANEL));
         t.group_position = false;
         t.keep_rgb = false;
@@ -507,12 +554,14 @@ impl Journal {
     fn files_description(&mut self, seq: &Sequence) {
         let total = self.files.lines.len();
         let top = self.files.top;
-        let bytes = self.files.lines[top.min(total.saturating_sub(1))..(top + LINES).min(total)]
+        let visible = self.files.visible;
+        let bytes = self.files.lines[top.min(total.saturating_sub(1))..(top + visible).min(total)]
             .join(&0x02u8);
         self.set_text(self.files.desc, bytes);
         let c = self.container;
-        let want_up = top > 0;
-        let want_down = total > LINES && top + LINES < total;
+        let arrows = self.files.arrows;
+        let want_up = arrows && top > 0;
+        let want_down = arrows && total > visible && top + visible < total;
         for (slot, want, group) in [(0, want_up, UP_ARROW), (1, want_down, DOWN_ARROW)] {
             let cur = if slot == 0 {
                 self.files.up
@@ -577,7 +626,7 @@ impl Journal {
         }
         // UP / DOWN scroll the description a line.
         let total = self.files.lines.len();
-        let max = if total < 8 { 0 } else { total - LINES };
+        let max = total.saturating_sub(self.files.visible);
         let step = pad.trig | pad.repeat;
         let before = self.files.top;
         if step & bits::UP != 0 {
@@ -623,6 +672,213 @@ impl Journal {
                     self.hide_help(seq);
                     self.slide(seq, (input != In::R2) as usize, 1);
                     self.pending = Some(self.state);
+                    self.substate = 2;
+                }
+            }
+            _ => {}
+        }
+        moved
+    }
+
+    fn report_owned(&self, i: usize) -> bool {
+        self.data
+            .reports
+            .get(i)
+            .is_some_and(|a| self.data.owned_items.contains(&a.item))
+    }
+
+    /// FUN_140333df0.
+    pub(super) fn build_reports_list(&mut self, layout_: &Layout) {
+        let seq = &layout_.sequences[SEQUENCE];
+        self.reset_list();
+        self.no_light = true;
+        self.cat.detail = false;
+        self.files.ret = None;
+        self.files.reports = true;
+        self.category_frame(seq);
+        self.files_panel(seq);
+        let all = self.show_all();
+        self.files.entries = (0..self.data.reports.len())
+            .filter(|&i| self.report_owned(i) || all)
+            .collect();
+        let n = self.files.entries.len();
+        let cursor = self.memory[0x18].min(n.saturating_sub(1));
+        self.files.scroll = cursor.saturating_sub(ROWS - 1).min(n.saturating_sub(ROWS));
+        self.list = MenuList::new(self.files.rows.clone(), cursor);
+        self.list.total = n.max(1);
+        self.list.mask = 0x73;
+        if n == 0 {
+            self.no_cursor = true;
+            self.list.mask &= !0x10;
+        }
+        self.scroll = self.files.scroll;
+        self.files_rows(seq, false);
+        self.show_help(seq, HELP_REPORTS[0]);
+        self.files_view(seq);
+    }
+
+    /// FUN_1403330d0.
+    pub(super) fn reports_list(
+        &mut self,
+        layout_: &Layout,
+        pad: &Pad,
+        sounds: &mut Vec<u32>,
+    ) -> bool {
+        let seq = &layout_.sequences[SEQUENCE];
+        let (input, moved, left) = self.files_pick(layout_, pad, false);
+        if left {
+            return false;
+        }
+        let valid = match input {
+            In::Row(k) => self
+                .files
+                .entries
+                .get(k)
+                .is_some_and(|&i| self.report_owned(i)),
+            _ => true,
+        };
+        if let Some(s) = sound(input, moved, valid) {
+            sounds.push(s);
+        }
+        if moved && self.substate == 1 {
+            self.files_view(seq);
+        }
+        if !valid {
+            return moved;
+        }
+        match input {
+            In::Start => self.exit = true,
+            In::Cancel => {
+                self.pill_out(seq);
+                self.hide_help(seq);
+                self.slide(seq, 1, 1);
+                self.pending = Some(COLLECTION_PAGE);
+                self.substate = 2;
+            }
+            In::Row(k) => {
+                self.memory[0x18] = k;
+                self.files.cur = k;
+                self.hide_help(seq);
+                self.slide(seq, 0, 1);
+                self.pending = Some(0x19);
+                self.substate = 2;
+            }
+            _ => {}
+        }
+        moved
+    }
+
+    /// FUN_140333900.
+    pub(super) fn build_report_reader(&mut self, layout_: &Layout) {
+        let seq = &layout_.sequences[SEQUENCE];
+        self.reset_list();
+        self.no_cursor = true;
+        self.cat.detail = false;
+        self.files.reports = true;
+        self.category_frame(seq);
+        let c = self.container;
+        let p0 = self.page_sprite(seq, PRIO_PANEL, REPORT_PANEL, c, None);
+        self.page_sprite(seq, PRIO_PANEL, REPORT_TRACK, c, None);
+        let a = self
+            .files
+            .entries
+            .get(self.files.cur)
+            .and_then(|&i| self.data.reports.get(i))
+            .copied();
+        let mut t = Self::text(
+            a.map(|a| self.msg(a.title)).unwrap_or_default(),
+            Self::size(seq, REPORT_TITLE),
+        );
+        t.align = 2;
+        t.group_position = false;
+        t.keep_rgb = false;
+        self.page_sprite(seq, BASE, REPORT_TITLE, c, Some(t));
+        let text = a.map(|a| self.msg(a.text)).unwrap_or_default();
+        self.files.lines = text.split(|&b| b == 0x02).map(<[u8]>::to_vec).collect();
+        self.files.top = 0;
+        self.files.visible = REPORT_LINES;
+        self.files.arrows = false;
+        let mut t = Self::text(Vec::new(), Self::size(seq, REPORT_PANEL));
+        t.group_position = false;
+        t.keep_rgb = false;
+        t.extra = Some(LINE_EXTRA);
+        let d = self.page_sprite(seq, BASE, ROW, p0, Some(t));
+        self.files.desc = Some(d);
+        self.files.up = None;
+        self.files.down = None;
+        self.files_description(seq);
+        let owned = (0..self.data.reports.len())
+            .filter(|&i| self.report_owned(i))
+            .count();
+        self.list = MenuList::new(vec![d], 0);
+        self.list.mask = 0x60 | if owned > 1 { 0xc000 } else { 0 };
+        self.show_help(seq, HELP_REPORTS[1]);
+    }
+
+    /// FUN_140332ea0 (not leaving).
+    pub(super) fn report_reader(
+        &mut self,
+        layout_: &Layout,
+        pad: &Pad,
+        sounds: &mut Vec<u32>,
+    ) -> bool {
+        let seq = &layout_.sequences[SEQUENCE];
+        let (input, moved) = self.input(pad);
+        if self.substate == 2 {
+            self.leave(layout_, input, moved, false);
+            return false;
+        }
+        self.settle(seq, input, moved, true);
+        let total = self.files.lines.len();
+        let max = total.saturating_sub(REPORT_LINES);
+        let step = pad.trig | pad.repeat;
+        let before = self.files.top;
+        if step & bits::UP != 0 {
+            self.files.top = self.files.top.saturating_sub(1);
+        } else if step & bits::DOWN != 0 {
+            self.files.top = (self.files.top + 1).min(max);
+        } else if total > REPORT_LINES && step & bits::L1 != 0 {
+            self.files.top = self.files.top.saturating_sub(REPORT_LINES);
+        } else if total > REPORT_LINES && step & bits::R1 != 0 {
+            self.files.top = (self.files.top + REPORT_LINES).min(max);
+        }
+        if self.files.top != before {
+            self.files_description(seq);
+            sounds.push(SOUND_CURSOR);
+        }
+        match input {
+            In::Start => {
+                sounds.push(SOUND_CLOSE);
+                self.exit = true;
+            }
+            In::Cancel => {
+                sounds.push(SOUND_CLOSE);
+                self.hide_help(seq);
+                self.slide(seq, 1, 1);
+                self.pending = Some(0x18);
+                self.substate = 2;
+            }
+            In::R2 | In::L2 => {
+                let n = self.files.entries.len();
+                let cur = self.files.cur;
+                let own = |s: &Self, i: usize| s.report_owned(s.files.entries[i]);
+                let next = if input == In::R2 {
+                    (cur + 1..n)
+                        .find(|&i| own(self, i))
+                        .or_else(|| (0..cur).find(|&i| own(self, i)))
+                } else {
+                    (0..cur)
+                        .rev()
+                        .find(|&i| own(self, i))
+                        .or_else(|| (cur + 1..n).rev().find(|&i| own(self, i)))
+                };
+                if let Some(i) = next {
+                    sounds.push(SOUND_DECIDE);
+                    self.files.cur = i;
+                    self.memory[0x18] = i;
+                    self.hide_help(seq);
+                    self.slide(seq, (input != In::R2) as usize, 1);
+                    self.pending = Some(0x19);
                     self.substate = 2;
                 }
             }

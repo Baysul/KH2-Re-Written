@@ -205,6 +205,26 @@ pub fn read_albums(bytes: &[u8]) -> io::Result<Vec<Album>> {
         })
         .collect())
 }
+/// An `anse` record (8 B): an Ansem Report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Report {
+    /// +0: the report item.
+    pub item: u16,
+    /// +2 / +4: title and text messages.
+    pub title: u16,
+    pub text: u16,
+}
+
+pub fn read_reports(bytes: &[u8]) -> io::Result<Vec<Report>> {
+    Ok(records(bytes, 8)?
+        .map(|r| Report {
+            item: u16_at(r, 0),
+            title: u16_at(r, 2),
+            text: u16_at(r, 4),
+        })
+        .collect())
+}
+
 /// A `trsr` record (03system.bin, 12 B at +4): a treasure chest or an
 /// event gift.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

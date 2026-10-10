@@ -68,6 +68,13 @@ Source: `journal-03/files-treasures-spec.md` §4.
 - **Evidence (private):** `autoplay-94` (arena-11 = arena-10 plus show-all flag 0x4837, opened bits 1, 2, 3, 20; exit 0): Treasures grid with 301 entries, `Total 2/301`, cursor frame on the first cell and after moving down and right.
 - **Not verified / not built:** opened cells (chest icon) and the caption of an opened chest are not in a capture; world labels show "?????" because the room's save has no world unlock flags; the scroll thumb G69's bar object is not drawn; Pieces (8 / 0x21) and Ansem Reports not built; opened chests and owned maps come from `journal.opened_bits` / `owned_items` of the room config.
 
+## Addendum 3: Ansem Reports
+
+Source: `journal-03/files-treasures-spec.md` §5.
+- **Built:** the list (state 0x18: 13 `anse` rows, owned ones by title, others "?????", NEW / viewed marks, decide invalid on unowned) and the reader (0x19: title pill, 9-line scrolling text, up / down, L1 / R1 page, R2 / L2 to the next / previous owned report, back to the list). New `journal_table::read_reports`.
+- **Evidence (private):** `autoplay-95` (arena-12 = arena-11 plus owned items 0xe2, 0xe3; exit 0): the list with two owned reports and eleven "?????" rows, report 1 and (after R2) report 2 in the reader.
+- **Not built:** the scroll bar thumb; whether the option is hidden without reports relies on the existing unlock check.
+
 ## Not built yet
 
 Character File 3D models / full-model pages, Story, Treasures / Maps / Pieces (7, 8, 9, 0x1a, 0x22), Ansem Reports, Missions, Minigames, Limits, Synthesis, Puzzles; form sub-weapons on Equip (state 6); NEW! badges on the main menu rows; party members' models; Load / Save (`save.2ld`); item shop (`itemshop.2ld`); mission and minigame 2LDs.
