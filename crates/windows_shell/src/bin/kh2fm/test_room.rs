@@ -3285,7 +3285,7 @@ fn spawn_room(
                 .collect();
             let texture = texture_slot.map(|i| handles[i].clone());
             // UVSC: fc bits 1..5 hold the record index + 1; repeat modes only.
-            let scroll_id = ((chunk.header_words[3] >> 1) & 0x1f) as u32;
+            let scroll_id = (chunk.header_words[3] >> 1) & 0x1f;
             let scroll = (scroll_id != 0)
                 .then(|| part.uv_scroll.iter().find(|r| r.0 + 1 == scroll_id))
                 .flatten()
