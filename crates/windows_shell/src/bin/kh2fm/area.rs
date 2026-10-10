@@ -2,6 +2,7 @@
 //! programs and spawn points loaded by name from the selected install, as
 //! the exe's area loader does (FUN_140152680 → FUN_14039c860 →
 //! FUN_1403a2170; map names FUN_140161c50, ARD FUN_1403a2060).
+use crate::npcs::{FieldNpc, Lcg, NpcKind};
 use area_sim::{
     Area, PlayerProbe, Request, Spawn,
     progress::{self, Progress},
@@ -17,7 +18,6 @@ use package_reader::{
     probe::ProbeSource,
     room_collision,
 };
-use crate::npcs::{FieldNpc, Lcg, NpcKind};
 use std::{collections::HashMap, sync::Arc};
 use windows_shell::{
     dialogue::{self, Op},
@@ -64,13 +64,26 @@ pub struct LoadedArea {
     /// Entities the scripts created.
     #[allow(dead_code)]
     pub spawns: Vec<Spawn>,
-    /// The townspeople of this area (objentry type 15, spawn types 0/1/3).
+    /// The townspeople of this area (objentry type 15, spawn types 0/1/3,
+    /// then zone-spawned ones as Sora enters their zones).
     pub npcs: Vec<FieldNpc>,
+    /// Spawn-type-2 townspeople waiting for their zone.
+    pub deferred: Vec<Deferred>,
     /// Libretto scripts by talk id and their message texts.
     pub scripts: HashMap<u16, Vec<Op>>,
     pub lines: HashMap<u32, Vec<u8>>,
     /// Player spawn in scene coordinates (Y up) and scene yaw.
     pub player: (Vec3, f32),
+}
+
+/// A zone-spawned townsperson (spawn type 2).
+pub struct Deferred {
+    pub spawn: Spawn,
+    pub kind: usize,
+    /// The NPC slot once spawned.
+    pub npc: Option<usize>,
+    /// Ticks since Sora left every zone of its point.
+    pub away: u32,
 }
 
 impl AreaSource {
@@ -125,7 +138,15 @@ impl AreaSource {
     }
 
     /// FUN_140152be0 (programs from the save table) then the area loader.
-    pub fn load(&mut self, world: u8, area: u8, entrance: u8) -> Result<(LoadedRoom, LoadedArea)> {
+    /// `request` overrides the save table's programs where it is not −1
+    /// (FUN_140152be0).
+    pub fn load(
+        &mut self,
+        world: u8,
+        area: u8,
+        entrance: u8,
+        request: [i16; 3],
+    ) -> Result<(LoadedRoom, LoadedArea)> {
         let code = progress::WORLDS
             .get(world as usize)
             .ok_or("world index outside the world table")?;
@@ -142,7 +163,12 @@ impl AreaSource {
                 .find(|e| e.entry_type == kind && u32::from_le_bytes(e.name_bytes) == name)
                 .and_then(|e| ard_bytes.get(e.offset as usize..e.offset as usize + e.size as usize))
         };
-        let programs = self.progress.programs(world, area);
+        let mut programs = self.progress.programs(world, area);
+        for (p, r) in programs.iter_mut().zip(request) {
+            if r != -1 {
+                *p = r;
+            }
+        }
         let location = Location {
             world,
             area,
@@ -161,7 +187,8 @@ impl AreaSource {
             .map(|o| (o.object_id, o.object_type))
             .collect();
         let spawns = state.activate(|id| types.get(&id).copied());
-        let (npcs, scripts, lines) = self.townspeople(code, area, &state, &spawns);
+        let (npcs, deferred, scripts, lines) =
+            self.townspeople(code, area, &state, &spawns, &types);
         let room = load_room_archive(&map, None)?;
         let collision = map_collision(&map, state.setup.bg_mask)?;
         let player = Area::player_spawn(&spawns)
@@ -182,6 +209,7 @@ impl AreaSource {
                 state,
                 spawns,
                 npcs,
+                deferred,
                 scripts,
                 lines,
                 player,
@@ -203,8 +231,10 @@ impl AreaSource {
         area: u8,
         state: &Area,
         spawns: &[Spawn],
+        types: &HashMap<u32, u8>,
     ) -> (
         Vec<FieldNpc>,
+        Vec<Deferred>,
         HashMap<u16, Vec<Op>>,
         HashMap<u32, Vec<u8>>,
     ) {
@@ -222,7 +252,8 @@ impl AreaSource {
                 None => match NpcKind::load(&self.source, &mut self.library, &self.objects[oi]) {
                     Ok(kind) => {
                         self.kinds.push(kind);
-                        self.kind_index.insert(s.entity.object, self.kinds.len() - 1);
+                        self.kind_index
+                            .insert(s.entity.object, self.kinds.len() - 1);
                         self.kinds.len() - 1
                     }
                     Err(e) => {
@@ -233,6 +264,36 @@ impl AreaSource {
             };
             let path = state.objects[s.point].point.walk_paths.first();
             npcs.push(FieldNpc::spawn(kind, &s.entity, i, path, &mut random));
+        }
+        let mut deferred = Vec::new();
+        for s in state.zone_spawns(|id| types.get(&id).copied()) {
+            let Some(&oi) = self.object_index.get(&s.entity.object) else {
+                continue;
+            };
+            if self.objects[oi].object_type != 15 {
+                continue;
+            }
+            let kind = match self.kind_index.get(&s.entity.object) {
+                Some(&k) => k,
+                None => match NpcKind::load(&self.source, &mut self.library, &self.objects[oi]) {
+                    Ok(kind) => {
+                        self.kinds.push(kind);
+                        self.kind_index
+                            .insert(s.entity.object, self.kinds.len() - 1);
+                        self.kinds.len() - 1
+                    }
+                    Err(e) => {
+                        eprintln!("NPC {} not loaded: {e}", s.entity.object);
+                        continue;
+                    }
+                },
+            };
+            deferred.push(Deferred {
+                spawn: s,
+                kind,
+                npc: None,
+                away: 0,
+            });
         }
         // Talk scripts: libretto-<world>.bar type-2 entry (kh2_first #474 for
         // tt): {u32 3, i32 count, count × {u16 talk, u16 kind, u32 offset}}.
@@ -250,10 +311,10 @@ impl AreaSource {
                 };
                 let id = u16::from_le_bytes([rec[0], rec[1]]);
                 let off = u32::from_le_bytes(rec[4..8].try_into().unwrap()) as usize;
-                if npcs.iter().any(|n| n.talk == id)
-                    && let Some(code) = entry.get(off..)
-                {
-                    scripts.insert(id, dialogue::read_script(code));
+                let wanted = npcs.iter().any(|n| n.talk == id)
+                    || deferred.iter().any(|d| d.spawn.entity.talk == id);
+                if wanted && let Some(script) = entry.get(off..) {
+                    scripts.insert(id, dialogue::read_script(script));
                 }
             }
         }
@@ -268,9 +329,11 @@ impl AreaSource {
         ids.sort_unstable();
         ids.dedup();
         let mut lines = HashMap::new();
-        if let (false, Some((index, ordinal, hash))) =
-            (ids.is_empty(), self.locate(&format!("msg/{}/{code}.bar", self.language)))
-            && let Ok(texts) = hud::load_messages_optional(&self.source, &index, ordinal, hash, &ids)
+        if let (false, Some((index, ordinal, hash))) = (
+            ids.is_empty(),
+            self.locate(&format!("msg/{}/{code}.bar", self.language)),
+        ) && let Ok(texts) =
+            hud::load_messages_optional(&self.source, &index, ordinal, hash, &ids)
         {
             for (id, text) in ids.iter().zip(texts) {
                 if let Some(t) = text {
@@ -278,7 +341,7 @@ impl AreaSource {
                 }
             }
         }
-        (npcs, scripts, lines)
+        (npcs, deferred, scripts, lines)
     }
 }
 

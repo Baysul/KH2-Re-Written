@@ -126,6 +126,9 @@ struct Config {
     /// Optional spawn (x, probe height, z) in scene coordinates.
     #[serde(default)]
     spawn: Option<[f32; 3]>,
+    /// Facing at that spawn (scene yaw); areas default to the entrance's.
+    #[serde(default)]
+    spawn_yaw: Option<f32>,
     /// Sound banks: `se/seNNN.win32.scd` entries, or object archives with
     /// the name of their `se/obj/seNNN` replacement asset.
     #[serde(default)]
@@ -176,6 +179,13 @@ struct AreaConfig {
     /// Unattended runs stand still instead of walking to an exit.
     #[serde(default)]
     stay: bool,
+    /// Program overrides [map, btl, evt] for the first load (−1 = story).
+    #[serde(default = "no_programs")]
+    programs: [i16; 3],
+}
+
+fn no_programs() -> [i16; 3] {
+    [-1; 3]
 }
 
 #[derive(Deserialize)]
@@ -475,6 +485,8 @@ struct AreaRes {
     transition: Option<Transition>,
     /// Unattended runs walk toward an exit (false = stand still).
     explore: bool,
+    /// NPC slots that already have meshes.
+    rendered: usize,
     /// The townsperson the talk resource currently points at.
     talk_npc: Option<usize>,
     was_talking: bool,
@@ -1364,7 +1376,7 @@ fn load(
                     area_sim::progress::world_index(&a.world).ok_or("unknown world code")?;
                 let story: Vec<(u32, u32)> = a.story.iter().map(|r| (r[0], r[1])).collect();
                 let mut src = AreaSource::open(Arc::clone(source), &story)?;
-                let (room, loaded) = src.load(world, a.area, a.entrance)?;
+                let (room, loaded) = src.load(world, a.area, a.entrance, a.programs)?;
                 area_load = Some((src, loaded));
                 (room, None)
             }
@@ -1906,7 +1918,7 @@ fn load(
     let idle_hand = clip_poses[clip_list[0].1].weapon[0].to_cols_array();
     let weapon_root = weapon.poses[0].matrix_bits[0].map(f32::from_bits);
     let [sx, sy, sz] = match (config.spawn, &area_load) {
-        (_, Some((_, a))) => a.player.0.to_array(),
+        (placed, Some((_, a))) => placed.unwrap_or(a.player.0.to_array()),
         (Some(spawn), None) => spawn,
         // Default: the walkable level with the most floor area.
         (None, None) => levels.first().map(|l| l.1).ok_or("no walkable floor")?,
@@ -1914,7 +1926,10 @@ fn load(
     // An area places Sora at the entrance's authored point without a
     // ground snap (FUN_1403b3200); the first physics frames settle him.
     let (spawn, yaw) = match &area_load {
-        Some((_, a)) => (a.player.0, a.player.1),
+        Some((_, a)) => (
+            config.spawn.map_or(a.player.0, Vec3::from_array),
+            config.spawn_yaw.unwrap_or(a.player.1),
+        ),
         None => {
             let ground_height = world
                 .floor(sx, sz, sy)
@@ -2721,7 +2736,7 @@ fn area_transition(
     let Some((world, number, entrance)) = area.pending.take() else {
         return;
     };
-    let (room, mut next) = match area.source.load(world, number, entrance) {
+    let (room, mut next) = match area.source.load(world, number, entrance, [-1; 3]) {
         Ok(loaded) => loaded,
         Err(e) => {
             area.transition = None;
@@ -2754,7 +2769,9 @@ fn area_transition(
         &area.source,
         &next,
         root.0,
+        0,
     );
+    area.rendered = next.npcs.len();
     game.world = RoomWorld::Map(MapWorld::new(next.take_collision()));
     let (position, yaw) = next.player;
     game.player = Player::new(position.to_array(), yaw);
@@ -2794,6 +2811,7 @@ struct FieldNpcPart {
 
 /// Creates the meshes of an area's townspeople under `parent` (tagged
 /// `RoomPart` so an area change removes them).
+#[allow(clippy::too_many_arguments)]
 fn spawn_field_npcs(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -2802,8 +2820,9 @@ fn spawn_field_npcs(
     source: &AreaSource,
     area: &LoadedArea,
     parent: Entity,
+    from: usize,
 ) {
-    for (i, npc) in area.npcs.iter().enumerate() {
+    for (i, npc) in area.npcs.iter().enumerate().skip(from) {
         let kind = &source.kinds[npc.kind];
         let root = commands
             .spawn((
@@ -2849,9 +2868,8 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
         hold,
         ..
     } = &mut *area;
-    if hold.len() != current.npcs.len() {
-        *hold = vec![0; current.npcs.len()];
-        *talk_npc = None;
+    if hold.len() < current.npcs.len() {
+        hold.resize(current.npcs.len(), 0);
     }
     let sora = Vec3::from_array(game.player.position);
     let talking = talk.active.is_some();
@@ -2867,7 +2885,11 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
     if !talking {
         let mut best: Option<(f32, usize)> = None;
         for (i, n) in current.npcs.iter().enumerate() {
-            if n.talk == 0 || n.reaction != 0x1f || !current.scripts.contains_key(&n.talk) {
+            if !n.alive
+                || n.talk == 0
+                || n.reaction != 0x1f
+                || !current.scripts.contains_key(&n.talk)
+            {
                 continue;
             }
             if source.kinds[n.kind].target.is_none() {
@@ -2900,7 +2922,12 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
                     radius: t.radius,
                     height: t.height,
                 };
-                talk.bones = vec![n.bone(&kind.anims).map(|m| (t.bone, m)).into_iter().collect()];
+                talk.bones = vec![
+                    n.bone(&kind.anims)
+                        .map(|m| (t.bone, m))
+                        .into_iter()
+                        .collect(),
+                ];
                 if *talk_npc != Some(i) {
                     talk.script = current.scripts[&n.talk].clone();
                     talk.lines = current.lines.clone();
@@ -2913,7 +2940,64 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
             }
         }
     }
+    // Zone pop-in / pop-out (FUN_1403ff000 / FUN_1403fe320 case 5 and
+    // FUN_140416270): an spawn-type-2 NPC appears when Sora is inside a
+    // kind-1 zone of its spawn point and leaves 5 ticks after he is not.
+    let engine_sora = [sora.x, -sora.y, -sora.z];
+    let mut random = crate::npcs::Lcg(0x9e37 ^ game.tick as u32);
+    for d in &mut current.deferred {
+        let inside = current.state.objects[d.spawn.point].zones.iter().any(|z| {
+            let raw = &current.state.objects[d.spawn.point].point.activators[z.activator].raw;
+            u16::from_le_bytes([raw[0x2c], raw[0x2d]]) == 1 && z.contains(engine_sora)
+        });
+        if inside {
+            d.away = 0;
+            match d.npc {
+                None => {
+                    let path = current.state.objects[d.spawn.point]
+                        .point
+                        .walk_paths
+                        .first();
+                    let mut n = crate::npcs::FieldNpc::spawn(
+                        d.kind,
+                        &d.spawn.entity,
+                        d.spawn.point,
+                        path,
+                        &mut random,
+                    );
+                    n.alive = true;
+                    current.npcs.push(n);
+                    d.npc = Some(current.npcs.len() - 1);
+                }
+                Some(i) if !current.npcs[i].alive => {
+                    let path = current.state.objects[d.spawn.point]
+                        .point
+                        .walk_paths
+                        .first();
+                    current.npcs[i] = crate::npcs::FieldNpc::spawn(
+                        d.kind,
+                        &d.spawn.entity,
+                        d.spawn.point,
+                        path,
+                        &mut random,
+                    );
+                }
+                _ => {}
+            }
+        } else if let Some(i) = d.npc {
+            d.away += 1;
+            if d.away > 4 && !(talking && *talk_npc == Some(i)) {
+                current.npcs[i].alive = false;
+            }
+        }
+    }
+    if hold.len() != current.npcs.len() {
+        hold.resize(current.npcs.len(), 0);
+    }
     for (i, n) in current.npcs.iter_mut().enumerate() {
+        if !n.alive {
+            continue;
+        }
         let is_target = talking && *talk_npc == Some(i);
         if is_target {
             n.yaw = talk.yaw;
@@ -2925,19 +3009,52 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
     }
 }
 
+/// Creates meshes for townspeople that appeared since the last frame.
+fn field_npc_spawn_new(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    area: Option<ResMut<AreaRes>>,
+    root: Option<Res<SceneRoot>>,
+) {
+    let (Some(mut area), Some(root)) = (area, root) else {
+        return;
+    };
+    if area.transition.is_some() || area.rendered >= area.current.npcs.len() {
+        return;
+    }
+    spawn_field_npcs(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &area.source,
+        &area.current,
+        root.0,
+        area.rendered,
+    );
+    area.rendered = area.current.npcs.len();
+}
+
 /// Places and poses the townspeople.
 fn field_npc_present(
     area: Option<Res<AreaRes>>,
-    mut roots: Query<(&FieldNpcRoot, &mut Transform)>,
+    mut roots: Query<(&FieldNpcRoot, &mut Transform, &mut Visibility)>,
     parts: Query<(&FieldNpcPart, &Mesh3d)>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let Some(area) = area else { return };
     let (kinds, npcs) = (&area.source.kinds, &area.current.npcs);
-    for (root, mut t) in &mut roots {
+    for (root, mut t, mut v) in &mut roots {
         if let Some(n) = npcs.get(root.0) {
             t.translation = n.position;
             t.rotation = Quat::from_rotation_y(n.yaw);
+            *v = if n.alive {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
         }
     }
     for (part, handle) in &parts {
@@ -3195,6 +3312,7 @@ fn setup(
             &a.source,
             &a.current,
             world,
+            0,
         );
     }
     commands.insert_resource(SceneRoot(world));
@@ -3921,7 +4039,10 @@ fn simulate(
             "enemy":enemy,
             "npcs":area.as_deref().map(|a| a.current.npcs.iter().map(|n| serde_json::json!({
                 "kind":a.source.kinds[n.kind].name,"position":n.position.to_array(),"yaw":n.yaw,
-                "pose":format!("{:?}", n.pose),"talk":n.talk})).collect::<Vec<_>>())}),
+                "pose":format!("{:?}", n.pose),"talk":n.talk,"reaction":n.reaction,"alive":n.alive,
+                "serial":n.serial,"point":n.entity,
+                "script":a.current.scripts.contains_key(&n.talk),
+                "target":a.source.kinds[n.kind].target.is_some()})).collect::<Vec<_>>())}),
         );
     }
 }
@@ -6203,6 +6324,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     }
     let stay = loaded.stay;
     let area_res = loaded.area.map(|(source, current)| AreaRes {
+        rendered: current.npcs.len(),
         source,
         current,
         previous: None,
@@ -6587,6 +6709,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             Update,
             (
                 area_transition,
+                field_npc_spawn_new,
                 field_npc_present,
                 dissolve_present,
                 camera_control,

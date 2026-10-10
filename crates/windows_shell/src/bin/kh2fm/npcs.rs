@@ -23,7 +23,6 @@ use package_reader::{
     objentry::ObjectEntry,
     probe::ProbeSource,
 };
-use std::collections::HashMap;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -62,6 +61,8 @@ pub struct NpcKind {
 
 /// Motion slots of an RTN set: 0 R00A idle, 1 R10A walk, 129 R50A turn in
 /// place (npc-01 §2.4).
+/// Object-collision kind of the talk camera shape.
+const CAMERA_SHAPE: u8 = 19;
 const SLOT_IDLE: usize = 0;
 const SLOT_WALK: usize = 1;
 const SLOT_TURN: usize = 129;
@@ -129,12 +130,8 @@ impl NpcKind {
         let found = library
             .find(&format!("obj/{model_name}.mdlx"))
             .ok_or_else(|| format!("obj/{model_name}.mdlx is not installed"))?;
-        let mut models = model_inspection::read_model_at(
-            source,
-            found.index,
-            found.ordinal,
-            found.name_hash,
-        )?;
+        let mut models =
+            model_inspection::read_model_at(source, found.index, found.ordinal, found.name_hash)?;
         if models.is_empty() {
             return Err("NPC model has no mesh".into());
         }
@@ -170,9 +167,16 @@ impl NpcKind {
             })
             .transpose()?
             .unwrap_or_default();
+        // Camera shape: the type-19 entry, else the type-3 TARGET one
+        // (FUN_1403be230 / FUN_1403be0f0, dialogue-01 §6).
         let target = collision
             .iter()
-            .find(|e| e.kind == object_collision::TARGET && e.bone >= 0)
+            .find(|e| e.kind == CAMERA_SHAPE && e.bone >= 0)
+            .or_else(|| {
+                collision
+                    .iter()
+                    .find(|e| e.kind == object_collision::TARGET && e.bone >= 0)
+            })
             .map(|t| TargetShape {
                 bone: t.bone as usize,
                 offset: Vec3::new(
@@ -215,7 +219,8 @@ pub struct Route {
 fn tangents(points: &[Vec3], looped: bool, tension: f32) -> Vec<Vec3> {
     let n = points.len();
     if n < 3 {
-        let d = points.get(1).copied().unwrap_or_default() - points.first().copied().unwrap_or_default();
+        let d = points.get(1).copied().unwrap_or_default()
+            - points.first().copied().unwrap_or_default();
         return vec![d; n];
     }
     // Parabola through three points: the endpoint tangent keeps the
@@ -350,8 +355,16 @@ impl Route {
         // Project the position onto the curve near the current parameter
         // (window 10·L = 50 units ≈ a segment either side).
         let window = 1.0;
-        let lo = if self.looped { self.t - window } else { (self.t - window).max(0.) };
-        let hi = if self.looped { self.t + window } else { (self.t + window).min(span - 1e-4) };
+        let lo = if self.looped {
+            self.t - window
+        } else {
+            (self.t - window).max(0.)
+        };
+        let hi = if self.looped {
+            self.t + window
+        } else {
+            (self.t + window).min(span - 1e-4)
+        };
         let mut projected = self.nearest(position, lo, hi);
         if self.looped {
             projected = projected.rem_euclid(span);
@@ -363,7 +376,9 @@ impl Route {
             // The current segment's chord length (route +0x28).
             let n = self.points.len();
             let i = (t.floor() as isize).clamp(0, span as isize - 1) as usize;
-            let chord = (self.points[(i + 1) % n] - self.points[i % n]).length().max(1.0);
+            let chord = (self.points[(i + 1) % n] - self.points[i % n])
+                .length()
+                .max(1.0);
             let step = (ahead / chord) * 0.5;
             t += if self.forward { step } else { -step };
             if self.looped {
@@ -421,16 +436,15 @@ pub struct FieldNpc {
     /// Scene position and yaw (facing (sin yaw, cos yaw)).
     pub position: Vec3,
     pub yaw: f32,
-    pub home_yaw: f32,
     pub pose: Pose,
     pub frame: u32,
     pub route: Option<Route>,
     pub talk: u16,
     pub reaction: u16,
     pub serial: u16,
-    /// Flag word +0xccc bits 0..6 (entity +0x24).
-    pub flags: u32,
     pub entity: usize,
+    /// false while a zone-spawned NPC is away (hidden).
+    pub alive: bool,
 }
 
 /// Turn rate per tick on the path (0.087266 × 2.0 = 10°).
@@ -463,22 +477,28 @@ impl FieldNpc {
             None
         } else {
             path.and_then(|p| {
-                Route::new(p, flags & 2 != 0, flags & 4 != 0, flags & 8 != 0, random, position)
+                Route::new(
+                    p,
+                    flags & 2 != 0,
+                    flags & 4 != 0,
+                    flags & 8 != 0,
+                    random,
+                    position,
+                )
             })
         };
         let mut npc = Self {
             kind,
             position,
             yaw,
-            home_yaw: yaw,
             pose: Pose::Idle,
             frame: 0,
             route,
             talk: entity.talk,
             reaction: entity.reaction,
             serial: entity.serial,
-            flags,
             entity: entity_index,
+            alive: true,
         };
         // The route start teleports the NPC onto the curve (nearest flag
         // clear): FUN_14054e130 / FUN_1403b64d0.
@@ -577,15 +597,17 @@ impl FieldNpc {
     }
 }
 
-/// Index for kinds by objentry id.
-pub type KindIndex = HashMap<u32, usize>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn square(looped: bool) -> Route {
-        let pts: Vec<[f32; 3]> = vec![[0., 0., 0.], [100., 0., 0.], [100., 0., 100.], [0., 0., 100.]];
+        let pts: Vec<[f32; 3]> = vec![
+            [0., 0., 0.],
+            [100., 0., 0.],
+            [100., 0., 100.],
+            [0., 0., 100.],
+        ];
         let path = WalkPath {
             header: [0, 0, 4, 0, looped as u8, 0, 0, 0],
             points: pts,
@@ -639,15 +661,14 @@ mod tests {
             kind: 0,
             position: Vec3::ZERO,
             yaw: std::f32::consts::PI,
-            home_yaw: 0.,
             pose: Pose::Walk,
             frame: 0,
             route: Some(square(true)),
             talk: 0,
             reaction: 0,
             serial: 0,
-            flags: 0,
             entity: 0,
+            alive: true,
         };
         npc.tick(&kind, false);
         assert_eq!(npc.pose, Pose::Turn);

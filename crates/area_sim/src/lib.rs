@@ -152,7 +152,12 @@ impl Area {
     /// 00objentry type byte, `None` when the id has no record.
     pub fn activate(&mut self, objentry_type: impl Fn(u32) -> Option<u8>) -> Vec<Spawn> {
         let mut out = Vec::new();
-        for (object, o) in self.objects.iter_mut().enumerate().filter(|(_, o)| !o.deferred) {
+        for (object, o) in self
+            .objects
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, o)| !o.deferred)
+        {
             o.flags |= 2;
             for (i, a) in o.point.activators.iter().enumerate() {
                 if (o.point.kind == 6 || a.option.wrapping_sub(3) > 1)
@@ -178,6 +183,28 @@ impl Area {
                 // Spawn types 0, 1 and 3 create the entity unless the point
                 // starts disabled; type 2 only counts (respawn points).
                 if matches!(e.spawn_type, 0 | 1 | 3) && o.flags & 1 == 0 {
+                    out.push(Spawn {
+                        set: o.set,
+                        point: object,
+                        entity: e.clone(),
+                        yaw: wrap(PI - e.rotation[1]),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Entities of spawn type 2 (zone pop-in, FUN_1403fe320 case 5) of
+    /// activated points, in file order. `point` is the object index.
+    pub fn zone_spawns(&self, objentry_type: impl Fn(u32) -> Option<u8>) -> Vec<Spawn> {
+        let mut out = Vec::new();
+        for (object, o) in self.objects.iter().enumerate() {
+            if o.deferred || o.flags & 2 == 0 {
+                continue;
+            }
+            for e in &o.point.entities {
+                if e.spawn_type == 2 && objentry_type(e.object).is_some() {
                     out.push(Spawn {
                         set: o.set,
                         point: object,
