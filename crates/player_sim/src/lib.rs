@@ -2,13 +2,15 @@
 //! jumping and grounded/aerial attack combos. It owns position, facing and
 //! the active action/motion frame; presentation only reads this state.
 //!
-//! Numeric inputs come from installed records where a public lead exists
-//! (PRTY walk/run/jump/turn, SSTM fall max, PTYA combo motions, ANB range
-//! triggers). Gravity, step height, body size, walk threshold and the
-//! collision response are explicit test-room choices, not observed KH2 rules.
+//! Movement parameters follow the executable's object init
+//! (`physics::ObjParams`: PRTY walk/run/jump/turn, SSTM fall max) and its
+//! gravity (`physics::G`); PTYA supplies the combo motions and ANB range
+//! triggers the windows. Step height, body size and the collision response
+//! are explicit test-room choices, not observed KH2 rules.
 
 pub mod camera;
 pub mod combat;
+pub mod physics;
 pub mod shadow;
 
 pub type Vec3 = [f32; 3];
@@ -28,11 +30,9 @@ pub struct Params {
     pub turn_speed: f32,
     /// Maximum downward speed, units per tick.
     pub fall_max: f32,
-    /// Test-room choice: downward acceleration, units per tick squared.
-    pub gravity: f32,
     /// Test-room choice: highest ledge climbed without jumping.
     pub step_height: f32,
-    /// Test-room choice: stick magnitude below which Sora walks.
+    /// Stick magnitude from which Sora runs (`DAT_140585c7c`, 0.8).
     pub walk_threshold: f32,
     /// Test-room choice: body radius/height for wall contact.
     pub radius: f32,
@@ -50,7 +50,6 @@ impl Params {
             self.jump_height,
             self.turn_speed,
             self.fall_max,
-            self.gravity,
             self.radius,
             self.height,
         ];
@@ -62,11 +61,6 @@ impl Params {
             return Err("player parameters must be finite and positive");
         }
         Ok(())
-    }
-    /// Launch speed whose discrete apex (speed reduced by gravity before
-    /// each position step) reaches `jump_height`.
-    pub fn jump_speed(&self) -> f32 {
-        launch_speed(self.gravity, self.jump_height)
     }
 }
 
@@ -117,6 +111,12 @@ pub struct AttackStep {
     /// PTYA "Jump" field, applied as a lift height when an aerial step starts
     /// (public label only; the installed use is unobserved).
     pub hop: f32,
+    /// PTYA +0x1c (speed maximum): horizontal speed of a hop without a
+    /// target (FUN_1403d78d0).
+    pub hop_speed: f32,
+    /// PTYA +0x38: blend into the next motion when this one ends
+    /// (FUN_1403d78d0 → FUN_1403c8310).
+    pub blend: f32,
     /// Root-position translation per tick in model space (+Z is facing).
     /// Its per-tick change moves the player; empty means no root motion.
     pub root: Vec<Vec3>,
@@ -196,27 +196,29 @@ pub struct Player {
     pub position: Vec3,
     /// Facing angle; facing direction is (sin yaw, cos yaw) in XZ.
     pub yaw: f32,
+    /// Last tick's vertical displacement (Y-up units per tick).
     pub vertical_speed: f32,
+    /// Jump/fall curve while airborne (obj+0xf0..+0xfc).
+    pub arc: physics::Arc,
+    /// Horizontal velocity while airborne (obj+0x20 x/z), units per tick.
+    pub air_velocity: [f32; 2],
     pub action: Action,
     /// Ticks since the current action started.
     pub frame: u32,
     /// Battle mode: weapon drawn, battle locomotion clips.
     pub armed: bool,
+    /// Blend, in ticks, from the previous motion into the current one.
+    pub blend: f32,
     idle_ticks: u32,
     queued_attack: bool,
     air_combo_spent: bool,
-    /// Knock-back slide per tick while hurt.
-    slide: [f32; 2],
-    /// Knock-slide (FUN_1403d4960/FUN_1403d4570): unit direction and speed.
-    knock: Option<([f32; 2], f32)>,
+    /// Knock-slide (FUN_1403d4960 / FUN_1403d4570), for hits and the guard
+    /// recoil alike.
+    knock: Option<physics::Knock>,
 }
 
-/// Knock-back slide brake per tick [test-room choice; SSTM brake 0.8].
-pub const HURT_SLIDE_BRAKE: f32 = 0.8;
-/// Guard recoil knock strength (DAT_140585efc) and knock-slide decay
-/// (DAT_1405aaa40).
+/// Guard recoil knock strength (DAT_140585efc).
 pub const GUARD_KNOCK: f32 = 200.;
-pub const KNOCK_DECAY: f32 = 0.9;
 
 /// What changed during one tick, for logging and presentation.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -225,8 +227,16 @@ pub struct Step {
     pub landed: bool,
 }
 
-fn launch_speed(gravity: f32, height: f32) -> f32 {
-    (2. * gravity * height).sqrt() + gravity * 0.5
+/// Motion blend, in ticks, when an action's motion starts: locomotion and
+/// the fall motion blend over 8 (`DAT_140623bac`: FUN_140422520,
+/// FUN_1403cb610); jump (FUN_140422630), land (FUN_1403cb940), attacks
+/// (FUN_1403d78d0), damage (FUN_1403d43b0), guard (FUN_1403a9c70) and its
+/// recoil (FUN_1403d61d0) start with blend 0.
+pub fn blend_for(action: Action) -> f32 {
+    match action {
+        Action::Idle | Action::Walk | Action::Run | Action::Fall => physics::MOTION_BLEND,
+        _ => 0.,
+    }
 }
 
 fn wrap_angle(a: f32) -> f32 {
@@ -240,26 +250,37 @@ impl Player {
             position,
             yaw,
             vertical_speed: 0.,
+            arc: physics::Arc::default(),
+            air_velocity: [0.; 2],
             action: Action::Idle,
             frame: 0,
             armed: false,
+            blend: 0.,
             idle_ticks: 0,
             queued_attack: false,
             air_combo_spent: false,
-            slide: [0.; 2],
             knock: None,
         }
     }
 
-    /// Starts a grounded damage reaction with a knock-back slide (per tick,
-    /// decaying). Airborne actions only take the slide.
-    pub fn hurt(&mut self, index: usize, slide: [f32; 2], clips: &Clips) -> Option<Action> {
-        self.slide = slide;
+    /// Starts a grounded damage reaction with a knock-slide away along
+    /// `direction` (XZ) at `strength` × 0.1 per tick, ×0.9 per tick until
+    /// below 1 (FUN_1403d4960 / FUN_1403d4570). Airborne actions only take
+    /// the slide.
+    pub fn hurt(
+        &mut self,
+        index: usize,
+        direction: [f32; 2],
+        strength: f32,
+        clips: &Clips,
+    ) -> Option<Action> {
+        self.knock = physics::Knock::new([direction[0], 0., direction[1]], strength, 0.);
         if self.action.airborne() || index >= clips.hurt.len() {
             return None;
         }
         self.action = Action::Hurt(index);
         self.frame = 0;
+        self.blend = 0.;
         self.queued_attack = false;
         self.arm();
         Some(self.action)
@@ -273,9 +294,10 @@ impl Player {
             return None;
         }
         self.yaw = (-away[0]).atan2(-away[1]);
-        self.knock = Some((away, GUARD_KNOCK * 0.1));
+        self.knock = physics::Knock::new([away[0], 0., away[1]], GUARD_KNOCK, 0.);
         self.action = Action::GuardRecoil;
         self.frame = 0;
+        self.blend = 0.;
         self.queued_attack = false;
         self.arm();
         Some(self.action)
@@ -285,7 +307,19 @@ impl Player {
         self.action = action;
         self.frame = 0;
         self.queued_attack = false;
+        self.blend = blend_for(action);
         step.started = Some(action);
+    }
+
+    /// Mode 0's walk↔run switch (FUN_1403c6dc0): the new loop starts at the
+    /// old one's phase, `fmod(len_new × (t + blend) / len_old, len_new)`,
+    /// with the locomotion blend.
+    fn switch_gait(&mut self, action: Action, clips: &Clips, step: &mut Step) {
+        let old = self.clip(clips).end.max(1) as f32;
+        let time = self.motion_frame(clips) as f32;
+        self.start(action, step);
+        let new = self.clip(clips).end.max(1) as f32;
+        self.frame = ((new * ((time + physics::MOTION_BLEND) / old)) % new) as u32;
     }
 
     pub fn clip<'a>(&self, clips: &'a Clips) -> &'a Clip {
@@ -341,14 +375,55 @@ impl Player {
         self.yaw = wrap_angle(self.yaw + delta.clamp(-rate, rate));
     }
 
-    fn lift(&mut self, height: f32, p: &Params) {
-        if height.is_finite() && height > 0. {
-            self.vertical_speed = self.vertical_speed.max(launch_speed(p.gravity, height));
+    /// PTYA attack start with a positive Jump field (FUN_1403d78d0, no
+    /// target): a new jump arc of that height from the current position,
+    /// moving along the facing at the PTYA speed maximum (+0x1c).
+    fn lift(&mut self, step: &AttackStep) {
+        if step.hop.is_finite() && step.hop > 0. {
+            self.arc = physics::Arc::launch(self.position[1], step.hop);
+            let speed = if step.hop_speed.is_finite() {
+                step.hop_speed
+            } else {
+                0.
+            };
+            self.air_velocity = [self.yaw.sin() * speed, self.yaw.cos() * speed];
         }
     }
 
-    fn facing(&self) -> [f32; 2] {
-        [self.yaw.sin(), self.yaw.cos()]
+    /// Jump (mode 0 slot +0x48, FUN_140422630 → FUN_1403cbb00): the arc
+    /// of the PRTY jump height from the current position, taking off with
+    /// the stick velocity (obj+0xe0 → +0x20 in FUN_1403cbd30).
+    fn jump(&mut self, p: &Params, velocity: [f32; 2], step: &mut Step) {
+        self.arc = physics::Arc::launch(self.position[1], p.jump_height);
+        self.air_velocity = velocity;
+        self.vertical_speed = 0.;
+        self.air_combo_spent = false;
+        self.start(Action::Jump, step);
+    }
+
+    /// Leaving the ground without jumping (FUN_1403b4780 / FUN_1403b8150),
+    /// keeping the ground velocity (obj+0xa38 → +0x20 [I: +0xa38 is the
+    /// last ground velocity]).
+    fn drop_off(&mut self, velocity: [f32; 2], step: &mut Step) {
+        self.arc = physics::Arc::fall(self.position[1], 0.);
+        self.air_velocity = velocity;
+        self.vertical_speed = 0.;
+        self.air_combo_spent = false;
+        self.start(Action::Fall, step);
+    }
+
+    /// FUN_1403a8fa0's move request: the stick direction at the walk speed
+    /// below magnitude 0.8 and the run speed from it; zero without a stick.
+    fn stick_velocity(direction: [f32; 2], magnitude: f32, p: &Params) -> [f32; 2] {
+        if magnitude <= 0. {
+            return [0.; 2];
+        }
+        let speed = if magnitude < p.walk_threshold {
+            p.walk_speed
+        } else {
+            p.run_speed
+        };
+        [direction[0] * speed, direction[1] * speed]
     }
 
     /// Moves horizontally, keeping the body out of walls and off ledges that
@@ -382,7 +457,9 @@ impl Player {
         let mut step = Step::default();
         self.frame = self.frame.saturating_add(1);
         let magnitude = input.direction[0].hypot(input.direction[1]).min(1.);
-        let moving = magnitude > 0.1;
+        // Any stick past the pad's dead zone moves (FUN_1403a8fa0: speed is
+        // set whenever the stick magnitude is above 0).
+        let moving = magnitude > 0.;
         let direction = if moving {
             [
                 input.direction[0] / magnitude,
@@ -402,28 +479,20 @@ impl Player {
                     self.arm();
                     self.start(Action::Attack(0), &mut step);
                 } else if input.jump {
-                    self.vertical_speed = p.jump_speed();
-                    self.air_combo_spent = false;
-                    self.start(Action::Jump, &mut step);
+                    self.jump(p, Self::stick_velocity(direction, magnitude, p), &mut step);
                 } else {
                     // Landing holds until its "Blend to idle" range starts.
                     let landing = self.action == Action::Land
                         && self.frame < clips.land.blend_to_idle.unwrap_or(clips.land.end);
+                    // FUN_1403a8fa0: run speed from stick magnitude 0.8
+                    // (DAT_140585c7c), walk speed below; FUN_140422520 then
+                    // plays RUN when speed ≥ (walk + run) / 2, else WALK.
                     let target = if !moving {
                         if landing { Action::Land } else { Action::Idle }
+                    } else if magnitude < p.walk_threshold {
+                        Action::Walk
                     } else {
-                        // Hysteresis keeps an analog stick near the threshold
-                        // from flipping between walk and run every tick.
-                        let band = if self.action == Action::Run {
-                            -0.05
-                        } else {
-                            0.05
-                        };
-                        if magnitude < p.walk_threshold + band {
-                            Action::Walk
-                        } else {
-                            Action::Run
-                        }
+                        Action::Run
                     };
                     self.idle_ticks = self.idle_ticks.saturating_add(1);
                     if self.armed && self.idle_ticks >= p.disarm_ticks && target != Action::Land {
@@ -431,20 +500,28 @@ impl Player {
                         self.armed = false;
                         self.start(target, &mut step);
                     } else if target != self.action {
-                        self.start(target, &mut step);
+                        if matches!(
+                            (self.action, target),
+                            (Action::Walk, Action::Run) | (Action::Run, Action::Walk)
+                        ) {
+                            self.switch_gait(target, clips, &mut step);
+                        } else {
+                            self.start(target, &mut step);
+                        }
                     }
                     if moving {
+                        // FUN_1403b4780 turns the facing at +0x134 per tick;
+                        // FUN_140422350 moves along the stick direction at
+                        // the full walk/run speed the same tick.
                         self.turn_toward(direction, p.turn_speed);
                         let speed = if target == Action::Walk {
                             p.walk_speed
                         } else {
                             p.run_speed
                         };
-                        let facing = self.facing();
-                        if !self.travel([facing[0] * speed, facing[1] * speed], p, world, true) {
-                            self.vertical_speed = 0.;
-                            self.air_combo_spent = false;
-                            self.start(Action::Fall, &mut step);
+                        let velocity = [direction[0] * speed, direction[1] * speed];
+                        if !self.travel(velocity, p, world, true) {
+                            self.drop_off(velocity, &mut step);
                         }
                     }
                 }
@@ -462,8 +539,7 @@ impl Player {
                     let (dx, dz) = (now[0] - before[0], now[2] - before[2]);
                     let delta = [dx * c + dz * s, -dx * s + dz * c];
                     if (delta[0] != 0. || delta[1] != 0.) && !self.travel(delta, p, world, true) {
-                        self.vertical_speed = 0.;
-                        self.start(Action::Fall, &mut step);
+                        self.drop_off(delta, &mut step);
                         return step;
                     }
                 }
@@ -475,11 +551,12 @@ impl Player {
                     }
                     self.start(Action::Attack(i + 1), &mut step);
                 } else if recovery && input.jump {
-                    self.vertical_speed = p.jump_speed();
-                    self.air_combo_spent = false;
-                    self.start(Action::Jump, &mut step);
-                } else if (recovery && moving) || self.frame >= clip.end {
+                    self.jump(p, Self::stick_velocity(direction, magnitude, p), &mut step);
+                } else if recovery && moving {
                     self.start(Action::Idle, &mut step);
+                } else if self.frame >= clip.end {
+                    self.start(Action::Idle, &mut step);
+                    self.blend = clips.ground_combo[i].blend;
                 }
             }
             Action::Jump | Action::Fall | Action::AirAttack(_) => {
@@ -506,29 +583,21 @@ impl Player {
                     } else if input.guard && clips.guard.is_some() {
                         self.start_guard(input, &mut step);
                     } else if input.jump {
-                        self.vertical_speed = p.jump_speed();
-                        self.air_combo_spent = false;
-                        self.start(Action::Jump, &mut step);
+                        self.jump(p, Self::stick_velocity(direction, magnitude, p), &mut step);
                     } else if moving || self.frame >= end {
                         self.start(Action::Idle, &mut step);
                     }
                 }
             }
         }
-        if let Some((dir, v)) = self.knock {
-            if v < 1. {
-                self.knock = None;
-            } else {
-                let grounded = !self.action.airborne();
-                self.travel([dir[0] * v, dir[1] * v], p, world, grounded);
-                self.knock = Some((dir, v * KNOCK_DECAY));
+        if let Some(knock) = self.knock.as_mut() {
+            match knock.step() {
+                Some(d) => {
+                    let grounded = !self.action.airborne();
+                    self.travel([d[0], d[2]], p, world, grounded);
+                }
+                None => self.knock = None,
             }
-        }
-        if self.slide[0].hypot(self.slide[1]) > 1e-3 {
-            let grounded = !self.action.airborne();
-            let slide = self.slide;
-            self.travel(slide, p, world, grounded);
-            self.slide = slide.map(|v| v * HURT_SLIDE_BRAKE);
         }
         step
     }
@@ -569,7 +638,7 @@ impl Player {
                     self.yaw = direction[0].atan2(direction[1]);
                 }
                 self.start(Action::AirAttack(i + 1), step);
-                self.lift(clips.air_combo[i + 1].hop, p);
+                self.lift(&clips.air_combo[i + 1]);
             } else if self.frame >= clip.end {
                 let [x, y, z] = self.position;
                 // A swing that touched down finishes on the ground.
@@ -582,6 +651,7 @@ impl Player {
                     return;
                 }
                 self.start(Action::Fall, step);
+                self.blend = clips.air_combo[i].blend;
             }
         } else if input.attack && !self.air_combo_spent && !clips.air_combo.is_empty() {
             self.air_combo_spent = true;
@@ -590,24 +660,44 @@ impl Player {
             }
             self.arm();
             self.start(Action::AirAttack(0), step);
-            self.lift(clips.air_combo[0].hop, p);
-        } else if self.action == Action::Jump && self.vertical_speed <= 0. {
+            self.lift(&clips.air_combo[0]);
+        } else if self.action == Action::Jump && self.arc.falling_motion() {
+            // FUN_1403cb680 → FUN_1403cb610: FALL (motion 4) blended over 8
+            // once the apex is within 5 ticks.
             self.start(Action::Fall, step);
         }
+        // ANB "No gravity" ranges hold the height while the curve's time
+        // keeps running (FUN_1403cb500 with obj+0x18c no-gravity bits) [I:
+        // trigger 3 → those bits].
         let floating = match self.action {
             Action::AirAttack(i) => Clip::within(&clips.air_combo[i].clip.no_gravity, self.frame),
             _ => false,
         };
-        if floating {
-            self.vertical_speed = 0.;
-        } else {
-            self.vertical_speed = (self.vertical_speed - p.gravity).max(-p.fall_max);
-        }
-        if moving && !matches!(self.action, Action::AirAttack(_)) {
+        self.vertical_speed = self.arc.step(self.position[1], p.fall_max, floating);
+        // Mode 1 horizontal (FUN_1403cb360 → FUN_1403b7ad0 with 0.9, 0.95):
+        // the velocity keeps 90% of itself and takes 10% of the stick
+        // velocity, or decays ×0.95 without a stick. Attacks take no stick
+        // [I: the move request is idle during an attack motion].
+        let attacking = matches!(self.action, Action::AirAttack(_));
+        if moving && !attacking {
             self.turn_toward(direction, p.turn_speed);
-            let speed = p.run_speed * magnitude.max(p.walk_threshold);
-            let facing = self.facing();
-            self.travel([facing[0] * speed, facing[1] * speed], p, world, false);
+        }
+        let (dir, speed) = if attacking || !moving {
+            ([0.; 2], 0.)
+        } else {
+            let v = Self::stick_velocity(direction, magnitude, p);
+            (direction, v[0].hypot(v[1]))
+        };
+        self.air_velocity = physics::steer(
+            self.air_velocity,
+            dir,
+            speed,
+            physics::AIR_INERTIA,
+            physics::AIR_DRAG,
+        );
+        let v = self.air_velocity.map(|c| c * physics::DT);
+        if v[0] != 0. || v[1] != 0. {
+            self.travel(v, p, world, false);
         }
         let [x, y, z] = self.position;
         let next = y + self.vertical_speed;
@@ -756,7 +846,6 @@ mod tests {
             jump_height: 185.,
             turn_speed: 0.2618,
             fall_max: 16.,
-            gravity: 1.,
             step_height: 20.,
             walk_threshold: 0.5,
             radius: 30.,
@@ -774,6 +863,8 @@ mod tests {
                 no_gravity: vec![],
             },
             hop,
+            hop_speed: 0.,
+            blend: 0.,
             root: Vec::new(),
         }
     }
@@ -863,11 +954,79 @@ mod tests {
         player.tick(&hold([0., 1.]), &p, &c, &w);
         assert_eq!(player.action, Action::Run);
         assert!((player.position[2] - 10.).abs() < 1e-5);
-        // Facing +X requires a quarter turn: limited per tick.
+        // Facing +X requires a quarter turn: limited per tick, while the
+        // body already moves along the stick (FUN_140422350).
         player.tick(&hold([1., 0.]), &p, &c, &w);
         assert!((player.yaw - 0.2618).abs() < 1e-5);
+        assert!((player.position[0] - 8.).abs() < 1e-5);
+        assert!((player.position[2] - 10.).abs() < 1e-5);
         player.tick(&Input::default(), &p, &c, &w);
         assert_eq!(player.action, Action::Idle);
+    }
+
+    #[test]
+    fn walk_to_run_keeps_the_gait_phase_and_blends_eight() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([0., 0., 0.], 0.);
+        for _ in 0..20 {
+            player.tick(&hold([0., 0.3]), &p, &c, &w);
+        }
+        assert_eq!((player.action, player.motion_frame(&c)), (Action::Walk, 19));
+        assert_eq!(player.blend, 8.);
+        player.tick(&hold([0., 1.]), &p, &c, &w);
+        // Field walk 50 → field run 36: 36 × (20 + 8) / 50 = 20.16.
+        assert_eq!((player.action, player.frame), (Action::Run, 20));
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&jump, &p, &c, &w);
+        assert_eq!(player.blend, 0.);
+    }
+
+    #[test]
+    fn running_jump_carries_momentum_then_drags() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([-900., 0., 0.], 0.);
+        let run_jump = Input {
+            direction: [0., 1.],
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&run_jump, &p, &c, &w);
+        assert_eq!(player.air_velocity, [0., 8.]);
+        // Stick released: FUN_1403b7ad0 scales the velocity by 0.95.
+        let z = player.position[2];
+        player.tick(&Input::default(), &p, &c, &w);
+        assert!((player.position[2] - z - 7.6).abs() < 1e-4);
+        // Stick sideways: 10% of the stick velocity per tick.
+        player.tick(&hold([1., 0.]), &p, &c, &w);
+        assert!((player.air_velocity[0] - 0.8).abs() < 1e-5);
+        assert!((player.air_velocity[1] - 7.6 * 0.9).abs() < 1e-4);
+    }
+
+    #[test]
+    fn fall_motion_starts_five_ticks_before_the_apex() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([0., 0., 0.], 0.);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&jump, &p, &c, &w);
+        let mut fell = None;
+        for tick in 1..40 {
+            let step = player.tick(&Input::default(), &p, &c, &w);
+            if step.started == Some(Action::Fall) {
+                fell = Some(tick);
+                break;
+            }
+        }
+        // rise √(2·185/g) = 30.1 ticks; FALL starts when rise ≤ t + 5,
+        // tested before this tick's t advances (t = 26 on tick 27).
+        assert_eq!(fell, Some(27));
+        assert_eq!(player.blend, 8.);
+        assert!(player.position[1] < 185.);
     }
 
     #[test]
@@ -899,9 +1058,10 @@ mod tests {
                 break;
             }
         }
-        // Discrete integration lands slightly under the continuous apex.
-        assert!(apex > 184. && apex <= 185., "apex {apex}");
-        assert!(landed.is_some());
+        // FUN_1403cb500: the double-sine rise reaches 185 at t ≈ 30.1 and
+        // the parabola lands at t ≈ 60.2.
+        assert!(apex > 184.9 && apex <= 185.001, "apex {apex}");
+        assert_eq!(landed, Some(60));
         assert_eq!(player.action, Action::Land);
         assert_eq!(player.position[1], 0.);
         for _ in 0..12 {
@@ -985,7 +1145,7 @@ mod tests {
         assert!(!matches!(player.action, Action::AirAttack(_)));
         if player.action == Action::Fall {
             player.tick(&press, &p, &c, &w);
-            assert_eq!(player.action, Action::Fall);
+            assert!(!matches!(player.action, Action::AirAttack(_)));
         }
     }
 
@@ -1138,11 +1298,13 @@ mod tests {
         let c = clips();
         let world = room();
         let mut player = Player::new([0.; 3], 0.);
-        assert_eq!(player.hurt(1, [0., -10.], &c), Some(Action::Hurt(1)));
+        assert_eq!(player.hurt(1, [0., -1.], 100., &c), Some(Action::Hurt(1)));
         assert!(player.armed);
         let p = params();
         player.tick(&Input::default(), &p, &c, &world);
         assert!((player.position[2] + 10.).abs() < 1e-3);
+        player.tick(&Input::default(), &p, &c, &world);
+        assert!((player.position[2] + 19.).abs() < 1e-3);
         for _ in 0..30 {
             player.tick(&Input::default(), &p, &c, &world);
         }
