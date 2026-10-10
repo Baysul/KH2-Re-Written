@@ -178,7 +178,10 @@ fn dds_layout(bytes: &[u8]) -> io::Result<(HdImageFormat, usize)> {
         if value(88) != 32
             || [value(92), value(96), value(100), value(104)]
                 != [0x00ff_0000, 0x0000_ff00, 0x0000_00ff, 0xff00_0000]
-            || value(8) & 0x100f != 0x100f
+            // The pitch flag (0x8) is required unless the header carries
+            // only the required flags; character face sheets (obj/*.a.us)
+            // omit it while still storing the tight pitch.
+            || (value(8) & 0x100f != 0x100f && value(8) != 0x1007)
             || value(8) & !0x2100f != 0
             || value(20) != width * 4
             || value(108) != 0x1000
@@ -777,6 +780,10 @@ mod tests {
             assert!(decode(&data).is_err(), "offset {offset}, word {value}");
         }
         assert!(decode(&source[..source.len() - 1]).is_err());
+        // Required flags only, with the tight pitch still stored.
+        let mut no_pitch_flag = source.clone();
+        no_pitch_flag[8..12].copy_from_slice(&0x1007u32.to_le_bytes());
+        assert!(decode(&no_pitch_flag).is_ok());
         let mut extra = source;
         extra.push(0);
         assert!(decode(&extra).is_err());

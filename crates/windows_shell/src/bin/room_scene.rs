@@ -1,46 +1,28 @@
 //! First source-bound room/character scene. Camera inspection, no game rules.
 use bevy::{
     app::AppExit,
-    asset::RenderAssetUsages,
     camera::ScalingMode,
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
-    image::ImageSampler,
     prelude::*,
-    render::{
-        render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat},
-        view::{
-            NoIndirectDrawing,
-            screenshot::{Screenshot, ScreenshotCaptured},
-        },
+    render::view::{
+        NoIndirectDrawing,
+        screenshot::{Screenshot, ScreenshotCaptured},
     },
 };
 use package_reader::{
-    bar,
     model_inspection::{self, InspectionModel},
     model_inspection_textures::TextureMode,
-    model_texture_pixels::{self, DecodedTexture},
     motion::{self, SelectedMotion},
-    original,
     probe::ProbeSource,
-    room_collision,
-    room_geometry::{self, RoomModel},
 };
 use sha2::{Digest, Sha256};
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     path::PathBuf,
 };
+use windows_shell::room::{LoadedRoom, Room, load_rooms, mesh, rgba_image, upload};
 
-struct Room {
-    model: RoomModel,
-    textures: Vec<DecodedTexture>,
-}
-struct LoadedRoom {
-    rooms: Vec<Room>,
-    frame_points: Vec<Vec3>,
-    inspection_ground: Option<f32>,
-}
 #[derive(Resource)]
 struct Scene {
     rooms: Vec<Room>,
@@ -75,153 +57,6 @@ impl Scene {
         writeln!(self.log).expect("scene log newline");
         self.log.flush().expect("scene log flush");
     }
-}
-fn load_rooms(
-    source: &ProbeSource,
-    selection: &PathBuf,
-) -> Result<LoadedRoom, Box<dyn std::error::Error>> {
-    let mut bytes = Vec::new();
-    File::open(selection)?
-        .take(1048577)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > 1048576 {
-        return Err("room selection too large".into());
-    }
-    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-    let items = value["selections"]
-        .as_array()
-        .ok_or("room selection absent")?;
-    if value["schema_version"] != 1
-        || value["source_content_identity"] != source.content_identity()
-        || items.len() != 1
-    {
-        return Err("one source-bound room selection required".into());
-    }
-    let item = &items[0];
-    let mut index = source.open_index(item["index"].as_str().ok_or("room index absent")?)?;
-    let ordinal = usize::try_from(item["ordinal"].as_u64().ok_or("room ordinal absent")?)?;
-    let entry = index
-        .inventory
-        .entries
-        .get(ordinal)
-        .ok_or("room entry absent")?;
-    if serde_json::to_value(entry.name_hash)? != item["name_hash"] {
-        return Err("room identity mismatch".into());
-    }
-    let archive = original::read_original(&mut index.reader, entry)?;
-    let table = bar::read_bar(&archive.bytes)?;
-    let mut rooms = Vec::new();
-    let mut frame_points = Vec::new();
-    let mut inspection_ground = None;
-    for entry in table
-        .entries
-        .iter()
-        .filter(|e| e.entry_type == 6 && e.offset > 0 && e.size > 0)
-    {
-        let collision = room_collision::read(
-            &archive.bytes[entry.offset as usize..entry.offset as usize + entry.size as usize],
-        )?;
-        // Pinned MapStudio CollisionModel.GenerateVertex display conversion.
-        frame_points.extend(collision.vertex_bits.iter().map(|p| {
-            let [x, y, z, _] = p.map(f32::from_bits);
-            Vec3::new(x, -y, -z)
-        }));
-        if let Some(polygon) = item.get("inspection_ground_polygon") {
-            if inspection_ground.is_some() {
-                return Err("inspection ground polygon ambiguous across collision blocks".into());
-            }
-            let ordinal = usize::try_from(
-                polygon
-                    .as_u64()
-                    .ok_or("inspection polygon ordinal invalid")?,
-            )?;
-            let polygon = collision
-                .polygons
-                .get(ordinal)
-                .ok_or("inspection ground polygon absent")?;
-            let heights: Vec<_> = polygon
-                .vertices
-                .iter()
-                .filter(|&&i| i >= 0)
-                .map(|&i| -f32::from_bits(collision.vertex_bits[i as usize][1]))
-                .collect();
-            if heights.len() < 3 || heights.iter().any(|&y| !y.is_finite() || y != heights[0]) {
-                return Err(
-                    "inspection grounding requires an explicitly selected horizontal polygon"
-                        .into(),
-                );
-            }
-            inspection_ground = Some(heights[0]);
-        }
-    }
-    let mut rgba_bytes = 0;
-    for entry in table
-        .entries
-        .iter()
-        .filter(|e| e.entry_type == 4 && e.offset > 0 && e.size > 0)
-    {
-        let payload =
-            &archive.bytes[entry.offset as usize..entry.offset as usize + entry.size as usize];
-        if payload.get(0x90..0x94) != Some(2u32.to_le_bytes().as_slice()) {
-            continue;
-        }
-        let model = room_geometry::read(payload)?;
-        let textures: Vec<_> = table
-            .entries
-            .iter()
-            .filter(|e| {
-                e.entry_type == 7 && e.name_bytes == entry.name_bytes && e.offset > 0 && e.size > 0
-            })
-            .collect();
-        if textures.len() != 1 {
-            return Err("room requires unique same-name texture block".into());
-        }
-        let entry = textures[0];
-        let textures = model_texture_pixels::decode_images(
-            &archive.bytes[entry.offset as usize..entry.offset as usize + entry.size as usize],
-        )?;
-        rgba_bytes += textures.iter().map(|t| t.pixels_rgba.len()).sum::<usize>();
-        if rgba_bytes > 128 * 1024 * 1024 {
-            return Err("room textures exceed cumulative limit".into());
-        }
-        rooms.push(Room { model, textures });
-    }
-    index.verify_unchanged()?;
-    if rooms.is_empty() {
-        return Err("no decoded room model".into());
-    }
-    if frame_points.is_empty() || frame_points.iter().any(|p| !p.is_finite()) {
-        return Err("finite collision area required for scene framing".into());
-    }
-    Ok(LoadedRoom {
-        rooms,
-        frame_points,
-        inspection_ground,
-    })
-}
-fn upload(texture: &DecodedTexture, images: &mut Assets<Image>) -> Handle<Image> {
-    let mut image = Image::new(
-        Extent3d {
-            width: texture.width,
-            height: texture.height,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        texture.pixels_rgba.clone(),
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
-    image.sampler = ImageSampler::nearest();
-    images.add(image)
-}
-fn mesh(positions: Vec<[f32; 3]>, uvs: Vec<[f32; 2]>, colors: Vec<[f32; 4]>) -> Mesh {
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
 }
 fn setup(
     mut commands: Commands,
@@ -342,19 +177,12 @@ fn setup(
                 .expect("admitted actor binding");
             if let Some(image) = binding.image_index {
                 let level = &set.images[image].levels[0];
-                let mut image = Image::new(
-                    Extent3d {
-                        width: level.width,
-                        height: level.height,
-                        depth_or_array_layers: 1,
-                    },
-                    TextureDimension::D2,
+                texture = Some(rgba_image(
+                    level.width,
+                    level.height,
                     level.pixels_rgba.clone(),
-                    TextureFormat::Rgba8UnormSrgb,
-                    RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-                );
-                image.sampler = ImageSampler::nearest();
-                texture = Some(images.add(image));
+                    &mut images,
+                ));
             }
         }
         commands.spawn((
@@ -610,6 +438,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
         rooms,
         frame_points,
         inspection_ground,
+        ..
     } = load_rooms(&source, &args[2])?;
     let actor = actors.remove(0);
     let motions = if let Some(path) = motion_path {

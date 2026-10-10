@@ -241,6 +241,10 @@ pub fn read_interpolated(bytes: &[u8]) -> io::Result<InterpolatedMotion> {
 }
 
 impl InterpolatedMotion {
+    /// Key `index` as (time, value, in-tangent, out-tangent).
+    pub(crate) fn key_record(&self, index: usize) -> io::Result<[f32; 4]> {
+        self.key(index)
+    }
     fn key(&self, index: usize) -> io::Result<[f32; 4]> {
         let key = self
             .keys
@@ -410,24 +414,48 @@ pub fn read_selected(
         return Err("motion selection identity/count invalid".into());
     }
     source.verify_full_source()?;
-    let mut checked = source.open_index(&selected.index)?;
+    read_slots(
+        source,
+        &selected.index,
+        selected.ordinal,
+        selected.name_hash,
+        &selected.slots,
+    )
+}
+
+/// Motions at explicit BAR slots of a motion set. Sets whose header byte
+/// +0xc bit 0 is clear (e.g. M_EX020.mset) index slots directly by motion id
+/// (executable FUN_1403c7c50 / FUN_14040d7d0).
+pub fn read_slots(
+    source: &crate::probe::ProbeSource,
+    index: &str,
+    ordinal: usize,
+    name_hash: [u8; 16],
+    slots: &[usize],
+) -> Result<Vec<SelectedMotion>, Box<dyn std::error::Error>> {
+    if slots.is_empty() || slots.len() > 32 {
+        return Err("motion slot count invalid".into());
+    }
+    let mut checked = source.open_index(index)?;
     let entry = checked
         .inventory
         .entries
-        .get(selected.ordinal)
-        .filter(|e| e.name_hash == selected.name_hash)
+        .get(ordinal)
+        .filter(|e| e.name_hash == name_hash)
         .ok_or("motion source entry mismatch")?;
     let original = crate::original::read_original(&mut checked.reader, entry)?;
     let table = crate::bar::read_bar(&original.bytes)?;
     let mut result = Vec::new();
-    for slot in selected.slots {
+    for &slot in slots {
         let entry = table
             .entries
             .get(slot)
             .filter(|e| e.offset > 0 && e.size > 0)
             .ok_or("motion slot absent/dummy")?;
-        let anb =
-            &original.bytes[entry.offset as usize..entry.offset as usize + entry.size as usize];
+        let anb = original
+            .bytes
+            .get(entry.offset as usize..entry.offset as usize + entry.size as usize)
+            .ok_or("motion slot exceeds set")?;
         let nested = crate::bar::read_bar(anb)?;
         let entries: Vec<_> = nested
             .entries
@@ -450,9 +478,117 @@ pub fn read_selected(
     Ok(result)
 }
 
+/// Public slot chooser from pinned OpenKH MotionSet.GetMotionSetIndex: four
+/// variant slots per motion ID, probed in a mode-dependent order.
+pub fn motion_set_index(
+    present: impl Fn(usize) -> bool,
+    motion_id: u16,
+    battle: bool,
+    has_weapon: bool,
+) -> Option<usize> {
+    const MODE_TABLE: [usize; 16] = [0, 1, 3, 2, 1, 0, 2, 3, 2, 3, 1, 0, 3, 2, 0, 1];
+    let mut mode = if battle { 1 } else { 2 };
+    if has_weapon {
+        mode ^= 1;
+    }
+    (0..4)
+        .map(|i| MODE_TABLE[mode * 4 + i] + motion_id as usize * 4)
+        .find(|&slot| present(slot))
+}
+
+/// One source-bound motion set resolved by motion ID through the public slot
+/// chooser. The chooser is a public lead, not observed installed routing.
+pub struct MotionSetSelection {
+    pub index: String,
+    pub ordinal: usize,
+    pub name_hash: [u8; 16],
+    pub battle: bool,
+    pub has_weapon: bool,
+}
+pub fn read_motion_ids(
+    source: &crate::probe::ProbeSource,
+    selection: &MotionSetSelection,
+    motion_ids: &[u16],
+) -> Result<Vec<SelectedMotion>, Box<dyn std::error::Error>> {
+    if motion_ids.is_empty() || motion_ids.len() > 32 {
+        return Err("motion ID selection count invalid".into());
+    }
+    source.verify_full_source()?;
+    let mut checked = source.open_index(&selection.index)?;
+    let entry = checked
+        .inventory
+        .entries
+        .get(selection.ordinal)
+        .filter(|e| e.name_hash == selection.name_hash)
+        .ok_or("motion source entry mismatch")?;
+    let original = crate::original::read_original(&mut checked.reader, entry)?;
+    let table = crate::bar::read_bar(&original.bytes)?;
+    let present = |slot: usize| {
+        table
+            .entries
+            .get(slot)
+            .is_some_and(|e| e.offset > 0 && e.size > 0)
+    };
+    let mut result = Vec::new();
+    for &id in motion_ids {
+        let slot = motion_set_index(present, id, selection.battle, selection.has_weapon)
+            .ok_or("motion ID has no populated slot")?;
+        let entry = &table.entries[slot];
+        let anb = original
+            .bytes
+            .get(entry.offset as usize..entry.offset as usize + entry.size as usize)
+            .ok_or("motion slot exceeds set")?;
+        let nested = crate::bar::read_bar(anb)?;
+        let entries: Vec<_> = nested
+            .entries
+            .iter()
+            .filter(|e| e.entry_type == 9 && e.offset > 0 && e.size > 0)
+            .collect();
+        if entries.len() != 1 {
+            return Err("one nested motion required".into());
+        }
+        let entry = entries[0];
+        let payload = &anb[entry.offset as usize..entry.offset as usize + entry.size as usize];
+        result.push(SelectedMotion {
+            slot,
+            sha256: format!("{:x}", Sha256::digest(payload)),
+            motion: read_interpolated(payload)?,
+            triggers: crate::motion_trigger::inspect_anb(anb)?,
+        });
+    }
+    checked.verify_unchanged()?;
+    Ok(result)
+}
+
+impl InterpolatedMotion {
+    /// Public FrameData words (FrameStart, FrameEnd, FramePerSecond,
+    /// FrameReturn) at interpolated header words 32..35. Key times in this
+    /// set use twice the declared 30-per-second frame units.
+    pub fn frame_window(&self) -> io::Result<(f32, f32, f32, f32)> {
+        let word = |i: usize| {
+            self.interpolated_header_words
+                .get(i)
+                .map(|&w| f32::from_bits(w))
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| invalid("motion frame window absent"))
+        };
+        Ok((word(32)?, word(33)?, word(34)?, word(35)?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_slot_chooser_orders_by_mode() {
+        let present = |slots: &'static [usize]| move |s: usize| slots.contains(&s);
+        // Field without weapon probes variant 2 first.
+        assert_eq!(motion_set_index(present(&[4, 6]), 1, false, false), Some(6));
+        // Battle with weapon probes variants 0, 1, 3, 2.
+        assert_eq!(motion_set_index(present(&[4, 6]), 1, true, true), Some(4));
+        assert_eq!(motion_set_index(present(&[14]), 3, true, true), Some(14));
+        assert_eq!(motion_set_index(present(&[]), 3, true, true), None);
+    }
     fn fixture() -> Vec<u8> {
         let mut bytes = vec![0; 0x90 + 320];
         let body = &mut bytes[0x90..];

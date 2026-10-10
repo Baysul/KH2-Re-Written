@@ -1,0 +1,19 @@
+//! Shared source-bound scene helpers for the developer binaries.
+pub mod camp;
+pub mod command;
+pub mod dialogue;
+pub mod effects;
+pub mod fade;
+pub mod gauge;
+pub mod hud;
+pub mod input;
+pub mod layout2d;
+pub mod newgame;
+pub mod pad;
+pub mod room;
+pub mod sound;
+pub mod splash;
+pub mod sprite2d;
+pub mod title;
+pub mod title_edits;
+pub mod ui2d;
