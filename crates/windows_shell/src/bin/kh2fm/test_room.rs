@@ -3273,8 +3273,13 @@ fn spawn_room(
                     base_color_texture: texture,
                     unlit: true,
                     cull_mode: None,
+                    // GS TEST: opaque pass keeps alpha > 31.5/255
+                    // (AREF 0x10); the alpha pass blends, additive when
+                    // the descriptor's fc bit 6 is set (draw-01 §3-4).
                     alpha_mode: if chunk.transparency_flag == 0 {
-                        AlphaMode::Opaque
+                        AlphaMode::Mask(31.5 / 255.)
+                    } else if chunk.header_words[3] & 0x40 != 0 {
+                        AlphaMode::Add
                     } else {
                         AlphaMode::Blend
                     },
