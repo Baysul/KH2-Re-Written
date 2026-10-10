@@ -1,4 +1,5 @@
 //! Shared source-bound scene helpers for the developer binaries.
+pub mod bobs;
 pub mod camp;
 pub mod command;
 pub mod dialogue;

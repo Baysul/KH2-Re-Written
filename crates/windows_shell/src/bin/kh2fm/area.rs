@@ -64,6 +64,8 @@ pub struct LoadedArea {
     /// Entities the scripts created.
     #[allow(dead_code)]
     pub spawns: Vec<Spawn>,
+    /// Map objects (lamps, signs, clock) and their placements.
+    pub bobs: windows_shell::bobs::LoadedBobs,
     /// The townspeople of this area (objentry type 15, spawn types 0/1/3,
     /// then zone-spawned ones as Sora enters their zones).
     pub npcs: Vec<FieldNpc>,
@@ -190,6 +192,13 @@ impl AreaSource {
         let (npcs, deferred, scripts, lines) =
             self.townspeople(code, area, &state, &spawns, &types);
         let room = load_room_archive(&map, None)?;
+        let bobs = windows_shell::bobs::load(&map).unwrap_or_else(|e| {
+            eprintln!("{name}: map objects not loaded: {e}");
+            windows_shell::bobs::LoadedBobs {
+                models: Vec::new(),
+                placements: Vec::new(),
+            }
+        });
         let collision = map_collision(&map, state.setup.bg_mask)?;
         let player = Area::player_spawn(&spawns)
             .map(|s| {
@@ -208,6 +217,7 @@ impl AreaSource {
                 collision: Some(collision),
                 state,
                 spawns,
+                bobs,
                 npcs,
                 deferred,
                 scripts,

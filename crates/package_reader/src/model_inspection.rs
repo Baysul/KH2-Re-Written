@@ -380,6 +380,53 @@ fn read_models(
     Ok(models)
 }
 
+/// A model from its BAR payloads (type 4 and the same-name type 7 bank),
+/// as used for map objects that live inside the map archive. Original
+/// indexed textures only; the legacy bind pose and integer-truncated UVs
+/// are the same explicit profiles as the named loader.
+pub fn model_from_payload(
+    model: &[u8],
+    textures: Option<(&[u8], usize, usize)>,
+) -> io::Result<InspectionModel> {
+    let geometry = crate::model_geometry::read_geometry(model)?;
+    let skinning = crate::model_pose::Skinning::read(model)?;
+    let poses = vec![skinning.bind_pose(PoseProfile::Legacy)?];
+    let mesh_parts = parts(&geometry, &poses)?;
+    let (textures, texture_routes) = match textures {
+        Some((bank, offset, ordinal)) => {
+            let mut budget = 0usize;
+            let set = crate::model_inspection_textures::read_textures(
+                bank,
+                offset,
+                ordinal,
+                &[],
+                &[TextureMode::OriginalIndexed],
+                &mut budget,
+            )?;
+            let environments = set.images.len();
+            let routes = crate::model_inspection_textures::read_uv_routes(
+                model,
+                &geometry,
+                environments,
+                &[UvProfile::Kkdf2IntegerTruncated],
+            )?;
+            (Some(Arc::new(set)), routes)
+        }
+        None => (None, Vec::new()),
+    };
+    Ok(InspectionModel {
+        index: String::new(),
+        ordinal: 0,
+        bar_ordinal: 0,
+        excluded_linked_groups: geometry.excluded_linked_groups,
+        parts: mesh_parts,
+        poses,
+        skinning,
+        textures,
+        texture_routes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

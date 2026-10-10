@@ -2766,6 +2766,15 @@ fn area_transition(
         show,
         next.state.setup.bg_mask,
     );
+    spawn_bobs(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &next,
+        root.0,
+        next.state.setup.bg_mask,
+    );
     spawn_field_npcs(
         &mut commands,
         &mut meshes,
@@ -2803,6 +2812,100 @@ fn area_transition(
             .and_then(|h| h.iris.as_ref())
             .map(|s| sequence::Player::new(&s.sequence, 0));
         t.fade.fade_in(1, false);
+    }
+}
+
+/// A placed map object and its mesh parts.
+#[derive(Component)]
+struct BobRoot;
+#[derive(Component)]
+struct BobPart {
+    placement: usize,
+    ordinal: usize,
+}
+
+/// Creates the meshes of an area's map objects (those whose group bit is
+/// set draw; the others are hidden and switch with the mask).
+fn spawn_bobs(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    area: &LoadedArea,
+    parent: Entity,
+    mask: u64,
+) {
+    for (i, p) in area.bobs.placements.iter().enumerate() {
+        let Some(Some(bob)) = area.bobs.models.get(p.model) else {
+            continue;
+        };
+        let bit = p.group;
+        let visible = windows_shell::room::chunk_visible(bit, mask);
+        let root = commands
+            .spawn((
+                RoomPart,
+                BobRoot,
+                BgChunk(bit),
+                ChildOf(parent),
+                p.transform(),
+                if visible {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                },
+            ))
+            .id();
+        let pose: Vec<Vec3> = bob.model.poses[0]
+            .position_bits
+            .iter()
+            .map(|v| Vec3::from_array(v.map(f32::from_bits)))
+            .collect();
+        for (ordinal, entity) in
+            spawn_model(commands, &bob.model, &pose, root, meshes, materials, images)
+        {
+            if let Some(entity) = entity {
+                commands.entity(entity).insert((
+                    RoomPart,
+                    BobPart {
+                        placement: i,
+                        ordinal,
+                    },
+                ));
+            }
+        }
+    }
+}
+
+/// Plays the map objects' looping motions (one tick per tick, start offset
+/// from the record).
+fn bob_present(
+    game: Res<Game>,
+    area: Option<Res<AreaRes>>,
+    parts: Query<(&BobPart, &Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let Some(area) = area else { return };
+    for (part, handle) in &parts {
+        let p = &area.current.bobs.placements[part.placement];
+        if p.motion < 0 {
+            continue;
+        }
+        let Some(Some(bob)) = area.current.bobs.models.get(p.model) else {
+            continue;
+        };
+        let Some(anim) = bob.anims.get(p.motion as usize) else {
+            continue;
+        };
+        let tick = (game.tick as f32 + p.start) as usize % anim.frames.len();
+        let frame = &anim.frames[tick];
+        let positions: Vec<[f32; 3]> = bob.model.parts[part.ordinal]
+            .indices
+            .iter()
+            .map(|&i| frame[i as usize].to_array())
+            .collect();
+        if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        }
     }
 }
 
@@ -3350,6 +3453,15 @@ fn setup(
         area.as_ref().map_or(!0, |a| a.current.state.setup.bg_mask),
     );
     if let Some(a) = &area {
+        spawn_bobs(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+            &a.current,
+            world,
+            a.current.state.setup.bg_mask,
+        );
         spawn_field_npcs(
             &mut commands,
             &mut meshes,
@@ -6769,6 +6881,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             (
                 area_transition,
                 bg_visibility,
+                bob_present,
                 field_npc_spawn_new,
                 field_npc_present,
                 dissolve_present,
