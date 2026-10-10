@@ -342,7 +342,6 @@ const WALK_THRESHOLD: f32 = physics::RUN_MAGNITUDE;
 const BODY_RADIUS: f32 = 30.;
 const BODY_HEIGHT: f32 = 140.;
 const FLOOR_MIN_NORMAL_Y: f32 = 0.5;
-const BLEND_TICKS: u32 = 6;
 /// Test-room choice: put the weapon away after 6 s without attacking.
 const DISARM_TICKS: u32 = 360;
 const PARTY_STAND: u32 = 1 << 0;
@@ -1492,6 +1491,7 @@ fn load(
     let step = |entry: &ptya::PtyaEntry, (clip, index): &(Clip, usize)| AttackStep {
         clip: clip.clone(),
         hop: f32::from_bits(entry.float_bits[0]),
+        blend: f32::from_bits(entry.float_bits[11]),
         root: clip_poses[*index]
             .root
             .iter()
@@ -1621,9 +1621,9 @@ fn load(
             "prty_index":prty_index,"prty_offset":prty_offset},
         "test_room_choices":{"step_height":STEP_HEIGHT,
             "body_radius":BODY_RADIUS,"body_height":BODY_HEIGHT,"floor_min_normal_y":FLOOR_MIN_NORMAL_Y,
-            "blend_ticks":BLEND_TICKS,"clock":"fixed 60 Hz, one motion tick per update"},
-        "ptya":{"ground":ground.iter().map(|e| serde_json::json!({"id":e.id,"kind":e.kind,"flag":e.flag,"motion_id":e.motion_id})).collect::<Vec<_>>(),
-            "air":air.iter().map(|e| serde_json::json!({"id":e.id,"kind":e.kind,"flag":e.flag,"motion_id":e.motion_id})).collect::<Vec<_>>()},
+            "blend_ticks":"per action (player_sim::blend_for, PTYA +0x38 after attacks)","clock":"fixed 60 Hz, one motion tick per update"},
+        "ptya":{"ground":ground.iter().map(|e| serde_json::json!({"id":e.id,"kind":e.kind,"flag":e.flag,"motion_id":e.motion_id,"next_motion_id":e.next_motion_id,"floats":e.float_bits.map(f32::from_bits)})).collect::<Vec<_>>(),
+            "air":air.iter().map(|e| serde_json::json!({"id":e.id,"kind":e.kind,"flag":e.flag,"motion_id":e.motion_id,"next_motion_id":e.next_motion_id,"floats":e.float_bits.map(f32::from_bits)})).collect::<Vec<_>>()},
         "motions":slots,"collision":{"floors":floors,"walls":walls,"surface_flags":flag_counts,"bounds":[low.to_array(),high.to_array()],
             "largest_levels":levels.iter().take(8).map(|(area,p)| serde_json::json!({"area":area,"point":p})).collect::<Vec<_>>()},
         "spawn":spawn.to_array(),"pose_evaluator":if basic_fk {"basic public FK (T053)"} else {"motion_eval IK/constraints (T057)"},
@@ -4354,7 +4354,12 @@ fn present(
     // applied to the body and the Keyblade alike.
     if let Some((from, from_hand, start)) = &game.blend_from {
         let elapsed = (game.tick - start) as f32 + fixed.overstep_fraction();
-        let weight = (elapsed / BLEND_TICKS as f32).clamp(0., 1.);
+        let blend = game.player.blend;
+        let weight = if blend > 0. {
+            (elapsed / blend).clamp(0., 1.)
+        } else {
+            1.
+        };
         if weight >= 1. {
             game.blend_from = None;
         } else {

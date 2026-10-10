@@ -111,6 +111,9 @@ pub struct AttackStep {
     /// PTYA "Jump" field, applied as a lift height when an aerial step starts
     /// (public label only; the installed use is unobserved).
     pub hop: f32,
+    /// PTYA +0x38: blend into the next motion when this one ends
+    /// (FUN_1403d78d0 → FUN_1403c8310).
+    pub blend: f32,
     /// Root-position translation per tick in model space (+Z is facing).
     /// Its per-tick change moves the player; empty means no root motion.
     pub root: Vec<Vec3>,
@@ -199,6 +202,8 @@ pub struct Player {
     pub frame: u32,
     /// Battle mode: weapon drawn, battle locomotion clips.
     pub armed: bool,
+    /// Blend, in ticks, from the previous motion into the current one.
+    pub blend: f32,
     idle_ticks: u32,
     queued_attack: bool,
     air_combo_spent: bool,
@@ -222,6 +227,18 @@ pub struct Step {
     pub landed: bool,
 }
 
+/// Motion blend, in ticks, when an action's motion starts: locomotion and
+/// the fall motion blend over 8 (`DAT_140623bac`: FUN_140422520,
+/// FUN_1403cb610); jump (FUN_140422630), land (FUN_1403cb940), attacks
+/// (FUN_1403d78d0), damage (FUN_1403d43b0), guard (FUN_1403a9c70) and its
+/// recoil (FUN_1403d61d0) start with blend 0.
+pub fn blend_for(action: Action) -> f32 {
+    match action {
+        Action::Idle | Action::Walk | Action::Run | Action::Fall => physics::MOTION_BLEND,
+        _ => 0.,
+    }
+}
+
 fn wrap_angle(a: f32) -> f32 {
     let tau = std::f32::consts::TAU;
     (a + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI
@@ -237,6 +254,7 @@ impl Player {
             action: Action::Idle,
             frame: 0,
             armed: false,
+            blend: 0.,
             idle_ticks: 0,
             queued_attack: false,
             air_combo_spent: false,
@@ -254,6 +272,7 @@ impl Player {
         }
         self.action = Action::Hurt(index);
         self.frame = 0;
+        self.blend = 0.;
         self.queued_attack = false;
         self.arm();
         Some(self.action)
@@ -270,6 +289,7 @@ impl Player {
         self.knock = Some((away, GUARD_KNOCK * 0.1));
         self.action = Action::GuardRecoil;
         self.frame = 0;
+        self.blend = 0.;
         self.queued_attack = false;
         self.arm();
         Some(self.action)
@@ -279,7 +299,19 @@ impl Player {
         self.action = action;
         self.frame = 0;
         self.queued_attack = false;
+        self.blend = blend_for(action);
         step.started = Some(action);
+    }
+
+    /// Mode 0's walk↔run switch (FUN_1403c6dc0): the new loop starts at the
+    /// old one's phase, `fmod(len_new × (t + blend) / len_old, len_new)`,
+    /// with the locomotion blend.
+    fn switch_gait(&mut self, action: Action, clips: &Clips, step: &mut Step) {
+        let old = self.clip(clips).end.max(1) as f32;
+        let time = self.motion_frame(clips) as f32;
+        self.start(action, step);
+        let new = self.clip(clips).end.max(1) as f32;
+        self.frame = ((new * ((time + physics::MOTION_BLEND) / old)) % new) as u32;
     }
 
     pub fn clip<'a>(&self, clips: &'a Clips) -> &'a Clip {
@@ -395,7 +427,9 @@ impl Player {
         let mut step = Step::default();
         self.frame = self.frame.saturating_add(1);
         let magnitude = input.direction[0].hypot(input.direction[1]).min(1.);
-        let moving = magnitude > 0.1;
+        // Any stick past the pad's dead zone moves (FUN_1403a8fa0: speed is
+        // set whenever the stick magnitude is above 0).
+        let moving = magnitude > 0.;
         let direction = if moving {
             [
                 input.direction[0] / magnitude,
@@ -420,21 +454,15 @@ impl Player {
                     // Landing holds until its "Blend to idle" range starts.
                     let landing = self.action == Action::Land
                         && self.frame < clips.land.blend_to_idle.unwrap_or(clips.land.end);
+                    // FUN_1403a8fa0: run speed from stick magnitude 0.8
+                    // (DAT_140585c7c), walk speed below; FUN_140422520 then
+                    // plays RUN when speed ≥ (walk + run) / 2, else WALK.
                     let target = if !moving {
                         if landing { Action::Land } else { Action::Idle }
+                    } else if magnitude < p.walk_threshold {
+                        Action::Walk
                     } else {
-                        // Hysteresis keeps an analog stick near the threshold
-                        // from flipping between walk and run every tick.
-                        let band = if self.action == Action::Run {
-                            -0.05
-                        } else {
-                            0.05
-                        };
-                        if magnitude < p.walk_threshold + band {
-                            Action::Walk
-                        } else {
-                            Action::Run
-                        }
+                        Action::Run
                     };
                     self.idle_ticks = self.idle_ticks.saturating_add(1);
                     if self.armed && self.idle_ticks >= p.disarm_ticks && target != Action::Land {
@@ -442,17 +470,31 @@ impl Player {
                         self.armed = false;
                         self.start(target, &mut step);
                     } else if target != self.action {
-                        self.start(target, &mut step);
+                        if matches!(
+                            (self.action, target),
+                            (Action::Walk, Action::Run) | (Action::Run, Action::Walk)
+                        ) {
+                            self.switch_gait(target, clips, &mut step);
+                        } else {
+                            self.start(target, &mut step);
+                        }
                     }
                     if moving {
+                        // FUN_1403b4780 turns the facing at +0x134 per tick;
+                        // FUN_140422350 moves along the stick direction at
+                        // the full walk/run speed the same tick.
                         self.turn_toward(direction, p.turn_speed);
                         let speed = if target == Action::Walk {
                             p.walk_speed
                         } else {
                             p.run_speed
                         };
-                        let facing = self.facing();
-                        if !self.travel([facing[0] * speed, facing[1] * speed], p, world, true) {
+                        if !self.travel(
+                            [direction[0] * speed, direction[1] * speed],
+                            p,
+                            world,
+                            true,
+                        ) {
                             self.drop_off(&mut step);
                         }
                     }
@@ -484,8 +526,11 @@ impl Player {
                     self.start(Action::Attack(i + 1), &mut step);
                 } else if recovery && input.jump {
                     self.jump(p, &mut step);
-                } else if (recovery && moving) || self.frame >= clip.end {
+                } else if recovery && moving {
                     self.start(Action::Idle, &mut step);
+                } else if self.frame >= clip.end {
+                    self.start(Action::Idle, &mut step);
+                    self.blend = clips.ground_combo[i].blend;
                 }
             }
             Action::Jump | Action::Fall | Action::AirAttack(_) => {
@@ -586,6 +631,7 @@ impl Player {
                     return;
                 }
                 self.start(Action::Fall, step);
+                self.blend = clips.air_combo[i].blend;
             }
         } else if input.attack && !self.air_combo_spent && !clips.air_combo.is_empty() {
             self.air_combo_spent = true;
@@ -776,6 +822,7 @@ mod tests {
                 no_gravity: vec![],
             },
             hop,
+            blend: 0.,
             root: Vec::new(),
         }
     }
@@ -865,11 +912,34 @@ mod tests {
         player.tick(&hold([0., 1.]), &p, &c, &w);
         assert_eq!(player.action, Action::Run);
         assert!((player.position[2] - 10.).abs() < 1e-5);
-        // Facing +X requires a quarter turn: limited per tick.
+        // Facing +X requires a quarter turn: limited per tick, while the
+        // body already moves along the stick (FUN_140422350).
         player.tick(&hold([1., 0.]), &p, &c, &w);
         assert!((player.yaw - 0.2618).abs() < 1e-5);
+        assert!((player.position[0] - 8.).abs() < 1e-5);
+        assert!((player.position[2] - 10.).abs() < 1e-5);
         player.tick(&Input::default(), &p, &c, &w);
         assert_eq!(player.action, Action::Idle);
+    }
+
+    #[test]
+    fn walk_to_run_keeps_the_gait_phase_and_blends_eight() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([0., 0., 0.], 0.);
+        for _ in 0..20 {
+            player.tick(&hold([0., 0.3]), &p, &c, &w);
+        }
+        assert_eq!((player.action, player.motion_frame(&c)), (Action::Walk, 19));
+        assert_eq!(player.blend, 8.);
+        player.tick(&hold([0., 1.]), &p, &c, &w);
+        // Field walk 50 → field run 36: 36 × (20 + 8) / 50 = 20.16.
+        assert_eq!((player.action, player.frame), (Action::Run, 20));
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&jump, &p, &c, &w);
+        assert_eq!(player.blend, 0.);
     }
 
     #[test]

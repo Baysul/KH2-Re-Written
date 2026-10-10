@@ -11,6 +11,10 @@
 pub const DT: f32 = 1.0;
 /// Gravity, units per tick squared (`DAT_1405ce184` = 0x3ed0fac7).
 pub const G: f32 = 0.408_163_28;
+/// Motion blend for locomotion and the fall motion (`DAT_140623bac`,
+/// FUN_140422520 / FUN_1403cb610), in motion-clock ticks: FUN_1403c6dc0
+/// adds it to the motion time, which advances by DT per tick.
+pub const MOTION_BLEND: f32 = 8.0;
 /// The fall motion starts this many ticks before the apex
 /// (`DAT_140623b98`, FUN_1403cb680).
 pub const FALL_MOTION_LEAD: f32 = 5.0;
