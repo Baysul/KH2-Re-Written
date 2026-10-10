@@ -32,6 +32,7 @@ use windows_shell::sound::{self, Banks, Music};
 use windows_shell::splash::{self, Splash};
 use windows_shell::sprite2d::Sheet;
 use windows_shell::title::{Action, Event, SCENE_BOOT, State, Title};
+use windows_shell::title_edits;
 use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
 
 #[derive(Deserialize, Clone)]
@@ -653,7 +654,17 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     }
     source.verify_session()?;
     let l = &config.title;
-    let menu = layout2d::load(&source, &l.index, l.ordinal, l.name_hash)?;
+    let mut menu = layout2d::load(&source, &l.index, l.ordinal, l.name_hash)?;
+    // The owner's edits [rebuild addition]: a shorter copyright hold and the
+    // "Final Re:WRITE" banner.
+    let copyright_cut = title_edits::shorten_copyright(&mut menu.layout);
+    let banner = match menu.replacements.get_mut(title_edits::LOGO_IMAGE) {
+        Some(Some(t)) => title_edits::final_rewrite_banner(t)?,
+        _ => false,
+    };
+    if !copyright_cut || !banner {
+        eprintln!("Title edits not applied: copyright cut {copyright_cut}, banner {banner}.");
+    }
     let mut banks = Banks::default();
     if let Some(l) = &config.system_sounds {
         banks.insert(sound::load_bank(
@@ -701,7 +712,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             "scenes":menu.layout.scenes.len(),"sequences":menu.layout.sequences.len(),
             "images":menu.image_sizes,"replacements":menu.replacements.iter()
                 .map(|r| r.as_ref().map(|t| t.size)).collect::<Vec<_>>(),
-            "banks":banks.numbers()});
+            "banks":banks.numbers(),"copyright_cut":copyright_cut,"banner":banner});
         serde_json::to_writer(&mut *log, &summary)?;
         writeln!(log)?;
     }

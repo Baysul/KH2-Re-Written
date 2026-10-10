@@ -15,4 +15,5 @@ pub mod sound;
 pub mod splash;
 pub mod sprite2d;
 pub mod title;
+pub mod title_edits;
 pub mod ui2d;
