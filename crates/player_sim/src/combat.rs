@@ -41,6 +41,41 @@ pub fn swept(current: Vec3, previous: Option<Vec3>, radius: f32) -> Vec<Vec3> {
     out
 }
 
+/// An ATTACK_MAGIC volume (sphere when radius equals height, else an
+/// ellipsoid, FUN_1404376b0) against a sphere (FUN_1403c94c0 /
+/// FUN_1403c9890): strict, with the ellipsoid's horizontal and vertical
+/// extents each widened by the sphere's radius.
+pub fn volume_hits_sphere(c: Vec3, r: f32, h: f32, b: Vec3, rb: f32) -> bool {
+    if r == h {
+        return spheres_overlap(c, r, b, rb);
+    }
+    let d = sub(b, c);
+    let (hr, vr) = (r + rb, h + rb);
+    (d[0] * d[0] + d[2] * d[2]) / (hr * hr) + d[1] * d[1] / (vr * vr) < 1.
+}
+
+/// A volume's centres this frame: the current one, plus copies stepping back
+/// toward last frame's centre by min(r, h) while more than half that
+/// remains (FUN_1404376b0).
+pub fn swept_volume(current: Vec3, previous: Option<Vec3>, r: f32, h: f32) -> Vec<Vec3> {
+    let mut out = vec![current];
+    let Some(prev) = previous else { return out };
+    let step = r.min(h);
+    let delta = sub(prev, current);
+    let mut dist = dot(delta, delta).sqrt();
+    if dist <= 0. || step <= 0. {
+        return out;
+    }
+    let dir = delta.map(|c| c / dist);
+    let mut at = current;
+    while dist > 0.5 * step {
+        at = [0, 1, 2].map(|k| at[k] + dir[k] * step);
+        out.push(at);
+        dist -= step;
+    }
+    out
+}
+
 /// Attack parameters used by the damage routine (from ATKP).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AttackParams {
@@ -618,6 +653,21 @@ mod tests {
         assert_eq!(swept([0.; 3], Some([50., 0., 0.]), 40.).len(), 1);
         assert!(spheres_overlap([0.; 3], 1., [1.9, 0., 0.], 1.));
         assert!(!spheres_overlap([0.; 3], 1., [2., 0., 0.], 1.));
+        // Ellipsoid 200 x 80 against a 50 sphere: reach 250 across, 130
+        // up; strict at the edge.
+        assert!(volume_hits_sphere([0.; 3], 200., 80., [240., 0., 0.], 50.));
+        assert!(!volume_hits_sphere([0.; 3], 200., 80., [250., 0., 0.], 50.));
+        assert!(!volume_hits_sphere([0.; 3], 200., 80., [0., 130., 0.], 50.));
+        assert!(volume_hits_sphere([0.; 3], 80., 80., [0., 100., 0.], 30.));
+        // A 40-unit shard moving 100 a tick fills the gap every 40.
+        assert_eq!(
+            swept_volume([0.; 3], Some([100., 0., 0.]), 40., 40.).len(),
+            3
+        );
+        assert_eq!(
+            swept_volume([0.; 3], Some([15., 0., 0.]), 40., 40.).len(),
+            1
+        );
         assert_eq!(reaction_class(7), 4);
         assert_eq!(reaction_class(3), 3);
     }

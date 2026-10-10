@@ -11,6 +11,7 @@
 pub mod abilities;
 pub mod camera;
 pub mod combat;
+pub mod magic;
 pub mod physics;
 pub mod ptya;
 pub mod shadow;
@@ -82,6 +83,9 @@ pub struct Clip {
     pub combo_windows: Vec<(u32, u32)>,
     /// Range trigger 50: a finisher may chain (obj+0x194 bit 5).
     pub finisher_windows: Vec<(u32, u32)>,
+    /// Frame trigger 17 (spell release): tick and the motion id it is
+    /// filtered by (None releases for any motion).
+    pub release: Vec<(u32, Option<u16>)>,
     /// Earliest range trigger 2, "Blend to idle".
     pub blend_to_idle: Option<u32>,
     /// Range trigger 3, "No gravity".
@@ -151,6 +155,14 @@ pub struct AttackStep {
     pub root: Vec<Vec3>,
 }
 
+/// A cast motion (magic.rs): its id, clip and root motion.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpellClip {
+    pub motion: u16,
+    pub clip: Clip,
+    pub root: Vec<Vec3>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Clips {
     /// Battle-mode (weapon drawn) locomotion.
@@ -168,6 +180,8 @@ pub struct Clips {
     /// each record's motion as an attack step.
     pub records: Vec<ptya::Record>,
     pub attacks: Vec<AttackStep>,
+    /// Cast motions by `Action::Cast(i)` / `AirCast(i)`.
+    pub spells: Vec<SpellClip>,
     /// Grounded damage reactions (front-high, front-low, back-high,
     /// back-low; motion ids 10..13). Empty when not loaded.
     pub hurt: Vec<Clip>,
@@ -188,6 +202,10 @@ pub enum Action {
     Attack(usize),
     /// An attack in the air, including ground records that hop.
     AirAttack(usize),
+    /// A spell cast on the ground / in the air (index into
+    /// `Clips::spells`).
+    Cast(usize),
+    AirCast(usize),
     /// A damage reaction (index into `Clips::hurt`).
     Hurt(usize),
     /// Guard (PTYA 0x0b, motion 173): one press, actionable from its
@@ -199,7 +217,10 @@ pub enum Action {
 
 impl Action {
     pub fn airborne(self) -> bool {
-        matches!(self, Self::Jump | Self::Fall | Self::AirAttack(_))
+        matches!(
+            self,
+            Self::Jump | Self::Fall | Self::AirAttack(_) | Self::AirCast(_)
+        )
     }
 }
 
@@ -346,9 +367,37 @@ pub struct Player {
     pub abilities: abilities::Abilities,
     /// Stats +0x1c0 > 0 (MP charge).
     pub mp_charging: bool,
+    /// MP and MP Charge (stats +0x180 / +0x1bc / +0x1c0).
+    pub mp: magic::Mp,
+    /// The cast in progress and the spell it released this tick.
+    cast: Option<CastState>,
+    released: Option<Released>,
     /// Knock-slide (FUN_1403d4960 / FUN_1403d4570), for hits and the guard
     /// recoil alike.
     knock: Option<physics::Knock>,
+}
+
+/// A cast waiting for its release tick (obj+0xda0).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CastState {
+    start: magic::Start,
+    magic_type: u8,
+    level: u8,
+    cost: u8,
+    form: u8,
+    released: bool,
+}
+
+/// A spell released this tick (FUN_1403c6150): MP is already spent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Released {
+    pub magic_type: u8,
+    pub level: u8,
+    /// The `magi` row and ATKP sub-table.
+    pub row: usize,
+    pub finisher: bool,
+    pub airborne: bool,
+    pub form: u8,
 }
 
 /// Guard recoil knock strength (DAT_140585efc).
@@ -400,6 +449,9 @@ impl Player {
             connected: false,
             abilities: abilities::Abilities::default(),
             mp_charging: false,
+            mp: magic::Mp::new(100),
+            cast: None,
+            released: None,
             knock: None,
         }
     }
@@ -420,11 +472,18 @@ impl Player {
             return None;
         }
         self.pending_jump = None;
+        self.cast = None;
         self.action = Action::Hurt(index);
         self.frame = 0;
         self.blend = 0.;
         self.arm();
         Some(self.action)
+    }
+
+    /// A knock-slide without a reaction motion (`obj_hitback`, FUN_1403d4960):
+    /// away along `direction` (XZ) at `strength` x 0.1 per tick.
+    pub fn recoil(&mut self, direction: [f32; 2], strength: f32) {
+        self.knock = physics::Knock::new([direction[0], 0., direction[1]], strength, 0.);
     }
 
     /// Guard success (FUN_1403d61d0, grounded): face the attacker, play the
@@ -434,6 +493,7 @@ impl Player {
         if self.in_air() || clips.guard_recoil.is_none() {
             return None;
         }
+        self.cast = None;
         self.yaw = (-away[0]).atan2(-away[1]);
         self.knock = physics::Knock::new([away[0], 0., away[1]], GUARD_KNOCK, 0.);
         self.action = Action::GuardRecoil;
@@ -473,6 +533,7 @@ impl Player {
             (Action::Fall, _) => &clips.fall,
             (Action::Land, _) => &clips.land,
             (Action::Attack(i) | Action::AirAttack(i), _) => &clips.attacks[i].clip,
+            (Action::Cast(i) | Action::AirCast(i), _) => &clips.spells[i].clip,
             (Action::Hurt(i), _) => &clips.hurt[i],
             (Action::Guard, _) => clips.guard.as_ref().unwrap_or(&clips.idle),
             (Action::GuardRecoil, _) => clips.guard_recoil.as_ref().unwrap_or(&clips.idle),
@@ -483,6 +544,7 @@ impl Player {
     pub fn root_offset(&self, clips: &Clips) -> Vec3 {
         let root = match self.action {
             Action::Attack(i) | Action::AirAttack(i) => &clips.attacks[i].root,
+            Action::Cast(i) | Action::AirCast(i) => &clips.spells[i].root,
             _ => return [0.; 3],
         };
         root.get(self.motion_frame(clips) as usize)
@@ -604,6 +666,9 @@ impl Player {
     pub fn tick(&mut self, input: &Input, p: &Params, clips: &Clips, world: &impl World) -> Step {
         let mut step = Step::default();
         self.frame = self.frame.saturating_add(1);
+        // MP Charge runs down at 1 + the MP Haste terms (FUN_1403c0de0).
+        self.mp.tick(1., self.abilities.mp_haste);
+        self.mp_charging = self.mp.charging();
         // This tick's whole displacement: mode velocity, root motion and
         // knock-slide, collided once at the end (FUN_1403b89a0).
         let mut disp = [0f32; 3];
@@ -730,7 +795,22 @@ impl Player {
                     self.blend = clips.attacks[i].blend;
                 }
             }
-            Action::Jump | Action::Fall | Action::AirAttack(_) => {
+            Action::Cast(i) => {
+                let clip = &clips.spells[i].clip;
+                self.face_target(clip, input);
+                self.release_if_due(clips, i);
+                // A spell is a combo hit: the next press may chain from the
+                // cast's combo window (range 11 / 35, finisher range 50).
+                let ready = self.actionable(clips);
+                if input.attack
+                    && self.try_attack(input, p, clips, ready, moving, direction, &mut step)
+                {
+                } else if self.frame >= clip.end {
+                    self.cast = None;
+                    self.start(Action::Idle, &mut step);
+                }
+            }
+            Action::Jump | Action::Fall | Action::AirAttack(_) | Action::AirCast(_) => {
                 disp = self.airborne(input, moving, magnitude, direction, p, clips, &mut step);
             }
             Action::Hurt(_) | Action::Guard | Action::GuardRecoil => {
@@ -829,6 +909,7 @@ impl Player {
     pub fn motion_id(&self, clips: &Clips) -> u16 {
         match self.action {
             Action::Attack(i) | Action::AirAttack(i) => clips.records[i].motion,
+            Action::Cast(i) | Action::AirCast(i) => clips.spells[i].motion,
             Action::Idle => 0,
             Action::Walk => 1,
             Action::Run => 2,
@@ -928,6 +1009,124 @@ impl Player {
         true
     }
 
+    /// Whether commands are taken now: an ANB range 0–2, or the unlocked
+    /// tail of a reaction (FUN_1401b15f0).
+    fn command_ready(&self, clips: &Clips) -> bool {
+        match self.action {
+            Action::Hurt(_) | Action::Guard | Action::GuardRecoil => {
+                let clip = self.clip(clips);
+                self.frame >= clip.blend_to_idle.unwrap_or(clip.end)
+            }
+            _ => self.actionable(clips),
+        }
+    }
+
+    /// The spell command (FUN_1403d6fc0 Execute 2 → FUN_1403d6ca0 →
+    /// FUN_1403a9dd0 → FUN_1403c5170): counts a combo hit, picks the
+    /// ground / finisher / air motion and row, and starts the cast. MP is
+    /// spent at the release tick. Returns the new action, or None when the
+    /// command is refused or the cast motion is not loaded.
+    pub fn cast(
+        &mut self,
+        rec: &magic::Record,
+        cost: u8,
+        form: u8,
+        target_is_self: bool,
+        clips: &Clips,
+    ) -> Option<(Action, magic::Start)> {
+        let ready = self.command_ready(clips);
+        let clip = self.clip(clips);
+        let frame = self.motion_frame(clips);
+        let state = ptya::State {
+            abilities: &self.abilities,
+            airborne: self.in_air(),
+            mp_charging: self.mp_charging,
+            combo_window: Clip::within(&clip.combo_windows, frame),
+            finisher_window: Clip::within(&clip.finisher_windows, frame),
+            actionable: ready,
+        };
+        // Casting needs the command to be accepted (FUN_1403ba070) and an
+        // MP state the menu allows; the colour check is the caller's.
+        let chain = self.connected || self.abilities.has(abilities::bit::COMBO_MASTER);
+        let mut combo = self.combo;
+        if !ptya::advance(&mut combo, &state, chain) {
+            return None;
+        }
+        // FUN_1403a9dd0: the Lion form never finishes; otherwise
+        // FUN_1403d7780(obj, 0) after the count.
+        let finisher = form != 7 && ptya::finisher_allowed(&state, combo, 0);
+        let airborne = self.in_air();
+        let start = magic::start(rec, finisher, airborne, form, target_is_self);
+        let motion = start.motion as u16;
+        let i = clips.spells.iter().position(|c| c.motion == motion)?;
+        self.combo = combo;
+        self.connected = false;
+        self.arm();
+        self.pending_jump = None;
+        let action = if airborne {
+            // The air cast hop (physics vt+0x20 with SSTM +0x48 = 40).
+            self.arc = physics::Arc::launch(self.position[1], magic::AIR_HOP);
+            self.air_velocity = [0.; 2];
+            self.sampler.reset();
+            self.vertical_speed = 0.;
+            Action::AirCast(i)
+        } else {
+            Action::Cast(i)
+        };
+        self.action = action;
+        self.frame = 0;
+        self.blend = start.blend;
+        self.cast = Some(CastState {
+            start,
+            magic_type: rec.magic_type,
+            level: rec.level,
+            cost,
+            form,
+            released: false,
+        });
+        // A release at tick 0 (Reflect) fires with the start.
+        self.release_if_due_at(clips, i, 0);
+        Some((action, start))
+    }
+
+    /// FUN_1403c6150 at a frame-trigger-17 tick: spends MP (FUN_1403d7e90)
+    /// and reports the spell as released.
+    fn release_if_due(&mut self, clips: &Clips, i: usize) {
+        let frame = self.frame;
+        self.release_if_due_at(clips, i, frame);
+    }
+
+    fn release_if_due_at(&mut self, clips: &Clips, i: usize, frame: u32) {
+        let spell = &clips.spells[i];
+        let Some(c) = self.cast.as_mut() else { return };
+        if c.released
+            || !spell
+                .clip
+                .release
+                .iter()
+                .any(|&(f, m)| f == frame && m.is_none_or(|m| m == spell.motion))
+        {
+            return;
+        }
+        c.released = true;
+        // 0xff is "all MP": it always takes MP below 0 and starts a charge.
+        self.mp.change(-(c.cost as i32), magic::CHARGE_LENGTH);
+        self.mp_charging = self.mp.charging();
+        self.released = Some(Released {
+            magic_type: c.magic_type,
+            level: c.level,
+            row: c.start.row,
+            finisher: c.start.finisher,
+            airborne: c.start.airborne,
+            form: c.form,
+        });
+    }
+
+    /// The spell released since the last call.
+    pub fn take_released(&mut self) -> Option<Released> {
+        self.released.take()
+    }
+
     /// PTYA 0x0b: the guard motion, turning to the target at once.
     fn start_guard(&mut self, input: &Input, step: &mut Step) {
         if let Some(t) = input.target
@@ -979,7 +1178,17 @@ impl Player {
         clips: &Clips,
         step: &mut Step,
     ) -> [f32; 3] {
-        if let Action::AirAttack(i) = self.action {
+        if let Action::AirCast(i) = self.action {
+            let clip = &clips.spells[i].clip;
+            self.face_target(clip, input);
+            self.release_if_due(clips, i);
+            let ready = self.actionable(clips);
+            if input.attack && self.try_attack(input, p, clips, ready, moving, direction, step) {
+            } else if self.frame >= clip.end {
+                self.cast = None;
+                self.start(Action::Fall, step);
+            }
+        } else if let Action::AirAttack(i) = self.action {
             let clip = &clips.attacks[i].clip;
             self.face_target(clip, input);
             let ready = self.actionable(clips);
@@ -1236,6 +1445,36 @@ mod tests {
             fall: open(30),
             land: Clip::looping(12, 0),
             records: records(),
+            spells: vec![
+                SpellClip {
+                    motion: 56,
+                    clip: Clip {
+                        end: 40,
+                        release: vec![(10, Some(56))],
+                        combo_windows: vec![(30, 40)],
+                        ..Clip::default()
+                    },
+                    root: Vec::new(),
+                },
+                SpellClip {
+                    motion: 57,
+                    clip: Clip {
+                        end: 40,
+                        release: vec![(12, Some(57))],
+                        ..Clip::default()
+                    },
+                    root: Vec::new(),
+                },
+                SpellClip {
+                    motion: 58,
+                    clip: Clip {
+                        end: 40,
+                        release: vec![(12, Some(58))],
+                        ..Clip::default()
+                    },
+                    root: Vec::new(),
+                },
+            ],
             attacks: vec![
                 attack(50, (60, 60), 0.),
                 attack(40, (10, 25), 0.),
@@ -1852,5 +2091,119 @@ mod tests {
             player.tick(&Input::default(), &p, &c, &world);
         }
         assert_eq!(player.action, Action::Idle);
+    }
+
+    fn fire(level: u8) -> magic::Record {
+        magic::Record {
+            magic_type: magic::FIRE,
+            level,
+            world: 0,
+            file: String::new(),
+            item: 0x15,
+            command: 0x31,
+            ground: (56, 8),
+            finisher: (57, 8),
+            air: (58, 8),
+            voice: 7,
+            voice_finisher: 11,
+            voice_self: -1,
+        }
+    }
+
+    #[test]
+    fn a_cast_spends_mp_at_its_release_tick_and_counts_a_combo_hit() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([0., 0., 0.], 0.);
+        player.mp = magic::Mp::new(100);
+        let (action, start) = player.cast(&fire(1), 12, 0, false, &c).unwrap();
+        assert_eq!(action, Action::Cast(0));
+        assert_eq!((start.motion, start.row, start.finisher), (56, 0, false));
+        assert_eq!(player.combo, ptya::Combo { step: 1, finish: 1 });
+        // No MP is spent before the release tick (10).
+        for _ in 0..9 {
+            player.tick(&Input::default(), &p, &c, &w);
+            assert_eq!(player.mp.cur, 100);
+            assert!(player.take_released().is_none());
+        }
+        player.tick(&Input::default(), &p, &c, &w);
+        let r = player.take_released().unwrap();
+        assert_eq!((r.magic_type, r.level, r.row, r.airborne), (0, 1, 0, false));
+        assert_eq!(player.mp.cur, 88);
+        // The motion ends in idle.
+        for _ in 0..40 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        assert_eq!(player.action, Action::Idle);
+        assert!(player.take_released().is_none());
+    }
+
+    #[test]
+    fn the_third_hit_of_a_combo_casts_the_finisher_row() {
+        let (_, c, _) = (params(), clips(), room());
+        let mut player = Player::new([0., 0., 0.], 0.);
+        // Two attacks already counted (limit 3), a hit connected.
+        player.combo = ptya::Combo { step: 2, finish: 1 };
+        player.connected = true;
+        player.action = Action::Attack(1);
+        player.frame = 12;
+        let (action, start) = player.cast(&fire(2), 12, 0, false, &c).unwrap();
+        assert_eq!(action, Action::Cast(1));
+        assert_eq!((start.motion, start.row, start.finisher), (57, 3, true));
+        assert_eq!(player.combo.step, 3);
+    }
+
+    #[test]
+    fn interrupted_casts_spend_nothing_and_cure_always_charges() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([0., 0., 0.], 0.);
+        player.cast(&fire(1), 12, 0, false, &c).unwrap();
+        for _ in 0..5 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        player.hurt(0, [0., 1.], 125., &c);
+        for _ in 0..20 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        assert_eq!(player.mp.cur, 100);
+        assert!(player.take_released().is_none());
+        // Cost 0xff always takes MP below 0: a full-bar cast starts a charge.
+        let mut cure = Player::new([0., 0., 0.], 0.);
+        cure.cast(&fire(1), 0xff, 0, true, &c).unwrap();
+        for _ in 0..11 {
+            cure.tick(&Input::default(), &p, &c, &w);
+        }
+        assert!(cure.take_released().is_some());
+        assert!(cure.mp.charging());
+        assert_eq!(cure.mp.cur, 0);
+        // MP Haste runs the charge down faster.
+        let before = cure.mp.remaining;
+        cure.abilities.mp_haste = 1.5;
+        cure.tick(&Input::default(), &p, &c, &w);
+        assert_eq!(cure.mp.remaining, before - 1.5);
+    }
+
+    #[test]
+    fn an_air_cast_hops_forty_and_lands() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([0., 0., 0.], 0.);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&jump, &p, &c, &w);
+        for _ in 0..20 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        assert!(player.in_air());
+        let (action, start) = player.cast(&fire(1), 12, 0, false, &c).unwrap();
+        assert_eq!(action, Action::AirCast(2));
+        assert!(start.airborne);
+        assert_eq!(start.row, 0);
+        for _ in 0..13 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        let r = player.take_released().unwrap();
+        assert!(r.airborne);
+        assert_eq!(player.mp.cur, 88);
     }
 }

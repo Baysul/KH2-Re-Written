@@ -30,7 +30,7 @@ use player_sim::{
     Action, AttackStep, Clip, Clips, Input, Params, Player, TriangleWorld, World,
     camera::{self, CameraInput, FollowCamera},
 };
-use player_sim::{abilities, combat, physics};
+use player_sim::{abilities, combat, magic, physics};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -57,6 +57,8 @@ struct Locator {
     ordinal: usize,
     name_hash: [u8; 16],
 }
+mod magic_room;
+
 fn player_object_default() -> String {
     "P_EX100".into()
 }
@@ -430,6 +432,14 @@ struct Game {
     jump_queued: bool,
     attack_queued: bool,
     guard_queued: bool,
+    /// L1-held shortcut presses of this tick (bit k = slot k) and the
+    /// shortcut command ids (camp Customize).
+    shortcut_queued: u8,
+    shortcuts: [u16; 4],
+    /// The back button (Circle, logical bit 3) pressed this tick.
+    back_queued: bool,
+    /// Sora's magic: owned spells, running casts and their volumes.
+    magic: Option<magic_room::MagicRt>,
     /// Guard's ability is equipped (the camp's Abilities screen sets it).
     guard_equipped: bool,
     menu_up_queued: bool,
@@ -587,6 +597,24 @@ fn bar_entry<'a>(bytes: &'a [u8], name: &[u8; 4]) -> Result<&'a [u8], Box<dyn st
 
 /// Clip timing and honoured range triggers from one decoded motion.
 /// Clip timing relative to FrameStart, plus the key time of FrameStart.
+/// Loads the ATKP rows of `id` in sub-table `sub` into the runtime (and the
+/// id's base row and hit sound for the clash rules) on first use.
+fn ensure_attack_rows(rt: &mut EnemyRuntime, id: u16, sub: u8) -> bool {
+    if rt.steps.contains_key(&(id, sub)) {
+        return true;
+    }
+    match package_reader::battle_tables::attack_steps_sub(&rt.atkp, id, sub) {
+        Ok(rows) => {
+            let first = rows[0];
+            rt.rows.entry(id).or_insert(first);
+            rt.hit_sounds.entry(id).or_insert(first.hit_sound);
+            rt.steps.insert((id, sub), rows);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// The damage routine's view of an ATKP row.
 fn params_of(a: &package_reader::battle_tables::Attack) -> combat::AttackParams {
     combat::AttackParams {
@@ -663,7 +691,9 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
             0 | 1 => clip.actionable.push((start, stop)),
             3 => clip.no_gravity.push((start, stop)),
             42 => clip.inertia.push((start, stop)),
-            28 => {
+            // 28 turns toward the lock-on target, 22 toward the command
+            // target; one enemy here, so they are the same.
+            28 | 22 => {
                 if let Some(&deg) = record.parameters.first() {
                     clip.turn_to_target.push((start, stop, deg as f32));
                 }
@@ -680,6 +710,11 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
                     clip.face_target.push((frame, deg as f32));
                 }
             }
+            // Spell release (FUN_14040dd70 case 0x11), filtered by the
+            // motion id when it has an argument.
+            17 => clip
+                .release
+                .push((frame, record.parameters.first().map(|&m| m as u16))),
             _ => {}
         }
     }
@@ -724,6 +759,7 @@ struct Loaded {
     /// SSTM battle parameters (blow, hit-back, fall max).
     sstm: physics::Sstm,
     abilities: AbilitySource,
+    magic: Option<magic_room::MagicSource>,
     clips: Clips,
     actions: Vec<((Action, bool), usize)>,
     clip_poses: Vec<ClipPoses>,
@@ -854,7 +890,26 @@ const ITEM_MESSAGES: [u32; 19] = [
 /// The room's stock and Sora's equipment [test-room values: a new save's
 /// inventory is not decoded]: 3 Potions, a Hi-Potion, 2 Ethers; the
 /// Kingdom Key with one empty armor, accessory and two item slots.
-const ROOM_STOCK: [(u16, u8); 3] = [(1, 3), (2, 1), (3, 2)];
+const ROOM_STOCK: [(u16, u8); 9] = [
+    (1, 3),
+    (2, 1),
+    (3, 2),
+    // The element items (type 0x12): Fire, Blizzard, Thunder, Cure, Magnet
+    // and Reflect at their top level [test-room values: a new save has
+    // none].
+    (0x15, 3),
+    (0x16, 3),
+    (0x17, 3),
+    (0x18, 3),
+    (0x57, 3),
+    (0x58, 3),
+];
+/// The element items by magic type (Fire, Blizzard, Thunder, Cure,
+/// Magnet, Reflect).
+const ELEMENT_ITEMS: [u16; 6] = [0x15, 0x16, 0x17, 0x18, 0x57, 0x58];
+/// Shortcut slots of a fresh room [test-room values]: Fire, Blizzard,
+/// Thunder and Cure by their level-1 command ids; Customize changes them.
+const ROOM_SHORTCUTS: [u16; 4] = [0x31, 0x33, 0x32, 0x34];
 
 /// Equip messages (camp-09 §10): sections, None, no items, unequip help,
 /// the two boxes, the info labels.
@@ -1111,8 +1166,11 @@ struct EnemyRuntime {
     body: Vec<(usize, Vec3, f32, bool)>,
     targets: Vec<(usize, Vec3, f32, f32)>,
     blade: HashMap<u8, Vec<(Vec3, f32)>>,
-    /// Every ATKP step row by id (FUN_1403eb230 picks one per hit count).
-    steps: HashMap<u16, Vec<package_reader::battle_tables::Attack>>,
+    /// Every ATKP step row by (id, sub-table); FUN_1403eb230 picks one per
+    /// hit count. Spell rows are added when a spell first hits.
+    steps: HashMap<(u16, u8), Vec<package_reader::battle_tables::Attack>>,
+    /// The ATKP table, for spell rows by sub-table.
+    atkp: Vec<u8>,
     sora: combat::AttackerStats,
     enemy: Shadow,
     rng: ScriptRandom,
@@ -1149,6 +1207,26 @@ struct EnemyRuntime {
     sound_tick: Option<(u32, u32)>,
 }
 
+/// A placeholder for a spell's hit volume: the spell effects (the `.mag`
+/// PAX containers) are not drawn yet, so each live ATTACK_MAGIC volume shows
+/// as a translucent shape tinted by its element.
+#[derive(Component)]
+struct SpellVolume(usize);
+
+/// Tints by ATKP id: fire, blizzard, thunder, cure, magnet, reflect.
+fn spell_tint(atkp: u16) -> [f32; 4] {
+    match atkp {
+        502 => [1., 0.45, 0.1, 0.35],
+        248 => [0.5, 0.85, 1., 0.45],
+        249..=251 => [1., 0.95, 0.3, 0.35],
+        708 | 709 => [0.3, 1., 0.5, 0.35],
+        658 | 976 | 1440 => [0.7, 0.4, 1., 0.3],
+        573 | 1247 => [0.9, 0.9, 1., 0.3],
+        574..=578 | 667..=669 => [0.9, 0.5, 1., 0.4],
+        _ => [1., 1., 1., 0.3],
+    }
+}
+
 #[derive(Component)]
 struct EnemyRoot;
 #[derive(Component)]
@@ -1163,7 +1241,8 @@ struct EnemySource {
     targets: Vec<(usize, Vec3, f32, f32)>,
     /// Keyblade attack spheres by collision group: offset, radius.
     blade: HashMap<u8, Vec<(Vec3, f32)>>,
-    steps: HashMap<u16, Vec<package_reader::battle_tables::Attack>>,
+    steps: HashMap<(u16, u8), Vec<package_reader::battle_tables::Attack>>,
+    atkp: Vec<u8>,
     difficulty: combat::Difficulty,
     sora: combat::AttackerStats,
     stats: combat::TargetStats,
@@ -1413,6 +1492,19 @@ fn load(
             attack_motions.push(e.motion_id);
         }
     }
+    // The six spells' tables and cast motions (magc, pref/magi, cmd).
+    let magic_src = magic_room::load(&battle, pref, &system, 70.)
+        .map_err(|e| format!("magic tables: {e}"))
+        .ok();
+    let spell_ids = magic_src
+        .as_ref()
+        .map(|m| magic_room::motion_ids(&m.records))
+        .unwrap_or_default();
+    for &m in &spell_ids {
+        if !attack_motions.contains(&m) {
+            attack_motions.push(m);
+        }
+    }
     if attack_motions.is_empty() {
         return Err("PTYA set has no attack motions".into());
     }
@@ -1479,6 +1571,7 @@ fn load(
     ids.extend(SORA_GUARD);
     // Sora's HIT spheres (object collision type 2), for enemy attacks.
     let mut sora_target_radius = 0f32;
+    let mut sora_target_lift = 70f32;
     let sora_body: Vec<(usize, Vec3, f32, bool)> = match &config.enemy {
         Some(e) => {
             let shapes = object_collision::read(bar_entry_typed(
@@ -1491,6 +1584,10 @@ fn load(
                 .iter()
                 .find(|c| c.kind == object_collision::TARGET)
                 .map_or(0., |c| c.radius as f32);
+            sora_target_lift = shapes
+                .iter()
+                .find(|c| c.kind == object_collision::TARGET)
+                .map_or(70., |c| c.position_height as f32);
             shapes
                 .iter()
                 .filter(|c| c.kind == object_collision::HIT && c.group == 0 && c.bone >= 0)
@@ -1541,7 +1638,22 @@ fn load(
     let mut by_slot: HashMap<usize, usize> = HashMap::new();
     let mut slots = Vec::new();
     for selected in &motions {
-        let (clip, key_start) = clip_for(selected)?;
+        let (mut clip, key_start) = clip_for(selected)?;
+        // Range 35 opens the combo window only for its own motion id
+        // (FUN_14040d810 case 0x23).
+        let own_id = ids[clip_list.len()];
+        for record in selected.triggers.iter().flat_map(|t| &t.records.ranges) {
+            if record.trigger == 35 && record.parameters.first().map(|&m| m as u16) == Some(own_id)
+            {
+                let start = record.start_frame.max(0) as u32;
+                let stop = if record.end_frame < 0 {
+                    clip.end
+                } else {
+                    record.end_frame as u32
+                };
+                clip.combo_windows.push((start, stop));
+            }
+        }
         let index = match by_slot.get(&selected.slot) {
             Some(&i) => i,
             None => {
@@ -1684,6 +1796,21 @@ fn load(
             .position(|&m| m == motion)
             .unwrap_or(0)]
     };
+    let spells: Vec<player_sim::SpellClip> = spell_ids
+        .iter()
+        .map(|&m| {
+            let (clip, index) = attack_clip(m);
+            player_sim::SpellClip {
+                motion: m,
+                clip: clip.clone(),
+                root: clip_poses[*index]
+                    .root
+                    .iter()
+                    .map(|r| r.to_array())
+                    .collect(),
+            }
+        })
+        .collect();
     let clips = Clips {
         idle: clip_list[0].0.clone(),
         walk: clip_list[1].0.clone(),
@@ -1695,6 +1822,7 @@ fn load(
         fall: clip_list[4].0.clone(),
         land: clip_list[5].0.clone(),
         records: records.clone(),
+        spells,
         attacks: set
             .iter()
             .map(|e| step(e, attack_clip(e.motion_id)))
@@ -1724,6 +1852,11 @@ fn load(
         let pose = attack_clip(e.motion_id).1;
         both.push((Action::Attack(i), pose));
         both.push((Action::AirAttack(i), pose));
+    }
+    for (i, &m) in spell_ids.iter().enumerate() {
+        let pose = attack_clip(m).1;
+        both.push((Action::Cast(i), pose));
+        both.push((Action::AirCast(i), pose));
     }
     for i in 0..hurt_count {
         both.push((Action::Hurt(i), clip_list[field + 3 + i].1));
@@ -2072,6 +2205,35 @@ fn load(
         ]),
         None => None,
     };
+    let magic_src = magic_src.map(|mut m| {
+        m.target_lift = sora_target_lift;
+        m
+    });
+    // The spells' names for the Magic submenu (cmd +8 message ids).
+    let magic_src = match (magic_src, &config.menu) {
+        (Some(mut m), Some(menu)) => {
+            let wanted: Vec<(u16, u32)> = m
+                .records
+                .iter()
+                .filter_map(|r| m.commands.get(&r.command).map(|c| (r.command, c.name)))
+                .collect();
+            let ids: Vec<u32> = wanted.iter().map(|w| w.1).collect();
+            let texts = hud::load_messages_optional(
+                source,
+                &menu.messages.index,
+                menu.messages.ordinal,
+                menu.messages.name_hash,
+                &ids,
+            )?;
+            for ((cmd, _), text) in wanted.into_iter().zip(texts) {
+                if let Some(t) = text {
+                    m.names.insert(cmd, t);
+                }
+            }
+            Some(m)
+        }
+        (m, _) => m,
+    };
     let enemy = match &config.enemy {
         Some(e) => Some(load_enemy(
             source,
@@ -2092,6 +2254,7 @@ fn load(
         params,
         sstm,
         abilities: ability_source,
+        magic: magic_src,
         clips,
         actions,
         clip_poses,
@@ -2285,7 +2448,7 @@ fn load_enemy(
     for (_, _, id, _) in clip_poses.iter().flat_map(|c| &c.hits) {
         let all = battle_tables::attack_steps(atkp, *id)?;
         let a = all[0];
-        steps.insert(*id, all);
+        steps.insert((*id, 0), all);
         rows.insert(*id, a);
         hit_sounds.insert(*id, a.hit_sound);
         hit_effects.insert(*id, (a.hit_effect, a.hit_effect_random));
@@ -2293,7 +2456,7 @@ fn load_enemy(
     for (_, _, id, _) in clips.values().flat_map(|c: &EnemyClip| &c.windows) {
         let all = battle_tables::attack_steps(atkp, *id)?;
         let a = all[0];
-        steps.insert(*id, all);
+        steps.insert((*id, 0), all);
         hit_sounds.insert(*id, a.hit_sound);
         rows.insert(*id, a);
     }
@@ -2351,6 +2514,7 @@ fn load_enemy(
         targets,
         blade,
         steps,
+        atkp: atkp.to_vec(),
         difficulty: match config.difficulty {
             0 => combat::Difficulty::Beginner,
             2 => combat::Difficulty::Proud,
@@ -2498,6 +2662,7 @@ fn setup(
             drive: 0,
             drive_level: 3,
             drive_max: 3,
+            mp_charge: None,
         };
         let canvas = Canvas::new(sheets[0].texel_scale as f32);
         let mut image = Image::new(
@@ -2538,11 +2703,10 @@ fn setup(
                         colour,
                     })
                     .collect();
-                MenuState {
-                    menu: CommandMenu::new(&sheet.sequence, items),
-                    sheet,
-                    font,
-                }
+                let mut menu = CommandMenu::new(&sheet.sequence, items);
+                // The Magic row opens submenu 1 (command-01 section 0.6).
+                menu.opens = vec![None, Some(1), None, None];
+                MenuState { menu, sheet, font }
             }),
             stats,
             canvas,
@@ -2666,6 +2830,24 @@ fn setup(
             Visibility::Hidden
         },
     ));
+    // A pool of spell-volume placeholders (the most volumes live at once).
+    let unit = meshes.add(Sphere::new(1.).mesh().ico(3).unwrap());
+    for i in 0..16 {
+        commands.spawn((
+            SpellVolume(i),
+            ChildOf(world),
+            Mesh3d(unit.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgba(1., 1., 1., 0.3),
+                unlit: true,
+                alpha_mode: AlphaMode::Blend,
+                cull_mode: None,
+                ..default()
+            })),
+            Transform::default(),
+            Visibility::Hidden,
+        ));
+    }
     let actor = startup.actor.take().expect("actor retained for setup");
     let weapon = startup.weapon.take().expect("weapon retained for setup");
     let pose = game.clip_poses[game.poses[&(Action::Idle, false)]].frames[0].clone();
@@ -3099,6 +3281,17 @@ fn read_pad(
         return;
     }
     let p = game.pad.pressed;
+    // L1 held (logical bit 23) shows the shortcut menu: the face buttons
+    // (logical bits 24-27) then pick its four slots instead of acting.
+    if game.pad.held & 0x80_0000 != 0 {
+        for k in 0..4 {
+            if p & (1 << (24 + k)) != 0 {
+                game.shortcut_queued |= 1 << k;
+            }
+        }
+        return;
+    }
+    game.back_queued |= p & 0x8 != 0;
     game.jump_queued |= p & 0x100 != 0;
     game.attack_queued |= p & 0x4 != 0;
     game.guard_queued |= p & 0x200 != 0;
@@ -3116,6 +3309,7 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
         _ => Vec2::ZERO,
     };
     let jump = matches!(tick, 300 | 560);
+    // (spell slots are scripted in `simulate`)
     let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
@@ -3184,20 +3378,78 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
     // The decide button executes the command under the cursor; Attack
     // (icon 1) is the only command this room implements.
     let mut cursor_moved = false;
-    let attack = match hud.and_then(|h| {
-        h.into_inner().menu.as_mut().map(|m| {
-            let before = m.menu.cursor;
-            let decision = m.menu.input(up, down, decide);
-            cursor_moved = m.menu.cursor != before;
-            decision == Decision::Execute(0) && m.menu.items.first().is_some_and(|i| i.icon == 1)
-        })
-    }) {
-        Some(execute) => execute,
-        None => decide,
-    };
+    let back = std::mem::take(&mut game.back_queued) && !talking;
+    let mut attack = decide;
+    let mut sub_was_open = false;
+    let mut menu_cast = None;
+    let mut denied = false;
+    if let Some(mut h) = hud
+        && let Some(m) = h.menu.as_mut()
+    {
+        // Magic row colour (command-01 section 0.6: 5 without spells, 1
+        // when every entry is unusable) and the open submenu's rows.
+        if let Some(mg) = game.magic.as_ref() {
+            let list = mg.menu_list(&game.player.mp);
+            if let Some(row) = m.menu.items.get_mut(1) {
+                row.colour = if list.is_empty() {
+                    5
+                } else if list.iter().all(|c| c.1 >= 4) {
+                    1
+                } else {
+                    0
+                };
+            }
+            if let Some(sub) = m.menu.sub.as_mut() {
+                for (item, (_, c)) in sub.items.iter_mut().zip(&list) {
+                    item.colour = *c;
+                }
+            }
+        }
+        sub_was_open = m.menu.sub.is_some();
+        let before = (m.menu.cursor, m.menu.sub.as_ref().map(|s| s.cursor));
+        let decision = m.menu.input_with_back(up, down, decide, back);
+        cursor_moved = (m.menu.cursor, m.menu.sub.as_ref().map(|s| s.cursor)) != before;
+        attack =
+            decision == Decision::Execute(0) && m.menu.items.first().is_some_and(|i| i.icon == 1);
+        match decision {
+            Decision::Open(1) => {
+                let mp = game.player.mp;
+                if let Some(mg) = game.magic.as_mut() {
+                    let list = mg.menu_list(&mp);
+                    let items = list
+                        .iter()
+                        .map(|&(t, colour)| {
+                            let cmd = mg.current(t).map(|r| r.command).unwrap_or(0);
+                            Item {
+                                label: mg.src.names.get(&cmd).cloned().unwrap_or_default(),
+                                icon: mg.src.commands.get(&cmd).map_or(0, |c| c.icon),
+                                colour,
+                            }
+                        })
+                        .collect();
+                    mg.menu_types = list.iter().map(|l| l.0).collect();
+                    m.menu.open_sub(1, items);
+                    cursor_moved = true;
+                }
+            }
+            Decision::ExecuteSub { row: 1, index } => {
+                menu_cast = game
+                    .magic
+                    .as_ref()
+                    .and_then(|mg| mg.menu_types.get(index).copied());
+            }
+            Decision::Invalid => denied = true,
+            _ => {}
+        }
+    }
+    // Circle backs out of a submenu instead of jumping.
+    let jump = jump && !sub_was_open;
     // Cursor moves play system sound 1 (FUN_1403bc640/FUN_1403b11e0).
     if cursor_moved {
         game.sound_queue.push((SE_CURSOR, "menu_cursor"));
+    }
+    if denied {
+        game.sound_queue.push((5, "menu_denied"));
     }
     // Guard (Square): F or the pad's west button; unattended runs guard
     // just before two of the Shadow's claws.
@@ -3246,6 +3498,38 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
         nearby,
         probe_blocked: false,
     };
+    // L1 + face button: the shortcut's command (a spell's level-1 command id
+    // stands for the spell of its magic type, FUN_1403b68b0). Unattended
+    // runs cast Fire, Thunder, Blizzard and Cure on fixed ticks.
+    let slot = std::mem::take(&mut game.shortcut_queued);
+    let mut cast = None;
+    if slot != 0 && !talking {
+        let k = slot.trailing_zeros() as usize;
+        let cmd = game.shortcuts[k];
+        cast = game
+            .magic
+            .as_ref()
+            .and_then(|m| m.src.commands.get(&cmd))
+            .filter(|c| c.execute == 2)
+            .map(|c| c.argument as u8);
+    }
+    if game.autoplay.is_some() && game.autoplay_end != AUTOPLAY_TALK_END {
+        cast = match tick {
+            700 => Some(magic::FIRE),
+            800 => Some(magic::BLIZZARD),
+            900 => Some(magic::THUNDER),
+            1000 => Some(magic::MAGNET),
+            1100 => Some(magic::REFLECT),
+            1250 => Some(magic::CURE),
+            _ => None,
+        };
+    }
+    let cast = cast.or(menu_cast);
+    if let Some(t) = cast
+        && !talking
+    {
+        magic_room::request(&mut game, t, tick);
+    }
     let Game {
         player,
         params,
@@ -3254,6 +3538,7 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
         ..
     } = &mut *game;
     let step = player.tick(&input, params, clips, world);
+    magic_room::tick(&mut game, tick);
     combat_tick(&mut game, tick);
     // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
     // recenters (test-room bindings for the original's camera buttons).
@@ -4018,15 +4303,11 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
         }
         s.hp = rt.sora_hp;
         s.max_hp = rt.sora_target.max_hp;
-        if game.autoplay.is_some() && game.tick == 500 {
-            s.mp = s.max_mp / 2;
-        }
     } else if game.autoplay.is_some() {
         match game.tick {
             420 => s.hp = s.max_hp * 7 / 10,
-            500 => s.mp = s.max_mp / 2,
             640 => s.hp = s.max_hp / 5,
-            900 => (s.hp, s.mp) = (s.max_hp, s.max_mp),
+            900 => s.hp = s.max_hp,
             _ => {}
         }
     } else {
@@ -4037,15 +4318,20 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
             s.hp = (s.hp + 2).min(s.max_hp);
         }
         if keys.just_pressed(KeyCode::F7) {
-            s.mp = (s.mp - 10).max(0);
+            game.player.mp.add(-10);
         }
         if keys.just_pressed(KeyCode::F8) {
-            s.mp = (s.mp + 10).min(s.max_mp);
+            game.player.mp.add(10);
         }
         if keys.just_pressed(KeyCode::F9) {
             s.drive = (s.drive + 10).min(100);
         }
     }
+    // MP is Sora's (casts spend it, MP Charge refills it).
+    s.mp = game.player.mp.cur;
+    s.max_mp = game.player.mp.max;
+    let mp = game.player.mp;
+    s.mp_charge = mp.charging().then_some((mp.remaining, mp.total));
     hud.stats = s;
     let Hud {
         sheets,
@@ -4179,6 +4465,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
         log,
         sound_queue,
         effect_queue,
+        magic,
         ..
     } = game;
     let Some(rt) = enemy.as_mut() else { return };
@@ -4211,7 +4498,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
         .collect();
     let mut hit = None;
     // Live guard (ATKP Type 2/3) spheres: centre, radius, ATKP.
-    let mut guards: Vec<(Vec3, f32, u16)> = Vec::new();
+    let mut guards: Vec<(Vec3, f32, u16, Option<u64>)> = Vec::new();
     if !cp.blade.is_empty() {
         let f = frame.min(cp.blade.len() - 1);
         let to_model = cp.weapon[f.min(cp.weapon.len() - 1)] * cp.blade[f];
@@ -4225,7 +4512,10 @@ fn combat_tick(game: &mut Game, tick: u64) {
             // FUN_1403cf400 / FUN_1403cf490: the attack's id and combo
             // group (ATKP ComboGroup, else a fresh one per attack).
             let (aid, _) = *rt.instance_ids.entry(instance).or_insert_with(|| {
-                let combo = rt.steps.get(&atkp).map_or(0, |r| r[0].combo_group as i32);
+                let combo = rt
+                    .steps
+                    .get(&(atkp, 0))
+                    .map_or(0, |r| r[0].combo_group as i32);
                 let group = if combo != 0 {
                     combo
                 } else {
@@ -4242,7 +4532,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
                 let centre = sora_at + sora_turn * to_model.transform_point3(offset);
                 let previous = rt.previous.insert((instance, i), centre);
                 if guard {
-                    guards.push((centre, radius, atkp));
+                    guards.push((centre, radius, atkp, None));
                     continue;
                 }
                 if !targetable {
@@ -4255,7 +4545,64 @@ fn combat_tick(game: &mut Game, tick: u64) {
                             .find(|(b, r, _)| combat::spheres_overlap(c, radius, b.to_array(), *r))
                     {
                         let at = (Vec3::from_array(c), target, target_radius);
-                        hit = Some((instance, atkp, high, at));
+                        hit = Some((instance, atkp, 0u8, high, at, None::<Vec3>, None::<u64>));
+                    }
+                }
+            }
+        }
+    }
+    // Spell volumes (YS::ATTACK_MAGIC): guards join the clash list, damaging
+    // volumes are tested against the Shadow's HIT spheres after the weapon
+    // (one body hit per target per frame, FUN_1403cff40).
+    if let Some(m) = magic.as_mut() {
+        let volumes = m.volumes.clone();
+        for v in &volumes {
+            ensure_attack_rows(rt, v.atkp, v.sub);
+        }
+        for v in &volumes {
+            let centre = Vec3::from_array(v.centre);
+            match v.role {
+                player_sim::magic::Role::Guard => {
+                    guards.push((centre, v.radius, v.atkp, Some(v.key)));
+                }
+                player_sim::magic::Role::Damage => {
+                    if !targetable || hit.is_some() {
+                        continue;
+                    }
+                    let key = magic_room::KEY_BASE | v.key;
+                    let (aid, _) = *rt.instance_ids.entry(key).or_insert_with(|| {
+                        let combo = rt
+                            .steps
+                            .get(&(v.atkp, v.sub))
+                            .map_or(0, |r| r[0].combo_group as i32);
+                        let group = if combo != 0 {
+                            combo
+                        } else {
+                            rt.next_group += 1;
+                            rt.next_group
+                        };
+                        (rt.ids.allocate(), group)
+                    });
+                    if rt.enemy.record.has(aid) {
+                        continue;
+                    }
+                    for c in combat::swept_volume(v.centre, v.previous, v.radius, v.height) {
+                        if hit.is_none()
+                            && let Some(&(target, target_radius, high)) =
+                                body.iter().find(|(b, r, _)| {
+                                    combat::volume_hits_sphere(
+                                        c,
+                                        v.radius,
+                                        v.height,
+                                        b.to_array(),
+                                        *r,
+                                    )
+                                })
+                        {
+                            let at = (Vec3::from_array(c), target, target_radius);
+                            let moving = v.moving.map(Vec3::from_array);
+                            hit = Some((key, v.atkp, v.sub, high, at, moving, Some(v.key)));
+                        }
                     }
                 }
             }
@@ -4265,11 +4612,19 @@ fn combat_tick(game: &mut Game, tick: u64) {
     let in_damage_motion = (10..=39).contains(&player.motion_id(clips));
     rt.sora_record.tick(1., in_damage_motion);
     rt.enemy.record.tick(1., false);
-    if let Some((instance, atkp, high, (attack_centre, target, target_radius))) = hit
-        && let Some(rows) = rt.steps.get(&atkp)
+    if let Some((instance, atkp, sub, high, (attack_centre, target, target_radius), moving, key)) =
+        hit
+        && let Some(rows) = rt.steps.get(&(atkp, sub))
         && let Some(&(aid, group)) = rt.instance_ids.get(&instance)
     {
-        let d = (enemy_at - sora_at) * Vec3::new(1., 0., 1.);
+        // The hit direction (FUN_1404373e0): a moving volume's direction,
+        // else toward the target from the volume's centre; the weapon uses
+        // Sora's facing toward the Shadow.
+        let d = match (moving, key) {
+            (Some(m), _) => m,
+            (None, Some(_)) => enemy_at - attack_centre,
+            (None, None) => enemy_at - sora_at,
+        } * Vec3::new(1., 0., 1.);
         let dir = d.normalize_or(Vec3::new(player.yaw.sin(), 0., player.yaw.cos()));
         // FUN_1403cf600: record the hit; the consecutive-hit count of its
         // combo group picks the ATKP level row (FUN_1403eb230).
@@ -4327,7 +4682,24 @@ fn combat_tick(game: &mut Game, tick: u64) {
                     direction: dir,
                 });
             }
-            let record = serde_json::json!({"event":"hit","tick":tick,"atkp":atkp,"damage":damage,
+            if let (Some(k), Some(m)) = (key, magic.as_mut()) {
+                m.feedback.hit.push(k);
+                // Reaction 5 (Magnet): held at a radius drawn between KB1
+                // and KB2 (DAT_140783ca0 LCG), spinning by ATKP +0x10.
+                if combat::reaction_class(attack.reaction) == 5
+                    && let Some(v) = m.volumes.iter().find(|v| v.key == k)
+                {
+                    let r = &rows[row];
+                    let hold = rt.rng.range(r.knockback[0] as f32, r.knockback[1] as f32);
+                    rt.enemy.capture(
+                        k,
+                        Vec3::from_array(v.centre).to_array(),
+                        hold,
+                        r.spin as f32,
+                    );
+                }
+            }
+            let record = serde_json::json!({"event":"hit","tick":tick,"atkp":atkp,"sub":sub,"damage":damage,
                 "step":row,"combo":player.combo.step,"enemy_hp":rt.enemy.hp,"reaction":format!("{:?}", rt.enemy.reaction),
                 "act":format!("{:?}", rt.enemy.current_act()),"high":high});
             if let Some(file) = log.as_mut() {
@@ -4383,7 +4755,10 @@ fn combat_tick(game: &mut Game, tick: u64) {
             }
             let instance = ((e.motion_serial as u64) << 4) | w as u64;
             let (aid, _) = *rt.instance_ids.entry(instance).or_insert_with(|| {
-                let combo = rt.steps.get(&atkp).map_or(0, |r| r[0].combo_group as i32);
+                let combo = rt
+                    .steps
+                    .get(&(atkp, 0))
+                    .map_or(0, |r| r[0].combo_group as i32);
                 let group = if combo != 0 {
                     combo
                 } else {
@@ -4403,12 +4778,13 @@ fn combat_tick(game: &mut Game, tick: u64) {
                 for c in combat::swept(centre.to_array(), previous.map(|p| p.to_array()), radius) {
                     // Attack-vs-attack clashes run before the body pass.
                     if clash.is_none()
-                        && let Some(&(g, gr, guard)) = guards.iter().find(|(g, gr, guard)| {
-                            combat::spheres_overlap(c, radius, g.to_array(), *gr)
-                                && clashes(*guard, atkp)
-                        })
+                        && let Some(&(g, gr, guard, gkey)) =
+                            guards.iter().find(|(g, gr, guard, _)| {
+                                combat::spheres_overlap(c, radius, g.to_array(), *gr)
+                                    && clashes(*guard, atkp)
+                            })
                     {
-                        clash = Some((instance, atkp, guard, Vec3::from_array(c), g, gr));
+                        clash = Some((instance, atkp, guard, Vec3::from_array(c), g, gr, gkey));
                     }
                     if sora_hit.is_none()
                         && clash.is_none_or(|k| k.0 != instance)
@@ -4424,9 +4800,14 @@ fn combat_tick(game: &mut Game, tick: u64) {
     }
     // A guarded claw: FUN_1403d2140 both ways, Sora's FUN_1403d61d0 and the
     // Shadow's FUN_140411060.
-    if let Some((instance, claw, guard, claw_at, g, gr)) = clash
+    if let Some((instance, claw, guard, claw_at, g, gr, gkey)) = clash
         && let (Some(&gr_row), Some(&claw_row)) = (rt.rows.get(&guard), rt.rows.get(&claw))
     {
+        // attack_get_reflect_count (+0xb0): each clash bumps the guard's
+        // counter, which Reflect's counter tiers read.
+        if let (Some(k), Some(m)) = (gkey, magic.as_mut()) {
+            *m.reflected.entry(k).or_insert(0) += 1;
+        }
         if let Some(&(aid, _)) = rt.instance_ids.get(&instance) {
             rt.sora_record.mark(aid);
         }
@@ -4492,7 +4873,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
             let _ = std::io::Write::write_all(file, b"\n");
         }
     } else if let Some((instance, atkp, high)) = sora_hit
-        && let Some(rows) = rt.steps.get(&atkp)
+        && let Some(rows) = rt.steps.get(&(atkp, 0))
         && let Some(&(aid, group)) = rt.instance_ids.get(&instance)
         && rt.sora_hp > 0
     {
@@ -4567,6 +4948,20 @@ fn combat_tick(game: &mut Game, tick: u64) {
             rt.ko_ticks = 0;
         }
     }
+    // A Magnet's hold follows its volume and ends with it.
+    if let Some(h) = rt.enemy.held {
+        match magic
+            .as_ref()
+            .and_then(|m| m.volumes.iter().find(|v| v.key == h.key))
+        {
+            Some(v) => {
+                if let Some(held) = rt.enemy.held.as_mut() {
+                    held.centre = v.centre;
+                }
+            }
+            None => rt.enemy.release_held(),
+        }
+    }
     let before = rt.enemy.current_act();
     rt.enemy.tick(
         &mut rt.rng,
@@ -4602,6 +4997,39 @@ fn combat_tick(game: &mut Game, tick: u64) {
             "motion":rt.enemy.motion,"position":rt.enemy.position});
         let _ = serde_json::to_writer(&mut *file, &record);
         let _ = std::io::Write::write_all(file, b"\n");
+    }
+}
+
+/// Places the spell-volume placeholders on this tick's volumes.
+fn present_spells(
+    game: Res<Game>,
+    mut volumes: Query<(
+        &SpellVolume,
+        &mut Transform,
+        &mut Visibility,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let live: Vec<_> = game
+        .magic
+        .as_ref()
+        .map(|m| m.volumes.clone())
+        .unwrap_or_default();
+    for (slot, mut transform, mut visibility, material) in &mut volumes {
+        match live.get(slot.0) {
+            Some(v) => {
+                *visibility = Visibility::Visible;
+                transform.translation = Vec3::from_array(v.centre);
+                // Horizontal radius r, vertical half-extent h.
+                transform.scale = Vec3::new(v.radius, v.height, v.radius);
+                if let Some(mut m) = materials.get_mut(&material.0) {
+                    let c = spell_tint(v.atkp);
+                    m.base_color = Color::srgba(c[0], c[1], c[2], c[3]);
+                }
+            }
+            None => *visibility = Visibility::Hidden,
+        }
     }
 }
 
@@ -5183,13 +5611,18 @@ fn camp_tick(
     // Test-room values: no munny, level 1, the room's HP/MP; the clock is
     // the room's frame count.
     let (hp, max_hp, mp, max_mp) = match (&game.enemy, &hud) {
-        (Some(rt), Some(h)) => (
+        (Some(rt), Some(_)) => (
             rt.sora_hp,
             rt.sora_target.max_hp,
-            h.stats.mp,
-            h.stats.max_mp,
+            game.player.mp.cur,
+            game.player.mp.max,
         ),
-        (None, Some(h)) => (h.stats.hp, h.stats.max_hp, h.stats.mp, h.stats.max_mp),
+        (None, Some(h)) => (
+            h.stats.hp,
+            h.stats.max_hp,
+            game.player.mp.cur,
+            game.player.mp.max,
+        ),
         _ => (1, 1, 0, 1),
     };
     let panels = camp::Panels {
@@ -5318,6 +5751,15 @@ fn camp_tick(
             // Guard's ability bit gates PTYA 0x0b (FUN_140402750).
             game.player.abilities = game.ability_source.build(&c.ability_slots);
             game.guard_equipped = game.player.abilities.has(abilities::bit::GUARD);
+            // Owned spell levels (the element items), the shortcut slots
+            // and the MP-charge toggles follow the camp.
+            game.shortcuts = c.shortcuts;
+            if let Some(m) = game.magic.as_mut() {
+                for (t, item) in ELEMENT_ITEMS.iter().enumerate() {
+                    m.levels[t] = c.stock.get(item).copied().unwrap_or(0);
+                }
+                m.dont_charge = c.no_charge;
+            }
             // Items used in the camp change the room's HP / MP.
             if let Some(sora) = menu.data.panels.members.first() {
                 if let Some(rt) = game.enemy.as_mut() {
@@ -5325,7 +5767,12 @@ fn camp_tick(
                 }
                 if let Some(h) = hud.as_mut() {
                     h.stats.hp = sora.hp;
-                    h.stats.mp = sora.mp;
+                }
+                // Items used in the camp restore MP through the charge
+                // rules (FUN_1403c0890).
+                let delta = sora.mp - game.player.mp.cur;
+                if delta != 0 {
+                    game.player.mp.add(delta);
                 }
             }
             let kind = menu.journal;
@@ -5669,6 +6116,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let talk_room = loaded.npc.is_some();
     let mut player = Player::new(loaded.spawn.to_array(), 0.);
     player.abilities = loaded.abilities.build(&ROOM_ABILITIES);
+    if let Some(h) = &loaded.hud {
+        player.mp = magic::Mp::new(h.stats.1);
+    }
     let guard_equipped = player.abilities.has(abilities::bit::GUARD);
     let mut game = Game {
         ability_source: loaded.abilities,
@@ -5690,6 +6140,19 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         jump_queued: false,
         attack_queued: false,
         guard_queued: false,
+        shortcut_queued: 0,
+        back_queued: false,
+        shortcuts: ROOM_SHORTCUTS,
+        magic: loaded.magic.map(|src| {
+            let mut levels = [0u8; 6];
+            for (t, item) in ELEMENT_ITEMS.iter().enumerate() {
+                levels[t] = ROOM_STOCK
+                    .iter()
+                    .find(|(i, _)| i == item)
+                    .map_or(0, |&(_, n)| n);
+            }
+            magic_room::MagicRt::new(src, levels)
+        }),
         guard_equipped,
         menu_up_queued: false,
         menu_down_queued: false,
@@ -5846,6 +6309,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             targets: e.targets,
             blade: e.blade,
             steps: e.steps,
+            atkp: e.atkp,
             difficulty: e.difficulty,
             sora: e.sora,
             enemy,
@@ -5926,7 +6390,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             keyboard_last: true,
             stock: ROOM_STOCK.into_iter().collect(),
             seen: Vec::new(),
-            shortcuts: [0; 4],
+            shortcuts: ROOM_SHORTCUTS,
             no_charge: 0,
             equipment: camp::items::Equipment {
                 weapon: KINGDOM_KEY,
@@ -5999,6 +6463,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 camera_control,
                 present,
                 present_enemy,
+                present_spells,
                 present_npc,
                 present_effects,
                 hud_present,

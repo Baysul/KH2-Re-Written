@@ -66,6 +66,8 @@ pub struct Attack {
     /// Kind (+0x2e): 1 ground finisher, 2 air finisher, 4 reaction command
     /// (the damage routine's combo-boost terms, FUN_1403c12f0).
     pub combo_kind: u8,
+    /// +0x10 (i16): Magnet's spin, units per tick around its centre.
+    pub spin: i16,
 }
 
 fn parse_row(rec: &[u8]) -> io::Result<Attack> {
@@ -95,6 +97,7 @@ fn parse_row(rec: &[u8]) -> io::Result<Attack> {
         revenge: rec[0x2a],
         hp_drain: rec[0x2f],
         combo_kind: rec[0x2e],
+        spin: i16_at(rec, 0x10)?,
     })
 }
 
@@ -111,6 +114,12 @@ pub fn attack(atkp: &[u8], id: u16) -> io::Result<Attack> {
 /// level variants that follow it (FUN_1403eafc0 finds the first, FUN_1403eb230
 /// walks the rest while Id and sub-table match).
 pub fn attack_steps(atkp: &[u8], id: u16) -> io::Result<Vec<Attack>> {
+    attack_steps_sub(atkp, id, 0)
+}
+
+/// The rows of `id` in sub-table `sub` (the attacker's stats byte +0x258;
+/// spells pass their `magi` row index).
+pub fn attack_steps_sub(atkp: &[u8], id: u16, sub: u8) -> io::Result<Vec<Attack>> {
     let count = u32_at(atkp, 4)? as usize;
     let mut out = Vec::new();
     for k in 0..count {
@@ -118,7 +127,7 @@ pub fn attack_steps(atkp: &[u8], id: u16) -> io::Result<Vec<Attack>> {
         let rec = atkp
             .get(r..r + 48)
             .ok_or_else(|| invalid("ATKP truncated"))?;
-        if u16_at(rec, 2)? == id && rec[1] == 0 {
+        if u16_at(rec, 2)? == id && rec[1] == sub {
             if out.is_empty() && rec[0] != 0 {
                 continue;
             }
