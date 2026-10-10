@@ -59,6 +59,7 @@ struct Locator {
 }
 mod item_room;
 mod magic_room;
+mod prize_room;
 
 fn player_object_default() -> String {
     "P_EX100".into()
@@ -1101,6 +1102,7 @@ fn load_camp_items(
 /// Sora's Status numbers the room does not track elsewhere.
 #[derive(Clone, Copy)]
 struct SoraNumbers {
+    level: u8,
     next_exp: u32,
     ap: i32,
     strength: i32,
@@ -1224,6 +1226,21 @@ struct EnemyRuntime {
     /// Sora's HP and KO timer (test room refills after a KO).
     sora_hp: i32,
     ko_ticks: u32,
+    /// The kill's EXP inputs, przt record and Sora's LVUP rows.
+    exp_rule: (u16, u16),
+    prize: package_reader::battle_tables::Prize,
+    sora_levels: Vec<package_reader::battle_tables::PlayerLevel>,
+    /// Sora's level, EXP, munny, the prizes in the world, and whether the
+    /// enemy was dead last tick.
+    level: u8,
+    exp_total: u32,
+    munny: u32,
+    orbs: Vec<player_sim::prize::Orb>,
+    was_dead: bool,
+    /// Ability items learned by level-ups, waiting for the camp.
+    learned: Vec<u16>,
+    /// Status numbers changed (level-up): the camp refreshes them.
+    numbers_dirty: bool,
     /// Last frame's attack sphere centres by (window instance, sphere).
     previous: HashMap<(u64, usize), Vec3>,
     indices: Vec<Vec<u32>>,
@@ -1259,6 +1276,20 @@ fn spell_tint(atkp: u16) -> [f32; 4] {
     }
 }
 
+/// A placeholder for a prize on the ground (the orb models are not
+/// drawn): a small sphere tinted by kind.
+#[derive(Component)]
+struct OrbMarker(usize);
+
+fn orb_tint(kind: u8) -> [f32; 4] {
+    match kind {
+        0 | 1 => [0.3, 1., 0.4, 1.],
+        2..=4 => [1., 0.85, 0.2, 1.],
+        5 | 6 => [0.4, 0.6, 1., 1.],
+        _ => [1., 0.5, 0.15, 1.],
+    }
+}
+
 #[derive(Component)]
 struct EnemyRoot;
 #[derive(Component)]
@@ -1288,6 +1319,12 @@ struct EnemySource {
     hit_sounds: HashMap<u16, i32>,
     hit_effects: HashMap<u16, (u8, u8)>,
     rows: HashMap<u16, package_reader::battle_tables::Attack>,
+    /// The kill's EXP (enmp +0x56 x the level row's EXP) and the przt
+    /// record its death scatters.
+    exp: (u16, u16),
+    prize: package_reader::battle_tables::Prize,
+    /// Sora's LVUP rows, levels 1..=99.
+    sora_levels: Vec<package_reader::battle_tables::PlayerLevel>,
 }
 
 /// Walkable collision levels (8-unit height bins) by XZ area, largest first,
@@ -2120,6 +2157,7 @@ fn load(
             // Sora at level 1 (LVUP row + PLRP id 0, Kingdom Key +3 Str /
             // +1 Mag as in the combat setup) [test-room values].
             let numbers = SoraNumbers {
+                level: 1,
                 next_exp: lv.exp,
                 ap: lv.ap as i32 + byte(5) + ROOM_EXTRA_AP,
                 strength: lv.strength as i32 + byte(6) + 3,
@@ -2551,7 +2589,17 @@ fn load_enemy(
         min: 1,
         weakness: [100; 7],
     };
+    // The Shadow's AI dead act scatters przt 2 (ai-01); enmp +0x58 is 0.
+    let prize_id = if enemy.prize != 0 { enemy.prize } else { 2 };
+    let prize = battle_tables::prize(bar_entry(battle, b"przt")?, prize_id)?;
+    let lvup_all = bar_entry(battle, b"lvup")?;
+    let sora_levels = (1..=99)
+        .map(|l| battle_tables::player_level(lvup_all, 1, l))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(EnemySource {
+        exp: (enemy.exp, row.exp),
+        prize,
+        sora_levels,
         model,
         clips: EnemyClips(clips),
         body,
@@ -2886,6 +2934,22 @@ fn setup(
                 unlit: true,
                 alpha_mode: AlphaMode::Blend,
                 cull_mode: None,
+                ..default()
+            })),
+            Transform::default(),
+            Visibility::Hidden,
+        ));
+    }
+    // A pool of prize markers.
+    let orb_mesh = meshes.add(Sphere::new(1.).mesh().ico(2).unwrap());
+    for i in 0..16 {
+        commands.spawn((
+            OrbMarker(i),
+            ChildOf(world),
+            Mesh3d(orb_mesh.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(1., 1., 1.),
+                unlit: true,
                 ..default()
             })),
             Transform::default(),
@@ -3655,6 +3719,7 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
     magic_room::tick(&mut game, tick);
     item_room::tick(&mut game, tick);
     combat_tick(&mut game, tick);
+    prize_room::tick(&mut game, tick);
     // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
     // recenters (test-room bindings for the original's camera buttons).
     let mut turn = 0f32;
@@ -4442,7 +4507,7 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
             game.player.mp.add(10);
         }
         if keys.just_pressed(KeyCode::F9) {
-            s.drive = (s.drive + 10).min(100);
+            game.player.drive.add(10);
         }
     }
     // MP is Sora's (casts spend it, MP Charge refills it).
@@ -4450,6 +4515,9 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
     s.max_mp = game.player.mp.max;
     let mp = game.player.mp;
     s.mp_charge = mp.charging().then_some((mp.remaining, mp.total));
+    // The Drive gauge is Sora's (hits, damage and orbs fill it).
+    let drive = game.player.drive;
+    (s.drive, s.drive_level, s.drive_max) = (drive.partial, drive.level, drive.max);
     hud.stats = s;
     let Hud {
         sheets,
@@ -4778,6 +4846,12 @@ fn combat_tick(game: &mut Game, tick: u64) {
             // FUN_1403d12c0: the attacker's obj+0x120 bit 25, which lets
             // the next press chain the combo.
             player.connected = true;
+            // FUN_1403a8800: the row's DriveDrain fills the gauge (the
+            // Shadow is a ZAKO).
+            let (mp_charging, boost) = (player.mp_charging, player.abilities.drive_boost);
+            player
+                .drive
+                .hit(rows[row].drive_drain, true, mp_charging, boost);
             // ATKP HitSound (FUN_1403d12c0 → FUN_1403dadf0); 500xxx ids
             // resolve to the equipped weapon's bank, 500 for this Keyblade.
             if let Some(&id) = rt.hit_sounds.get(&atkp)
@@ -5080,6 +5154,11 @@ fn combat_tick(game: &mut Game, tick: u64) {
         if started.is_some() {
             *action_started = tick;
         }
+        // Damage Drive (FUN_1403a85f0): damage taken fills the gauge.
+        let damage_drive = player.abilities.damage_drive;
+        player
+            .drive
+            .damaged(damage, rt.sora_target.max_hp, damage_drive);
         // MP Rage (FUN_1403d5e50): damage taken outside MP Charge gives
         // MP by its share of max HP × the ability's value.
         if damage > 0 && !player.mp.charging() && player.abilities.mp_rage > 0. {
@@ -5191,6 +5270,44 @@ fn present_spells(
                 if let Some(mut m) = materials.get_mut(&material.0) {
                     let c = spell_tint(v.atkp);
                     m.base_color = Color::srgba(c[0], c[1], c[2], c[3]);
+                }
+            }
+            None => *visibility = Visibility::Hidden,
+        }
+    }
+}
+
+/// Places the prize markers on the live orbs.
+fn present_orbs(
+    game: Res<Game>,
+    mut markers: Query<(
+        &OrbMarker,
+        &mut Transform,
+        &mut Visibility,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let orbs = game
+        .enemy
+        .as_ref()
+        .map(|e| e.orbs.as_slice())
+        .unwrap_or(&[]);
+    for (slot, mut transform, mut visibility, material) in &mut markers {
+        match orbs.get(slot.0) {
+            Some(o) => {
+                *visibility = Visibility::Visible;
+                let lift = player_sim::prize::centre_height(o.kind);
+                transform.translation =
+                    Vec3::new(o.position[0], o.position[1] + lift, o.position[2]);
+                transform.scale = Vec3::splat(if o.kind % 3 == 2 || o.kind == 8 {
+                    9.
+                } else {
+                    6.
+                });
+                if let Some(mut m) = materials.get_mut(&material.0) {
+                    let c = orb_tint(o.kind);
+                    m.base_color = Color::srgb(c[0], c[1], c[2]);
                 }
             }
             None => *visibility = Visibility::Hidden,
@@ -5758,6 +5875,27 @@ fn camp_tick(
     } else {
         pad::MODE_FIELD
     };
+    // Level-ups change the Status numbers and teach abilities.
+    if let Some(rt) = game.enemy.as_mut()
+        && rt.numbers_dirty
+    {
+        rt.numbers_dirty = false;
+        if let Some(row) = rt.sora_levels.get(rt.level as usize - 1) {
+            let n = &mut c.source.numbers;
+            n.level = rt.level;
+            n.next_exp = row.exp.saturating_sub(rt.exp_total);
+            n.strength = rt.sora.strength;
+            n.magic = rt.sora.magic;
+            n.defense = rt.sora_target.defense;
+        }
+        for id in rt.learned.drain(..) {
+            if !c.ability_slots.iter().any(|&s| s & 0x7fff == id)
+                && let Some(slot) = c.ability_slots.iter_mut().find(|s| **s == 0)
+            {
+                *slot = id;
+            }
+        }
+    }
     let tick = game.tick;
     if game.autoplay.is_some() {
         let logical = AUTOPLAY_CAMP
@@ -5828,7 +5966,7 @@ fn camp_tick(
         ));
         let value = |bit: usize| -> String {
             match bit {
-                0 => "1".into(),
+                0 => format!("{}", n.level),
                 1 | 7 => "0".into(),
                 2 => format!("{}", n.next_exp),
                 3 => format!("{hp}/{max_hp}"),
@@ -6522,6 +6660,16 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             claw_previous: HashMap::new(),
             sora_hp: e.sora_target.max_hp,
             ko_ticks: 0,
+            exp_rule: e.exp,
+            prize: e.prize,
+            sora_levels: e.sora_levels,
+            level: 1,
+            exp_total: 0,
+            munny: 0,
+            orbs: Vec::new(),
+            was_dead: false,
+            learned: Vec::new(),
+            numbers_dirty: false,
             previous: HashMap::new(),
             indices: Vec::new(),
             hit_sounds: e.hit_sounds,
@@ -6660,6 +6808,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 present,
                 present_enemy,
                 present_spells,
+                present_orbs,
                 present_npc,
                 present_effects,
                 hud_present,

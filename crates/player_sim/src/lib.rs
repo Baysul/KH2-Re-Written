@@ -11,8 +11,10 @@
 pub mod abilities;
 pub mod camera;
 pub mod combat;
+pub mod drive;
 pub mod magic;
 pub mod physics;
+pub mod prize;
 pub mod ptya;
 pub mod shadow;
 pub mod targeting;
@@ -406,6 +408,8 @@ pub struct Player {
     pub mp_charging: bool,
     /// MP and MP Charge (stats +0x180 / +0x1bc / +0x1c0).
     pub mp: magic::Mp,
+    /// The Drive gauge (stats +0x1b0..+0x1b2).
+    pub drive: drive::Gauge,
     /// The cast in progress and the spell it released this tick.
     cast: Option<CastState>,
     released: Option<Released>,
@@ -517,6 +521,7 @@ impl Player {
             abilities: abilities::Abilities::default(),
             mp_charging: false,
             mp: magic::Mp::new(100),
+            drive: drive::Gauge::new(3),
             cast: None,
             released: None,
             knock: None,

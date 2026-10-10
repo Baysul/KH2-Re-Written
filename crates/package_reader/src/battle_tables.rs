@@ -174,6 +174,10 @@ pub struct Enemy {
     pub damage_min: u16,
     /// Physical, fire, blizzard, thunder, dark, light, general (percent).
     pub weakness: [u16; 7],
+    /// +0x56: the EXP multiplier of the kill.
+    pub exp: u16,
+    /// +0x58: the przt id scattered on death (0: none).
+    pub prize: u16,
 }
 
 pub fn enemy(enmp: &[u8], id: u16) -> io::Result<Enemy> {
@@ -195,6 +199,8 @@ pub fn enemy(enmp: &[u8], id: u16) -> io::Result<Enemy> {
                 damage_cap: u16_at(rec, 68)?,
                 damage_min: u16_at(rec, 70)?,
                 weakness,
+                exp: u16_at(rec, 0x56)?,
+                prize: u16_at(rec, 0x58)?,
             });
         }
     }
@@ -227,6 +233,42 @@ pub fn enemy_level(lvpm: &[u8], level: u16) -> io::Result<LevelRow> {
     })
 }
 
+/// One przt record: the nine prize counts and three item drops with their
+/// chances in percent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Prize {
+    pub counts: [u8; 9],
+    pub items: [(u16, u16); 3],
+}
+
+/// The przt record of an id; an absent id falls back to 0x48
+/// (FUN_1403ecc70). Rows are 0x18 bytes after u32 version, u32 count.
+pub fn prize(przt: &[u8], id: u16) -> io::Result<Prize> {
+    let count = u32_at(przt, 4)? as usize;
+    let find = |want: u16| -> io::Result<Option<Prize>> {
+        for k in 0..count {
+            let r = 8 + k * 0x18;
+            let rec = przt
+                .get(r..r + 0x18)
+                .ok_or_else(|| invalid("PRZT truncated"))?;
+            if u16_at(rec, 0)? == want {
+                let mut counts = [0u8; 9];
+                counts.copy_from_slice(&rec[2..11]);
+                let mut items = [(0u16, 0u16); 3];
+                for (i, it) in items.iter_mut().enumerate() {
+                    *it = (u16_at(rec, 0xc + i * 4)?, u16_at(rec, 0xe + i * 4)?);
+                }
+                return Ok(Some(Prize { counts, items }));
+            }
+        }
+        Ok(None)
+    };
+    match find(id)? {
+        Some(p) => Ok(p),
+        None => find(0x48)?.ok_or_else(|| invalid("PRZT has no fallback row")),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayerLevel {
     /// EXP of the row (u32 at +0; the Status "Next LV" subtracts the
@@ -236,6 +278,9 @@ pub struct PlayerLevel {
     pub magic: u8,
     pub defense: u8,
     pub ap: u8,
+    /// +8 / +0xa / +0xc: the ability items learned at this level, one per
+    /// growth choice (FUN_1403ed7d0 reads +8 + choice x 2).
+    pub abilities: [u16; 3],
 }
 
 /// LVUP row for a character id and level: the character block is at the
@@ -256,6 +301,11 @@ pub fn player_level(lvup: &[u8], character: usize, level: usize) -> io::Result<P
         magic: row[5],
         defense: row[6],
         ap: row[7],
+        abilities: [
+            u16::from_le_bytes([row[8], row[9]]),
+            u16::from_le_bytes([row[10], row[11]]),
+            u16::from_le_bytes([row[12], row[13]]),
+        ],
     })
 }
 
