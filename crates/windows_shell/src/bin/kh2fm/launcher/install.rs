@@ -307,6 +307,69 @@ pub const TESTS: [Test; 2] = [
     },
 ];
 
+/// A developer viewer over one private selection file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Viewer {
+    pub label: String,
+    /// The sibling executable it runs.
+    pub program: &'static str,
+    pub selection: PathBuf,
+}
+
+/// Viewers for the model and image selections in `dir`, sorted by label.
+pub fn viewers(dir: &Path) -> Vec<Viewer> {
+    let mut list: Vec<Viewer> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.to_owned();
+            let (who, _) = name.strip_suffix(".json")?.split_once("-selection-")?;
+            let v: serde_json::Value =
+                serde_json::from_slice(&read_limited(&path, CONFIG_LIMIT).ok()?).ok()?;
+            let flag = |k: &str| v.get(k).and_then(serde_json::Value::as_bool) == Some(true);
+            let (kind, program) = if flag("inspect_model_geometry") {
+                ("Model viewer", "model_inspector")
+            } else if flag("inspect_images") {
+                ("Image viewer", "image_inspector")
+            } else {
+                return None;
+            };
+            // Names for the selections in use [launcher labels].
+            let what = match who {
+                "actor" => "Sora".to_owned(),
+                "weapon" => "Kingdom Key".to_owned(),
+                other => {
+                    let mut c = other.chars();
+                    c.next()
+                        .map(|f| f.to_uppercase().chain(c).collect())
+                        .unwrap_or_default()
+                }
+            };
+            Some(Viewer {
+                label: format!("{kind}: {what}"),
+                program,
+                selection: path,
+            })
+        })
+        .collect();
+    list.sort_by(|a, b| a.label.cmp(&b.label));
+    list
+}
+
+/// A new private log path for a viewer: outside any checkout, under
+/// `%LOCALAPPDATA%\KH2FinalRewrite\logs`.
+pub fn viewer_log(program: &str) -> Result<PathBuf, String> {
+    let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
+    let logs = PathBuf::from(local).join("KH2FinalRewrite").join("logs");
+    fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    Ok(logs.join(format!("{program}-{stamp}.jsonl")))
+}
+
 /// The content identity the tests' configs were made for (the title
 /// config's), if the configs are present.
 pub fn supported_identity(dir: &Path) -> Option<String> {
@@ -480,6 +543,43 @@ mod tests {
         };
         save_settings(&f.0, &s).unwrap();
         assert_eq!(load_settings(&f.0), s);
+    }
+
+    #[test]
+    fn viewers_come_from_model_and_image_selections() {
+        let f = Fixture::new();
+        let write = |name: &str, v: serde_json::Value| {
+            fs::write(f.0.join(name), v.to_string()).unwrap();
+        };
+        write(
+            "actor-selection-01.json",
+            serde_json::json!({"inspect_model_geometry": true}),
+        );
+        write(
+            "shadow-selection-01.json",
+            serde_json::json!({"inspect_model_geometry": true}),
+        );
+        write(
+            "tex-selection-01.json",
+            serde_json::json!({"inspect_images": true}),
+        );
+        write("other-selection-01.json", serde_json::json!({}));
+        write(
+            "launch.json",
+            serde_json::json!({"inspect_model_geometry": true}),
+        );
+        let labels: Vec<_> = viewers(&f.0)
+            .into_iter()
+            .map(|v| (v.label, v.program))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("Image viewer: Tex".to_owned(), "image_inspector"),
+                ("Model viewer: Shadow".to_owned(), "model_inspector"),
+                ("Model viewer: Sora".to_owned(), "model_inspector"),
+            ]
+        );
     }
 
     #[test]

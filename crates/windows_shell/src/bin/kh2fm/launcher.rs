@@ -49,6 +49,8 @@ enum Action {
     Browse(Option<PathBuf>),
     Pick,
     Run(usize),
+    /// A developer viewer (index into `Launcher::viewers`).
+    View(usize),
     Quit,
 }
 
@@ -96,7 +98,7 @@ struct Job {
 /// A test running as a child process.
 struct Running {
     child: Child,
-    name: &'static str,
+    name: String,
     output: Arc<Mutex<VecDeque<String>>>,
     window_open: Arc<AtomicBool>,
     since_window: Option<f32>,
@@ -123,6 +125,7 @@ struct Launcher {
     settings: Settings,
     supported: Option<String>,
     detected: Vec<PathBuf>,
+    viewers: Vec<install::Viewer>,
     screen: Screen,
     items: Vec<Item>,
     cursor: usize,
@@ -192,6 +195,10 @@ impl Launcher {
                     .enumerate()
                     .map(|(i, t)| Item::new(t.name, Action::Run(i)).detail(t.blurb))
                     .collect();
+                items.extend(self.viewers.iter().enumerate().map(|(i, v)| {
+                    Item::new(v.label.clone(), Action::View(i))
+                        .detail("Developer tool, slow to start")
+                }));
                 items.push(Item::new("Change game folder", Action::Pick));
                 items.push(Item::new("Quit", Action::Quit));
                 items
@@ -324,13 +331,44 @@ fn start_test(index: usize, dir: &Path, b: &Bound) -> Result<Running, String> {
     let test = &TESTS[index];
     let args = install::test_args(dir, test.program, b)?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut child = Command::new(exe)
+    spawn(test.name.into(), exe, args)
+}
+
+/// A viewer is a sibling executable: folder, manifest, selection, new log.
+fn start_viewer(v: &install::Viewer, b: &Bound) -> Result<Running, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .with_file_name(format!("{}.exe", v.program));
+    if !exe.is_file() {
+        return Err(format!(
+            "{}.exe is not next to kh2fm.exe. Build all of windows_shell (cargo build -p windows_shell).",
+            v.program
+        ));
+    }
+    let log = install::viewer_log(v.program)?;
+    let args = [&b.folder, &b.manifest, &v.selection, &log]
+        .map(|p| p.to_string_lossy().into_owned())
+        .to_vec();
+    spawn(v.label.clone(), exe, args)
+}
+
+fn spawn(name: String, exe: PathBuf, args: Vec<String>) -> Result<Running, String> {
+    let mut command = Command::new(exe);
+    command
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Console programs (the viewers) get no console window.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
         .spawn()
-        .map_err(|e| format!("The test could not start: {e}"))?;
+        .map_err(|e| format!("{name} could not start: {e}"))?;
     let output = Arc::new(Mutex::new(VecDeque::new()));
     let window_open = Arc::new(AtomicBool::new(false));
     let pipes: [Box<dyn std::io::Read + Send>; 2] = [
@@ -355,7 +393,7 @@ fn start_test(index: usize, dir: &Path, b: &Bound) -> Result<Running, String> {
     }
     Ok(Running {
         child,
-        name: test.name,
+        name,
         output,
         window_open,
         since_window: None,
@@ -526,22 +564,32 @@ fn act(l: &mut Launcher, action: Action, exit: &mut MessageWriter<AppExit>) {
             let job = start_check(folder, l.dir.clone(), hint);
             l.go(Screen::Check(job));
         }
-        Action::Run(i) => {
-            let Screen::Tests(b) = &l.screen else {
-                return;
-            };
-            let b = b.clone();
-            match start_test(i, &l.dir, &b) {
-                Ok(running) => {
-                    l.go(Screen::Loading(running, b));
-                }
-                Err(why) => l.go(Screen::Problem {
-                    title: format!("{} could not start", TESTS[i].name),
-                    lines: vec![why],
-                    retry: Some(b),
-                }),
+        Action::Run(_) | Action::View(_) => {
+            if let Screen::Tests(b) = &l.screen {
+                let b = b.clone();
+                launch(l, &action, b);
             }
         }
+    }
+}
+
+/// Starts a test or viewer on `b` and waits on the loading screen.
+fn launch(l: &mut Launcher, which: &Action, b: Bound) {
+    let (name, started) = match which {
+        Action::Run(i) => (TESTS[*i].name.to_owned(), start_test(*i, &l.dir, &b)),
+        Action::View(i) => (
+            l.viewers[*i].label.clone(),
+            start_viewer(&l.viewers[*i], &b),
+        ),
+        _ => return,
+    };
+    match started {
+        Ok(running) => l.go(Screen::Loading(running, b)),
+        Err(why) => l.go(Screen::Problem {
+            title: format!("{name} could not start"),
+            lines: vec![why],
+            retry: Some(b),
+        }),
     }
 }
 
@@ -619,6 +667,7 @@ fn update(
     if matches!(l.screen, Screen::Boot) {
         l.supported = install::supported_identity(&l.dir);
         l.detected = install::detect_installs();
+        l.viewers = install::viewers(&l.dir);
         match l.settings.game_folder.clone() {
             Some(folder) => act(l, Action::UseFolder(folder), &mut exit),
             None => l.go(Screen::Pick),
@@ -653,7 +702,7 @@ fn update(
     }
 
     // Background work.
-    let mut finished = None;
+    let (mut finished, mut ended) = (None, None);
     match &mut l.screen {
         Screen::Check(job) => {
             if let Some(result) = job.done.lock().ok().and_then(|mut d| d.take()) {
@@ -671,36 +720,46 @@ fn update(
                 winit.unfocused_mode = UpdateMode::reactive_low_power(Duration::from_millis(100));
             }
             if let Ok(Some(status)) = run.child.try_wait() {
-                window.visible = true;
-                window.focused = true;
-                winit.unfocused_mode =
-                    UpdateMode::reactive_low_power(Duration::from_secs_f64(1. / 60.));
-                let b = b.clone();
-                let name = run.name;
-                let lines = run
+                let (lines, new_game) = run
                     .output
                     .lock()
-                    .map(|o| failure_lines(&o))
+                    .map(|o| {
+                        let new_game = o.iter().any(|l| l.trim() == "kh2fm-handoff NewGame");
+                        (failure_lines(&o), new_game)
+                    })
                     .unwrap_or_default();
-                l.fade = 1.;
-                if status.success() {
-                    let cursor = l.cursor;
-                    l.go(Screen::Tests(b));
-                    l.cursor = cursor;
-                } else {
-                    l.go(Screen::Problem {
-                        title: format!("{name} stopped with an error"),
-                        lines: if lines.is_empty() {
-                            vec![format!("Exit status: {status}")]
-                        } else {
-                            lines
-                        },
-                        retry: Some(b),
-                    });
-                }
+                ended = Some((status, b.clone(), run.name.clone(), lines, new_game));
             }
         }
         _ => {}
+    }
+    if let Some((status, b, name, lines, new_game)) = ended {
+        let room = TESTS.iter().position(|t| t.program == "play");
+        if let (true, true, Some(room)) = (status.success(), new_game, room) {
+            // New Game on the title continues straight into the test room.
+            launch(l, &Action::Run(room), b);
+        } else if status.success() {
+            let cursor = l.cursor;
+            l.go(Screen::Tests(b));
+            l.cursor = cursor;
+        } else {
+            l.go(Screen::Problem {
+                title: format!("{name} stopped with an error"),
+                lines: if lines.is_empty() {
+                    vec![format!("Exit status: {status}")]
+                } else {
+                    lines
+                },
+                retry: Some(b),
+            });
+        }
+        if !matches!(l.screen, Screen::Loading(..)) {
+            window.visible = true;
+            window.focused = true;
+            winit.unfocused_mode =
+                UpdateMode::reactive_low_power(Duration::from_secs_f64(1. / 60.));
+            l.fade = 1.;
+        }
     }
     if let Some((result, folder)) = finished {
         checked(l, result, &folder);
@@ -1078,6 +1137,7 @@ pub fn main() -> std::process::ExitCode {
             settings,
             supported: None,
             detected: Vec::new(),
+            viewers: Vec::new(),
             screen: Screen::Boot,
             items: Vec::new(),
             cursor: 0,

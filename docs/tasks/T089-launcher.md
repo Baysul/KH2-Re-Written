@@ -35,7 +35,12 @@ Same selected source as T086–T088: Steam app 2552430, build 15194255, content 
   - The launcher shows NOW LOADING until the child logs its window creation, then hides.
   - When the test closes, the launcher comes back on the test menu.
   - If the test fails, the launcher shows the test's own error lines.
-- **Input:** keyboard (arrows/WASD, Enter/Space, Esc/Backspace, PgUp/PgDn, F2), mouse (hover, click, wheel, right-click back) and gamepad (D-pad/stick, A, B, Y, bumpers).
+- **Owner's answers (2026-10-10).**
+  - *New Game goes to the test room.* When the title hands off with New Game, `kh2fm title` prints `kh2fm-handoff NewGame` as it exits (a one-line addition in `bin/kh2fm/title.rs`). The launcher then starts the test room straight away, without showing its own window in between.
+  - *Developer viewers in the list.* Every `*-selection-*.json` in the private folder with `inspect_model_geometry` (model viewer) or `inspect_images` (image viewer) becomes a row, for example "Model viewer: Sora", "Model viewer: Axel", "Model viewer: Shadow" and "Model viewer: Kingdom Key" on this machine.
+    - A viewer runs the sibling `model_inspector.exe` / `image_inspector.exe` with the folder, manifest and selection.
+    - Its new log goes to `%LOCALAPPDATA%\KH2FinalRewrite\logs\`, outside the checkout, as the viewers require.
+    - Viewers start with no console window. They still do their own full source rescan, so they are slow to start.- **Input:** keyboard (arrows/WASD, Enter/Space, Esc/Backspace, PgUp/PgDn, F2), mouse (hover, click, wheel, right-click back) and gamepad (D-pad/stick, A, B, Y, bumpers).
 
 ## Evidence (private, outside Git)
 
@@ -65,6 +70,7 @@ Same selected source as T086–T088: Steam app 2552430, build 15194255, content 
 - NOT RUN: the windowed smoke (`cargo run -p windows_shell --locked -- --frames 180`). The owner was using the machine.
 - NOT RUN: the full-scan path on the real install (it reads about 16 GB; the existing manifest matched). It is covered only by the synthetic test.
 - NOT RUN: gamepad and drag-and-drop on the real window.
+- NOT RUN: the New Game handoff and a viewer launch on the real install. The handoff's input and the viewers' full rescan were not driven while the owner was using the machine. `viewers` has a synthetic test.
 
 ## Uncertainty
 
@@ -78,5 +84,4 @@ PASS for the launcher flow on the installed build, within the checks above. No g
 
 ## Next
 
-- If the owner wants it, New Game on the title could hand off to the combined room.
 - Once a folder is bound, the test menu could draw with the game's own menu art.
