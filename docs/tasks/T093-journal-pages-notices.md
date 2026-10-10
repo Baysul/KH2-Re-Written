@@ -61,6 +61,13 @@ Source: `journal-03/files-treasures-spec.md` §2.2, §3.1–§3.4.
 - **Also fixed:** the face cache was not reused when the journal reopened, so portraits were missing on the second opening.
 - **Not built:** the 3D model and the full-model pages (0x11 / 0x14 / 0x17, TRIANGLE), the "Slain" count and reaction rows (kill counters and `rcct` are not in the room's data), the list scroll bar G95.
 
+## Addendum 2: Treasures and Maps grid
+
+Source: `journal-03/files-treasures-spec.md` §4.
+- **Built:** states 7 / 0x1a (Treasures) and 9 / 0x22 (Maps): the frame with caption bar, 9 world-label rows with "There's nothing yet!", 72 cells (chest / map / "?" squares), cursor frame with hand and light, the "Total n/m" counter under show-all, caption ("?????" until opened, item with icon after), NEW / viewed marks, and the movement rules (§4.6). Data: 03system `trsr` (new `journal_table::read_treasures`, `journal_world`), item names and map type from `item` and the system messages.
+- **Evidence (private):** `autoplay-94` (arena-11 = arena-10 plus show-all flag 0x4837, opened bits 1, 2, 3, 20; exit 0): Treasures grid with 301 entries, `Total 2/301`, cursor frame on the first cell and after moving down and right.
+- **Not verified / not built:** opened cells (chest icon) and the caption of an opened chest are not in a capture; world labels show "?????" because the room's save has no world unlock flags; the scroll thumb G69's bar object is not drawn; Pieces (8 / 0x21) and Ansem Reports not built; opened chests and owned maps come from `journal.opened_bits` / `owned_items` of the room config.
+
 ## Not built yet
 
 Character File 3D models / full-model pages, Story, Treasures / Maps / Pieces (7, 8, 9, 0x1a, 0x22), Ansem Reports, Missions, Minigames, Limits, Synthesis, Puzzles; form sub-weapons on Equip (state 6); NEW! badges on the main menu rows; party members' models; Load / Save (`save.2ld`); item shop (`itemshop.2ld`); mission and minigame 2LDs.

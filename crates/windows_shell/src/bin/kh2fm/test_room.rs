@@ -157,6 +157,12 @@ struct JournalConfig {
     /// "show everything" flag.
     #[serde(default)]
     flags: Vec<u16>,
+    /// Opened-chest bits (save+0x23ac) and owned map items [test-room
+    /// values].
+    #[serde(default)]
+    opened_bits: Vec<u16>,
+    #[serde(default)]
+    owned_items: Vec<u16>,
 }
 
 #[derive(Deserialize)]
@@ -667,6 +673,10 @@ struct JournalSource {
     stories: Vec<package_reader::journal_table::Story>,
     texts: HashMap<u16, Vec<u8>>,
     flags: Vec<u16>,
+    treasures: Vec<package_reader::journal_table::Treasure>,
+    item_names: HashMap<u16, journal::TreasureItem>,
+    opened_bits: Vec<u16>,
+    owned_items: Vec<u16>,
     chars: Vec<package_reader::journal_table::Char>,
     diag: Vec<package_reader::journal_table::Diag>,
     albums: Vec<package_reader::journal_table::Album>,
@@ -676,6 +686,7 @@ fn load_journal(
     source: &ProbeSource,
     j: &JournalConfig,
     sys: &Locator,
+    system: &[u8],
 ) -> Result<JournalSource, Box<dyn std::error::Error>> {
     use package_reader::journal_table;
     use windows_shell::camp::journal;
@@ -718,6 +729,36 @@ fn load_journal(
         j.messages.name_hash,
         &ids,
     )?;
+    // The chests' items: names from the system table.
+    let treasures = journal_table::read_treasures(bar_entry(system, b"trsr")?)?;
+    let items = package_reader::item_table::read(bar_entry(system, b"item")?)?;
+    let wanted: Vec<u16> = {
+        let mut v: Vec<u16> = treasures.iter().map(|t| t.item).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let rows: Vec<&package_reader::item_table::Item> = wanted
+        .iter()
+        .filter_map(|id| items.iter().find(|r| r.id == *id))
+        .collect();
+    let name_ids: Vec<u32> = rows.iter().map(|r| r.name as u32).collect();
+    let names =
+        hud::load_messages_optional(source, &sys.index, sys.ordinal, sys.name_hash, &name_ids)?;
+    let item_names: HashMap<u16, journal::TreasureItem> = rows
+        .iter()
+        .zip(names)
+        .map(|(r, n)| {
+            (
+                r.id,
+                journal::TreasureItem {
+                    name: n.unwrap_or_default(),
+                    icon: r.icon,
+                    map: r.kind == 22,
+                },
+            )
+        })
+        .collect();
     let mut texts: HashMap<u16, Vec<u8>> = ids
         .iter()
         .zip(found)
@@ -744,6 +785,10 @@ fn load_journal(
         stories,
         texts,
         flags: j.flags.clone(),
+        treasures,
+        item_names,
+        opened_bits: j.opened_bits.clone(),
+        owned_items: j.owned_items.clone(),
         chars,
         diag,
         albums,
@@ -1946,7 +1991,7 @@ fn load(
         _ => None,
     };
     let journal = match (&config.journal, &config.menu, &camp) {
-        (Some(j), Some(m), Some(_)) => Some(load_journal(source, j, &m.messages)?),
+        (Some(j), Some(m), Some(_)) => Some(load_journal(source, j, &m.messages, &system)?),
         _ => None,
     };
     let music = match &config.music {
@@ -3001,7 +3046,7 @@ const AUTOPLAY_CAPTURES: &[u64] = &[
     2690, 2715, 2760, 2780, 2840, 2880, 2915, 2950, 3000, 3110, 3230, 3250, 3300, 3330, 3590, 3690,
     3720, 3760, 3830, 3860, 3930, 4090, 4180, 4450, 4480, 4830, 4910, 5030, 5130, 5590, 5650, 5740,
     5780, 5890, 5930, 6030, 6090, 6330, 6430, 6475, 6560, 6670, 6790, 6900, 7000, 7160, 7200, 7240,
-    7330, 7560, 7640, 7720, 7800, 7880, 7960, 8060, 8160,
+    7330, 7560, 7640, 7720, 7800, 7880, 7960, 8060, 8160, 8650, 8900, 9100, 9170,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -3015,7 +3060,7 @@ const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 /// The last stretch leaves Sora standing so an enemy can attack him.
 /// The index that holds the item pictures.
 const PICTURE_INDEX: &str = "Image/dt/kh2_fifth.hed";
-const AUTOPLAY_END: u64 = 8550;
+const AUTOPLAY_END: u64 = 9400;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
@@ -4850,6 +4895,20 @@ const AUTOPLAY_CAMP: &[(u64, u64)] = &[
     (8190, 0x8),
     (8260, 0x8),
     (8400, 0x2),
+    (8480, 0x2),
+    // Treasures: reopen, Journal (Notes), down to Treasures, the grid, a
+    // few cursor moves, START.
+    (8550, 0x2),
+    (8600, 0x4),
+    (8680, 0x20),
+    (8700, 0x20),
+    (8720, 0x20),
+    (8780, 0x4),
+    (8960, 0x20),
+    (8990, 0x80),
+    (9020, 0x80),
+    (9050, 0x4000),
+    (9200, 0x100),
 ];
 fn camp_setup(
     camp: Option<ResMut<CampRes>>,
@@ -5146,6 +5205,10 @@ fn camp_tick(
                     chars: j.chars.clone(),
                     diag: j.diag.clone(),
                     albums: j.albums.clone(),
+                    treasures: j.treasures.clone(),
+                    item_names: j.item_names.clone(),
+                    opened_bits: j.opened_bits.clone(),
+                    owned_items: j.owned_items.clone(),
                     seen_chars: c.seen_chars.clone(),
                     seen_albums: c.seen_albums.clone(),
                 };

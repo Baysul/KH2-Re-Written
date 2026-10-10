@@ -24,6 +24,7 @@ mod album;
 mod category;
 mod characters;
 mod files;
+mod treasure;
 
 /// The journal sprites' SEQD (DAT_1407434e8) and image (DAT_1407434e4).
 pub const SEQUENCE: usize = 5;
@@ -171,9 +172,9 @@ pub const MESSAGES: [u16; 52] = [
     0x26b3,
 ];
 /// Messages of the category pages (help lines and the empty album).
-pub const PAGE_MESSAGES: [u16; 13] = [
+pub const PAGE_MESSAGES: [u16; 19] = [
     0x48d5, 0x48d6, 0x48d8, 0x48d9, 0x32dd, 0x48ee, 0x48ef, 0x48f0, 0x48f1, 0x48f2, 0x36b3, 0x2874,
-    0x2dc6,
+    0x2dc6, 0x48f4, 0x48f5, 0x4a0f, 0x4a12, 0x4a11, 0x4a13,
 ];
 
 /// FUN_1402f5db0: the "show everything" story flag.
@@ -222,6 +223,15 @@ pub struct Unlocks {
     pub synthesis: bool,
 }
 
+/// An item a chest or map holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TreasureItem {
+    pub name: Vec<u8>,
+    pub icon: u8,
+    /// Item type 22.
+    pub map: bool,
+}
+
 /// Everything the journal shows besides its art.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct JournalData {
@@ -245,6 +255,12 @@ pub struct JournalData {
     pub chars: Vec<Char>,
     pub diag: Vec<Diag>,
     pub albums: Vec<Album>,
+    /// 03system `trsr`, the items they hold (names, icons, map type) and
+    /// the save's opened-chest bits and owned map items.
+    pub treasures: Vec<package_reader::journal_table::Treasure>,
+    pub item_names: HashMap<u16, TreasureItem>,
+    pub opened_bits: Vec<u16>,
+    pub owned_items: Vec<u16>,
     /// The `char` rows and `albu` rows already seen (save+0x4c38 / +0x4c7c).
     pub seen_chars: Vec<u16>,
     pub seen_albums: Vec<u16>,
@@ -519,6 +535,7 @@ pub struct Journal {
     /// The category pages' pill and the pages' own state.
     cat: category::Category,
     files: files::Page,
+    treasure: treasure::Page,
     /// First list entry shown by the 10-row file lists (the hand follows
     /// the row `cursor − scroll`).
     scroll: usize,
@@ -611,6 +628,7 @@ impl Journal {
             top: None,
             cat: category::Category::default(),
             files: files::Page::default(),
+            treasure: treasure::Page::default(),
             scroll: 0,
             chars: characters::Page::default(),
             album: album::Page::default(),
@@ -882,6 +900,7 @@ impl Journal {
             5 => self.build_album_photo(layout),
             6 | 0xc | 0x28 => self.build_characters(layout),
             0xe => self.build_files_menu(layout),
+            7 | 9 | 0x1a | 0x22 => self.build_treasure(layout),
             0xf | 0x12 | 0x15 => self.build_files_list(layout),
             0x10 | 0x13 | 0x16 => self.build_files_detail(layout),
             // Pages not built yet go back to the Notes of the world.
@@ -1279,6 +1298,7 @@ impl Journal {
                     5 => self.album_photo(layout, &pad, &mut sounds),
                     6 | 0xc | 0x28 => self.characters(layout, &pad, &mut sounds),
                     0xe => self.files_menu(layout, &pad, &mut sounds),
+                    7 | 9 | 0x1a | 0x22 => self.treasure_page(layout, &pad, &mut sounds),
                     0xf | 0x12 | 0x15 => self.files_list(layout, &pad, &mut sounds),
                     0x10 | 0x13 | 0x16 => self.files_detail(layout, &pad, &mut sounds),
                     _ => self.option_page(layout, &pad, &mut sounds),
@@ -1436,7 +1456,10 @@ impl Journal {
                 };
                 if let Some(&o) = self.options.get(k) {
                     let (label, _, state) = table[o];
-                    if matches!(state, 4 | 6 | 0xc | 0x28 | 0xe | 0x12 | 0x15) {
+                    if matches!(
+                        state,
+                        4 | 6 | 0xc | 0x28 | 0xe | 0x12 | 0x15 | 7 | 9 | 0x1a | 0x22
+                    ) {
                         self.enter_category(seq, state, label, k);
                     }
                 }

@@ -205,6 +205,62 @@ pub fn read_albums(bytes: &[u8]) -> io::Result<Vec<Album>> {
         })
         .collect())
 }
+/// A `trsr` record (03system.bin, 12 B at +4): a treasure chest or an
+/// event gift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Treasure {
+    /// +2: the item inside.
+    pub item: u16,
+    /// +4: 0 chest, 1 event gift.
+    pub kind: u8,
+    /// +5: the game world.
+    pub game_world: u8,
+    /// +8: the story flag that makes it available.
+    pub flag: u16,
+    /// +10: the opened bit (save+0x23ac); 0 = none.
+    pub opened: u16,
+}
+
+pub fn read_treasures(bytes: &[u8]) -> io::Result<Vec<Treasure>> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "trsr table truncated");
+    let count = u16::from_le_bytes(bytes.get(2..4).ok_or_else(invalid)?.try_into().unwrap());
+    let body = bytes.get(4..4 + count as usize * 12).ok_or_else(invalid)?;
+    Ok(body
+        .as_chunks::<12>()
+        .0
+        .iter()
+        .map(|r| Treasure {
+            item: u16_at(r, 2),
+            kind: r[4],
+            game_world: r[5],
+            flag: u16_at(r, 8),
+            opened: u16_at(r, 10),
+        })
+        .collect())
+}
+
+/// FUN_1402f23d0: the journal world of a game world, -1 for none.
+pub fn journal_world(game_world: u8) -> i8 {
+    match game_world {
+        1 | 6 => 3,
+        2 => 0,
+        4 => 1,
+        5 => 2,
+        7 => 4,
+        8 => 5,
+        9 => 6,
+        10 => 7,
+        11 => 8,
+        12 => 9,
+        13 => 10,
+        14 => 11,
+        16 => 12,
+        17 => 13,
+        18 => 14,
+        _ => -1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +333,16 @@ mod tests {
         let albums = read_albums(&table(1, &a)).unwrap();
         assert_eq!(albums[0].suffix, "11");
         assert_eq!(albums[0].flag, 0x1c14);
+        let mut s = vec![0u8; 4 + 12];
+        s[2] = 1;
+        s[6..8].copy_from_slice(&130u16.to_le_bytes());
+        s[8] = 1;
+        s[9] = 8;
+        s[12..14].copy_from_slice(&0x2040u16.to_le_bytes());
+        s[14..16].copy_from_slice(&20u16.to_le_bytes());
+        let t = read_treasures(&s).unwrap();
+        assert_eq!((t[0].item, t[0].kind, t[0].game_world), (130, 1, 8));
+        assert_eq!((t[0].flag, t[0].opened), (0x2040, 20));
+        assert_eq!(journal_world(8), 5);
     }
 }
