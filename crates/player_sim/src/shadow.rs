@@ -201,6 +201,8 @@ pub struct Shadow {
     arc: Option<physics::Arc>,
     /// Blow flight (physics mode 4, FUN_140422780).
     blow: Option<physics::Blow>,
+    /// Physics-mode velocity sampling (FUN_1403b89a0).
+    sampler: physics::Sampler,
     /// Knock-slide (FUN_1403d4960 / FUN_1403d4570), for flinches and
     /// reflects.
     knock: Option<physics::Knock>,
@@ -237,6 +239,7 @@ impl Shadow {
             velocity: [0.; 3],
             arc: None,
             blow: None,
+            sampler: physics::Sampler::default(),
             knock: None,
             sstm,
             airborne: false,
@@ -358,6 +361,7 @@ impl Shadow {
             };
             self.velocity = [dx * speed, up, dz * speed];
             self.blow = Some(physics::Blow::new(self.velocity, &self.sstm));
+            self.sampler.reset();
             self.arc = None;
             self.knock = None;
             self.airborne = true;
@@ -455,39 +459,38 @@ impl Shadow {
             }
         }
         if self.airborne {
-            if self.arc.is_some() {
-                // Mode 1 horizontal (FUN_1403b7ad0): no move request during
-                // the jump claw, so the take-off velocity decays ×0.95 [I:
-                // the AI leaves obj+0x1c at 0 here].
-                let [x, z] = physics::steer(
-                    [self.velocity[0], self.velocity[2]],
-                    [0.; 2],
-                    0.,
-                    physics::AIR_INERTIA,
-                    physics::AIR_DRAG,
-                );
-                self.velocity[0] = x;
-                self.velocity[2] = z;
+            // FUN_1403b89a0: the mode routine runs every second frame with a
+            // two-frame step; its displacement is spread over those frames.
+            if self.sampler.due(0.) {
+                let dt = physics::PHYSICS_STEP;
+                let d = if let Some(blow) = self.blow.as_mut() {
+                    let d = blow.step(&self.sstm, self.sstm.fall_max, dt);
+                    self.velocity = blow.velocity;
+                    d
+                } else if let Some(arc) = self.arc.as_mut() {
+                    // Mode 1 horizontal (FUN_1403b7ad0): no move request
+                    // during the jump claw, so the take-off velocity decays
+                    // ×0.95 per run [I: the AI leaves obj+0x1c at 0 here].
+                    let [x, z] = physics::steer(
+                        [self.velocity[0], self.velocity[2]],
+                        [0.; 2],
+                        0.,
+                        physics::AIR_INERTIA,
+                        physics::AIR_DRAG,
+                    );
+                    let dy = arc.step(self.position[1], self.sstm.fall_max, false, dt);
+                    self.velocity = [x, dy / dt, z];
+                    [x * dt, dy, z * dt]
+                } else {
+                    let d = self.velocity.map(|c| c * dt);
+                    self.velocity[1] -= GRAVITY * dt;
+                    d
+                };
+                self.sampler.store(d);
             }
-            if let Some(blow) = self.blow.as_mut() {
-                let d = blow.step(&self.sstm, self.sstm.fall_max);
-                self.velocity = blow.velocity;
-                self.position = add(self.position, d);
-            } else {
-                self.position[0] += self.velocity[0];
-                self.position[2] += self.velocity[2];
-                match self.arc.as_mut() {
-                    Some(arc) => {
-                        let dy = arc.step(self.position[1], self.sstm.fall_max, false);
-                        self.velocity[1] = dy;
-                        self.position[1] += dy;
-                    }
-                    None => {
-                        self.position[1] += self.velocity[1];
-                        self.velocity[1] -= GRAVITY;
-                    }
-                }
-            }
+            let d = self.sampler.displacement();
+            self.position = add(self.position, d);
+            self.velocity[1] = d[1];
             if let Some(floor) =
                 env.floor(self.position[0], self.position[2], self.position[1] + 30.)
                 && self.position[1] <= floor
@@ -497,6 +500,7 @@ impl Shadow {
                 self.velocity = [0.; 3];
                 self.arc = None;
                 self.blow = None;
+                self.sampler = physics::Sampler::default();
                 self.airborne = false;
                 if let Reaction::Blow { back } = self.reaction {
                     self.reaction = Reaction::BlowLand;
@@ -723,6 +727,7 @@ impl Shadow {
                     let f = self.forward();
                     self.velocity = [f[0] * 5., 0., f[2] * 5.];
                     self.arc = Some(physics::Arc::launch(self.position[1], 100.));
+                    self.sampler.reset();
                     self.airborne = true;
                     self.motion_start(motion::JUMP);
                     self.set(act.kind, Step::Air { stage: 0 });

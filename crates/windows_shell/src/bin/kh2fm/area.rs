@@ -38,7 +38,6 @@ pub struct AreaSource {
     progress: Progress,
     /// 00objentry type byte per object id.
     object_types: HashMap<u32, u8>,
-    pub object_names: HashMap<u32, String>,
     rng: ScriptRandom,
     /// The ARD language directory (`*0x1408ec5d0`; "us" in this build).
     language: &'static str,
@@ -46,13 +45,13 @@ pub struct AreaSource {
 
 /// One loaded area.
 pub struct LoadedArea {
-    pub world: u8,
     pub area: u8,
-    pub entrance: u8,
     pub programs: [i16; 3],
     /// Taken by the field when the area becomes current.
     collision: Option<field_collision::World>,
     pub state: Area,
+    /// Entities the scripts created, for the NPC port to place.
+    #[allow(dead_code)]
     pub spawns: Vec<Spawn>,
     /// Player spawn in scene coordinates (Y up) and scene yaw.
     pub player: (Vec3, f32),
@@ -97,15 +96,6 @@ impl AreaSource {
             object_types: objects
                 .iter()
                 .map(|o| (o.object_id, o.object_type))
-                .collect(),
-            object_names: objects
-                .iter()
-                .map(|o| {
-                    (
-                        o.object_id,
-                        String::from_utf8_lossy(&o.model_name).into_owned(),
-                    )
-                })
                 .collect(),
             rng: ScriptRandom::default(),
             language: "us",
@@ -158,9 +148,7 @@ impl AreaSource {
         Ok((
             room,
             LoadedArea {
-                world,
                 area,
-                entrance,
                 programs,
                 collision: Some(collision),
                 state,
@@ -197,41 +185,81 @@ fn map_collision(map: &[u8], mask: u64) -> Result<field_collision::World> {
     Ok(field_collision::World::new(&coct, mask)?)
 }
 
-/// The test-room controller's view of the map collision. The controller
-/// still asks for floors and walls separately; both answers come from the
-/// exe's routines (the floor ray FUN_140173b30 and the sphere push of
-/// FUN_14016fec0 with Sora's body), not from guessed thresholds.
-pub struct MapWorld(pub field_collision::World);
+/// The controller's view of the map collision: one body-versus-map move
+/// per tick through the exe's solver (FUN_14016fec0 as FUN_1403b9090 calls
+/// it). The scene is Y up; the exe is Y down: (x, y, z) ↔ (x, −y, −z).
+pub struct MapWorld {
+    world: field_collision::World,
+    /// Floor normal from the previous tick (obj+0x768 is −normal), (0, −1,
+    /// 0) engine-side without a floor.
+    floor_normal: std::sync::Mutex<[f32; 3]>,
+}
 
-impl player_sim::World for MapWorld {
-    fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
-        let p0 = [x, -top, -z];
-        let p1 = [x, -top + 100_000., -z];
-        self.0.ray(p0, p1, SORA_BODY.class).map(|(p, _)| -p[1])
-    }
-
-    fn resolve_walls(&self, position: [f32; 2], _radius: f32, low: f32, _high: f32) -> [f32; 2] {
-        // `low` is the feet plus the controller's step; the exe body sits on
-        // the feet, so the sphere is placed `offset` above `low` minus that
-        // step [adapter until the controller makes one collision call].
-        let feet = [position[0], -(low - player_sim_step()), -position[1]];
-        let s = field_collision::solve(
-            &self.0,
-            &SORA_BODY,
-            &Query {
-                start: feet,
-                displacement: [0.; 3],
-                airborne: false,
-                extra_snap: 0.,
-            },
-        );
-        [s.position[0], -s.position[2]]
+impl MapWorld {
+    pub fn new(world: field_collision::World) -> Self {
+        Self {
+            world,
+            floor_normal: std::sync::Mutex::new([0., -1., 0.]),
+        }
     }
 }
 
-/// The controller's step height used to build `low` (test_room STEP_HEIGHT).
-fn player_sim_step() -> f32 {
-    24.
+fn engine(v: [f32; 3]) -> [f32; 3] {
+    [v[0], -v[1], -v[2]]
+}
+
+impl player_sim::World for MapWorld {
+    fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        // The exe's floor ray (FUN_140173b30) straight down from `top`.
+        let p0 = [x, -top, -z];
+        let p1 = [x, -top + 100_000., -z];
+        self.world.ray(p0, p1, SORA_BODY.class).map(|(p, _)| -p[1])
+    }
+
+    fn resolve_walls(&self, position: [f32; 2], _radius: f32, _low: f32, _high: f32) -> [f32; 2] {
+        // Only the single collide call moves Sora; other callers get the
+        // wanted point back.
+        position
+    }
+
+    fn collide(
+        &self,
+        start: player_sim::Vec3,
+        displacement: player_sim::Vec3,
+        airborne: bool,
+        _body: &player_sim::Body,
+    ) -> player_sim::Collided {
+        let mut d = engine(displacement);
+        if !airborne {
+            // FUN_1403b9090: the move is turned into the floor plane,
+            // keeping its length (n = obj+0x768 = −floor normal).
+            let n = *self.floor_normal.lock().expect("floor normal");
+            d = field_collision::project_on_floor(d, [-n[0], -n[1], -n[2]]);
+        }
+        let s = field_collision::solve(
+            &self.world,
+            &SORA_BODY,
+            &Query {
+                start: engine(start),
+                displacement: d,
+                airborne,
+                extra_snap: 0.,
+            },
+        );
+        *self.floor_normal.lock().expect("floor normal") =
+            field_collision::floor_info(&self.world, &s).normal;
+        // Airborne: landing needs a floor while not rising (disp.y ≥ 0 in
+        // engine space) [FUN_1403b9090].
+        let on_floor = if airborne {
+            d[1] >= 0. && !s.no_floor
+        } else {
+            !s.no_floor
+        };
+        player_sim::Collided {
+            position: engine(s.position),
+            on_floor,
+        }
+    }
 }
 
 /// The zone task's view of the player (FUN_1403a4f90): scene → engine.

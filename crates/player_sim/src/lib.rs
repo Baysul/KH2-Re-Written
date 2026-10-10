@@ -8,10 +8,13 @@
 //! triggers the windows. Step height, body size and the collision response
 //! are explicit test-room choices, not observed KH2 rules.
 
+pub mod abilities;
 pub mod camera;
 pub mod combat;
 pub mod physics;
+pub mod ptya;
 pub mod shadow;
+pub mod targeting;
 
 pub type Vec3 = [f32; 3];
 
@@ -30,6 +33,10 @@ pub struct Params {
     pub turn_speed: f32,
     /// Maximum downward speed, units per tick.
     pub fall_max: f32,
+    /// PRTY words 10/11 (record +0x28/+0x2c): inertia and drag of mode 0's
+    /// range-42 movement (FUN_140422350 → FUN_1403b7ad0).
+    pub land_inertia: f32,
+    pub land_drag: f32,
     /// Test-room choice: highest ledge climbed without jumping.
     pub step_height: f32,
     /// Stick magnitude from which Sora runs (`DAT_140585c7c`, 0.8).
@@ -73,10 +80,25 @@ pub struct Clip {
     pub loop_start: u32,
     /// Range trigger 11, "Allow combo".
     pub combo_windows: Vec<(u32, u32)>,
+    /// Range trigger 50: a finisher may chain (obj+0x194 bit 5).
+    pub finisher_windows: Vec<(u32, u32)>,
     /// Earliest range trigger 2, "Blend to idle".
     pub blend_to_idle: Option<u32>,
     /// Range trigger 3, "No gravity".
     pub no_gravity: Vec<(u32, u32)>,
+    /// Range triggers 0, 1 and 2: commands are taken while one is active
+    /// (obj+0x18c & 0x1c, FUN_14040d810 / FUN_1401b15f0).
+    pub actionable: Vec<(u32, u32)>,
+    /// Range trigger 42: mode 0 moves inertially (obj+0x190 bit 0,
+    /// FUN_140422350 → FUN_1403b7ad0 with PRTY words 10/11).
+    pub inertia: Vec<(u32, u32)>,
+    /// Range trigger 28: turn toward the target by up to `deg` per tick.
+    pub turn_to_target: Vec<(u32, u32, f32)>,
+    /// Frame trigger 21: turn toward the target by up to `deg` at a tick.
+    pub face_target: Vec<(u32, f32)>,
+    /// Frame trigger 0: the pending physics mode starts (jump take-off,
+    /// FUN_14040dd70).
+    pub takeoff: Option<u32>,
 }
 
 impl Clip {
@@ -108,12 +130,19 @@ impl Clip {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AttackStep {
     pub clip: Clip,
-    /// PTYA "Jump" field, applied as a lift height when an aerial step starts
-    /// (public label only; the installed use is unobserved).
+    /// PTYA +0xc "Jump": hop height when the step starts with no target
+    /// (FUN_1403d78d0).
     pub hop: f32,
     /// PTYA +0x1c (speed maximum): horizontal speed of a hop without a
-    /// target (FUN_1403d78d0).
+    /// target, and the cap toward one (FUN_1403d78d0).
     pub hop_speed: f32,
+    /// PTYA +0x10 / +0x14: hop height limits toward a target.
+    pub hop_max: f32,
+    pub hop_min: f32,
+    /// PTYA +0x18: minimum hop speed toward a target.
+    pub hop_speed_min: f32,
+    /// PTYA +0x3c: distance adjustment toward a target.
+    pub hop_reach: f32,
     /// PTYA +0x38: blend into the next motion when this one ends
     /// (FUN_1403d78d0 → FUN_1403c8310).
     pub blend: f32,
@@ -135,8 +164,10 @@ pub struct Clips {
     pub jump: Clip,
     pub fall: Clip,
     pub land: Clip,
-    pub ground_combo: Vec<AttackStep>,
-    pub air_combo: Vec<AttackStep>,
+    /// The battler's PTYA records (obj+0xd50) and, at the same index,
+    /// each record's motion as an attack step.
+    pub records: Vec<ptya::Record>,
+    pub attacks: Vec<AttackStep>,
     /// Grounded damage reactions (front-high, front-low, back-high,
     /// back-low; motion ids 10..13). Empty when not loaded.
     pub hurt: Vec<Clip>,
@@ -153,7 +184,9 @@ pub enum Action {
     Jump,
     Fall,
     Land,
+    /// A grounded attack (index into `Clips::records` / `attacks`).
     Attack(usize),
+    /// An attack in the air, including ground records that hop.
     AirAttack(usize),
     /// A damage reaction (index into `Clips::hurt`).
     Hurt(usize),
@@ -181,6 +214,35 @@ pub struct Input {
     /// XZ direction toward the current target, if any (Guard turns to it
     /// at its first tick: frame trigger 21, up to 360°).
     pub target: Option<[f32; 2]>,
+    /// Target height above the player (Y-up) and the two bodies' summed
+    /// radii, for aerial hops toward it (FUN_1403d78d0 / FUN_1403d7520).
+    pub target_rise: f32,
+    pub target_reach: f32,
+    /// The current target's TARGET shape (the attack chooser's "target").
+    pub target_shape: Option<ptya::Target>,
+    /// Every attackable object's TARGET shapes near the player.
+    pub nearby: [Option<ptya::Target>; 4],
+    /// Grounded probe ahead hit the background (FUN_1403ba750) [U].
+    pub probe_blocked: bool,
+}
+
+/// The player's collision body as the controller hands it to the world.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Body {
+    pub radius: f32,
+    pub height: f32,
+    /// Highest ledge followed without leaving the ground (snap-down limit).
+    pub step: f32,
+}
+
+/// The result of one tick's body-versus-map move.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Collided {
+    /// Feet position after the move.
+    pub position: Vec3,
+    /// Grounded move: a floor is still underfoot (false = walked off).
+    /// Airborne move: the body reached a floor while not rising (landed).
+    pub on_floor: bool,
 }
 
 /// Room collision as used by the controller.
@@ -189,6 +251,66 @@ pub trait World {
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32>;
     /// Pushes a body circle out of walls overlapping the vertical span.
     fn resolve_walls(&self, position: [f32; 2], radius: f32, low: f32, high: f32) -> [f32; 2];
+
+    /// One body-versus-map move per tick, as FUN_1403b89a0 hands the tick's
+    /// whole displacement (mode velocity, root motion, knock-slide) to the
+    /// collision solver: from the feet at `start` by `displacement` (Y-up).
+    /// The default is the test room's solver built from `floor` and
+    /// `resolve_walls`; a map collision port overrides it.
+    fn collide(&self, start: Vec3, displacement: Vec3, airborne: bool, body: &Body) -> Collided {
+        let [x, y, z] = start;
+        let [dx, dy, dz] = displacement;
+        let low = y + body.step;
+        let mut position = start;
+        if dx != 0. || dz != 0. {
+            let moved = self.resolve_walls([x + dx, z + dz], body.radius, low, y + body.height);
+            // A floor reachable from this height must exist under the new point.
+            match self.floor(moved[0], moved[1], low) {
+                Some(floor) => {
+                    position[0] = moved[0];
+                    position[2] = moved[1];
+                    if !airborne {
+                        if y - floor > body.step {
+                            return Collided {
+                                position,
+                                on_floor: false,
+                            };
+                        }
+                        position[1] = floor;
+                    }
+                }
+                None if !airborne => {
+                    return Collided {
+                        position: start,
+                        on_floor: true,
+                    };
+                }
+                None => {}
+            }
+        }
+        if !airborne {
+            return Collided {
+                position,
+                on_floor: true,
+            };
+        }
+        let next = y + dy;
+        if dy <= 0.
+            && let Some(floor) = self.floor(position[0], position[2], low)
+            && next <= floor
+        {
+            position[1] = floor;
+            return Collided {
+                position,
+                on_floor: true,
+            };
+        }
+        position[1] = next;
+        Collided {
+            position,
+            on_floor: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -202,6 +324,11 @@ pub struct Player {
     pub arc: physics::Arc,
     /// Horizontal velocity while airborne (obj+0x20 x/z), units per tick.
     pub air_velocity: [f32; 2],
+    /// Physics-mode velocity sampling (FUN_1403b89a0, obj+0xba8/+0xb98).
+    pub sampler: physics::Sampler,
+    /// A jump waiting for its take-off trigger (obj+0x648 = 1): height and
+    /// take-off velocity (+0xe0).
+    pub pending_jump: Option<(f32, [f32; 2])>,
     pub action: Action,
     /// Ticks since the current action started.
     pub frame: u32,
@@ -210,8 +337,15 @@ pub struct Player {
     /// Blend, in ticks, from the previous motion into the current one.
     pub blend: f32,
     idle_ticks: u32,
-    queued_attack: bool,
-    air_combo_spent: bool,
+    /// Combo counters obj+0xd74 / +0xd75.
+    pub combo: ptya::Combo,
+    /// obj+0x120 bit 25: the last attack connected (set by a hit or a
+    /// clash, cleared when an attack starts).
+    pub connected: bool,
+    /// Battle stats +0x1d0.
+    pub abilities: abilities::Abilities,
+    /// Stats +0x1c0 > 0 (MP charge).
+    pub mp_charging: bool,
     /// Knock-slide (FUN_1403d4960 / FUN_1403d4570), for hits and the guard
     /// recoil alike.
     knock: Option<physics::Knock>,
@@ -219,6 +353,9 @@ pub struct Player {
 
 /// Guard recoil knock strength (DAT_140585efc).
 pub const GUARD_KNOCK: f32 = 200.;
+/// Horizontal speed cap kept when walking off a ledge (reported by the map
+/// collision trace of FUN_1403b4780 / FUN_1403b9090).
+pub const WALK_OFF_SPEED: f32 = 8.;
 
 /// What changed during one tick, for logging and presentation.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -252,13 +389,17 @@ impl Player {
             vertical_speed: 0.,
             arc: physics::Arc::default(),
             air_velocity: [0.; 2],
+            sampler: physics::Sampler::default(),
+            pending_jump: None,
             action: Action::Idle,
             frame: 0,
             armed: false,
             blend: 0.,
             idle_ticks: 0,
-            queued_attack: false,
-            air_combo_spent: false,
+            combo: ptya::Combo::default(),
+            connected: false,
+            abilities: abilities::Abilities::default(),
+            mp_charging: false,
             knock: None,
         }
     }
@@ -275,13 +416,13 @@ impl Player {
         clips: &Clips,
     ) -> Option<Action> {
         self.knock = physics::Knock::new([direction[0], 0., direction[1]], strength, 0.);
-        if self.action.airborne() || index >= clips.hurt.len() {
+        if self.in_air() || index >= clips.hurt.len() {
             return None;
         }
+        self.pending_jump = None;
         self.action = Action::Hurt(index);
         self.frame = 0;
         self.blend = 0.;
-        self.queued_attack = false;
         self.arm();
         Some(self.action)
     }
@@ -290,7 +431,7 @@ impl Player {
     /// recoil and knock-slide away at 200 × 0.1 per tick (×0.9 per tick,
     /// stopping below 1). `away` is the XZ unit vector from the attacker.
     pub fn guard_recoil(&mut self, away: [f32; 2], clips: &Clips) -> Option<Action> {
-        if self.action.airborne() || clips.guard_recoil.is_none() {
+        if self.in_air() || clips.guard_recoil.is_none() {
             return None;
         }
         self.yaw = (-away[0]).atan2(-away[1]);
@@ -298,7 +439,6 @@ impl Player {
         self.action = Action::GuardRecoil;
         self.frame = 0;
         self.blend = 0.;
-        self.queued_attack = false;
         self.arm();
         Some(self.action)
     }
@@ -306,7 +446,6 @@ impl Player {
     fn start(&mut self, action: Action, step: &mut Step) {
         self.action = action;
         self.frame = 0;
-        self.queued_attack = false;
         self.blend = blend_for(action);
         step.started = Some(action);
     }
@@ -333,8 +472,7 @@ impl Player {
             (Action::Jump, _) => &clips.jump,
             (Action::Fall, _) => &clips.fall,
             (Action::Land, _) => &clips.land,
-            (Action::Attack(i), _) => &clips.ground_combo[i].clip,
-            (Action::AirAttack(i), _) => &clips.air_combo[i].clip,
+            (Action::Attack(i) | Action::AirAttack(i), _) => &clips.attacks[i].clip,
             (Action::Hurt(i), _) => &clips.hurt[i],
             (Action::Guard, _) => clips.guard.as_ref().unwrap_or(&clips.idle),
             (Action::GuardRecoil, _) => clips.guard_recoil.as_ref().unwrap_or(&clips.idle),
@@ -344,8 +482,7 @@ impl Player {
     /// Root-motion translation for the current attack frame, model space.
     pub fn root_offset(&self, clips: &Clips) -> Vec3 {
         let root = match self.action {
-            Action::Attack(i) => &clips.ground_combo[i].root,
-            Action::AirAttack(i) => &clips.air_combo[i].root,
+            Action::Attack(i) | Action::AirAttack(i) => &clips.attacks[i].root,
             _ => return [0.; 3],
         };
         root.get(self.motion_frame(clips) as usize)
@@ -356,6 +493,17 @@ impl Player {
     fn arm(&mut self) {
         self.armed = true;
         self.idle_ticks = 0;
+    }
+
+    /// In the jump/fall mode: airborne actions once any pending jump has
+    /// taken off.
+    pub fn in_air(&self) -> bool {
+        self.action.airborne() && self.pending_jump.is_none()
+    }
+
+    /// An ANB range 0, 1 or 2 covers the current motion frame.
+    fn actionable(&self, clips: &Clips) -> bool {
+        Clip::within(&self.clip(clips).actionable, self.motion_frame(clips))
     }
 
     /// Motion frame to sample for the current action.
@@ -375,29 +523,55 @@ impl Player {
         self.yaw = wrap_angle(self.yaw + delta.clamp(-rate, rate));
     }
 
-    /// PTYA attack start with a positive Jump field (FUN_1403d78d0, no
-    /// target): a new jump arc of that height from the current position,
-    /// moving along the facing at the PTYA speed maximum (+0x1c).
-    fn lift(&mut self, step: &AttackStep) {
-        if step.hop.is_finite() && step.hop > 0. {
-            self.arc = physics::Arc::launch(self.position[1], step.hop);
-            let speed = if step.hop_speed.is_finite() {
-                step.hop_speed
-            } else {
-                0.
-            };
-            self.air_velocity = [self.yaw.sin() * speed, self.yaw.cos() * speed];
+    /// PTYA attack start with a positive Jump field (FUN_1403d78d0), then
+    /// the mode's jump slot (FUN_140409ad0: FUN_1403cbb00 + mode 1). With a
+    /// target the height is its rise clamped to [+0x14, +0x10] and the speed
+    /// (distance − reach + PTYA +0x3c) / √(2h/g) clamped to [+0x18, +0x1c]
+    /// toward it; without one, PTYA +0xc along the facing at +0x1c.
+    fn lift(&mut self, step: &AttackStep, input: &Input) {
+        if !(step.hop.is_finite() && step.hop > 0.) {
+            return;
         }
+        let finite = |v: f32| if v.is_finite() { v } else { 0. };
+        let (height, dir, speed) = match input.target {
+            Some(t) if t[0].hypot(t[1]) > 1e-4 => {
+                let (lo, hi) = (finite(step.hop_min), finite(step.hop_max));
+                let rise = input.target_rise;
+                let height = if rise < lo {
+                    lo
+                } else if rise > hi {
+                    hi
+                } else {
+                    rise
+                };
+                let len = t[0].hypot(t[1]);
+                let reach = len - input.target_reach + finite(step.hop_reach);
+                let per_tick = reach / physics::rise_time(height);
+                let (smin, smax) = (finite(step.hop_speed_min), finite(step.hop_speed));
+                let speed = if smin <= per_tick {
+                    per_tick.min(smax)
+                } else {
+                    smin
+                };
+                (height, [t[0] / len, t[1] / len], speed)
+            }
+            _ => (
+                step.hop,
+                [self.yaw.sin(), self.yaw.cos()],
+                finite(step.hop_speed),
+            ),
+        };
+        self.arc = physics::Arc::launch(self.position[1], height);
+        self.air_velocity = [dir[0] * speed, dir[1] * speed];
+        self.sampler.reset();
     }
 
-    /// Jump (mode 0 slot +0x48, FUN_140422630 → FUN_1403cbb00): the arc
-    /// of the PRTY jump height from the current position, taking off with
-    /// the stick velocity (obj+0xe0 → +0x20 in FUN_1403cbd30).
+    /// Jump (mode 0 slot +0x48, FUN_140422630 → FUN_1403cbb00): plays JUMP
+    /// and queues the arc of the PRTY jump height with the stick velocity
+    /// (obj+0xe0); the jump mode starts at JUMP's take-off trigger.
     fn jump(&mut self, p: &Params, velocity: [f32; 2], step: &mut Step) {
-        self.arc = physics::Arc::launch(self.position[1], p.jump_height);
-        self.air_velocity = velocity;
+        self.pending_jump = Some((p.jump_height, velocity));
         self.vertical_speed = 0.;
-        self.air_combo_spent = false;
         self.start(Action::Jump, step);
     }
 
@@ -406,9 +580,10 @@ impl Player {
     /// last ground velocity]).
     fn drop_off(&mut self, velocity: [f32; 2], step: &mut Step) {
         self.arc = physics::Arc::fall(self.position[1], 0.);
+        self.pending_jump = None;
         self.air_velocity = velocity;
+        self.sampler.reset();
         self.vertical_speed = 0.;
-        self.air_combo_spent = false;
         self.start(Action::Fall, step);
     }
 
@@ -426,36 +601,19 @@ impl Player {
         [direction[0] * speed, direction[1] * speed]
     }
 
-    /// Moves horizontally, keeping the body out of walls and off ledges that
-    /// are higher than a step. Returns whether ground remains underfoot.
-    fn travel(&mut self, delta: [f32; 2], p: &Params, world: &impl World, grounded: bool) -> bool {
-        let [x, y, z] = self.position;
-        let wanted = [x + delta[0], z + delta[1]];
-        let low = y + p.step_height;
-        let moved = world.resolve_walls(wanted, p.radius, low, y + p.height);
-        // A floor reachable from this height must exist under the new point.
-        match world.floor(moved[0], moved[1], low) {
-            Some(floor) => {
-                self.position[0] = moved[0];
-                self.position[2] = moved[1];
-                if grounded {
-                    if y - floor <= p.step_height {
-                        self.position[1] = floor;
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    true
-                }
-            }
-            None => grounded,
-        }
-    }
-
     pub fn tick(&mut self, input: &Input, p: &Params, clips: &Clips, world: &impl World) -> Step {
         let mut step = Step::default();
         self.frame = self.frame.saturating_add(1);
+        // This tick's whole displacement: mode velocity, root motion and
+        // knock-slide, collided once at the end (FUN_1403b89a0).
+        let mut disp = [0f32; 3];
+        // Mode 0 move request this tick (obj+0x10 × +0x1c): the stick, but
+        // only while an ANB range 0–2 is active (the same gate as commands);
+        // LAND before tick 12, attacks, damage and guard leave it idle [I:
+        // the stick feed's gate was not traced; the original locks movement
+        // on landing].
+        let mut ground_request = [0f32; 2];
+        let was_in_air = self.in_air();
         let magnitude = input.direction[0].hypot(input.direction[1]).min(1.);
         // Any stick past the pad's dead zone moves (FUN_1403a8fa0: speed is
         // set whenever the stick magnitude is above 0).
@@ -468,27 +626,36 @@ impl Player {
         } else {
             [0., 0.]
         };
+        let stick = Self::stick_velocity(direction, magnitude, p);
         match self.action {
             Action::Idle | Action::Walk | Action::Run | Action::Land => {
-                if input.guard && !input.attack && clips.guard.is_some() {
+                // Commands need an active ANB range 0, 1 or 2 (obj+0x18c &
+                // 0x1c, FUN_1401b15f0): always during locomotion, from
+                // LAND's range-2 start (tick 12 installed) after a landing.
+                let ready = self.actionable(clips);
+                if ready && input.guard && !input.attack && clips.guard.is_some() {
                     self.start_guard(input, &mut step);
-                } else if input.attack && !clips.ground_combo.is_empty() {
-                    if moving {
-                        self.yaw = direction[0].atan2(direction[1]);
-                    }
-                    self.arm();
-                    self.start(Action::Attack(0), &mut step);
-                } else if input.jump {
-                    self.jump(p, Self::stick_velocity(direction, magnitude, p), &mut step);
+                } else if ready
+                    && input.attack
+                    && self.try_attack(input, p, clips, ready, moving, direction, &mut step)
+                {
+                } else if ready && input.jump {
+                    self.jump(p, stick, &mut step);
                 } else {
-                    // Landing holds until its "Blend to idle" range starts.
-                    let landing = self.action == Action::Land
-                        && self.frame < clips.land.blend_to_idle.unwrap_or(clips.land.end);
+                    let landing = self.action == Action::Land;
                     // FUN_1403a8fa0: run speed from stick magnitude 0.8
                     // (DAT_140585c7c), walk speed below; FUN_140422520 then
-                    // plays RUN when speed ≥ (walk + run) / 2, else WALK.
+                    // plays RUN when speed ≥ (walk + run) / 2, else WALK, but
+                    // only while ANB range 0 or 2 is active (obj+0x18c bits
+                    // 2/4); LAND otherwise plays to its end, then idles.
                     let target = if !moving {
-                        if landing { Action::Land } else { Action::Idle }
+                        if landing && self.frame < clips.land.end {
+                            Action::Land
+                        } else {
+                            Action::Idle
+                        }
+                    } else if !ready {
+                        self.action
                     } else if magnitude < p.walk_threshold {
                         Action::Walk
                     } else {
@@ -509,97 +676,256 @@ impl Player {
                             self.start(target, &mut step);
                         }
                     }
-                    if moving {
+                    if moving && ready {
                         // FUN_1403b4780 turns the facing at +0x134 per tick;
                         // FUN_140422350 moves along the stick direction at
-                        // the full walk/run speed the same tick.
+                        // the full walk/run speed (inertially under range 42).
                         self.turn_toward(direction, p.turn_speed);
-                        let speed = if target == Action::Walk {
-                            p.walk_speed
-                        } else {
-                            p.run_speed
-                        };
-                        let velocity = [direction[0] * speed, direction[1] * speed];
-                        if !self.travel(velocity, p, world, true) {
-                            self.drop_off(velocity, &mut step);
-                        }
+                        ground_request = stick;
                     }
                 }
             }
-            Action::Attack(i) => {
-                let clip = &clips.ground_combo[i].clip;
-                if input.attack {
-                    self.queued_attack = true;
+            Action::Jump if self.pending_jump.is_some() => {
+                // The jump mode is pending (obj+0x648 = 1) until the JUMP
+                // motion's frame trigger 0 (tick 4 installed) switches to it
+                // (FUN_14040dd70); until then mode 0 keeps going, with JUMP's
+                // range 1 (tick 8) not yet feeding the stick.
+                if self.actionable(clips) {
+                    ground_request = stick;
                 }
+                if self.frame >= clips.jump.takeoff.unwrap_or(0)
+                    && let Some((height, velocity)) = self.pending_jump.take()
+                {
+                    // FUN_1403cbd30 (mode 1 enter): the arc's base is the
+                    // take-off height; the stored +0xe0 velocity applies.
+                    self.arc = physics::Arc::launch(self.position[1], height);
+                    self.air_velocity = velocity;
+                    self.sampler.reset();
+                    disp = self.airborne(input, moving, magnitude, direction, p, clips, &mut step);
+                }
+            }
+            Action::Attack(i) => {
+                let clip = &clips.attacks[i].clip;
+                self.face_target(clip, input);
                 // Root motion: the attack's root-curve change this tick.
-                let root = &clips.ground_combo[i].root;
+                let root = &clips.attacks[i].root;
                 let at = |f: u32| root.get(clip.held_frame(f) as usize).copied();
                 if let (Some(now), Some(before)) = (at(self.frame), at(self.frame - 1)) {
                     let (s, c) = self.yaw.sin_cos();
                     let (dx, dz) = (now[0] - before[0], now[2] - before[2]);
-                    let delta = [dx * c + dz * s, -dx * s + dz * c];
-                    if (delta[0] != 0. || delta[1] != 0.) && !self.travel(delta, p, world, true) {
-                        self.drop_off(delta, &mut step);
-                        return step;
-                    }
+                    disp[0] += dx * c + dz * s;
+                    disp[2] += -dx * s + dz * c;
                 }
-                let can_chain = Clip::within(&clip.combo_windows, self.frame);
                 let recovery = self.frame >= clip.blend_to_idle.unwrap_or(clip.end);
-                if self.queued_attack && can_chain && i + 1 < clips.ground_combo.len() {
-                    if moving {
-                        self.yaw = direction[0].atan2(direction[1]);
-                    }
-                    self.start(Action::Attack(i + 1), &mut step);
+                let ready = self.actionable(clips);
+                if input.attack
+                    && self.try_attack(input, p, clips, ready, moving, direction, &mut step)
+                {
                 } else if recovery && input.jump {
-                    self.jump(p, Self::stick_velocity(direction, magnitude, p), &mut step);
+                    self.jump(p, stick, &mut step);
                 } else if recovery && moving {
                     self.start(Action::Idle, &mut step);
                 } else if self.frame >= clip.end {
                     self.start(Action::Idle, &mut step);
-                    self.blend = clips.ground_combo[i].blend;
+                    self.blend = clips.attacks[i].blend;
                 }
             }
             Action::Jump | Action::Fall | Action::AirAttack(_) => {
-                self.airborne(
-                    input, moving, magnitude, direction, p, clips, world, &mut step,
-                );
+                disp = self.airborne(input, moving, magnitude, direction, p, clips, &mut step);
             }
-            Action::Hurt(i) => {
-                if self.frame >= clips.hurt[i].end {
-                    self.start(Action::Idle, &mut step);
-                }
-            }
-            Action::Guard | Action::GuardRecoil => {
-                // Locked until the clip's range-2 tick, then input is taken
-                // again (FUN_1401b15f0 actionable bits).
+            Action::Hurt(_) | Action::Guard | Action::GuardRecoil => {
+                // Locked until the clip's range-2 tick (hurt 50, guard 52,
+                // recoil 40 installed), then input is taken again
+                // (FUN_1401b15f0 actionable bits).
                 let clip = self.clip(clips);
                 let (end, ready) = (clip.end, clip.blend_to_idle.unwrap_or(clip.end));
-                if self.frame >= ready {
-                    if input.attack && !clips.ground_combo.is_empty() {
-                        if moving {
-                            self.yaw = direction[0].atan2(direction[1]);
-                        }
-                        self.start(Action::Attack(0), &mut step);
-                    } else if input.guard && clips.guard.is_some() {
+                let actionable = self.frame >= ready;
+                if input.attack
+                    && self.try_attack(input, p, clips, actionable, moving, direction, &mut step)
+                {
+                } else if actionable {
+                    if input.guard && clips.guard.is_some() {
                         self.start_guard(input, &mut step);
                     } else if input.jump {
-                        self.jump(p, Self::stick_velocity(direction, magnitude, p), &mut step);
+                        self.jump(p, stick, &mut step);
                     } else if moving || self.frame >= end {
                         self.start(Action::Idle, &mut step);
                     }
                 }
             }
         }
+        if !was_in_air && !self.in_air() {
+            // Mode 0 (FUN_140422350) sampled by FUN_1403b89a0 every second
+            // frame. Under ANB range 42 (obj+0x190 bit 0, e.g. all of LAND)
+            // the velocity eases toward the request through FUN_1403b7ad0
+            // with PRTY words 10/11 as inertia and drag; otherwise it is the
+            // request itself.
+            let speed = ground_request[0].hypot(ground_request[1]);
+            if self.sampler.due(speed) {
+                let dt = physics::PHYSICS_STEP;
+                let clip = self.clip(clips);
+                if Clip::within(&clip.inertia, self.frame) {
+                    let dir = if speed > 0. {
+                        [ground_request[0] / speed, ground_request[1] / speed]
+                    } else {
+                        [0.; 2]
+                    };
+                    self.air_velocity =
+                        physics::steer(self.air_velocity, dir, speed, p.land_inertia, p.land_drag);
+                } else {
+                    self.air_velocity = ground_request;
+                }
+                self.sampler
+                    .store([self.air_velocity[0] * dt, 0., self.air_velocity[1] * dt]);
+            }
+            let [vx, _, vz] = self.sampler.displacement();
+            disp[0] += vx;
+            disp[2] += vz;
+        }
         if let Some(knock) = self.knock.as_mut() {
             match knock.step() {
                 Some(d) => {
-                    let grounded = !self.action.airborne();
-                    self.travel([d[0], d[2]], p, world, grounded);
+                    disp[0] += d[0];
+                    disp[2] += d[2];
                 }
                 None => self.knock = None,
             }
         }
+        let airborne = self.in_air();
+        if airborne || disp[0] != 0. || disp[2] != 0. {
+            let body = Body {
+                radius: p.radius,
+                height: p.height,
+                step: p.step_height,
+            };
+            let moved = world.collide(self.position, disp, airborne, &body);
+            self.position = moved.position;
+            if airborne && moved.on_floor {
+                // Landing switches to the ground mode and plays the land
+                // motion (FUN_1403cb940: obj+0x11c = 5, which FUN_1403d78d0
+                // also sets for aerial attacks), cutting an aerial swing
+                // short. The air velocity stays in obj+0x20 for LAND's
+                // inertial slide.
+                self.vertical_speed = 0.;
+                self.sampler = physics::Sampler::default();
+                step.landed = true;
+                self.start(Action::Land, &mut step);
+            } else if !airborne && !moved.on_floor {
+                // Walked off a ledge: fall keeping this tick's horizontal
+                // displacement, capped at 8 per tick, as the velocity.
+                let h = disp[0].hypot(disp[2]);
+                let k = if h > WALK_OFF_SPEED {
+                    WALK_OFF_SPEED / h
+                } else {
+                    1.
+                };
+                self.drop_off([disp[0] * k, disp[2] * k], &mut step);
+            }
+        }
         step
+    }
+
+    /// The current motion id (obj+0x180) as far as the controller knows it.
+    pub fn motion_id(&self, clips: &Clips) -> u16 {
+        match self.action {
+            Action::Attack(i) | Action::AirAttack(i) => clips.records[i].motion,
+            Action::Idle => 0,
+            Action::Walk => 1,
+            Action::Run => 2,
+            Action::Jump => 3,
+            Action::Fall => 4,
+            Action::Land => 5,
+            Action::Hurt(i) => 10 + i as u16,
+            Action::Guard => 173,
+            Action::GuardRecoil => 42,
+        }
+    }
+
+    /// The attack command (FUN_1403d6fc0 type 1 → FUN_1403d6ca0, then
+    /// FUN_1403a8690 → FUN_1403d78d0). The press counts toward the combo
+    /// only inside an "allow combo" (11) or finisher (50) range after an
+    /// attack that connected (obj+0x120 bit 25) or with Combo Master;
+    /// otherwise it needs an active range 0–2 and starts a new combo. The
+    /// record comes from the PTYA chooser, or Counterguard (0x27) out of the
+    /// guard recoil. Returns false when nothing starts. Requests last one
+    /// frame (FUN_1403b2340 clears them), so there is no input buffer.
+    #[allow(clippy::too_many_arguments)]
+    fn try_attack(
+        &mut self,
+        input: &Input,
+        p: &Params,
+        clips: &Clips,
+        actionable: bool,
+        moving: bool,
+        direction: [f32; 2],
+        step: &mut Step,
+    ) -> bool {
+        if clips.records.is_empty() {
+            return false;
+        }
+        let clip = self.clip(clips);
+        let frame = self.motion_frame(clips);
+        let state = ptya::State {
+            abilities: &self.abilities,
+            airborne: self.in_air(),
+            mp_charging: self.mp_charging,
+            combo_window: Clip::within(&clip.combo_windows, frame),
+            finisher_window: Clip::within(&clip.finisher_windows, frame),
+            actionable,
+        };
+        let chain = self.connected || self.abilities.has(abilities::bit::COMBO_MASTER);
+        let mut combo = self.combo;
+        if !ptya::advance(&mut combo, &state, chain) {
+            return false;
+        }
+        let current = self.motion_id(clips);
+        let counter = if current == 42 {
+            ptya::find(&clips.records, 0x27)
+                .filter(|&i| ptya::allowed(&clips.records[i], &state, combo))
+        } else {
+            None
+        };
+        // [test-room carry-over] The stick sets the facing an attack is
+        // chosen and swung along.
+        let facing_yaw = if moving {
+            direction[0].atan2(direction[1])
+        } else {
+            self.yaw
+        };
+        let nearby: Vec<ptya::Target> = input.nearby.iter().flatten().copied().collect();
+        let scene = ptya::Scene {
+            origin: self.position,
+            facing: [facing_yaw.sin(), facing_yaw.cos()],
+            target: input.target_shape,
+            others: &nearby,
+            jump_height: p.jump_height,
+            current_motion: current,
+        };
+        let Some(i) = counter
+            .or_else(|| ptya::select(&clips.records, &state, combo, &scene, input.probe_blocked))
+        else {
+            return false;
+        };
+        let airborne = self.in_air();
+        self.combo = combo;
+        self.connected = false;
+        self.yaw = facing_yaw;
+        let record = clips.records[i];
+        // FUN_1403d78d0: a hop from the ground starts a fresh count.
+        if record.jump > 0. && !airborne {
+            self.combo = ptya::Combo { step: 1, finish: 1 };
+        }
+        self.arm();
+        self.pending_jump = None;
+        let action = if airborne || record.leaves_ground() {
+            Action::AirAttack(i)
+        } else {
+            Action::Attack(i)
+        };
+        self.start(action, step);
+        self.face_target(&clips.attacks[i].clip, input);
+        self.lift(&clips.attacks[i], input);
+        true
     }
 
     /// PTYA 0x0b: the guard motion, turning to the target at once.
@@ -613,6 +939,35 @@ impl Player {
         self.start(Action::Guard, step);
     }
 
+    /// Attack facing toward the target: ANB range 28 turns by up to its
+    /// parameter in degrees per tick (FUN_14040d810 → FUN_1403d4b10 →
+    /// FUN_1403d3a90, `DAT_1405b15b4` = π/180) and frame trigger 21 by up to
+    /// its parameter at that tick, both only beyond 50 units horizontally
+    /// (`DAT_1405b532c`).
+    fn face_target(&mut self, clip: &Clip, input: &Input) {
+        let Some(t) = input.target else { return };
+        if t[0].hypot(t[1]) <= 50. {
+            return;
+        }
+        let frame = self.frame;
+        let ranges = clip
+            .turn_to_target
+            .iter()
+            .filter(|&&(a, b, _)| (a..=b).contains(&frame))
+            .map(|&(_, _, deg)| deg);
+        let ticks = clip
+            .face_target
+            .iter()
+            .filter(|&&(f, _)| f == frame)
+            .map(|&(_, deg)| deg);
+        let limit = ranges.chain(ticks).fold(0f32, f32::max);
+        if limit > 0. {
+            self.turn_toward(t, limit * std::f32::consts::PI / 180.);
+        }
+    }
+
+    /// Mode 1 for one tick: action changes in the air, then this tick's
+    /// displacement (collided by `tick`).
     #[allow(clippy::too_many_arguments)]
     fn airborne(
         &mut self,
@@ -622,100 +977,65 @@ impl Player {
         direction: [f32; 2],
         p: &Params,
         clips: &Clips,
-        world: &impl World,
         step: &mut Step,
-    ) {
+    ) -> [f32; 3] {
         if let Action::AirAttack(i) = self.action {
-            let clip = &clips.air_combo[i].clip;
-            if input.attack {
-                self.queued_attack = true;
-            }
-            if self.queued_attack
-                && Clip::within(&clip.combo_windows, self.frame)
-                && i + 1 < clips.air_combo.len()
-            {
-                if moving {
-                    self.yaw = direction[0].atan2(direction[1]);
-                }
-                self.start(Action::AirAttack(i + 1), step);
-                self.lift(&clips.air_combo[i + 1]);
+            let clip = &clips.attacks[i].clip;
+            self.face_target(clip, input);
+            let ready = self.actionable(clips);
+            if input.attack && self.try_attack(input, p, clips, ready, moving, direction, step) {
             } else if self.frame >= clip.end {
-                let [x, y, z] = self.position;
-                // A swing that touched down finishes on the ground.
-                if world
-                    .floor(x, z, y + 1e-3)
-                    .is_some_and(|f| (y - f).abs() < 1e-3)
-                {
-                    self.start(Action::Land, step);
-                    step.landed = true;
-                    return;
-                }
                 self.start(Action::Fall, step);
-                self.blend = clips.air_combo[i].blend;
+                self.blend = clips.attacks[i].blend;
             }
-        } else if input.attack && !self.air_combo_spent && !clips.air_combo.is_empty() {
-            self.air_combo_spent = true;
-            if moving {
-                self.yaw = direction[0].atan2(direction[1]);
-            }
-            self.arm();
-            self.start(Action::AirAttack(0), step);
-            self.lift(&clips.air_combo[0]);
+        } else if input.attack
+            && self.actionable(clips)
+            && self.try_attack(input, p, clips, true, moving, direction, step)
+        {
+            // Air attacks need an active ANB range 0–2 too: JUMP from its
+            // range-1 start (tick 8 installed), FALL throughout.
         } else if self.action == Action::Jump && self.arc.falling_motion() {
             // FUN_1403cb680 → FUN_1403cb610: FALL (motion 4) blended over 8
             // once the apex is within 5 ticks.
             self.start(Action::Fall, step);
         }
-        // ANB "No gravity" ranges hold the height while the curve's time
-        // keeps running (FUN_1403cb500 with obj+0x18c no-gravity bits) [I:
-        // trigger 3 → those bits].
-        let floating = match self.action {
-            Action::AirAttack(i) => Clip::within(&clips.air_combo[i].clip.no_gravity, self.frame),
-            _ => false,
-        };
-        self.vertical_speed = self.arc.step(self.position[1], p.fall_max, floating);
+        // ANB "No gravity" ranges (range 3 → obj+0x18c bit 5, FUN_14040d810)
+        // hold the height while the curve's time keeps running
+        // (FUN_1403cb500).
+        let floating = Clip::within(&self.clip(clips).no_gravity, self.frame);
         // Mode 1 horizontal (FUN_1403cb360 → FUN_1403b7ad0 with 0.9, 0.95):
         // the velocity keeps 90% of itself and takes 10% of the stick
-        // velocity, or decays ×0.95 without a stick. Attacks take no stick
-        // [I: the move request is idle during an attack motion].
-        let attacking = matches!(self.action, Action::AirAttack(_));
-        if moving && !attacking {
+        // velocity, or decays ×0.95 without a stick. The stick only feeds it
+        // under an ANB range 0–2: JUMP from tick 8, FALL throughout, never
+        // during aerial attacks [I, as on the ground].
+        let steering = moving && self.actionable(clips);
+        if steering {
             self.turn_toward(direction, p.turn_speed);
         }
-        let (dir, speed) = if attacking || !moving {
+        let (dir, speed) = if !steering {
             ([0.; 2], 0.)
         } else {
             let v = Self::stick_velocity(direction, magnitude, p);
             (direction, v[0].hypot(v[1]))
         };
-        self.air_velocity = physics::steer(
-            self.air_velocity,
-            dir,
-            speed,
-            physics::AIR_INERTIA,
-            physics::AIR_DRAG,
-        );
-        let v = self.air_velocity.map(|c| c * physics::DT);
-        if v[0] != 0. || v[1] != 0. {
-            self.travel(v, p, world, false);
+        // FUN_1403b89a0: the mode routine runs every second frame with a
+        // two-frame step; its displacement is spread over those frames.
+        if self.sampler.due(speed) {
+            let dt = physics::PHYSICS_STEP;
+            let dy = self.arc.step(self.position[1], p.fall_max, floating, dt);
+            self.air_velocity = physics::steer(
+                self.air_velocity,
+                dir,
+                speed,
+                physics::AIR_INERTIA,
+                physics::AIR_DRAG,
+            );
+            self.sampler
+                .store([self.air_velocity[0] * dt, dy, self.air_velocity[1] * dt]);
         }
-        let [x, y, z] = self.position;
-        let next = y + self.vertical_speed;
-        if self.vertical_speed <= 0.
-            && let Some(floor) = world.floor(x, z, y + p.step_height)
-            && next <= floor
-        {
-            self.position[1] = floor;
-            self.vertical_speed = 0.;
-            if matches!(self.action, Action::AirAttack(_)) {
-                // Test-room choice: let the aerial swing play out on the ground.
-                return;
-            }
-            step.landed = true;
-            self.start(Action::Land, step);
-            return;
-        }
-        self.position[1] = next;
+        let d = self.sampler.displacement();
+        self.vertical_speed = d[1];
+        d
     }
 }
 
@@ -846,6 +1166,8 @@ mod tests {
             jump_height: 185.,
             turn_speed: 0.2618,
             fall_max: 16.,
+            land_inertia: 0.9,
+            land_drag: 0.8,
             step_height: 20.,
             walk_threshold: 0.5,
             radius: 30.,
@@ -860,31 +1182,67 @@ mod tests {
                 loop_start: 0,
                 combo_windows: vec![window],
                 blend_to_idle: Some(end - 10),
-                no_gravity: vec![],
+                ..Clip::default()
             },
             hop,
             hop_speed: 0.,
+            hop_max: 0.,
+            hop_min: 0.,
+            hop_speed_min: 0.,
+            hop_reach: 0.,
             blend: 0.,
             root: Vec::new(),
         }
     }
+    /// A cut of Sora's set: finisher 3, the basic swing 5 (alternate 6),
+    /// the target dash 6, and the air swings 9 (alternate 10) and 10.
+    fn records() -> Vec<ptya::Record> {
+        use ptya::{flag, kind};
+        let r = |id, kind, alternate, flags, motion, jump| ptya::Record {
+            id,
+            kind,
+            alternate,
+            flags,
+            motion,
+            jump,
+            cos_min: 0.99996,
+            cos_max: 1.,
+            ..ptya::Record::default()
+        };
+        vec![
+            r(3, kind::ALWAYS, -1, flag::FINISHER, 155, 0.),
+            r(5, kind::ALWAYS, 6, 0, 151, 0.),
+            r(6, kind::TARGET, -1, 0, 153, 0.),
+            r(9, kind::ALWAYS, 10, flag::AIR, 181, 21.),
+            r(10, kind::TARGET, -1, flag::AIR, 182, 21.),
+        ]
+    }
+    /// A loop with ANB range 0 over its whole length (always actionable).
+    fn open(end: u32) -> Clip {
+        Clip {
+            actionable: vec![(0, end)],
+            ..Clip::looping(end, 0)
+        }
+    }
     fn clips() -> Clips {
         Clips {
-            idle: Clip::looping(100, 0),
-            walk: Clip::looping(60, 0),
-            run: Clip::looping(40, 0),
-            field_idle: Clip::looping(90, 0),
-            field_walk: Clip::looping(50, 0),
-            field_run: Clip::looping(36, 0),
-            jump: Clip::looping(30, 0),
-            fall: Clip::looping(30, 0),
+            idle: open(100),
+            walk: open(60),
+            run: open(40),
+            field_idle: open(90),
+            field_walk: open(50),
+            field_run: open(36),
+            jump: open(30),
+            fall: open(30),
             land: Clip::looping(12, 0),
-            ground_combo: vec![
-                attack(40, (10, 25), 0.),
-                attack(40, (10, 25), 0.),
+            records: records(),
+            attacks: vec![
                 attack(50, (60, 60), 0.),
+                attack(40, (10, 25), 0.),
+                attack(40, (10, 25), 0.),
+                attack(30, (8, 20), 20.),
+                attack(30, (8, 20), 20.),
             ],
-            air_combo: vec![attack(30, (8, 20), 20.), attack(30, (8, 20), 20.)],
             hurt: vec![
                 Clip {
                     end: 24,
@@ -951,15 +1309,21 @@ mod tests {
         player.tick(&hold([0., 0.3]), &p, &c, &w);
         assert_eq!(player.action, Action::Walk);
         assert!((player.position[2] - 2.).abs() < 1e-5);
+        // FUN_1403b89a0 samples the move request every second frame: the
+        // run starts next frame, the walk velocity carries this one.
         player.tick(&hold([0., 1.]), &p, &c, &w);
         assert_eq!(player.action, Action::Run);
-        assert!((player.position[2] - 10.).abs() < 1e-5);
+        assert!((player.position[2] - 4.).abs() < 1e-5);
+        player.tick(&hold([0., 1.]), &p, &c, &w);
+        assert!((player.position[2] - 12.).abs() < 1e-5);
         // Facing +X requires a quarter turn: limited per tick, while the
-        // body already moves along the stick (FUN_140422350).
+        // body moves along the stick (FUN_140422350) at the next sample.
         player.tick(&hold([1., 0.]), &p, &c, &w);
         assert!((player.yaw - 0.2618).abs() < 1e-5);
+        assert!((player.position[2] - 20.).abs() < 1e-5);
+        player.tick(&hold([1., 0.]), &p, &c, &w);
         assert!((player.position[0] - 8.).abs() < 1e-5);
-        assert!((player.position[2] - 10.).abs() < 1e-5);
+        assert!((player.position[2] - 20.).abs() < 1e-5);
         player.tick(&Input::default(), &p, &c, &w);
         assert_eq!(player.action, Action::Idle);
     }
@@ -994,12 +1358,14 @@ mod tests {
             ..Input::default()
         };
         player.tick(&run_jump, &p, &c, &w);
-        assert_eq!(player.air_velocity, [0., 8.]);
-        // Stick released: FUN_1403b7ad0 scales the velocity by 0.95.
+        assert_eq!(player.pending_jump, Some((185., [0., 8.])));
+        // Stick released: FUN_1403b7ad0 scales the velocity by 0.95 per
+        // two-frame sample, moving 7.6 on each of those frames.
         let z = player.position[2];
         player.tick(&Input::default(), &p, &c, &w);
-        assert!((player.position[2] - z - 7.6).abs() < 1e-4);
-        // Stick sideways: 10% of the stick velocity per tick.
+        player.tick(&Input::default(), &p, &c, &w);
+        assert!((player.position[2] - z - 15.2).abs() < 1e-4);
+        // Stick sideways: 10% of the stick velocity at the next sample.
         player.tick(&hold([1., 0.]), &p, &c, &w);
         assert!((player.air_velocity[0] - 0.8).abs() < 1e-5);
         assert!((player.air_velocity[1] - 7.6 * 0.9).abs() < 1e-4);
@@ -1022,11 +1388,171 @@ mod tests {
                 break;
             }
         }
-        // rise √(2·185/g) = 30.1 ticks; FALL starts when rise ≤ t + 5,
-        // tested before this tick's t advances (t = 26 on tick 27).
-        assert_eq!(fell, Some(27));
+        // rise √(2·185/g) = 30.1 ticks; FALL starts when rise ≤ t + 5. The
+        // curve's t advances by 2 every second frame (t = 26 on tick 26).
+        assert_eq!(fell, Some(26));
         assert_eq!(player.blend, 8.);
         assert!(player.position[1] < 185.);
+    }
+
+    /// The installed JUMP/LAND trigger layout: take-off at JUMP tick 4,
+    /// commands from JUMP tick 8; LAND locked until tick 12 and inertial
+    /// throughout (range 42).
+    fn installed_jump_land(c: &mut Clips) {
+        c.jump = Clip {
+            actionable: vec![(8, 26)],
+            takeoff: Some(4),
+            ..Clip::looping(26, 0)
+        };
+        c.land = Clip {
+            actionable: vec![(12, 26)],
+            inertia: vec![(0, 26)],
+            blend_to_idle: Some(12),
+            ..Clip::looping(26, 0)
+        };
+    }
+
+    #[test]
+    fn jump_takes_off_at_the_jump_trigger() {
+        let (p, mut c, w) = (params(), clips(), room());
+        installed_jump_land(&mut c);
+        let mut player = Player::new([0., 0., 0.], 0.);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&jump, &p, &c, &w);
+        assert_eq!(player.action, Action::Jump);
+        for _ in 1..4 {
+            player.tick(&Input::default(), &p, &c, &w);
+            assert_eq!(player.position[1], 0.);
+            assert!(player.pending_jump.is_some());
+        }
+        // FUN_14040dd70: frame trigger 0 switches to the jump mode.
+        player.tick(&Input::default(), &p, &c, &w);
+        assert!(player.pending_jump.is_none());
+        assert!(player.position[1] > 0.);
+        // No air attack before JUMP's range-1 start (tick 8).
+        let press = Input {
+            attack: true,
+            ..Input::default()
+        };
+        player.tick(&press, &p, &c, &w);
+        assert_eq!(player.action, Action::Jump);
+        for _ in 0..3 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        player.tick(&press, &p, &c, &w);
+        assert_eq!(player.action, Action::AirAttack(3));
+    }
+
+    #[test]
+    fn landing_locks_commands_and_slides_inertially() {
+        let (p, mut c, w) = (params(), clips(), room());
+        installed_jump_land(&mut c);
+        let mut player = Player::new([-900., 0., 0.], 0.);
+        let run_jump = Input {
+            direction: [0., 1.],
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&run_jump, &p, &c, &w);
+        let mut landed = false;
+        for _ in 0..120 {
+            if player.tick(&hold([0., 1.]), &p, &c, &w).landed {
+                landed = true;
+                break;
+            }
+        }
+        assert!(landed);
+        assert_eq!(player.action, Action::Land);
+        // Locked until LAND tick 12: no jump, no switch to running and no
+        // stick; range 42 eases the carried velocity by the PRTY drag.
+        let push = Input {
+            direction: [0., 1.],
+            jump: true,
+            ..Input::default()
+        };
+        for _ in 0..10 {
+            player.tick(&push, &p, &c, &w);
+            assert_eq!(player.action, Action::Land);
+        }
+        assert!(player.air_velocity[1] > 0.);
+        player.tick(&hold([0., 1.]), &p, &c, &w);
+        player.tick(&hold([0., 1.]), &p, &c, &w);
+        assert_eq!(player.action, Action::Run);
+    }
+
+    #[test]
+    fn aerial_hop_heads_for_the_target() {
+        let (p, mut c, w) = (params(), clips(), room());
+        c.attacks[3].hop_max = 71.;
+        c.attacks[3].hop_min = 21.;
+        c.attacks[3].hop_speed_min = -8.;
+        c.attacks[3].hop_speed = 8.;
+        let mut player = Player::new([0., 0., 0.], 0.);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&jump, &p, &c, &w);
+        for _ in 0..10 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        let press = Input {
+            attack: true,
+            target: Some([400., 0.]),
+            target_rise: -100.,
+            ..Input::default()
+        };
+        player.tick(&press, &p, &c, &w);
+        assert_eq!(player.action, Action::AirAttack(3));
+        // Height clamps to the 21 minimum; speed 400 / √(2·21/g) > 8 caps
+        // at 8 toward +X, then the first two-frame sample drags it ×0.95.
+        assert!((player.arc.rise - physics::rise_time(21.)).abs() < 1e-4);
+        assert!((player.air_velocity[0] - 7.6).abs() < 1e-4);
+    }
+
+    /// A world that counts collide calls and moves freely on a flat floor.
+    struct Counting(std::cell::Cell<u32>);
+    impl World for Counting {
+        fn floor(&self, _x: f32, _z: f32, top: f32) -> Option<f32> {
+            (top >= -1e-3).then_some(0.)
+        }
+        fn resolve_walls(&self, p: [f32; 2], _r: f32, _l: f32, _h: f32) -> [f32; 2] {
+            p
+        }
+        fn collide(&self, start: Vec3, d: Vec3, airborne: bool, _b: &Body) -> Collided {
+            self.0.set(self.0.get() + 1);
+            let y = if airborne {
+                (start[1] + d[1]).max(0.)
+            } else {
+                0.
+            };
+            Collided {
+                position: [start[0] + d[0], y, start[2] + d[2]],
+                on_floor: !airborne || (d[1] <= 0. && y == 0.),
+            }
+        }
+    }
+
+    #[test]
+    fn one_collide_call_per_tick_with_knock_and_movement() {
+        let (p, c) = (params(), clips());
+        let w = Counting(std::cell::Cell::new(0));
+        let mut player = Player::new([0., 0., 0.], 0.);
+        player.guard_recoil([0., -1.], &c);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        for t in 0..120u32 {
+            let input = if t == 60 { jump } else { hold([1., 0.]) };
+            let before = w.0.get();
+            player.tick(&input, &p, &c, &w);
+            assert!(w.0.get() - before <= 1, "tick {t}");
+        }
+        assert!(player.position[0] > 0.);
     }
 
     #[test]
@@ -1079,18 +1605,32 @@ mod tests {
             ..Input::default()
         };
         player.tick(&press, &p, &c, &w);
-        assert_eq!(player.action, Action::Attack(0));
-        // Pressing early queues; chaining waits for the window at frame 10.
+        assert_eq!(player.action, Action::Attack(1));
+        assert_eq!(player.combo, ptya::Combo { step: 1, finish: 1 });
+        // Presses last one frame: before the window nothing happens, and a
+        // swing that missed cannot chain inside it either.
+        for _ in 0..9 {
+            player.tick(&press, &p, &c, &w);
+            assert_eq!(player.action, Action::Attack(1));
+        }
         player.tick(&press, &p, &c, &w);
-        for _ in 0..7 {
+        assert_eq!(player.action, Action::Attack(1));
+        // After a hit the press in the window chains: 5 would repeat 151,
+        // so its alternate 6 (153) plays.
+        player.connected = true;
+        player.tick(&press, &p, &c, &w);
+        assert_eq!(player.action, Action::Attack(2));
+        assert_eq!(player.combo.step, 2);
+        assert!(!player.connected);
+        for _ in 0..10 {
             player.tick(&Input::default(), &p, &c, &w);
         }
-        player.tick(&Input::default(), &p, &c, &w);
+        // Third step reaches the limit 3: the finisher.
+        player.connected = true;
+        player.tick(&press, &p, &c, &w);
         assert_eq!(player.action, Action::Attack(0));
-        player.tick(&Input::default(), &p, &c, &w);
-        assert_eq!(player.action, Action::Attack(1));
         // Without another press the step finishes and returns to idle.
-        for _ in 0..40 {
+        for _ in 0..60 {
             player.tick(&Input::default(), &p, &c, &w);
         }
         assert_eq!(player.action, Action::Idle);
@@ -1112,7 +1652,7 @@ mod tests {
         for _ in 0..20 {
             player.tick(&hold([0., 1.]), &p, &c, &w);
         }
-        assert_eq!(player.action, Action::Attack(0));
+        assert_eq!(player.action, Action::Attack(1));
         assert_eq!(player.position, [0., 0., 0.]);
         for _ in 0..15 {
             player.tick(&hold([0., 1.]), &p, &c, &w);
@@ -1121,7 +1661,7 @@ mod tests {
     }
 
     #[test]
-    fn one_air_combo_per_jump_with_hop() {
+    fn air_attacks_hop_and_restart_from_the_fall() {
         let (p, c, w) = (params(), clips(), room());
         let mut player = Player::new([0., 0., 0.], 0.);
         let jump = Input {
@@ -1137,15 +1677,18 @@ mod tests {
             player.tick(&Input::default(), &p, &c, &w);
         }
         player.tick(&press, &p, &c, &w);
-        assert_eq!(player.action, Action::AirAttack(0));
+        assert_eq!(player.action, Action::AirAttack(3));
         assert!(player.vertical_speed > 0.);
         for _ in 0..40 {
             player.tick(&Input::default(), &p, &c, &w);
         }
         assert!(!matches!(player.action, Action::AirAttack(_)));
+        // FALL is actionable (range 0): a new air combo starts from step 1
+        // (FUN_1403d6ca0), so the exe allows another swing while airborne.
         if player.action == Action::Fall {
             player.tick(&press, &p, &c, &w);
-            assert!(!matches!(player.action, Action::AirAttack(_)));
+            assert_eq!(player.action, Action::AirAttack(3));
+            assert_eq!(player.combo.step, 1);
         }
     }
 
@@ -1224,7 +1767,7 @@ mod tests {
     #[test]
     fn attack_root_motion_moves_along_facing() {
         let (p, mut c, w) = (params(), clips(), room());
-        c.ground_combo[0].root = (0..40).map(|f| [0., 0., f as f32 * 2.]).collect();
+        c.attacks[1].root = (0..40).map(|f| [0., 0., f as f32 * 2.]).collect();
         // Facing +X: model +Z root motion moves the player along +X.
         let mut player = Player::new([0., 0., 0.], std::f32::consts::FRAC_PI_2);
         player.tick(

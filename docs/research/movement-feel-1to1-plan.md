@@ -179,3 +179,47 @@ Branch `claude/project-thread-dhv9n6`, one commit per step. Evidence runs go in 
 Checks after step 6: PASS fmt, clippy, workspace tests (36 in `player_sim`), build, smoke (`--frames 180`), and `autoplay-s6` (arena-07: exit 0, 81 non-uniform captures, Shadow hits at 417/448/486, jump on tick 300 → FALL 327 at 185.0 → LAND 361). `autoplay-s3` (after step 3) also exited 0. A hands-on play check with a pad and a side-by-side against the installed game are NOT RUN.
 
 Still open (step 7): the targeted hop and ground lunge, the desired-yaw writer, the ANB trigger → obj+0x18c bits (landing recovery, hitstun), the JUMP 03A frame-35 trigger, and the collision radius, height and step.
+
+### Second pass (2026-10-10)
+
+The user reported the feel still differed. Tracing the position integrator FUN_1403b89a0 (called from the per-object update FUN_1403bfd30) found that a physics mode's velocity routine does not run every frame. It runs when the timer obj+0xba8 drops below 0, every `DAT_1405b18ec` = 2.0 frames (every frame only for move requests faster than `DAT_140623be4` = 100), with that 2-frame span as its time step. The result divided by 2 is stored at obj+0xb98 and applied each frame × frame time. Root motion (FUN_1403b7ca0), the knock-slide (FUN_1403d4570), slope slide (FUN_1403b81d0) and force fields (FUN_1403f9130) are added every frame. Collision (FUN_1403b9090) follows. FUN_1403b4da0 clears the timer on every mode change.
+
+`physics::Sampler` translates this. Ground movement, the jump curve (t advances 2 per run), air steering (0.9/0.95 once per 2 frames) and the Shadow's blow (gravity and brakes once per 2 frames) now run through it. Frame time is confirmed: FUN_140154740 sets `DAT_140717480` to the vsyncs elapsed × game speed (`DAT_140717424` = 1.0), so it is 1.0 per 60 Hz frame. FUN_140154600 doubles it only in 30 fps mode. Sora's locomotion, jump, fall, land and hurt clips carry no root motion (logged as `root_start`/`root_end`), so velocity alone moves him there.
+
+Checks: PASS fmt, clippy, workspace tests (37 in `player_sim`), build, smoke, and `autoplay-s7` (exit 0, 81 non-uniform captures; jump at 300 → FALL 326 at 184.9 → LAND 361).
+
+### Third pass (2026-10-10): jump take-off, landing lock, aerial hops
+
+The user reported that jump/fall and air combos felt off, and that the rewrite let Sora move again instantly after landing.
+
+- **Jump take-off [O].** Pressing jump queues the jump mode (FUN_1403cbb00 sets obj+0x648 = 1). The switch to mode 1, with the arc base and the stored take-off velocity, happens when the JUMP motion's frame trigger 0 fires (FUN_14040dd70, case 0 → FUN_1403b4da0(1)). On Sora's JUMP that is tick 4, so he crouches for 4 frames before lifting off.
+- **Actionable gating [O for commands, I for the stick].** Commands are taken only while an ANB range 0, 1 or 2 is active (FUN_14040d810 maps them to obj+0x18c bits 2/3/4; FUN_1401b15f0 checks `& 0x1c`). Installed ranges:
+  - idle/walk/run/fall: always;
+  - JUMP: from tick 8;
+  - LAND: from tick 12;
+  - damage 10–13: from tick 50;
+  - guard: from tick 52;
+  - recoil: from tick 40;
+  - aerial attacks: none.
+
+  The stick feed to the move request follows the same gate [I: its own gate was not traced; the user's report of the original's landing lock supports it]. LAND therefore locks movement and actions for 12 frames, then plays to tick 26 unless the stick moves. Damage now recovers at tick 50 instead of 70.
+- **Range 42 [O].** It maps to obj+0x190 bit 0. FUN_140422350 then moves mode 0 through FUN_1403b7ad0 with PRTY record +0x28/+0x2c (words 10/11) as inertia and drag. Sora's record holds 0/0, so the carried velocity stops dead on landing.
+- **Aerial hops toward the target [O formula; I radii].** FUN_1403d78d0, with a target:
+  - height = target rise clamped to [PTYA +0x14, +0x10];
+  - speed = (horizontal distance − FUN_1403d7520's summed radii + PTYA +0x3c) / √(2h/g), clamped to [+0x18, +0x1c], toward the target;
+  - then FUN_140409ad0 (FUN_1403cbb00 + mode 1).
+
+  The test room uses 2 × Sora's body radius for the summed radii.
+- **Turning toward the target [O].** ANB range 28 turns by up to its parameter in degrees per tick; frame trigger 21 turns at once (FUN_1403d4b10 / FUN_1403d3a90, π/180 = `DAT_1405b15b4`), only beyond 50 units. Installed values:
+  - ground combo: 15° for ticks 0–12;
+  - air steps 1–2: 15° for ticks 0–23 / 0–22;
+  - finisher: 360° at tick 0.
+
+Checks: PASS fmt, clippy, workspace tests (40 in `player_sim`), build, smoke, and `autoplay-s8` (exit 0, 81 non-uniform captures; jump pressed 300, lift-off 304, FALL 329, LAND 364, idle 390).
+
+### Fourth pass (2026-10-10): landing during an aerial attack
+
+The user reported that Sora seemed to float for about a second after an air combo. The rewrite let an aerial swing that touched down play out on the ground; that was a test-room choice. In the exe, landing calls mode 1's land slot FUN_1403cb940, which plays the land motion stored at obj+0x11c. FUN_1403d78d0 sets that to 5 (LAND) for aerial attacks, so touching down cuts the swing short into LAND and its 12-frame lock [O]. The bit at obj+0x194 bit 4, which would skip the land motion, was not traced [U]. In `autoplay-s9`, the combo's finisher (pressed at 617) now lands at 653 and is idle at 679, where before it landed at 683 and idled at 709.
+
+Aerial hop reach [O]: FUN_1403d7520 sums the attacker's TARGET object-collision radius (kind 3, via FUN_1403b5650(obj, 3, -1) / FUN_1403c9c00) and the target's shape radius (FUN_1403be0f0). This was traced by the Twilight Town thread. The test room now reads both TARGET entries from the BAR type-23 tables: Sora plus the Shadow = 100, replacing the test-room 60. Whether the enemy-side shape is its TARGET entry is [I].
+
