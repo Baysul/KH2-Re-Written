@@ -6,6 +6,7 @@ use std::{
     fs::{self, File},
     io::{self, Read},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -70,6 +71,17 @@ pub fn inspect_file_with(
     role: &str,
     with_chunks: bool,
 ) -> io::Result<SourceFile> {
+    inspect_file_counted(root, relative, role, with_chunks, None)
+}
+
+/// `inspect_file_with`, adding each hashed chunk's length to `progress`.
+fn inspect_file_counted(
+    root: &Path,
+    relative: &str,
+    role: &str,
+    with_chunks: bool,
+    progress: Option<&AtomicU64>,
+) -> io::Result<SourceFile> {
     let path = root.join(relative);
     let resolved = fs::canonicalize(&path)?;
     if !resolved.starts_with(root) {
@@ -103,6 +115,9 @@ pub fn inspect_file_with(
             chunks.push(format!("{:x}", Sha256::digest(&buffer[..filled])));
         }
         bytes += filled as u64;
+        if let Some(progress) = progress {
+            progress.fetch_add(filled as u64, Ordering::Relaxed);
+        }
         if filled < buffer.len() {
             break;
         }
@@ -154,6 +169,15 @@ pub fn inspect_files(
     list: &[(String, &str)],
     with_chunks: bool,
 ) -> io::Result<Vec<SourceFile>> {
+    inspect_files_counted(root, list, with_chunks, None)
+}
+
+fn inspect_files_counted(
+    root: &Path,
+    list: &[(String, &str)],
+    with_chunks: bool,
+    progress: Option<&AtomicU64>,
+) -> io::Result<Vec<SourceFile>> {
     let workers = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .min(list.len().max(1));
@@ -168,7 +192,7 @@ pub fn inspect_files(
                     let Some((relative, role)) = list.get(i) else {
                         break;
                     };
-                    let r = inspect_file_with(root, relative, role, with_chunks);
+                    let r = inspect_file_counted(root, relative, role, with_chunks, progress);
                     *results[i].lock().unwrap() = Some(r);
                 }
             });
@@ -221,13 +245,41 @@ pub fn scan(root: &Path) -> io::Result<SourceManifest> {
 
 /// `scan`; without chunk digests when only whole-file hashes are compared.
 pub fn scan_with(root: &Path, with_chunks: bool) -> io::Result<SourceManifest> {
+    scan_counted(root, with_chunks, None)
+}
+
+/// Total size of the required files, for `scan_with_progress` (missing
+/// files count as 0; the scan itself reports them).
+pub fn required_bytes(root: &Path) -> u64 {
+    required_files()
+        .iter()
+        .filter_map(|(relative, _)| fs::metadata(root.join(relative)).ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// `scan_with`, adding hashed bytes to `progress` as the scan runs (compare
+/// with `required_bytes`).
+pub fn scan_with_progress(
+    root: &Path,
+    with_chunks: bool,
+    progress: &AtomicU64,
+) -> io::Result<SourceManifest> {
+    scan_counted(root, with_chunks, Some(progress))
+}
+
+fn scan_counted(
+    root: &Path,
+    with_chunks: bool,
+    progress: Option<&AtomicU64>,
+) -> io::Result<SourceManifest> {
     let root = fs::canonicalize(root)?;
     if !root.is_dir() {
         return Err(invalid(
             "select the installed game folder, not a file or cache",
         ));
     }
-    let files = inspect_files(&root, &required_files(), with_chunks)?;
+    let files = inspect_files_counted(&root, &required_files(), with_chunks, progress)?;
     if let Some(empty) = files.iter().find(|f| f.size == 0) {
         return Err(invalid(format!(
             "empty required candidate file: {}; finish/verify the Steam installation",
@@ -399,6 +451,21 @@ mod tests {
         assert_eq!(vdf_value(text, "appid").as_deref(), Some("2552430"));
         assert_eq!(vdf_value(text, "language").as_deref(), Some("english"));
         assert_eq!(vdf_value(text, "buildid"), None);
+    }
+
+    #[test]
+    fn progress_counts_every_hashed_byte() {
+        let fixture = Fixture::new();
+        populate(&fixture.0);
+        let progress = AtomicU64::new(0);
+        let manifest = scan_with_progress(&fixture.0, true, &progress).unwrap();
+        let total = required_bytes(&fixture.0);
+        assert_eq!(total, manifest.files.iter().map(|f| f.size).sum::<u64>());
+        assert_eq!(progress.load(Ordering::Relaxed), total);
+        assert_eq!(
+            manifest.content_identity,
+            scan(&fixture.0).unwrap().content_identity
+        );
     }
 
     #[test]
