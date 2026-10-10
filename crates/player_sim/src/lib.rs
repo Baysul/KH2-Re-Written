@@ -226,12 +226,91 @@ pub struct Input {
     pub probe_blocked: bool,
 }
 
+/// The player's collision body as the controller hands it to the world.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Body {
+    pub radius: f32,
+    pub height: f32,
+    /// Highest ledge followed without leaving the ground (snap-down limit).
+    pub step: f32,
+}
+
+/// The result of one tick's body-versus-map move.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Collided {
+    /// Feet position after the move.
+    pub position: Vec3,
+    /// Grounded move: a floor is still underfoot (false = walked off).
+    /// Airborne move: the body reached a floor while not rising (landed).
+    pub on_floor: bool,
+}
+
 /// Room collision as used by the controller.
 pub trait World {
     /// Highest walkable surface at (x, z) whose height is at most `top`.
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32>;
     /// Pushes a body circle out of walls overlapping the vertical span.
     fn resolve_walls(&self, position: [f32; 2], radius: f32, low: f32, high: f32) -> [f32; 2];
+
+    /// One body-versus-map move per tick, as FUN_1403b89a0 hands the tick's
+    /// whole displacement (mode velocity, root motion, knock-slide) to the
+    /// collision solver: from the feet at `start` by `displacement` (Y-up).
+    /// The default is the test room's solver built from `floor` and
+    /// `resolve_walls`; a map collision port overrides it.
+    fn collide(&self, start: Vec3, displacement: Vec3, airborne: bool, body: &Body) -> Collided {
+        let [x, y, z] = start;
+        let [dx, dy, dz] = displacement;
+        let low = y + body.step;
+        let mut position = start;
+        if dx != 0. || dz != 0. {
+            let moved = self.resolve_walls([x + dx, z + dz], body.radius, low, y + body.height);
+            // A floor reachable from this height must exist under the new point.
+            match self.floor(moved[0], moved[1], low) {
+                Some(floor) => {
+                    position[0] = moved[0];
+                    position[2] = moved[1];
+                    if !airborne {
+                        if y - floor > body.step {
+                            return Collided {
+                                position,
+                                on_floor: false,
+                            };
+                        }
+                        position[1] = floor;
+                    }
+                }
+                None if !airborne => {
+                    return Collided {
+                        position: start,
+                        on_floor: true,
+                    };
+                }
+                None => {}
+            }
+        }
+        if !airborne {
+            return Collided {
+                position,
+                on_floor: true,
+            };
+        }
+        let next = y + dy;
+        if dy <= 0.
+            && let Some(floor) = self.floor(position[0], position[2], low)
+            && next <= floor
+        {
+            position[1] = floor;
+            return Collided {
+                position,
+                on_floor: true,
+            };
+        }
+        position[1] = next;
+        Collided {
+            position,
+            on_floor: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -274,6 +353,9 @@ pub struct Player {
 
 /// Guard recoil knock strength (DAT_140585efc).
 pub const GUARD_KNOCK: f32 = 200.;
+/// Horizontal speed cap kept when walking off a ledge (reported by the map
+/// collision trace of FUN_1403b4780 / FUN_1403b9090).
+pub const WALK_OFF_SPEED: f32 = 8.;
 
 /// What changed during one tick, for logging and presentation.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -519,36 +601,12 @@ impl Player {
         [direction[0] * speed, direction[1] * speed]
     }
 
-    /// Moves horizontally, keeping the body out of walls and off ledges that
-    /// are higher than a step. Returns whether ground remains underfoot.
-    fn travel(&mut self, delta: [f32; 2], p: &Params, world: &impl World, grounded: bool) -> bool {
-        let [x, y, z] = self.position;
-        let wanted = [x + delta[0], z + delta[1]];
-        let low = y + p.step_height;
-        let moved = world.resolve_walls(wanted, p.radius, low, y + p.height);
-        // A floor reachable from this height must exist under the new point.
-        match world.floor(moved[0], moved[1], low) {
-            Some(floor) => {
-                self.position[0] = moved[0];
-                self.position[2] = moved[1];
-                if grounded {
-                    if y - floor <= p.step_height {
-                        self.position[1] = floor;
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    true
-                }
-            }
-            None => grounded,
-        }
-    }
-
     pub fn tick(&mut self, input: &Input, p: &Params, clips: &Clips, world: &impl World) -> Step {
         let mut step = Step::default();
         self.frame = self.frame.saturating_add(1);
+        // This tick's whole displacement: mode velocity, root motion and
+        // knock-slide, collided once at the end (FUN_1403b89a0).
+        let mut disp = [0f32; 3];
         // Mode 0 move request this tick (obj+0x10 × +0x1c): the stick, but
         // only while an ANB range 0–2 is active (the same gate as commands);
         // LAND before tick 12, attacks, damage and guard leave it idle [I:
@@ -643,9 +701,7 @@ impl Player {
                     self.arc = physics::Arc::launch(self.position[1], height);
                     self.air_velocity = velocity;
                     self.sampler.reset();
-                    self.airborne(
-                        input, moving, magnitude, direction, p, clips, world, &mut step,
-                    );
+                    disp = self.airborne(input, moving, magnitude, direction, p, clips, &mut step);
                 }
             }
             Action::Attack(i) => {
@@ -657,11 +713,8 @@ impl Player {
                 if let (Some(now), Some(before)) = (at(self.frame), at(self.frame - 1)) {
                     let (s, c) = self.yaw.sin_cos();
                     let (dx, dz) = (now[0] - before[0], now[2] - before[2]);
-                    let delta = [dx * c + dz * s, -dx * s + dz * c];
-                    if (delta[0] != 0. || delta[1] != 0.) && !self.travel(delta, p, world, true) {
-                        self.drop_off(delta, &mut step);
-                        return step;
-                    }
+                    disp[0] += dx * c + dz * s;
+                    disp[2] += -dx * s + dz * c;
                 }
                 let recovery = self.frame >= clip.blend_to_idle.unwrap_or(clip.end);
                 let ready = self.actionable(clips);
@@ -678,9 +731,7 @@ impl Player {
                 }
             }
             Action::Jump | Action::Fall | Action::AirAttack(_) => {
-                self.airborne(
-                    input, moving, magnitude, direction, p, clips, world, &mut step,
-                );
+                disp = self.airborne(input, moving, magnitude, direction, p, clips, &mut step);
             }
             Action::Hurt(_) | Action::Guard | Action::GuardRecoil => {
                 // Locked until the clip's range-2 tick (hurt 50, guard 52,
@@ -728,17 +779,47 @@ impl Player {
                     .store([self.air_velocity[0] * dt, 0., self.air_velocity[1] * dt]);
             }
             let [vx, _, vz] = self.sampler.displacement();
-            if (vx != 0. || vz != 0.) && !self.travel([vx, vz], p, world, true) {
-                self.drop_off([vx, vz], &mut step);
-            }
+            disp[0] += vx;
+            disp[2] += vz;
         }
         if let Some(knock) = self.knock.as_mut() {
             match knock.step() {
                 Some(d) => {
-                    let grounded = !self.in_air();
-                    self.travel([d[0], d[2]], p, world, grounded);
+                    disp[0] += d[0];
+                    disp[2] += d[2];
                 }
                 None => self.knock = None,
+            }
+        }
+        let airborne = self.in_air();
+        if airborne || disp[0] != 0. || disp[2] != 0. {
+            let body = Body {
+                radius: p.radius,
+                height: p.height,
+                step: p.step_height,
+            };
+            let moved = world.collide(self.position, disp, airborne, &body);
+            self.position = moved.position;
+            if airborne && moved.on_floor {
+                // Landing switches to the ground mode and plays the land
+                // motion (FUN_1403cb940: obj+0x11c = 5, which FUN_1403d78d0
+                // also sets for aerial attacks), cutting an aerial swing
+                // short. The air velocity stays in obj+0x20 for LAND's
+                // inertial slide.
+                self.vertical_speed = 0.;
+                self.sampler = physics::Sampler::default();
+                step.landed = true;
+                self.start(Action::Land, &mut step);
+            } else if !airborne && !moved.on_floor {
+                // Walked off a ledge: fall keeping this tick's horizontal
+                // displacement, capped at 8 per tick, as the velocity.
+                let h = disp[0].hypot(disp[2]);
+                let k = if h > WALK_OFF_SPEED {
+                    WALK_OFF_SPEED / h
+                } else {
+                    1.
+                };
+                self.drop_off([disp[0] * k, disp[2] * k], &mut step);
             }
         }
         step
@@ -885,6 +966,8 @@ impl Player {
         }
     }
 
+    /// Mode 1 for one tick: action changes in the air, then this tick's
+    /// displacement (collided by `tick`).
     #[allow(clippy::too_many_arguments)]
     fn airborne(
         &mut self,
@@ -894,25 +977,14 @@ impl Player {
         direction: [f32; 2],
         p: &Params,
         clips: &Clips,
-        world: &impl World,
         step: &mut Step,
-    ) {
+    ) -> [f32; 3] {
         if let Action::AirAttack(i) = self.action {
             let clip = &clips.attacks[i].clip;
             self.face_target(clip, input);
             let ready = self.actionable(clips);
             if input.attack && self.try_attack(input, p, clips, ready, moving, direction, step) {
             } else if self.frame >= clip.end {
-                let [x, y, z] = self.position;
-                // A swing that touched down finishes on the ground.
-                if world
-                    .floor(x, z, y + 1e-3)
-                    .is_some_and(|f| (y - f).abs() < 1e-3)
-                {
-                    self.start(Action::Land, step);
-                    step.landed = true;
-                    return;
-                }
                 self.start(Action::Fall, step);
                 self.blend = clips.attacks[i].blend;
             }
@@ -961,29 +1033,9 @@ impl Player {
             self.sampler
                 .store([self.air_velocity[0] * dt, dy, self.air_velocity[1] * dt]);
         }
-        let [vx, vy, vz] = self.sampler.displacement();
-        self.vertical_speed = vy;
-        if vx != 0. || vz != 0. {
-            self.travel([vx, vz], p, world, false);
-        }
-        let [x, y, z] = self.position;
-        let next = y + self.vertical_speed;
-        if self.vertical_speed <= 0.
-            && let Some(floor) = world.floor(x, z, y + p.step_height)
-            && next <= floor
-        {
-            self.position[1] = floor;
-            self.vertical_speed = 0.;
-            // Landing switches to the ground mode and plays the land motion
-            // (FUN_1403cb940: obj+0x11c = 5, which FUN_1403d78d0 also sets
-            // for aerial attacks), cutting an aerial swing short. The air
-            // velocity stays in obj+0x20 for LAND's inertial slide.
-            self.sampler = physics::Sampler::default();
-            step.landed = true;
-            self.start(Action::Land, step);
-            return;
-        }
-        self.position[1] = next;
+        let d = self.sampler.displacement();
+        self.vertical_speed = d[1];
+        d
     }
 }
 
@@ -1459,6 +1511,48 @@ mod tests {
         // at 8 toward +X, then the first two-frame sample drags it ×0.95.
         assert!((player.arc.rise - physics::rise_time(21.)).abs() < 1e-4);
         assert!((player.air_velocity[0] - 7.6).abs() < 1e-4);
+    }
+
+    /// A world that counts collide calls and moves freely on a flat floor.
+    struct Counting(std::cell::Cell<u32>);
+    impl World for Counting {
+        fn floor(&self, _x: f32, _z: f32, top: f32) -> Option<f32> {
+            (top >= -1e-3).then_some(0.)
+        }
+        fn resolve_walls(&self, p: [f32; 2], _r: f32, _l: f32, _h: f32) -> [f32; 2] {
+            p
+        }
+        fn collide(&self, start: Vec3, d: Vec3, airborne: bool, _b: &Body) -> Collided {
+            self.0.set(self.0.get() + 1);
+            let y = if airborne {
+                (start[1] + d[1]).max(0.)
+            } else {
+                0.
+            };
+            Collided {
+                position: [start[0] + d[0], y, start[2] + d[2]],
+                on_floor: !airborne || (d[1] <= 0. && y == 0.),
+            }
+        }
+    }
+
+    #[test]
+    fn one_collide_call_per_tick_with_knock_and_movement() {
+        let (p, c) = (params(), clips());
+        let w = Counting(std::cell::Cell::new(0));
+        let mut player = Player::new([0., 0., 0.], 0.);
+        player.guard_recoil([0., -1.], &c);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        for t in 0..120u32 {
+            let input = if t == 60 { jump } else { hold([1., 0.]) };
+            let before = w.0.get();
+            player.tick(&input, &p, &c, &w);
+            assert!(w.0.get() - before <= 1, "tick {t}");
+        }
+        assert!(player.position[0] > 0.);
     }
 
     #[test]
