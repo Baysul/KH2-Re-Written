@@ -58,8 +58,12 @@ pub struct ObjParams {
     pub fall_max: f32,
     /// +0x13c (PRTY word 8).
     pub word8: f32,
-    /// +0x140 (PRTY word 10).
+    /// +0x140 (PRTY word 10); FUN_140422350 also reads it from the record
+    /// (+0x28) as the inertia of range-42 movement.
     pub word10: f32,
+    /// PRTY word 11 (record +0x2c): the drag of range-42 movement. Not part
+    /// of the init block; 0 without a record.
+    pub word11: f32,
 }
 
 impl ObjParams {
@@ -74,6 +78,7 @@ impl ObjParams {
             fall_max: sstm_fall_max,
             word8: 0.,
             word10: f32::from_bits(0x3f73_3333),
+            word11: 0.,
         }
     }
 
@@ -86,6 +91,7 @@ impl ObjParams {
         self.turn = f32::from_bits(words[3]);
         self.word8 = f32::from_bits(words[8]);
         self.word10 = f32::from_bits(words[10]);
+        self.word11 = f32::from_bits(words[11]);
     }
 }
 

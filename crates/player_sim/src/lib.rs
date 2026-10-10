@@ -30,6 +30,10 @@ pub struct Params {
     pub turn_speed: f32,
     /// Maximum downward speed, units per tick.
     pub fall_max: f32,
+    /// PRTY words 10/11 (record +0x28/+0x2c): inertia and drag of mode 0's
+    /// range-42 movement (FUN_140422350 → FUN_1403b7ad0).
+    pub land_inertia: f32,
+    pub land_drag: f32,
     /// Test-room choice: highest ledge climbed without jumping.
     pub step_height: f32,
     /// Stick magnitude from which Sora runs (`DAT_140585c7c`, 0.8).
@@ -77,6 +81,19 @@ pub struct Clip {
     pub blend_to_idle: Option<u32>,
     /// Range trigger 3, "No gravity".
     pub no_gravity: Vec<(u32, u32)>,
+    /// Range triggers 0, 1 and 2: commands are taken while one is active
+    /// (obj+0x18c & 0x1c, FUN_14040d810 / FUN_1401b15f0).
+    pub actionable: Vec<(u32, u32)>,
+    /// Range trigger 42: mode 0 moves inertially (obj+0x190 bit 0,
+    /// FUN_140422350 → FUN_1403b7ad0 with PRTY words 10/11).
+    pub inertia: Vec<(u32, u32)>,
+    /// Range trigger 28: turn toward the target by up to `deg` per tick.
+    pub turn_to_target: Vec<(u32, u32, f32)>,
+    /// Frame trigger 21: turn toward the target by up to `deg` at a tick.
+    pub face_target: Vec<(u32, f32)>,
+    /// Frame trigger 0: the pending physics mode starts (jump take-off,
+    /// FUN_14040dd70).
+    pub takeoff: Option<u32>,
 }
 
 impl Clip {
@@ -108,12 +125,19 @@ impl Clip {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AttackStep {
     pub clip: Clip,
-    /// PTYA "Jump" field, applied as a lift height when an aerial step starts
-    /// (public label only; the installed use is unobserved).
+    /// PTYA +0xc "Jump": hop height when the step starts with no target
+    /// (FUN_1403d78d0).
     pub hop: f32,
     /// PTYA +0x1c (speed maximum): horizontal speed of a hop without a
-    /// target (FUN_1403d78d0).
+    /// target, and the cap toward one (FUN_1403d78d0).
     pub hop_speed: f32,
+    /// PTYA +0x10 / +0x14: hop height limits toward a target.
+    pub hop_max: f32,
+    pub hop_min: f32,
+    /// PTYA +0x18: minimum hop speed toward a target.
+    pub hop_speed_min: f32,
+    /// PTYA +0x3c: distance adjustment toward a target.
+    pub hop_reach: f32,
     /// PTYA +0x38: blend into the next motion when this one ends
     /// (FUN_1403d78d0 → FUN_1403c8310).
     pub blend: f32,
@@ -181,6 +205,10 @@ pub struct Input {
     /// XZ direction toward the current target, if any (Guard turns to it
     /// at its first tick: frame trigger 21, up to 360°).
     pub target: Option<[f32; 2]>,
+    /// Target height above the player (Y-up) and the two bodies' summed
+    /// radii, for aerial hops toward it (FUN_1403d78d0 / FUN_1403d7520).
+    pub target_rise: f32,
+    pub target_reach: f32,
 }
 
 /// Room collision as used by the controller.
@@ -204,6 +232,9 @@ pub struct Player {
     pub air_velocity: [f32; 2],
     /// Physics-mode velocity sampling (FUN_1403b89a0, obj+0xba8/+0xb98).
     pub sampler: physics::Sampler,
+    /// A jump waiting for its take-off trigger (obj+0x648 = 1): height and
+    /// take-off velocity (+0xe0).
+    pub pending_jump: Option<(f32, [f32; 2])>,
     pub action: Action,
     /// Ticks since the current action started.
     pub frame: u32,
@@ -255,6 +286,7 @@ impl Player {
             arc: physics::Arc::default(),
             air_velocity: [0.; 2],
             sampler: physics::Sampler::default(),
+            pending_jump: None,
             action: Action::Idle,
             frame: 0,
             armed: false,
@@ -278,9 +310,10 @@ impl Player {
         clips: &Clips,
     ) -> Option<Action> {
         self.knock = physics::Knock::new([direction[0], 0., direction[1]], strength, 0.);
-        if self.action.airborne() || index >= clips.hurt.len() {
+        if self.in_air() || index >= clips.hurt.len() {
             return None;
         }
+        self.pending_jump = None;
         self.action = Action::Hurt(index);
         self.frame = 0;
         self.blend = 0.;
@@ -293,7 +326,7 @@ impl Player {
     /// recoil and knock-slide away at 200 × 0.1 per tick (×0.9 per tick,
     /// stopping below 1). `away` is the XZ unit vector from the attacker.
     pub fn guard_recoil(&mut self, away: [f32; 2], clips: &Clips) -> Option<Action> {
-        if self.action.airborne() || clips.guard_recoil.is_none() {
+        if self.in_air() || clips.guard_recoil.is_none() {
             return None;
         }
         self.yaw = (-away[0]).atan2(-away[1]);
@@ -361,6 +394,17 @@ impl Player {
         self.idle_ticks = 0;
     }
 
+    /// In the jump/fall mode: airborne actions once any pending jump has
+    /// taken off.
+    pub fn in_air(&self) -> bool {
+        self.action.airborne() && self.pending_jump.is_none()
+    }
+
+    /// An ANB range 0, 1 or 2 covers the current motion frame.
+    fn actionable(&self, clips: &Clips) -> bool {
+        Clip::within(&self.clip(clips).actionable, self.motion_frame(clips))
+    }
+
     /// Motion frame to sample for the current action.
     pub fn motion_frame(&self, clips: &Clips) -> u32 {
         let clip = self.clip(clips);
@@ -378,29 +422,54 @@ impl Player {
         self.yaw = wrap_angle(self.yaw + delta.clamp(-rate, rate));
     }
 
-    /// PTYA attack start with a positive Jump field (FUN_1403d78d0, no
-    /// target): a new jump arc of that height from the current position,
-    /// moving along the facing at the PTYA speed maximum (+0x1c).
-    fn lift(&mut self, step: &AttackStep) {
-        if step.hop.is_finite() && step.hop > 0. {
-            self.arc = physics::Arc::launch(self.position[1], step.hop);
-            let speed = if step.hop_speed.is_finite() {
-                step.hop_speed
-            } else {
-                0.
-            };
-            self.air_velocity = [self.yaw.sin() * speed, self.yaw.cos() * speed];
-            self.sampler.reset();
+    /// PTYA attack start with a positive Jump field (FUN_1403d78d0), then
+    /// the mode's jump slot (FUN_140409ad0: FUN_1403cbb00 + mode 1). With a
+    /// target the height is its rise clamped to [+0x14, +0x10] and the speed
+    /// (distance − reach + PTYA +0x3c) / √(2h/g) clamped to [+0x18, +0x1c]
+    /// toward it; without one, PTYA +0xc along the facing at +0x1c.
+    fn lift(&mut self, step: &AttackStep, input: &Input) {
+        if !(step.hop.is_finite() && step.hop > 0.) {
+            return;
         }
+        let finite = |v: f32| if v.is_finite() { v } else { 0. };
+        let (height, dir, speed) = match input.target {
+            Some(t) if t[0].hypot(t[1]) > 1e-4 => {
+                let (lo, hi) = (finite(step.hop_min), finite(step.hop_max));
+                let rise = input.target_rise;
+                let height = if rise < lo {
+                    lo
+                } else if rise > hi {
+                    hi
+                } else {
+                    rise
+                };
+                let len = t[0].hypot(t[1]);
+                let reach = len - input.target_reach + finite(step.hop_reach);
+                let per_tick = reach / physics::rise_time(height);
+                let (smin, smax) = (finite(step.hop_speed_min), finite(step.hop_speed));
+                let speed = if smin <= per_tick {
+                    per_tick.min(smax)
+                } else {
+                    smin
+                };
+                (height, [t[0] / len, t[1] / len], speed)
+            }
+            _ => (
+                step.hop,
+                [self.yaw.sin(), self.yaw.cos()],
+                finite(step.hop_speed),
+            ),
+        };
+        self.arc = physics::Arc::launch(self.position[1], height);
+        self.air_velocity = [dir[0] * speed, dir[1] * speed];
+        self.sampler.reset();
     }
 
-    /// Jump (mode 0 slot +0x48, FUN_140422630 → FUN_1403cbb00): the arc
-    /// of the PRTY jump height from the current position, taking off with
-    /// the stick velocity (obj+0xe0 → +0x20 in FUN_1403cbd30).
+    /// Jump (mode 0 slot +0x48, FUN_140422630 → FUN_1403cbb00): plays JUMP
+    /// and queues the arc of the PRTY jump height with the stick velocity
+    /// (obj+0xe0); the jump mode starts at JUMP's take-off trigger.
     fn jump(&mut self, p: &Params, velocity: [f32; 2], step: &mut Step) {
-        self.arc = physics::Arc::launch(self.position[1], p.jump_height);
-        self.air_velocity = velocity;
-        self.sampler.reset();
+        self.pending_jump = Some((p.jump_height, velocity));
         self.vertical_speed = 0.;
         self.air_combo_spent = false;
         self.start(Action::Jump, step);
@@ -411,6 +480,7 @@ impl Player {
     /// last ground velocity]).
     fn drop_off(&mut self, velocity: [f32; 2], step: &mut Step) {
         self.arc = physics::Arc::fall(self.position[1], 0.);
+        self.pending_jump = None;
         self.air_velocity = velocity;
         self.sampler.reset();
         self.vertical_speed = 0.;
@@ -462,10 +532,13 @@ impl Player {
     pub fn tick(&mut self, input: &Input, p: &Params, clips: &Clips, world: &impl World) -> Step {
         let mut step = Step::default();
         self.frame = self.frame.saturating_add(1);
-        // Mode 0 move request this tick (obj+0x10 × +0x1c); zero outside
-        // locomotion [I: other actions leave the request idle].
+        // Mode 0 move request this tick (obj+0x10 × +0x1c): the stick, but
+        // only while an ANB range 0–2 is active (the same gate as commands);
+        // LAND before tick 12, attacks, damage and guard leave it idle [I:
+        // the stick feed's gate was not traced; the original locks movement
+        // on landing].
         let mut ground_request = [0f32; 2];
-        let was_airborne = self.action.airborne();
+        let was_in_air = self.in_air();
         let magnitude = input.direction[0].hypot(input.direction[1]).min(1.);
         // Any stick past the pad's dead zone moves (FUN_1403a8fa0: speed is
         // set whenever the stick magnitude is above 0).
@@ -478,27 +551,38 @@ impl Player {
         } else {
             [0., 0.]
         };
+        let stick = Self::stick_velocity(direction, magnitude, p);
         match self.action {
             Action::Idle | Action::Walk | Action::Run | Action::Land => {
-                if input.guard && !input.attack && clips.guard.is_some() {
+                // Commands need an active ANB range 0, 1 or 2 (obj+0x18c &
+                // 0x1c, FUN_1401b15f0): always during locomotion, from
+                // LAND's range-2 start (tick 12 installed) after a landing.
+                let ready = self.actionable(clips);
+                if ready && input.guard && !input.attack && clips.guard.is_some() {
                     self.start_guard(input, &mut step);
-                } else if input.attack && !clips.ground_combo.is_empty() {
+                } else if ready && input.attack && !clips.ground_combo.is_empty() {
                     if moving {
                         self.yaw = direction[0].atan2(direction[1]);
                     }
                     self.arm();
                     self.start(Action::Attack(0), &mut step);
-                } else if input.jump {
-                    self.jump(p, Self::stick_velocity(direction, magnitude, p), &mut step);
+                } else if ready && input.jump {
+                    self.jump(p, stick, &mut step);
                 } else {
-                    // Landing holds until its "Blend to idle" range starts.
-                    let landing = self.action == Action::Land
-                        && self.frame < clips.land.blend_to_idle.unwrap_or(clips.land.end);
+                    let landing = self.action == Action::Land;
                     // FUN_1403a8fa0: run speed from stick magnitude 0.8
                     // (DAT_140585c7c), walk speed below; FUN_140422520 then
-                    // plays RUN when speed ≥ (walk + run) / 2, else WALK.
+                    // plays RUN when speed ≥ (walk + run) / 2, else WALK, but
+                    // only while ANB range 0 or 2 is active (obj+0x18c bits
+                    // 2/4); LAND otherwise plays to its end, then idles.
                     let target = if !moving {
-                        if landing { Action::Land } else { Action::Idle }
+                        if landing && self.frame < clips.land.end {
+                            Action::Land
+                        } else {
+                            Action::Idle
+                        }
+                    } else if !ready {
+                        self.action
                     } else if magnitude < p.walk_threshold {
                         Action::Walk
                     } else {
@@ -519,13 +603,34 @@ impl Player {
                             self.start(target, &mut step);
                         }
                     }
-                    if moving {
+                    if moving && ready {
                         // FUN_1403b4780 turns the facing at +0x134 per tick;
                         // FUN_140422350 moves along the stick direction at
-                        // the full walk/run speed.
+                        // the full walk/run speed (inertially under range 42).
                         self.turn_toward(direction, p.turn_speed);
-                        ground_request = Self::stick_velocity(direction, magnitude, p);
+                        ground_request = stick;
                     }
+                }
+            }
+            Action::Jump if self.pending_jump.is_some() => {
+                // The jump mode is pending (obj+0x648 = 1) until the JUMP
+                // motion's frame trigger 0 (tick 4 installed) switches to it
+                // (FUN_14040dd70); until then mode 0 keeps going, with JUMP's
+                // range 1 (tick 8) not yet feeding the stick.
+                if self.actionable(clips) {
+                    ground_request = stick;
+                }
+                if self.frame >= clips.jump.takeoff.unwrap_or(0)
+                    && let Some((height, velocity)) = self.pending_jump.take()
+                {
+                    // FUN_1403cbd30 (mode 1 enter): the arc's base is the
+                    // take-off height; the stored +0xe0 velocity applies.
+                    self.arc = physics::Arc::launch(self.position[1], height);
+                    self.air_velocity = velocity;
+                    self.sampler.reset();
+                    self.airborne(
+                        input, moving, magnitude, direction, p, clips, world, &mut step,
+                    );
                 }
             }
             Action::Attack(i) => {
@@ -533,6 +638,7 @@ impl Player {
                 if input.attack {
                     self.queued_attack = true;
                 }
+                self.face_target(clip, input);
                 // Root motion: the attack's root-curve change this tick.
                 let root = &clips.ground_combo[i].root;
                 let at = |f: u32| root.get(clip.held_frame(f) as usize).copied();
@@ -553,7 +659,7 @@ impl Player {
                     }
                     self.start(Action::Attack(i + 1), &mut step);
                 } else if recovery && input.jump {
-                    self.jump(p, Self::stick_velocity(direction, magnitude, p), &mut step);
+                    self.jump(p, stick, &mut step);
                 } else if recovery && moving {
                     self.start(Action::Idle, &mut step);
                 } else if self.frame >= clip.end {
@@ -566,14 +672,10 @@ impl Player {
                     input, moving, magnitude, direction, p, clips, world, &mut step,
                 );
             }
-            Action::Hurt(i) => {
-                if self.frame >= clips.hurt[i].end {
-                    self.start(Action::Idle, &mut step);
-                }
-            }
-            Action::Guard | Action::GuardRecoil => {
-                // Locked until the clip's range-2 tick, then input is taken
-                // again (FUN_1401b15f0 actionable bits).
+            Action::Hurt(_) | Action::Guard | Action::GuardRecoil => {
+                // Locked until the clip's range-2 tick (hurt 50, guard 52,
+                // recoil 40 installed), then input is taken again
+                // (FUN_1401b15f0 actionable bits).
                 let clip = self.clip(clips);
                 let (end, ready) = (clip.end, clip.blend_to_idle.unwrap_or(clip.end));
                 if self.frame >= ready {
@@ -581,25 +683,41 @@ impl Player {
                         if moving {
                             self.yaw = direction[0].atan2(direction[1]);
                         }
+                        self.arm();
                         self.start(Action::Attack(0), &mut step);
                     } else if input.guard && clips.guard.is_some() {
                         self.start_guard(input, &mut step);
                     } else if input.jump {
-                        self.jump(p, Self::stick_velocity(direction, magnitude, p), &mut step);
+                        self.jump(p, stick, &mut step);
                     } else if moving || self.frame >= end {
                         self.start(Action::Idle, &mut step);
                     }
                 }
             }
         }
-        if !was_airborne && !self.action.airborne() {
-            // Mode 0 (FUN_140422350) sampled by FUN_1403b89a0: the request
-            // × the two-frame step, spread over two frames.
+        if !was_in_air && !self.in_air() {
+            // Mode 0 (FUN_140422350) sampled by FUN_1403b89a0 every second
+            // frame. Under ANB range 42 (obj+0x190 bit 0, e.g. all of LAND)
+            // the velocity eases toward the request through FUN_1403b7ad0
+            // with PRTY words 10/11 as inertia and drag; otherwise it is the
+            // request itself.
             let speed = ground_request[0].hypot(ground_request[1]);
             if self.sampler.due(speed) {
                 let dt = physics::PHYSICS_STEP;
+                let clip = self.clip(clips);
+                if Clip::within(&clip.inertia, self.frame) {
+                    let dir = if speed > 0. {
+                        [ground_request[0] / speed, ground_request[1] / speed]
+                    } else {
+                        [0.; 2]
+                    };
+                    self.air_velocity =
+                        physics::steer(self.air_velocity, dir, speed, p.land_inertia, p.land_drag);
+                } else {
+                    self.air_velocity = ground_request;
+                }
                 self.sampler
-                    .store([ground_request[0] * dt, 0., ground_request[1] * dt]);
+                    .store([self.air_velocity[0] * dt, 0., self.air_velocity[1] * dt]);
             }
             let [vx, _, vz] = self.sampler.displacement();
             if (vx != 0. || vz != 0.) && !self.travel([vx, vz], p, world, true) {
@@ -609,7 +727,7 @@ impl Player {
         if let Some(knock) = self.knock.as_mut() {
             match knock.step() {
                 Some(d) => {
-                    let grounded = !self.action.airborne();
+                    let grounded = !self.in_air();
                     self.travel([d[0], d[2]], p, world, grounded);
                 }
                 None => self.knock = None,
@@ -629,6 +747,33 @@ impl Player {
         self.start(Action::Guard, step);
     }
 
+    /// Attack facing toward the target: ANB range 28 turns by up to its
+    /// parameter in degrees per tick (FUN_14040d810 → FUN_1403d4b10 →
+    /// FUN_1403d3a90, `DAT_1405b15b4` = π/180) and frame trigger 21 by up to
+    /// its parameter at that tick, both only beyond 50 units horizontally
+    /// (`DAT_1405b532c`).
+    fn face_target(&mut self, clip: &Clip, input: &Input) {
+        let Some(t) = input.target else { return };
+        if t[0].hypot(t[1]) <= 50. {
+            return;
+        }
+        let frame = self.frame;
+        let ranges = clip
+            .turn_to_target
+            .iter()
+            .filter(|&&(a, b, _)| (a..=b).contains(&frame))
+            .map(|&(_, _, deg)| deg);
+        let ticks = clip
+            .face_target
+            .iter()
+            .filter(|&&(f, _)| f == frame)
+            .map(|&(_, deg)| deg);
+        let limit = ranges.chain(ticks).fold(0f32, f32::max);
+        if limit > 0. {
+            self.turn_toward(t, limit * std::f32::consts::PI / 180.);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn airborne(
         &mut self,
@@ -646,6 +791,7 @@ impl Player {
             if input.attack {
                 self.queued_attack = true;
             }
+            self.face_target(clip, input);
             if self.queued_attack
                 && Clip::within(&clip.combo_windows, self.frame)
                 && i + 1 < clips.air_combo.len()
@@ -654,7 +800,8 @@ impl Player {
                     self.yaw = direction[0].atan2(direction[1]);
                 }
                 self.start(Action::AirAttack(i + 1), step);
-                self.lift(&clips.air_combo[i + 1]);
+                self.face_target(&clips.air_combo[i + 1].clip, input);
+                self.lift(&clips.air_combo[i + 1], input);
             } else if self.frame >= clip.end {
                 let [x, y, z] = self.position;
                 // A swing that touched down finishes on the ground.
@@ -669,35 +816,40 @@ impl Player {
                 self.start(Action::Fall, step);
                 self.blend = clips.air_combo[i].blend;
             }
-        } else if input.attack && !self.air_combo_spent && !clips.air_combo.is_empty() {
+        } else if input.attack
+            && !self.air_combo_spent
+            && !clips.air_combo.is_empty()
+            && self.actionable(clips)
+        {
+            // Air attacks need an active ANB range 0–2 too: JUMP from its
+            // range-1 start (tick 8 installed), FALL throughout.
             self.air_combo_spent = true;
             if moving {
                 self.yaw = direction[0].atan2(direction[1]);
             }
             self.arm();
             self.start(Action::AirAttack(0), step);
-            self.lift(&clips.air_combo[0]);
+            self.face_target(&clips.air_combo[0].clip, input);
+            self.lift(&clips.air_combo[0], input);
         } else if self.action == Action::Jump && self.arc.falling_motion() {
             // FUN_1403cb680 → FUN_1403cb610: FALL (motion 4) blended over 8
             // once the apex is within 5 ticks.
             self.start(Action::Fall, step);
         }
-        // ANB "No gravity" ranges hold the height while the curve's time
-        // keeps running (FUN_1403cb500 with obj+0x18c no-gravity bits) [I:
-        // trigger 3 → those bits].
-        let floating = match self.action {
-            Action::AirAttack(i) => Clip::within(&clips.air_combo[i].clip.no_gravity, self.frame),
-            _ => false,
-        };
+        // ANB "No gravity" ranges (range 3 → obj+0x18c bit 5, FUN_14040d810)
+        // hold the height while the curve's time keeps running
+        // (FUN_1403cb500).
+        let floating = Clip::within(&self.clip(clips).no_gravity, self.frame);
         // Mode 1 horizontal (FUN_1403cb360 → FUN_1403b7ad0 with 0.9, 0.95):
         // the velocity keeps 90% of itself and takes 10% of the stick
-        // velocity, or decays ×0.95 without a stick. Attacks take no stick
-        // [I: the move request is idle during an attack motion].
-        let attacking = matches!(self.action, Action::AirAttack(_));
-        if moving && !attacking {
+        // velocity, or decays ×0.95 without a stick. The stick only feeds it
+        // under an ANB range 0–2: JUMP from tick 8, FALL throughout, never
+        // during aerial attacks [I, as on the ground].
+        let steering = moving && self.actionable(clips);
+        if steering {
             self.turn_toward(direction, p.turn_speed);
         }
-        let (dir, speed) = if attacking || !moving {
+        let (dir, speed) = if !steering {
             ([0.; 2], 0.)
         } else {
             let v = Self::stick_velocity(direction, magnitude, p);
@@ -731,7 +883,8 @@ impl Player {
         {
             self.position[1] = floor;
             self.vertical_speed = 0.;
-            // Landing switches to the ground mode (FUN_1403cb940).
+            // Landing switches to the ground mode (FUN_1403cb940); the air
+            // velocity stays in obj+0x20 for LAND's inertial slide.
             self.sampler = physics::Sampler::default();
             if matches!(self.action, Action::AirAttack(_)) {
                 // Test-room choice: let the aerial swing play out on the ground.
@@ -872,6 +1025,8 @@ mod tests {
             jump_height: 185.,
             turn_speed: 0.2618,
             fall_max: 16.,
+            land_inertia: 0.9,
+            land_drag: 0.8,
             step_height: 20.,
             walk_threshold: 0.5,
             radius: 30.,
@@ -886,24 +1041,35 @@ mod tests {
                 loop_start: 0,
                 combo_windows: vec![window],
                 blend_to_idle: Some(end - 10),
-                no_gravity: vec![],
+                ..Clip::default()
             },
             hop,
             hop_speed: 0.,
+            hop_max: 0.,
+            hop_min: 0.,
+            hop_speed_min: 0.,
+            hop_reach: 0.,
             blend: 0.,
             root: Vec::new(),
         }
     }
+    /// A loop with ANB range 0 over its whole length (always actionable).
+    fn open(end: u32) -> Clip {
+        Clip {
+            actionable: vec![(0, end)],
+            ..Clip::looping(end, 0)
+        }
+    }
     fn clips() -> Clips {
         Clips {
-            idle: Clip::looping(100, 0),
-            walk: Clip::looping(60, 0),
-            run: Clip::looping(40, 0),
-            field_idle: Clip::looping(90, 0),
-            field_walk: Clip::looping(50, 0),
-            field_run: Clip::looping(36, 0),
-            jump: Clip::looping(30, 0),
-            fall: Clip::looping(30, 0),
+            idle: open(100),
+            walk: open(60),
+            run: open(40),
+            field_idle: open(90),
+            field_walk: open(50),
+            field_run: open(36),
+            jump: open(30),
+            fall: open(30),
             land: Clip::looping(12, 0),
             ground_combo: vec![
                 attack(40, (10, 25), 0.),
@@ -1026,7 +1192,7 @@ mod tests {
             ..Input::default()
         };
         player.tick(&run_jump, &p, &c, &w);
-        assert_eq!(player.air_velocity, [0., 8.]);
+        assert_eq!(player.pending_jump, Some((185., [0., 8.])));
         // Stick released: FUN_1403b7ad0 scales the velocity by 0.95 per
         // two-frame sample, moving 7.6 on each of those frames.
         let z = player.position[2];
@@ -1061,6 +1227,124 @@ mod tests {
         assert_eq!(fell, Some(26));
         assert_eq!(player.blend, 8.);
         assert!(player.position[1] < 185.);
+    }
+
+    /// The installed JUMP/LAND trigger layout: take-off at JUMP tick 4,
+    /// commands from JUMP tick 8; LAND locked until tick 12 and inertial
+    /// throughout (range 42).
+    fn installed_jump_land(c: &mut Clips) {
+        c.jump = Clip {
+            actionable: vec![(8, 26)],
+            takeoff: Some(4),
+            ..Clip::looping(26, 0)
+        };
+        c.land = Clip {
+            actionable: vec![(12, 26)],
+            inertia: vec![(0, 26)],
+            blend_to_idle: Some(12),
+            ..Clip::looping(26, 0)
+        };
+    }
+
+    #[test]
+    fn jump_takes_off_at_the_jump_trigger() {
+        let (p, mut c, w) = (params(), clips(), room());
+        installed_jump_land(&mut c);
+        let mut player = Player::new([0., 0., 0.], 0.);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&jump, &p, &c, &w);
+        assert_eq!(player.action, Action::Jump);
+        for _ in 1..4 {
+            player.tick(&Input::default(), &p, &c, &w);
+            assert_eq!(player.position[1], 0.);
+            assert!(player.pending_jump.is_some());
+        }
+        // FUN_14040dd70: frame trigger 0 switches to the jump mode.
+        player.tick(&Input::default(), &p, &c, &w);
+        assert!(player.pending_jump.is_none());
+        assert!(player.position[1] > 0.);
+        // No air attack before JUMP's range-1 start (tick 8).
+        let press = Input {
+            attack: true,
+            ..Input::default()
+        };
+        player.tick(&press, &p, &c, &w);
+        assert_eq!(player.action, Action::Jump);
+        for _ in 0..3 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        player.tick(&press, &p, &c, &w);
+        assert_eq!(player.action, Action::AirAttack(0));
+    }
+
+    #[test]
+    fn landing_locks_commands_and_slides_inertially() {
+        let (p, mut c, w) = (params(), clips(), room());
+        installed_jump_land(&mut c);
+        let mut player = Player::new([-900., 0., 0.], 0.);
+        let run_jump = Input {
+            direction: [0., 1.],
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&run_jump, &p, &c, &w);
+        let mut landed = false;
+        for _ in 0..120 {
+            if player.tick(&hold([0., 1.]), &p, &c, &w).landed {
+                landed = true;
+                break;
+            }
+        }
+        assert!(landed);
+        assert_eq!(player.action, Action::Land);
+        // Locked until LAND tick 12: no jump, no switch to running and no
+        // stick; range 42 eases the carried velocity by the PRTY drag.
+        let push = Input {
+            direction: [0., 1.],
+            jump: true,
+            ..Input::default()
+        };
+        for _ in 0..10 {
+            player.tick(&push, &p, &c, &w);
+            assert_eq!(player.action, Action::Land);
+        }
+        assert!(player.air_velocity[1] > 0.);
+        player.tick(&hold([0., 1.]), &p, &c, &w);
+        player.tick(&hold([0., 1.]), &p, &c, &w);
+        assert_eq!(player.action, Action::Run);
+    }
+
+    #[test]
+    fn aerial_hop_heads_for_the_target() {
+        let (p, mut c, w) = (params(), clips(), room());
+        c.air_combo[0].hop_max = 71.;
+        c.air_combo[0].hop_min = 21.;
+        c.air_combo[0].hop_speed_min = -8.;
+        c.air_combo[0].hop_speed = 8.;
+        let mut player = Player::new([0., 0., 0.], 0.);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&jump, &p, &c, &w);
+        for _ in 0..10 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        let press = Input {
+            attack: true,
+            target: Some([400., 0.]),
+            target_rise: -100.,
+            ..Input::default()
+        };
+        player.tick(&press, &p, &c, &w);
+        assert_eq!(player.action, Action::AirAttack(0));
+        // Height clamps to the 21 minimum; speed 400 / √(2·21/g) > 8 caps
+        // at 8 toward +X, then the first two-frame sample drags it ×0.95.
+        assert!((player.arc.rise - physics::rise_time(21.)).abs() < 1e-4);
+        assert!((player.air_velocity[0] - 7.6).abs() < 1e-4);
     }
 
     #[test]

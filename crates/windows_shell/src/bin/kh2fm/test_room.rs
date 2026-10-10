@@ -599,8 +599,30 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
         };
         match record.trigger {
             11 => clip.combo_windows.push((start, stop)),
-            2 => clip.blend_to_idle = Some(clip.blend_to_idle.map_or(start, |b: u32| b.min(start))),
+            2 => {
+                clip.blend_to_idle = Some(clip.blend_to_idle.map_or(start, |b: u32| b.min(start)));
+                clip.actionable.push((start, stop));
+            }
+            0 | 1 => clip.actionable.push((start, stop)),
             3 => clip.no_gravity.push((start, stop)),
+            42 => clip.inertia.push((start, stop)),
+            28 => {
+                if let Some(&deg) = record.parameters.first() {
+                    clip.turn_to_target.push((start, stop, deg as f32));
+                }
+            }
+            _ => {}
+        }
+    }
+    for record in selected.triggers.iter().flat_map(|t| &t.records.frames) {
+        let frame = record.frame.max(0) as u32;
+        match record.trigger {
+            0 => clip.takeoff = Some(clip.takeoff.map_or(frame, |f: u32| f.min(frame))),
+            21 => {
+                if let Some(&deg) = record.parameters.first() {
+                    clip.face_target.push((frame, deg as f32));
+                }
+            }
             _ => {}
         }
     }
@@ -1178,6 +1200,8 @@ fn load(
         jump_height: obj_params.jump,
         turn_speed: obj_params.turn,
         fall_max: obj_params.fall_max,
+        land_inertia: obj_params.word10,
+        land_drag: obj_params.word11,
         step_height: STEP_HEIGHT,
         walk_threshold: WALK_THRESHOLD,
         radius: BODY_RADIUS,
@@ -1487,7 +1511,8 @@ fn load(
         };
         slots.push(serde_json::json!({"motion_id":ids[clip_list.len()],"slot":selected.slot,"sha256":selected.sha256,
             "end_ticks":clip.end,"loop_start":clip.loop_start,"combo_windows":clip.combo_windows,
-            "blend_to_idle":clip.blend_to_idle,"no_gravity":clip.no_gravity,
+            "blend_to_idle":clip.blend_to_idle,"no_gravity":clip.no_gravity,"actionable":clip.actionable,
+            "inertia":clip.inertia,"turn_to_target":clip.turn_to_target,"face_target":clip.face_target,"takeoff":clip.takeoff,
             "root_start":clip_poses[index].root.first().map(|r| r.to_array()),
             "root_end":clip_poses[index].root.last().map(|r| r.to_array())}));
         clip_list.push((clip, index));
@@ -1496,6 +1521,10 @@ fn load(
         clip: clip.clone(),
         hop: f32::from_bits(entry.float_bits[0]),
         hop_speed: f32::from_bits(entry.float_bits[4]),
+        hop_max: f32::from_bits(entry.float_bits[1]),
+        hop_min: f32::from_bits(entry.float_bits[2]),
+        hop_speed_min: f32::from_bits(entry.float_bits[3]),
+        hop_reach: f32::from_bits(entry.float_bits[12]),
         blend: f32::from_bits(entry.float_bits[11]),
         root: clip_poses[*index]
             .root
@@ -1623,7 +1652,7 @@ fn load(
     let summary = serde_json::json!({"event":"admission","source_qualification":"quarantined_unqualified",
         "params":{"walk_speed":params.walk_speed,"run_speed":params.run_speed,"jump_height":params.jump_height,
             "turn_speed":params.turn_speed,"fall_max":params.fall_max,"gravity":physics::G,"run_magnitude":WALK_THRESHOLD,
-            "prty_index":prty_index,"prty_offset":prty_offset,"sstm":format!("{sstm:?}")},
+            "prty_index":prty_index,"prty_offset":prty_offset,"land_inertia":params.land_inertia,"land_drag":params.land_drag,"sstm":format!("{sstm:?}")},
         "test_room_choices":{"step_height":STEP_HEIGHT,
             "body_radius":BODY_RADIUS,"body_height":BODY_HEIGHT,"floor_min_normal_y":FLOOR_MIN_NORMAL_Y,
             "blend_ticks":"per action (player_sim::blend_for, PTYA +0x38 after attacks)","clock":"fixed 60 Hz, one motion tick per update"},
@@ -3021,14 +3050,22 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
         .filter(|rt| rt.enemy.targetable())
         .map(|rt| {
             let p = game.player.position;
-            [rt.enemy.position[0] - p[0], rt.enemy.position[2] - p[2]]
+            [
+                rt.enemy.position[0] - p[0],
+                rt.enemy.position[1] - p[1],
+                rt.enemy.position[2] - p[2],
+            ]
         });
     let input = Input {
         direction: direction.to_array(),
         jump,
         attack,
         guard,
-        target,
+        target: target.map(|t| [t[0], t[2]]),
+        target_rise: target.map_or(0., |t| t[1]),
+        // Test-room choice for FUN_1403d7520's summed body radii: Sora's
+        // body radius twice.
+        target_reach: 2. * BODY_RADIUS,
     };
     let Game {
         player,

@@ -188,3 +188,32 @@ The user reported the feel still differed. Tracing the position integrator FUN_1
 
 Checks: PASS fmt, clippy, workspace tests (37 in `player_sim`), build, smoke, and `autoplay-s7` (exit 0, 81 non-uniform captures; jump at 300 → FALL 326 at 184.9 → LAND 361).
 
+### Third pass (2026-10-10): jump take-off, landing lock, aerial hops
+
+The user reported that jump/fall and air combos felt off, and that the rewrite let Sora move again instantly after landing.
+
+- **Jump take-off [O].** Pressing jump queues the jump mode (FUN_1403cbb00 sets obj+0x648 = 1). The switch to mode 1, with the arc base and the stored take-off velocity, happens when the JUMP motion's frame trigger 0 fires (FUN_14040dd70, case 0 → FUN_1403b4da0(1)). On Sora's JUMP that is tick 4, so he crouches for 4 frames before lifting off.
+- **Actionable gating [O for commands, I for the stick].** Commands are taken only while an ANB range 0, 1 or 2 is active (FUN_14040d810 maps them to obj+0x18c bits 2/3/4; FUN_1401b15f0 checks `& 0x1c`). Installed ranges:
+  - idle/walk/run/fall: always;
+  - JUMP: from tick 8;
+  - LAND: from tick 12;
+  - damage 10–13: from tick 50;
+  - guard: from tick 52;
+  - recoil: from tick 40;
+  - aerial attacks: none.
+
+  The stick feed to the move request follows the same gate [I: its own gate was not traced; the user's report of the original's landing lock supports it]. LAND therefore locks movement and actions for 12 frames, then plays to tick 26 unless the stick moves. Damage now recovers at tick 50 instead of 70.
+- **Range 42 [O].** It maps to obj+0x190 bit 0. FUN_140422350 then moves mode 0 through FUN_1403b7ad0 with PRTY record +0x28/+0x2c (words 10/11) as inertia and drag. Sora's record holds 0/0, so the carried velocity stops dead on landing.
+- **Aerial hops toward the target [O formula; I radii].** FUN_1403d78d0, with a target:
+  - height = target rise clamped to [PTYA +0x14, +0x10];
+  - speed = (horizontal distance − FUN_1403d7520's summed radii + PTYA +0x3c) / √(2h/g), clamped to [+0x18, +0x1c], toward the target;
+  - then FUN_140409ad0 (FUN_1403cbb00 + mode 1).
+
+  The test room uses 2 × Sora's body radius for the summed radii.
+- **Turning toward the target [O].** ANB range 28 turns by up to its parameter in degrees per tick; frame trigger 21 turns at once (FUN_1403d4b10 / FUN_1403d3a90, π/180 = `DAT_1405b15b4`), only beyond 50 units. Installed values:
+  - ground combo: 15° for ticks 0–12;
+  - air steps 1–2: 15° for ticks 0–23 / 0–22;
+  - finisher: 360° at tick 0.
+
+Checks: PASS fmt, clippy, workspace tests (40 in `player_sim`), build, smoke, and `autoplay-s8` (exit 0, 81 non-uniform captures; jump pressed 300, lift-off 304, FALL 329, LAND 364, idle 390).
+
