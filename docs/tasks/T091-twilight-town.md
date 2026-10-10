@@ -22,7 +22,7 @@ PASS: fmt, clippy -D warnings, workspace tests, build. Unattended runs: tt08 →
 
 - NPC routes follow the Hermite curve but the projection and look-ahead use a sampled search with a 33-step refinement rather than FUN_1405513a0/FUN_1405510d0 line by line.
 - Not ported: NPC interrupts (zone actions, meets, encounter), look-at, NPC push, rtn_sit and other AI programs, pop-in alpha fade, place-name display, destination-name guide, 'dsa' blocks (never blocked here).
-- Not applied: fog and the area clear colour, the glow post-effect, per-object LOD and fade distances, batch ordering of the alpha pass, subtractive blends, UV scroll (sky UVSC) and TEXA frame swaps.
+- Not applied: fog and the area clear colour, the glow post-effect, per-object LOD and fade distances, batch ordering of the alpha pass, subtractive blends, TEXA frame swaps.
 - Walk speed is the motion root record translation over its length in ticks; the footer reading is [I].
 - Story state is the chosen "first visit" point (flags 0x800..0x895 ascending) [I].
 

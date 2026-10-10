@@ -23,6 +23,9 @@ pub struct Room {
     pub chunk_bits: Vec<u8>,
     /// Texture region per environment ordinal (CLAMP register, §4.6).
     pub regions: std::collections::HashMap<usize, EnvRegion>,
+    /// UV-scroll records of the texture footer: (index, u speed, v speed)
+    /// in counts per tick (draw-01 §7).
+    pub uv_scroll: Vec<(u32, f32, f32)>,
 }
 
 /// A texture environment's CLAMP-register region (draw-01 §4.6): the exe
@@ -36,6 +39,8 @@ pub struct EnvRegion {
     pub scale: [f32; 2],
     pub offset: [f32; 2],
     pub wrap: [bool; 2],
+    /// regionW / texW and regionH / texH for UV scrolling.
+    pub scroll_ratio: [f32; 2],
 }
 
 impl EnvRegion {
@@ -63,6 +68,7 @@ impl EnvRegion {
             scale: [sx, sy],
             offset: [ox, oy],
             wrap: [wu, wv],
+            scroll_ratio: [(minu + 1) as f32 / w as f32, (minv + 1) as f32 / h as f32],
         }
     }
 
@@ -317,7 +323,13 @@ pub fn load_room_archive(
         let bank = &bytes[entry.offset as usize..entry.offset as usize + entry.size as usize];
         let textures = model_texture_pixels::decode_images(bank)?;
         let mut regions = std::collections::HashMap::new();
+        let mut uv_scroll = Vec::new();
         if let Ok(layout) = package_reader::model_texture::read_layout(bank) {
+            for f in &layout.footer {
+                if let Some([i, u, v]) = f.uv_scroll_words {
+                    uv_scroll.push((i, f32::from_bits(u), f32::from_bits(v)));
+                }
+            }
             for (ordinal, env) in layout.environments.iter().enumerate() {
                 let (w, h) = (1u32 << env.tex0[3], 1u32 << env.tex0[4]);
                 let a = env.address;
@@ -336,6 +348,7 @@ pub fn load_room_archive(
             textures,
             chunk_bits,
             regions,
+            uv_scroll,
         });
     }
     if rooms.is_empty() {

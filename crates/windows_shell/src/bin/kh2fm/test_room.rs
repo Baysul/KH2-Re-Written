@@ -520,6 +520,36 @@ struct SceneRoot(Entity);
 #[derive(Component)]
 struct RoomPart;
 
+/// A scrolling chunk's UV animation (UVSC record, draw-01 §7).
+#[derive(Component)]
+struct UvScroll {
+    material: Handle<StandardMaterial>,
+    speed: [f32; 2],
+    ratio: [f32; 2],
+    scale: [f32; 2],
+}
+
+/// UV scroll of the map's chunks: counts accumulate per tick as
+/// `(int)speed`, the offset is `((ratio * acc) >> 16 & 0xfff) / 4096`.
+fn uv_scroll_tick(
+    game: Res<Game>,
+    scrolls: Query<&UvScroll>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let tick = game.tick as i64;
+    for s in &scrolls {
+        let off = |speed: f32, ratio: f32| -> f32 {
+            let acc = tick * (speed as i32 as i64);
+            ((((ratio * acc as f32) as i64) >> 16) & 0xfff) as f32 / 4096.
+        };
+        let (u, v) = (off(s.speed[0], s.ratio[0]), off(s.speed[1], s.ratio[1]));
+        if let Some(mut m) = materials.get_mut(&s.material) {
+            m.uv_transform =
+                bevy::math::Affine2::from_translation(Vec2::new(u * s.scale[0], v * s.scale[1]));
+        }
+    }
+}
+
 /// A map chunk's background group bit (`NO_GROUP` = always drawn).
 #[derive(Component)]
 struct BgChunk(u8);
@@ -3254,7 +3284,34 @@ fn spawn_room(
                 .map(|i| vertex(i).color_bits.map(f32::from_bits))
                 .collect();
             let texture = texture_slot.map(|i| handles[i].clone());
-            commands.spawn((
+            // UVSC: fc bits 1..5 hold the record index + 1; repeat modes only.
+            let scroll_id = ((chunk.header_words[3] >> 1) & 0x1f) as u32;
+            let scroll = (scroll_id != 0)
+                .then(|| part.uv_scroll.iter().find(|r| r.0 + 1 == scroll_id))
+                .flatten()
+                .zip(texture_slot);
+            let material = materials.add(StandardMaterial {
+                base_color: if texture.is_some() {
+                    Color::WHITE
+                } else {
+                    Color::srgb(1., 0., 1.)
+                },
+                base_color_texture: texture,
+                unlit: true,
+                cull_mode: None,
+                // GS TEST: opaque pass keeps alpha > 31.5/255
+                // (AREF 0x10); the alpha pass blends, additive when
+                // the descriptor's fc bit 6 is set (draw-01 §3-4).
+                alpha_mode: if chunk.transparency_flag == 0 {
+                    AlphaMode::Mask(31.5 / 255.)
+                } else if chunk.header_words[3] & 0x40 != 0 {
+                    AlphaMode::Add
+                } else {
+                    AlphaMode::Blend
+                },
+                ..default()
+            });
+            let mut entity = commands.spawn((
                 ChildOf(parent),
                 RoomPart,
                 BgChunk(bit),
@@ -3264,29 +3321,21 @@ fn spawn_room(
                     Visibility::Hidden
                 },
                 Mesh3d(meshes.add(mesh(positions, uvs, colors))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: if texture.is_some() {
-                        Color::WHITE
-                    } else {
-                        Color::srgb(1., 0., 1.)
-                    },
-                    base_color_texture: texture,
-                    unlit: true,
-                    cull_mode: None,
-                    // GS TEST: opaque pass keeps alpha > 31.5/255
-                    // (AREF 0x10); the alpha pass blends, additive when
-                    // the descriptor's fc bit 6 is set (draw-01 §3-4).
-                    alpha_mode: if chunk.transparency_flag == 0 {
-                        AlphaMode::Mask(31.5 / 255.)
-                    } else if chunk.header_words[3] & 0x40 != 0 {
-                        AlphaMode::Add
-                    } else {
-                        AlphaMode::Blend
-                    },
-                    ..default()
-                })),
+                MeshMaterial3d(material.clone()),
                 Transform::default(),
             ));
+            if let Some((record, slot)) = scroll {
+                let r = &regions[slot];
+                entity.insert(UvScroll {
+                    material,
+                    speed: [record.1, record.2],
+                    ratio: [
+                        if r.wrap[0] { r.scroll_ratio[0] } else { 0. },
+                        if r.wrap[1] { r.scroll_ratio[1] } else { 0. },
+                    ],
+                    scale: r.scale,
+                });
+            }
         }
     }
     // Collision overlay (F1): walkable floors green, walls red.
@@ -6886,6 +6935,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             (
                 area_transition,
                 bg_visibility,
+                uv_scroll_tick,
                 bob_present,
                 field_npc_spawn_new,
                 field_npc_present,
