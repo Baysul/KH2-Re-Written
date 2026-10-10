@@ -184,6 +184,51 @@ pub fn read_selected_models(
         }
     }
     source.verify_full_source()?;
+    let items: Vec<_> = selection
+        .selections
+        .iter()
+        .map(|s| ModelItem {
+            index: s.index.clone(),
+            ordinal: s.ordinal,
+            name_hash: s.name_hash,
+        })
+        .collect();
+    read_models(
+        source,
+        &items,
+        &ModelOptions {
+            pose_profiles: selection.model_pose_profiles,
+            textures: selection.inspect_model_textures,
+            texture_modes: selection.model_texture_modes,
+            uv_profiles: selection.model_uv_profiles,
+        },
+    )
+}
+
+/// One installed model archive (`obj/<NAME>.mdlx`) by HED locator.
+#[derive(Clone, Debug)]
+pub struct ModelItem {
+    pub index: String,
+    pub ordinal: usize,
+    pub name_hash: [u8; 16],
+}
+
+/// Decoding choices for [`read_models`].
+#[derive(Clone, Debug)]
+pub struct ModelOptions {
+    pub pose_profiles: Vec<PoseProfile>,
+    pub textures: bool,
+    pub texture_modes: Vec<TextureMode>,
+    pub uv_profiles: Vec<UvProfile>,
+}
+
+/// Decodes the type-4 models of already admitted archives; the caller has
+/// verified the bound source.
+pub fn read_models(
+    source: &ProbeSource,
+    items: &[ModelItem],
+    options: &ModelOptions,
+) -> Result<Vec<InspectionModel>, Box<dyn std::error::Error>> {
     let mut models = Vec::new();
     let mut storage_bytes = 0usize;
     let mut position_words = 0usize;
@@ -195,11 +240,7 @@ pub fn read_selected_models(
         .into_iter()
         .filter(|(name, _)| name.ends_with(".hed"))
     {
-        let selected: Vec<_> = selection
-            .selections
-            .iter()
-            .filter(|item| item.index == relative)
-            .collect();
+        let selected: Vec<_> = items.iter().filter(|item| item.index == relative).collect();
         if selected.is_empty() {
             continue;
         }
@@ -217,7 +258,7 @@ pub fn read_selected_models(
                 return Err("model storage exceeds 128 MiB".into());
             }
             let bar = crate::bar::read_bar(&original.bytes)?;
-            let textures = if selection.inspect_model_textures {
+            let textures = if options.textures {
                 let replacements =
                     crate::replacement::read_all_replacements(&mut checked.reader, entry)?;
                 storage_bytes += replacements.iter().map(|r| r.bytes.len()).sum::<usize>();
@@ -247,7 +288,7 @@ pub fn read_selected_models(
                     start,
                     ordinal,
                     &replacements,
-                    &selection.model_texture_modes,
+                    &options.texture_modes,
                     &mut texture_rgba,
                 )?;
                 texture_images += set.images.len();
@@ -272,8 +313,8 @@ pub fn read_selected_models(
                 let payload = &original.bytes[start..start + entry.size as usize];
                 let geometry = crate::model_geometry::read_geometry(payload)?;
                 let skinning = crate::model_pose::Skinning::read(payload)?;
-                let poses: Vec<_> = selection
-                    .model_pose_profiles
+                let poses: Vec<_> = options
+                    .pose_profiles
                     .iter()
                     .map(|&profile| skinning.bind_pose(profile))
                     .collect::<io::Result<_>>()?;
@@ -293,7 +334,7 @@ pub fn read_selected_models(
                         payload,
                         &geometry,
                         environments,
-                        &selection.model_uv_profiles,
+                        &options.uv_profiles,
                     )?;
                     uv_corners += routes
                         .iter()

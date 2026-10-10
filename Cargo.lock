@@ -1865,6 +1865,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "event_sim"
+version = "0.1.0"
+dependencies = [
+ "package_reader",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4272,6 +4279,7 @@ dependencies = [
  "audio_out",
  "bevy",
  "effect_vm",
+ "event_sim",
  "fontdue",
  "image",
  "package_reader",

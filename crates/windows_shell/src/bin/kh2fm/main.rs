@@ -8,6 +8,7 @@
 //! launcher; output still reaches a pipe or redirect (the launcher reads
 //! its tests' output that way).
 #![cfg_attr(windows, windows_subsystem = "windows")]
+mod cutscene;
 mod launcher;
 mod test_room;
 mod title;
@@ -30,8 +31,9 @@ fn run(program: &str, args: Vec<PathBuf>) -> ExitCode {
             }
         },
         "play" => test_room::main(args, false),
+        "event" => cutscene::main(args, false),
         _ => {
-            eprintln!("usage: kh2fm [title|room|talk|play] [program arguments]");
+            eprintln!("usage: kh2fm [title|room|talk|play|event] [program arguments]");
             ExitCode::FAILURE
         }
     }
