@@ -734,6 +734,8 @@ struct CampSource {
     equip_stats: Vec<camp::equip::ItemStats>,
     /// The font image's icon plane (0x09 icons).
     icons: SystemFont,
+    /// 03system.bin `ipic`: the item pictures' sequence.
+    picture_sequence: Option<package_reader::sequence::Sequence>,
 }
 
 /// Items screen messages (camp-05 §9).
@@ -845,6 +847,7 @@ fn load_camp_items(
             sell: r.sell,
             icon: r.icon,
             param: r.weapon_stats,
+            picture: r.picture,
             name: t[0].clone().unwrap_or_default(),
             description: t[1].clone().unwrap_or_default(),
         })
@@ -1870,6 +1873,10 @@ fn load(
                 customize,
                 equip_texts,
                 equip_stats,
+                picture_sequence: bar_entry(&system, b"ipic")
+                    .ok()
+                    .map(package_reader::sequence::read)
+                    .transpose()?,
             })
         }
         _ => None,
@@ -2924,12 +2931,12 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 81] = [
+const AUTOPLAY_CAPTURES: [u64; 82] = [
     90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1198, 1300, 1500,
     1700, 1830, 1900, 1930, 1990, 2030, 2050, 2070, 2110, 2230, 2310, 2330, 2390, 2420, 2450, 2520,
-    2690, 2715, 2760, 2780, 2840, 2880, 2920, 2970, 3080, 3200, 3220, 3270, 3300, 3560, 3660, 3690,
-    3730, 3800, 3830, 3900, 4060, 4150, 4420, 4450, 4800, 4880, 5000, 5100, 5500, 5560, 5650, 5690,
-    5800, 5840, 5940, 6000, 6210, 6270, 6300, 6390, 6460, 6530, 6600, 6670, 6705, 6725, 6760,
+    2690, 2715, 2760, 2780, 2840, 2880, 2915, 2950, 3000, 3110, 3230, 3250, 3300, 3330, 3590, 3690,
+    3720, 3760, 3830, 3860, 3930, 4090, 4180, 4450, 4480, 4830, 4910, 5030, 5130, 5590, 5650, 5740,
+    5780, 5890, 5930, 6030, 6090, 6300, 6360, 6390, 6480, 6550, 6620, 6690, 6760, 6790, 6815, 6850,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -2941,7 +2948,9 @@ const AUTOPLAY_TALK_END: u64 = 260;
 /// in earlier unattended runs.
 const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 /// The last stretch leaves Sora standing so an enemy can attack him.
-const AUTOPLAY_END: u64 = 6860;
+/// The index that holds the item pictures.
+const PICTURE_INDEX: &str = "Image/dt/kh2_fifth.hed";
+const AUTOPLAY_END: u64 = 6950;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
@@ -4578,6 +4587,11 @@ struct CampRes {
     journal: Option<Journal>,
     curtain: Option<Curtain>,
     journal_sheets: JournalSheets,
+    /// The item pictures: the selected source they load from at run time
+    /// (`itempic/item-%03d.imd` in kh2_fifth) and their sheets (None:
+    /// the install has no such file).
+    picture_source: Option<ProbeSource>,
+    picture_sheets: HashMap<u16, Option<usize>>,
 }
 
 /// Sheet slots of the journal's images.
@@ -4634,95 +4648,95 @@ const AUTOPLAY_CAMP: [(u64, u64); 108] = [
     (2790, 0x1_0000),
     (2830, 0x20),
     (2850, 0x4),
-    (2890, 0x4),
-    (2930, 0x4),
-    (2980, 0x4),
+    (2920, 0x4),
+    (2960, 0x4),
     (3010, 0x4),
-    (3050, 0x4),
-    (3090, 0x4),
-    (3120, 0x8),
-    (3150, 0x20),
-    (3170, 0x4),
-    (3210, 0x40),
-    (3230, 0x4),
-    (3280, 0x8),
-    (3320, 0x8),
-    (3400, 0x2),
+    (3040, 0x4),
+    (3080, 0x4),
+    (3120, 0x4),
+    (3150, 0x8),
+    (3180, 0x20),
+    (3200, 0x4),
+    (3240, 0x40),
+    (3260, 0x4),
+    (3310, 0x8),
+    (3350, 0x8),
+    (3430, 0x2),
     // Abilities: reopen, down to Abilities, Sora, the list; unequip Guard
     // with TRIANGLE, re-equip it in the popup, back out, SQUARE to Items
     // and back, close.
-    (3460, 0x2),
-    (3500, 0x20),
-    (3520, 0x4),
-    (3580, 0x4),
-    (3680, 0x20),
-    (3700, 0x10),
-    (3720, 0x1000),
-    (3750, 0x4),
-    (3820, 0x20),
-    (3850, 0x4),
-    (3920, 0x8),
-    (3990, 0x800),
-    (4080, 0x800),
-    (4170, 0x8),
-    (4240, 0x2),
+    (3490, 0x2),
+    (3530, 0x20),
+    (3550, 0x4),
+    (3610, 0x4),
+    (3710, 0x20),
+    (3730, 0x10),
+    (3750, 0x1000),
+    (3780, 0x4),
+    (3850, 0x20),
+    (3880, 0x4),
+    (3950, 0x8),
+    (4020, 0x800),
+    (4110, 0x800),
+    (4200, 0x8),
+    (4270, 0x2),
     // Party: reopen, down to Party, the card (nothing to switch), back.
-    (4300, 0x2),
-    (4340, 0x20),
-    (4350, 0x20),
-    (4370, 0x4),
-    (4440, 0x80),
-    (4460, 0x8),
-    (4540, 0x2),
+    (4330, 0x2),
+    (4370, 0x20),
+    (4380, 0x20),
+    (4400, 0x4),
+    (4470, 0x80),
+    (4490, 0x8),
+    (4570, 0x2),
     // Customize: reopen, up to Customize, Sora, shortcut 1 → Potion, back
     // out, close.
-    (4600, 0x2),
-    (4640, 0x10),
-    (4660, 0x4),
-    (4720, 0x4),
-    (4830, 0x4),
-    (4900, 0x20),
-    (4920, 0x4),
-    (5020, 0x8),
-    (5120, 0x8),
-    (5190, 0x2),
+    (4630, 0x2),
+    (4670, 0x10),
+    (4690, 0x4),
+    (4750, 0x4),
+    (4860, 0x4),
+    (4930, 0x20),
+    (4950, 0x4),
+    (5050, 0x8),
+    (5150, 0x8),
+    (5220, 0x2),
     // Equip: reopen, up to Items, Sora, item slot 1 → Potion, auto-reload
     // on with TRIANGLE, back to Items, close.
-    (5260, 0x2),
-    (5300, 0x10),
-    (5310, 0x10),
-    (5330, 0x4),
-    (5410, 0x4),
-    (5520, 0x20),
-    (5530, 0x20),
-    (5540, 0x20),
-    (5580, 0x4),
-    (5670, 0x20),
-    (5710, 0x4),
-    (5820, 0x1000),
-    (5860, 0x8),
-    (5960, 0x8),
-    (6030, 0x2),
+    (5290, 0x2),
+    (5330, 0x10),
+    (5340, 0x10),
+    (5360, 0x4),
+    (5440, 0x4),
+    (5610, 0x20),
+    (5620, 0x20),
+    (5630, 0x20),
+    (5670, 0x4),
+    (5760, 0x20),
+    (5800, 0x4),
+    (5910, 0x1000),
+    (5950, 0x8),
+    (6050, 0x8),
+    (6120, 0x2),
     // Journal: reopen, down to Jiminy's Journal (curtain, Notes of the
     // world), a row down, decide (no category page), R1 Collection, R1
     // Select World, L1 Collection, L1 Notes, cancel to Select World,
     // cancel out (the camp comes back as the curtain lifts), close.
-    (6100, 0x2),
-    (6140, 0x20),
-    (6150, 0x20),
-    (6160, 0x20),
-    (6170, 0x20),
-    (6180, 0x20),
-    (6200, 0x4),
-    (6290, 0x20),
-    (6320, 0x4),
-    (6340, 0x4000),
-    (6410, 0x4000),
-    (6480, 0x8000),
-    (6550, 0x8000),
-    (6620, 0x8),
-    (6690, 0x8),
-    (6780, 0x2),
+    (6190, 0x2),
+    (6230, 0x20),
+    (6240, 0x20),
+    (6250, 0x20),
+    (6260, 0x20),
+    (6270, 0x20),
+    (6290, 0x4),
+    (6380, 0x20),
+    (6410, 0x4),
+    (6430, 0x4000),
+    (6500, 0x4000),
+    (6570, 0x8000),
+    (6640, 0x8000),
+    (6710, 0x8),
+    (6780, 0x8),
+    (6870, 0x2),
 ];
 fn camp_setup(
     camp: Option<ResMut<CampRes>>,
@@ -4784,6 +4798,7 @@ fn field_running(camp: Option<Res<CampRes>>) -> bool {
 /// START (logical 0x2 in the field's pad mode) opens the camp
 /// (FUN_1401572b0 → FUN_1402e4950(0)); while it runs the field is not
 /// stepped, the menu reads pad mode 7 and the frame counter keeps going.
+#[allow(clippy::too_many_arguments)]
 fn camp_tick(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -4792,6 +4807,8 @@ fn camp_tick(
     mut game: ResMut<Game>,
     mut audio: ResMut<Audio>,
     mut hud: Option<ResMut<Hud>>,
+    mut frame: ResMut<Ui2dFrame>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut c) = camp else { return };
     let c = &mut *c;
@@ -4930,12 +4947,20 @@ fn camp_tick(
                 no_charge: c.no_charge,
                 texts: c.source.customize.clone(),
             },
+            picture_sequence: c.source.picture_sequence.clone(),
         }
     };
     // The menu chain (menu mode 10, FUN_14031aac0): the camp; deciding a
     // journal brings the curtain down over the camp's close; the journal
     // runs; then the camp is rebuilt as the curtain lifts.
     if let Some(menu) = c.open.as_mut() {
+        // The images loaded so far (FUN_1403018e0's cache).
+        menu.pictures.loaded = c
+            .picture_sheets
+            .iter()
+            .filter(|(_, s)| s.is_some())
+            .map(|(&id, _)| id)
+            .collect();
         sounds = menu.frame(layout, c.pad.pressed, c.pad.repeat, tick as u32);
         game.tick += 1;
         if menu.journal.is_some()
@@ -5028,6 +5053,7 @@ fn camp_tick(
         game.tick += 1;
         game.event(serde_json::json!({"event":"camp_open","tick":tick}));
     }
+    load_wanted_picture(c, &mut frame, &mut images);
     if let (Some(cur), Some(j)) = (c.curtain.as_mut(), c.journal_source.as_ref()) {
         cur.update(&j.curtain.layout);
         if cur.dead {
@@ -5044,6 +5070,34 @@ fn camp_tick(
                 mixer.play(layer, n, r.volume, 1.);
             }
         }
+    }
+}
+
+/// FUN_1403018e0's load (here at once): the item picture the camp asks for,
+/// from the install (`itempic/item-%03d.imd`).
+fn load_wanted_picture(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Assets<Image>) {
+    let Some(menu) = c.open.as_mut() else { return };
+    let Some(id) = menu.pictures.wanted.take() else {
+        return;
+    };
+    let Some(source) = &c.picture_source else {
+        return;
+    };
+    if c.picture_sheets.contains_key(&id) {
+        return;
+    }
+    let path = format!("itempic/item-{id:03}.imd");
+    let sheet = match layout2d::load_imgd(source, PICTURE_INDEX, &path) {
+        Ok(Some(t)) => Some(frame.add_sheet(images, t.rgba, t.size, t.texel_scale)),
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!("Item picture {path} rejected: {e}");
+            None
+        }
+    };
+    c.picture_sheets.insert(id, sheet);
+    if sheet.is_some() {
+        menu.pictures.loaded.insert(id);
     }
 }
 
@@ -5078,6 +5132,12 @@ fn camp_present(
                         q.uv = [0, 0, MENU_TARGET[0] as i32, MENU_TARGET[1] as i32];
                     }
                     m.sheet
+                }
+                camp::Sheet::Picture(id) => {
+                    let Some(&Some(s)) = c.picture_sheets.get(&id) else {
+                        continue;
+                    };
+                    s
                 }
             };
             frame.draws.push((slot, quads));
@@ -5548,7 +5608,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         game.event(serde_json::json!({"event":"camp_loaded","props":c.menu.layout.props.len(),
             "scenes":c.menu.layout.scenes.len(),"sequences":c.menu.layout.sequences.len(),
             "replacements":c.menu.replacements.iter().map(|r| r.as_ref().map(|t| t.size)).collect::<Vec<_>>(),
-            "entries":c.entries.len(),"stats":c.stats.len(),"config_rows":c.config.len()}));
+            "entries":c.entries.len(),"stats":c.stats.len(),"config_rows":c.config.len(),
+            "picture_groups":c.picture_sequence.as_ref().map(|s| s.groups.len())}));
         app.insert_resource(CampRes {
             source: c,
             open: None,
@@ -5584,6 +5645,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             journal: None,
             curtain: None,
             journal_sheets: JournalSheets::default(),
+            picture_source: Some(source),
+            picture_sheets: HashMap::new(),
         });
     }
     Ok(app

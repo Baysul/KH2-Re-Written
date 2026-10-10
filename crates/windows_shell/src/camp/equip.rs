@@ -15,6 +15,8 @@ const PRIO_LABEL: u32 = 0x753d;
 const PRIO_TEXT: u32 = 0x753e;
 const PRIO_INFO: u32 = 0x753f;
 const PRIO_VALUE: u32 = 0x7540;
+/// The item picture (FUN_1403022b0(0x753f, …)).
+const PRIO_PICTURE: u32 = 0x753f;
 const PANEL: [usize; 3] = [227, 228, 229];
 const HOLDER: [usize; 3] = [287, 288, 289];
 /// Slot rows and section labels per section (0x1405bc0d0 / 0x1405bc0f0):
@@ -329,6 +331,10 @@ impl Camp {
             .create(seq, PRIO_PANEL, ART, HOLDER[0], Some(HOLDER[1]), None);
         self.closers.push((holder, HOLDER[2]));
         self.equip_ui.holder = Some(holder);
+        // The item picture on the holder (items-spec §3.6).
+        self.picture.setup(PRIO_PICTURE, None);
+        self.picture.set_parent(holder);
+        self.picture.reset();
         let (cur, sc) = self.memory.equip;
         let mut list = MenuList::new(self.equip_ui.rows.clone(), cur.min(VISIBLE - 1));
         list.total = n;
@@ -404,7 +410,8 @@ impl Camp {
         }
     }
 
-    /// FUN_140358620 for state 2: help and the info panel (mode 1).
+    /// FUN_140358620 for state 2: help, the info panel (mode 1) and the
+    /// picture.
     fn equip_help(&mut self, seq: &Sequence) {
         let s = self.equip_cursor();
         let id = s.map_or(0, |s| s.id);
@@ -415,6 +422,8 @@ impl Camp {
         };
         self.show_help(seq, h);
         self.info_mode1(seq, id);
+        let picture = (id != 0).then(|| self.info(id).picture);
+        self.picture_request(seq, picture);
     }
 
     fn clear_info(&mut self) {
@@ -687,6 +696,8 @@ impl Camp {
             sounds.push(s);
         }
         if moved && self.substate == 1 {
+            // FUN_140356380: the old picture closes first.
+            self.picture_close(seq);
             if self.equip_ui.list.scroll != scroll {
                 self.equip_fill(seq);
             }
@@ -730,6 +741,7 @@ impl Camp {
                     self.close_banner(seq);
                     self.close_equip(seq);
                     self.clear_info();
+                    self.picture_close(seq);
                     self.pending = Some(State::AbilityList);
                     self.substate = 2;
                 }
@@ -747,6 +759,7 @@ impl Camp {
                     self.close_banner(seq);
                     self.close_equip(seq);
                     self.clear_info();
+                    self.picture_close(seq);
                     self.pending = Some(State::Items);
                     self.substate = 2;
                 }
@@ -764,6 +777,9 @@ impl Camp {
                 }
                 _ => {}
             }
+        }
+        if self.state == State::Equip && self.substate == 1 {
+            self.picture_timers(seq);
         }
         if self.state == State::Equip && self.substate != 2 {
             let bubble = self.equip_cursor().is_some_and(|s| s.sec == 4);
@@ -936,6 +952,9 @@ impl Camp {
         );
         self.closers.push((holder, PICK_HOLDER[sec][1]));
         self.equip_ui.holder = Some(holder);
+        self.picture.setup(PRIO_PICTURE, None);
+        self.picture.set_parent(holder);
+        self.picture.reset();
         // The cursor starts on the equipped item.
         let idx = self
             .equip_ui
@@ -1051,6 +1070,8 @@ impl Camp {
         self.show_help(seq, h);
         let cur = self.equip_ui.slots[self.equip_ui.slot].id;
         self.info_compare(seq, cur, cand.unwrap_or(0));
+        let picture = cand.map(|id| self.info(id).picture);
+        self.picture_request(seq, picture);
     }
 
     /// FUN_1402fd410: rows of either item; current value, candidate value
@@ -1316,6 +1337,7 @@ impl Camp {
             sounds.push(s);
         }
         if moved && self.substate == 1 {
+            self.picture_close(seq);
             if self.equip_ui.pick.scroll != scroll {
                 self.pick_fill(seq);
             }
@@ -1363,7 +1385,11 @@ impl Camp {
             let f = self.equip_ui.frame.take();
             self.kill_opt(f);
             self.clear_info();
+            self.picture_close(seq);
             self.substate = 2;
+        }
+        if matches!(self.state, State::EquipPick(_)) && self.substate == 1 {
+            self.picture_timers(seq);
         }
         if matches!(self.state, State::EquipPick(_)) && self.substate != 2 {
             self.equip_frame(seq, PICK_FRAME[sec], false);

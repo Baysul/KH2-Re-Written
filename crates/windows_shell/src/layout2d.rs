@@ -103,6 +103,41 @@ pub fn load_images(
         .collect()
 }
 
+/// A bare IMGD archive (e.g. `itempic/item-000.imd`) found by its path's
+/// name hash, as its HD replacement; None when the index has no such path.
+pub fn load_imgd(
+    source: &ProbeSource,
+    index: &str,
+    path: &str,
+) -> Result<Option<Texture>, Box<dyn std::error::Error>> {
+    let hash = package_reader::name_hash::of_path(path);
+    let mut checked = source.open_index(index)?;
+    let Some(entry) = checked
+        .inventory
+        .entries
+        .iter()
+        .find(|e| e.name_hash == hash)
+    else {
+        return Ok(None);
+    };
+    let imgd = original::read_original(&mut checked.reader, entry)?.bytes;
+    let hd = replacement::read_all_replacements(&mut checked.reader, entry)?;
+    checked.verify_unchanged()?;
+    let h = image_structure::read_imgd_header(&imgd)?;
+    let r = hd.last().ok_or("IMGD without HD replacement")?;
+    let d = hd_image::decode_hd_image(&r.bytes, r.metadata.declared_decompressed_length as usize)?;
+    let w = h.width as u32;
+    let scale = d.width / w;
+    if scale == 0 || d.width != w * scale || d.height != h.height as u32 * scale {
+        return Err("IMGD HD image is not an integer upscale".into());
+    }
+    Ok(Some(Texture {
+        size: [d.width, d.height],
+        rgba: d.pixels_rgba,
+        texel_scale: scale as f32,
+    }))
+}
+
 pub fn load(
     source: &ProbeSource,
     index: &str,

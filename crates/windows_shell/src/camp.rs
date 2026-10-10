@@ -16,6 +16,7 @@ pub mod equip;
 pub mod items;
 pub mod journal;
 pub mod party;
+pub mod picture;
 
 use crate::command::Font;
 use crate::sprite2d::{self, Id, LightCur, Sprites, Text};
@@ -213,6 +214,8 @@ pub struct Data {
     pub party_help: [Vec<u8>; 3],
     pub customize: customize::CustomizeData,
     pub equip: equip::EquipData,
+    /// 03system.bin `ipic`: the item pictures' sequence (FUN_1403b0c90).
+    pub picture_sequence: Option<Sequence>,
 }
 
 /// Cursor memory kept between camp openings (DAT_140beec30 / 7c).
@@ -250,6 +253,8 @@ pub enum Sheet {
     /// The font image's icon plane (0x09 icons).
     Icon,
     Model(usize),
+    /// `itempic/item-%03d.imd`.
+    Picture(u16),
 }
 
 /// The menu model's layout offset for member `i` of `n` (FUN_140306400):
@@ -591,6 +596,9 @@ pub struct Camp {
     custom_ui: customize::Ui,
     // Equip.
     equip_ui: equip::Ui,
+    /// The item picture and the images the caller has loaded for it.
+    picture: picture::Picture,
+    pub pictures: picture::PictureCache,
 }
 
 impl Camp {
@@ -646,6 +654,8 @@ impl Camp {
             party_ui: party::Ui::default(),
             custom_ui: customize::Ui::default(),
             equip_ui: equip::Ui::default(),
+            picture: picture::Picture::default(),
+            pictures: picture::PictureCache::default(),
         };
         camp.build_top(seq);
         camp.munny_digits = digits(seq, &munny_groups(camp.data.panels.munny), Vec::new());
@@ -847,6 +857,9 @@ impl Camp {
         }
         self.layout.update(layout, 1.);
         self.sprites.update(seq);
+        if let Some(ipic) = &self.data.picture_sequence {
+            self.picture.update(ipic, &self.sprites);
+        }
         for d in self
             .munny_digits
             .iter_mut()
@@ -1998,6 +2011,32 @@ impl Camp {
             self.sprites.kill(f);
         }
         self.item_ui.kill_dim(&mut self.sprites);
+        self.picture_close(seq);
+    }
+
+    // ---- item picture --------------------------------------------------
+
+    /// FUN_140302370 for `id` (None: FUN_140302280, no picture).
+    fn picture_request(&mut self, seq: &Sequence, id: Option<u16>) {
+        match (id, &self.data.picture_sequence) {
+            (Some(id), Some(ipic)) => self.picture.request(seq, ipic, &mut self.sprites, id),
+            _ => self.picture.reset(),
+        }
+    }
+
+    /// FUN_140302040.
+    fn picture_close(&mut self, seq: &Sequence) {
+        if let Some(ipic) = &self.data.picture_sequence {
+            self.picture.close(seq, ipic, &mut self.sprites);
+        }
+    }
+
+    /// FUN_140301cc0 + FUN_140301c80.
+    fn picture_timers(&mut self, seq: &Sequence) {
+        if let Some(ipic) = &self.data.picture_sequence {
+            self.picture
+                .timers(seq, ipic, &mut self.sprites, &mut self.pictures);
+        }
     }
 
     /// FUN_140305480 (the curtain's callback): every camp sprite goes and
@@ -2008,6 +2047,7 @@ impl Camp {
             s.dead = true;
         }
         self.model_time = None;
+        self.picture.kill(&mut self.sprites);
         self.closed = true;
     }
 
@@ -2036,23 +2076,38 @@ impl Camp {
         // in Party); the digit rows (Tz::MultiSeq) follow the panel band
         // (0x753b) with their labels.
         let layer = self.model_layer();
-        let mut cuts: Vec<(u32, bool)> = vec![(PRIO_PANEL + 1, false)];
+        // The item picture goes after the sprites of its priority.
+        let picture = self
+            .data
+            .picture_sequence
+            .as_ref()
+            .and_then(|ipic| self.picture.quads(ipic, &self.sprites));
+        let mut cuts: Vec<(u32, Cut)> = vec![(PRIO_PANEL + 1, Cut::Digits)];
         if let Some((prio, _)) = &layer {
-            cuts.push((*prio, true));
+            cuts.push((*prio, Cut::Models));
+        }
+        if let Some((_, prio, _)) = &picture {
+            cuts.push((prio + 1, Cut::Picture));
         }
         cuts.sort_by_key(|c| c.0);
         let mut low = 0;
-        for (cut, models) in cuts {
+        for (cut, kind) in cuts {
             out.extend(convert(
                 self.sprites
                     .draw_where(seq, font, |p| (low..cut).contains(&p)),
             ));
-            if models {
-                for &(member, offset, alpha) in &layer.as_ref().unwrap().1 {
-                    out.push((Sheet::Model(member), model_quads(offset, alpha)));
+            match kind {
+                Cut::Models => {
+                    for &(member, offset, alpha) in &layer.as_ref().unwrap().1 {
+                        out.push((Sheet::Model(member), model_quads(offset, alpha)));
+                    }
                 }
-            } else {
-                out.push((Sheet::Art, self.digit_quads(seq)));
+                Cut::Digits => out.push((Sheet::Art, self.digit_quads(seq))),
+                Cut::Picture => {
+                    if let Some((id, _, quads)) = &picture {
+                        out.push((Sheet::Picture(*id), quads.clone()));
+                    }
+                }
             }
             low = cut;
         }
@@ -2140,6 +2195,14 @@ fn model_quads(offset: [f32; 2], alpha: f32) -> Vec<Quad> {
         colors: [[MODEL_TINT, MODEL_TINT, MODEL_TINT, alpha]; 4],
         blend: 0,
     }]
+}
+
+/// What the draw inserts between priority bands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cut {
+    Digits,
+    Models,
+    Picture,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
