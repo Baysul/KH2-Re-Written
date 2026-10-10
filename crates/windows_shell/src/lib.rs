@@ -5,6 +5,7 @@ pub mod command;
 pub mod dialogue;
 pub mod effects;
 pub mod fade;
+pub mod fog;
 pub mod gauge;
 pub mod hud;
 pub mod input;

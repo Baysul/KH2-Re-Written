@@ -44,6 +44,7 @@ use windows_shell::camp::journal::{self, Curtain, Journal};
 use windows_shell::camp::{self, Camp};
 use windows_shell::command::{self, CommandMenu, Decision, Item};
 use windows_shell::fade::{self, Fade};
+use windows_shell::fog::{AddFogged, FogMaterial, FogPlugin};
 use windows_shell::gauge::{self, Canvas, Draw, Gauge, GaugeStats, Texture};
 use windows_shell::hud::{self, Sheet, SystemFont};
 use windows_shell::input;
@@ -532,7 +533,7 @@ struct RoomPart;
 /// A scrolling chunk's UV animation (UVSC record, draw-01 §7).
 #[derive(Component)]
 struct UvScroll {
-    material: Handle<StandardMaterial>,
+    material: Handle<FogMaterial>,
     speed: [f32; 2],
     ratio: [f32; 2],
     scale: [f32; 2],
@@ -543,7 +544,7 @@ struct UvScroll {
 fn uv_scroll_tick(
     game: Res<Game>,
     scrolls: Query<&UvScroll>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<FogMaterial>>,
 ) {
     let tick = game.tick as i64;
     for s in &scrolls {
@@ -553,7 +554,7 @@ fn uv_scroll_tick(
         };
         let (u, v) = (off(s.speed[0], s.ratio[0]), off(s.speed[1], s.ratio[1]));
         if let Some(mut m) = materials.get_mut(&s.material) {
-            m.uv_transform =
+            m.base.uv_transform =
                 bevy::math::Affine2::from_translation(Vec2::new(u * s.scale[0], v * s.scale[1]));
         }
     }
@@ -2643,7 +2644,7 @@ fn spawn_model(
     pose: &[Vec3],
     parent: Entity,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    materials: &mut Assets<FogMaterial>,
     images: &mut Assets<Image>,
 ) -> Vec<(usize, Option<Entity>)> {
     let mut spawned = Vec::new();
@@ -2683,7 +2684,7 @@ fn spawn_model(
             .spawn((
                 ChildOf(parent),
                 Mesh3d(meshes.add(mesh(positions, uvs, vec![[1.; 4]; part.indices.len()]))),
-                MeshMaterial3d(materials.add(StandardMaterial {
+                MeshMaterial3d(materials.add_fogged(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: texture,
                     unlit: true,
@@ -2773,7 +2774,7 @@ fn area_tick(area: Option<ResMut<AreaRes>>, hud: Option<ResMut<Hud>>) {
 fn area_transition(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<FogMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut game: ResMut<Game>,
     mut rig: ResMut<CameraRig>,
@@ -2884,7 +2885,7 @@ struct BobPart {
 fn spawn_bobs(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    materials: &mut Assets<FogMaterial>,
     images: &mut Assets<Image>,
     area: &LoadedArea,
     parent: Entity,
@@ -2979,7 +2980,7 @@ struct FieldNpcPart {
 fn spawn_field_npcs(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    materials: &mut Assets<FogMaterial>,
     images: &mut Assets<Image>,
     source: &AreaSource,
     area: &LoadedArea,
@@ -3202,7 +3203,7 @@ fn bg_visibility(
 fn field_npc_spawn_new(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<FogMaterial>>,
     mut images: ResMut<Assets<Image>>,
     area: Option<ResMut<AreaRes>>,
     root: Option<Res<SceneRoot>>,
@@ -3269,13 +3270,20 @@ fn field_npc_present(
 fn spawn_room(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    materials: &mut Assets<FogMaterial>,
     images: &mut Assets<Image>,
     room: &LoadedRoom,
     parent: Entity,
     show_collision: bool,
     bg_mask: u64,
 ) {
+    // The area's type-14 record: screen clear colour and fog (draw-01 §8.1).
+    windows_shell::fog::set_current(room.environment.map(|e| e.fog));
+    if let Some(e) = &room.environment {
+        commands.insert_resource(ClearColor(Color::srgb_u8(
+            e.clear[0], e.clear[1], e.clear[2],
+        )));
+    }
     for part in &room.rooms {
         // Each environment's CLAMP region is baked into a cropped copy with
         // the exe's address modes and linear filter (draw-01 §4.6).
@@ -3339,7 +3347,9 @@ fn spawn_room(
                 .then(|| part.uv_scroll.iter().find(|r| r.0 + 1 == scroll_id))
                 .flatten()
                 .zip(texture_slot);
-            let material = materials.add(StandardMaterial {
+            // Sky layer 0 is never fogged (draw-01 §4.5).
+            let sky0 = part.name == *b"SK0";
+            let base = StandardMaterial {
                 base_color: if texture.is_some() {
                     Color::WHITE
                 } else {
@@ -3359,7 +3369,12 @@ fn spawn_room(
                     AlphaMode::Blend
                 },
                 ..default()
-            });
+            };
+            let material = if sky0 {
+                materials.add_plain(base)
+            } else {
+                materials.add_fogged(base)
+            };
             let mut entity = commands.spawn((
                 ChildOf(parent),
                 RoomPart,
@@ -3414,7 +3429,7 @@ fn spawn_room(
         RoomPart,
         ChildOf(parent),
         Mesh3d(meshes.add(mesh(positions, vec![[0., 0.]; corners], colors))),
-        MeshMaterial3d(materials.add(StandardMaterial {
+        MeshMaterial3d(materials.add_fogged(StandardMaterial {
             base_color: Color::WHITE,
             unlit: true,
             cull_mode: None,
@@ -3436,7 +3451,7 @@ fn setup(
     mut startup: ResMut<Startup>,
     mut game: ResMut<Game>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<FogMaterial>>,
     mut images: ResMut<Assets<Image>>,
     talk: Option<ResMut<Talk>>,
     mut frame: ResMut<Ui2dFrame>,
@@ -3535,7 +3550,7 @@ fn setup(
         commands.spawn((
             ChildOf(world),
             Mesh3d(meshes.add(mesh(arena.positions, arena.uvs, arena.colors))),
-            MeshMaterial3d(materials.add(StandardMaterial {
+            MeshMaterial3d(materials.add_fogged(StandardMaterial {
                 base_color: Color::WHITE,
                 base_color_texture: Some(texture),
                 unlit: true,
@@ -3811,7 +3826,7 @@ fn setup(
                 EffectMesh { additive },
                 ChildOf(world),
                 Mesh3d(meshes.add(mesh(vec![[0.; 3]; 3], vec![[0.; 2]; 3], vec![[0.; 4]; 3]))),
-                MeshMaterial3d(materials.add(StandardMaterial {
+                MeshMaterial3d(materials.add_fogged(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: Some(image.clone()),
                     unlit: true,
@@ -6993,6 +7008,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             close_when_requested: false,
             ..default()
         }))
+        .add_plugins(FogPlugin)
         .add_plugins(Ui2dPlugin {
             order: 0,
             overlay: false,

@@ -16,6 +16,8 @@ use package_reader::{
 use std::{fs::File, io::Read, path::Path};
 
 pub struct Room {
+    /// BAR entry name: MAP, SK0 or SK1.
+    pub name: [u8; 3],
     pub model: RoomModel,
     pub textures: Vec<DecodedTexture>,
     /// Per chunk, the background group bit of its DOCT group (FUN_140186380
@@ -149,7 +151,40 @@ pub struct LoadedRoom {
     /// Camera collision (BAR type 11, COCT layout) triangles in scene
     /// coordinates.
     pub camera_triangles: Vec<[Vec3; 3]>,
+    /// The map's type-14 environment record.
+    pub environment: Option<Environment>,
 }
+
+/// Type-14 environment record (draw-01 §8.1, FUN_14016fa90).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Environment {
+    /// Screen clear colour (+0x00).
+    pub clear: [u8; 3],
+    /// Fog colour (+0x44) and near/far/min/max floats (+0x48..0x58).
+    pub fog: crate::fog::FogParams,
+}
+
+impl Environment {
+    pub fn read(d: &[u8]) -> Option<Self> {
+        let f = |o: usize| Some(f32::from_le_bytes(d.get(o..o + 4)?.try_into().ok()?));
+        let (near, far, min, mut max) = (f(0x48)?, f(0x4c)?, f(0x50)?, f(0x54)?);
+        if max == 0. {
+            max = 255.;
+        }
+        let b = d.get(..0x58)?;
+        Some(Environment {
+            clear: [b[0], b[1], b[2]],
+            fog: crate::fog::FogParams {
+                colour: [b[0x44], b[0x45], b[0x46]],
+                near,
+                far,
+                min,
+                max,
+            },
+        })
+    }
+}
+
 pub struct CollisionTriangle {
     pub polygon: usize,
     /// Raw COCT surface flags word (public labels: bit 0 partyStand,
@@ -344,6 +379,11 @@ pub fn load_room_archive(
             return Err("room textures exceed cumulative limit".into());
         }
         rooms.push(Room {
+            name: [
+                entry.name_bytes[0],
+                entry.name_bytes[1],
+                entry.name_bytes[2],
+            ],
             model,
             textures,
             chunk_bits,
@@ -363,6 +403,12 @@ pub fn load_room_archive(
         inspection_ground,
         collision_triangles,
         camera_triangles,
+        environment: table
+            .entries
+            .iter()
+            .find(|e| e.entry_type == 14 && e.size >= 0x58)
+            .and_then(|e| bytes.get(e.offset as usize..e.offset as usize + e.size as usize))
+            .and_then(Environment::read),
     })
 }
 
@@ -513,6 +559,7 @@ pub fn arena(half_size: f32, wall_height: f32, tile: f32) -> (LoadedRoom, ArenaM
             inspection_ground: Some(0.),
             collision_triangles,
             camera_triangles,
+            environment: None,
         },
         ArenaMesh {
             positions,
