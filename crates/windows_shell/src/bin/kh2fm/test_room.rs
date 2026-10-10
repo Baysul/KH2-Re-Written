@@ -5461,7 +5461,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     if let Some(e) = loaded.enemy {
         let spawn = loaded.spawn + e.offset;
         let to_sora = loaded.spawn - spawn;
-        let enemy = Shadow::new(spawn.to_array(), to_sora.x.atan2(to_sora.z), e.stats);
+        let mut enemy = Shadow::new(spawn.to_array(), to_sora.x.atan2(to_sora.z), e.stats);
+        // obj+0x138: SSTM FallMax for every object (FUN_14040a440).
+        enemy.fall_max = loaded.params.fall_max;
         game.event(serde_json::json!({"event":"enemy","hp":e.stats.max_hp,"defense":e.stats.defense,
             "damage_cap":e.stats.cap,"damage_min":e.stats.min,"sora_strength":e.sora.strength,
             "hit_spheres":e.body.len(),"blade_groups":e.blade.keys().collect::<Vec<_>>(),"position":spawn,

@@ -170,4 +170,5 @@ Branch `claude/project-thread-dhv9n6`, one commit per step. Evidence runs go in 
 | Step | State | What changed (value, source) |
 | --- | --- | --- |
 | 1 | Done | `player_sim::physics::ObjParams` (FUN_14040a440 defaults, FUN_14040a480 PRTY copy), `prty_offset` (FUN_1403e9590), `Sstm` (SSTM +0x14..+0x34). The room now picks the PRTY record from the player objentry's +0x4e (`P_EX100` → index 1, offset 284; it was config `prty_pointer` 1 before, so the values are unchanged: walk 2, run 8, jump 185, turn 0.2618, fall max 16). Gravity is G = 0.40816328 (`DAT_1405ce184`) in place of the test-room 0.8. `autoplay-s1`: 7 hits, as in `autoplay-76`. Captures after tick 594 came out black because the display went dark (window not drawn), and the run exited 1 for that reason only. |
-| 2–6 | Open | — |
+| 2 | Done | `physics::Arc`: FUN_1403cbb00/FUN_1403cbc30 launch, FUN_1403cbd30 base, FUN_1403cb500 per-tick target (double-sine rise over √(2h/g), parabola fall, downward delta capped at FallMax 16), FUN_1403b8150/FUN_1403b4780 ledge fall. Sora's jump (h 185: apex 185 at t 30.1, lands on tick 60), ledge falls and aerial-attack hops (a new arc of the PTYA Jump height, FUN_1403d78d0) use it; ANB no-gravity ranges hold the height while `t` runs. The Shadow's jump claw uses it with h 100. The Jump→Fall action switch is still at the apex until step 5. |
+| 3–6 | Open | — |

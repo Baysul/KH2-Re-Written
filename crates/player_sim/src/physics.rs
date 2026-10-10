@@ -11,6 +11,10 @@
 pub const DT: f32 = 1.0;
 /// Gravity, units per tick squared (`DAT_1405ce184` = 0x3ed0fac7).
 pub const G: f32 = 0.408_163_28;
+/// The fall motion starts this many ticks before the apex
+/// (`DAT_140623b98`, FUN_1403cb680).
+pub const FALL_MOTION_LEAD: f32 = 5.0;
+
 /// Default stick magnitude from which the run speed is used
 /// (`DAT_140585c7c`, FUN_1403a8fa0).
 pub const RUN_MAGNITUDE: f32 = 0.8;
@@ -143,6 +147,103 @@ impl Sstm {
     }
 }
 
+/// The jump/fall state at obj+0xf0..+0xfc, kept in the executable's
+/// Y-down terms.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Arc {
+    /// +0xf0: ticks since the arc began.
+    pub t: f32,
+    /// +0xf4: rise duration √(2h/g); 0 for a plain fall.
+    pub rise: f32,
+    /// +0xf8: Y-down base height.
+    pub base: f32,
+    /// +0xfc: Y-down rise span (−h).
+    pub span: f32,
+}
+
+impl Arc {
+    /// FUN_1403cbb00 / FUN_1403cbc30 with the base offset FUN_1403cbd30
+    /// adds on entering the jump mode. `height` is the Y-down request: a
+    /// value ≥ 0 rises by that much; a negative value starts a fall already
+    /// moving down as if dropped from that far above. `y` is Y-up.
+    pub fn launch(y: f32, height: f32) -> Self {
+        let mut arc = if height < 0. {
+            // fVar1 < 0: t = √|y·(−2.0) / g| (DAT_140623c60 = −2.0), base = y.
+            Arc {
+                t: ((height * -2.0) / G).abs().sqrt(),
+                rise: 0.,
+                base: height,
+                span: 0.,
+            }
+        } else {
+            Arc {
+                t: 0.,
+                rise: rise_time(height),
+                base: 0.,
+                span: -height,
+            }
+        };
+        arc.base += -y;
+        arc
+    }
+
+    /// FUN_1403b8150 / FUN_1403b4780: leaving the ground with a Y-up
+    /// vertical speed. The parabola continues from that speed
+    /// (t = v_down / g when moving down, else 0, as in FUN_1403b4780).
+    pub fn fall(y: f32, vertical_up: f32) -> Self {
+        let v_down = -vertical_up;
+        let t = if v_down <= 0. { 0. } else { v_down / G };
+        Arc {
+            t,
+            rise: 0.,
+            base: -y - t * G * t * 0.5,
+            span: 0.,
+        }
+    }
+
+    /// FUN_1403cb500's target height (Y-down) at the current `t`.
+    fn target(&self) -> f32 {
+        if self.rise <= self.t {
+            let k = self.t - self.rise;
+            self.span + self.base + G * k * k * 0.5
+        } else {
+            let u = if self.rise != 0. {
+                self.t / self.rise
+            } else {
+                self.t
+            };
+            let pi = std::f32::consts::PI;
+            let s = (u * pi * 0.5).sin();
+            let s = (s * pi * 0.5).sin();
+            s * self.span + self.base
+        }
+    }
+
+    /// FUN_1403cb360 / FUN_1403cb500, one tick: advance `t`, then return
+    /// the Y-up vertical displacement toward the curve, with downward
+    /// motion capped at `fall_max` per tick. `frozen` is the no-gravity
+    /// state (obj+0x18c & 0x1000020 or bit 6), which holds the height while
+    /// `t` keeps running.
+    pub fn step(&mut self, y: f32, fall_max: f32, frozen: bool) -> f32 {
+        self.t += DT;
+        if frozen {
+            return 0.;
+        }
+        let dy = (self.target() - -y).min(fall_max * DT);
+        -dy
+    }
+
+    /// FUN_1403cb680: true once `rise ≤ t + 5`, when the fall motion plays.
+    pub fn falling_motion(&self) -> bool {
+        self.rise <= self.t + FALL_MOTION_LEAD
+    }
+}
+
+/// FUN_1403b73f0: √(2h/g).
+pub fn rise_time(height: f32) -> f32 {
+    ((height + height) / G).abs().sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +273,62 @@ mod tests {
         assert_eq!(prty_offset(&offsets, 3), Some(40));
         assert_eq!(prty_offset(&offsets, 9), Some(40));
         assert_eq!(prty_offset(&[0, 0], 5), None);
+    }
+
+    #[test]
+    fn jump_rises_on_the_double_sine_and_falls_on_the_parabola() {
+        let mut arc = Arc::launch(0., 185.);
+        assert!((arc.rise - 30.108_14).abs() < 1e-3);
+        let mut y = 0.;
+        let mut heights = Vec::new();
+        let mut landed = None;
+        for tick in 1..200 {
+            y += arc.step(y, 16., false);
+            heights.push(y);
+            if y <= 0. && tick > 1 {
+                landed = Some(tick);
+                break;
+            }
+        }
+        // h·sin(π/2·sin(π/2·t/T)) at t = 5, 10, 15, 20.
+        for (t, want) in [(5, 72.9), (10, 130.5), (15, 165.5), (20, 180.8)] {
+            assert!(
+                (heights[t - 1] - want).abs() < 0.1,
+                "t {t}: {}",
+                heights[t - 1]
+            );
+        }
+        let apex = heights.iter().copied().fold(0., f32::max);
+        assert!(apex > 184.9 && apex <= 185.0 + 1e-3, "{apex}");
+        // Falls back over ≈ √(2h/g) ticks: lands at tick 61 (t ≈ 60.2).
+        assert_eq!(landed, Some(61));
+    }
+
+    #[test]
+    fn long_falls_cap_at_fall_max() {
+        let mut arc = Arc::fall(1000., 0.);
+        let mut y = 1000.;
+        let mut last = 0.;
+        for _ in 0..80 {
+            last = arc.step(y, 16., false);
+            y += last;
+        }
+        assert_eq!(last, -16.);
+    }
+
+    #[test]
+    fn frozen_ticks_hold_height_but_advance_time() {
+        let mut arc = Arc::launch(0., 185.);
+        assert_eq!(arc.step(0., 16., true), 0.);
+        assert_eq!(arc.t, 1.);
+    }
+
+    #[test]
+    fn negative_launch_starts_already_falling() {
+        let mut arc = Arc::launch(50., -100.);
+        assert_eq!(arc.rise, 0.);
+        let dy = arc.step(50., 16., false);
+        // Starts at speed g·t0 = √(2·100·g) ≈ 9.0 downward.
+        assert!(dy < -9. && dy > -9.5, "{dy}");
     }
 }

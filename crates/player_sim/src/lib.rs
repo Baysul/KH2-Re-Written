@@ -62,11 +62,6 @@ impl Params {
         }
         Ok(())
     }
-    /// Launch speed whose discrete apex (speed reduced by gravity before
-    /// each position step) reaches `jump_height`.
-    pub fn jump_speed(&self) -> f32 {
-        launch_speed(physics::G, self.jump_height)
-    }
 }
 
 /// Motion timing in ticks relative to the motion's FrameStart, with the ANB
@@ -195,7 +190,10 @@ pub struct Player {
     pub position: Vec3,
     /// Facing angle; facing direction is (sin yaw, cos yaw) in XZ.
     pub yaw: f32,
+    /// Last tick's vertical displacement (Y-up units per tick).
     pub vertical_speed: f32,
+    /// Jump/fall curve while airborne (obj+0xf0..+0xfc).
+    pub arc: physics::Arc,
     pub action: Action,
     /// Ticks since the current action started.
     pub frame: u32,
@@ -224,10 +222,6 @@ pub struct Step {
     pub landed: bool,
 }
 
-fn launch_speed(gravity: f32, height: f32) -> f32 {
-    (2. * gravity * height).sqrt() + gravity * 0.5
-}
-
 fn wrap_angle(a: f32) -> f32 {
     let tau = std::f32::consts::TAU;
     (a + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI
@@ -239,6 +233,7 @@ impl Player {
             position,
             yaw,
             vertical_speed: 0.,
+            arc: physics::Arc::default(),
             action: Action::Idle,
             frame: 0,
             armed: false,
@@ -340,10 +335,29 @@ impl Player {
         self.yaw = wrap_angle(self.yaw + delta.clamp(-rate, rate));
     }
 
+    /// PTYA attack start with a positive Jump field (FUN_1403d78d0): a new
+    /// jump arc of that height from the current position.
     fn lift(&mut self, height: f32) {
         if height.is_finite() && height > 0. {
-            self.vertical_speed = self.vertical_speed.max(launch_speed(physics::G, height));
+            self.arc = physics::Arc::launch(self.position[1], height);
         }
+    }
+
+    /// Jump (mode 0 slot +0x48, FUN_140422630 → FUN_1403cbb00): the arc
+    /// of the PRTY jump height from the current position.
+    fn jump(&mut self, p: &Params, step: &mut Step) {
+        self.arc = physics::Arc::launch(self.position[1], p.jump_height);
+        self.vertical_speed = 0.;
+        self.air_combo_spent = false;
+        self.start(Action::Jump, step);
+    }
+
+    /// Leaving the ground without jumping (FUN_1403b4780 / FUN_1403b8150).
+    fn drop_off(&mut self, step: &mut Step) {
+        self.arc = physics::Arc::fall(self.position[1], 0.);
+        self.vertical_speed = 0.;
+        self.air_combo_spent = false;
+        self.start(Action::Fall, step);
     }
 
     fn facing(&self) -> [f32; 2] {
@@ -401,9 +415,7 @@ impl Player {
                     self.arm();
                     self.start(Action::Attack(0), &mut step);
                 } else if input.jump {
-                    self.vertical_speed = p.jump_speed();
-                    self.air_combo_spent = false;
-                    self.start(Action::Jump, &mut step);
+                    self.jump(p, &mut step);
                 } else {
                     // Landing holds until its "Blend to idle" range starts.
                     let landing = self.action == Action::Land
@@ -441,9 +453,7 @@ impl Player {
                         };
                         let facing = self.facing();
                         if !self.travel([facing[0] * speed, facing[1] * speed], p, world, true) {
-                            self.vertical_speed = 0.;
-                            self.air_combo_spent = false;
-                            self.start(Action::Fall, &mut step);
+                            self.drop_off(&mut step);
                         }
                     }
                 }
@@ -461,8 +471,7 @@ impl Player {
                     let (dx, dz) = (now[0] - before[0], now[2] - before[2]);
                     let delta = [dx * c + dz * s, -dx * s + dz * c];
                     if (delta[0] != 0. || delta[1] != 0.) && !self.travel(delta, p, world, true) {
-                        self.vertical_speed = 0.;
-                        self.start(Action::Fall, &mut step);
+                        self.drop_off(&mut step);
                         return step;
                     }
                 }
@@ -474,9 +483,7 @@ impl Player {
                     }
                     self.start(Action::Attack(i + 1), &mut step);
                 } else if recovery && input.jump {
-                    self.vertical_speed = p.jump_speed();
-                    self.air_combo_spent = false;
-                    self.start(Action::Jump, &mut step);
+                    self.jump(p, &mut step);
                 } else if (recovery && moving) || self.frame >= clip.end {
                     self.start(Action::Idle, &mut step);
                 }
@@ -505,9 +512,7 @@ impl Player {
                     } else if input.guard && clips.guard.is_some() {
                         self.start_guard(input, &mut step);
                     } else if input.jump {
-                        self.vertical_speed = p.jump_speed();
-                        self.air_combo_spent = false;
-                        self.start(Action::Jump, &mut step);
+                        self.jump(p, &mut step);
                     } else if moving || self.frame >= end {
                         self.start(Action::Idle, &mut step);
                     }
@@ -590,18 +595,17 @@ impl Player {
             self.arm();
             self.start(Action::AirAttack(0), step);
             self.lift(clips.air_combo[0].hop);
-        } else if self.action == Action::Jump && self.vertical_speed <= 0. {
+        } else if self.action == Action::Jump && self.arc.rise <= self.arc.t {
             self.start(Action::Fall, step);
         }
+        // ANB "No gravity" ranges hold the height while the curve's time
+        // keeps running (FUN_1403cb500 with obj+0x18c no-gravity bits) [I:
+        // trigger 3 → those bits].
         let floating = match self.action {
             Action::AirAttack(i) => Clip::within(&clips.air_combo[i].clip.no_gravity, self.frame),
             _ => false,
         };
-        if floating {
-            self.vertical_speed = 0.;
-        } else {
-            self.vertical_speed = (self.vertical_speed - physics::G).max(-p.fall_max);
-        }
+        self.vertical_speed = self.arc.step(self.position[1], p.fall_max, floating);
         if moving && !matches!(self.action, Action::AirAttack(_)) {
             self.turn_toward(direction, p.turn_speed);
             let speed = p.run_speed * magnitude.max(p.walk_threshold);
@@ -897,9 +901,10 @@ mod tests {
                 break;
             }
         }
-        // Discrete integration lands slightly under the continuous apex.
-        assert!(apex > 184. && apex <= 185., "apex {apex}");
-        assert!(landed.is_some());
+        // FUN_1403cb500: the double-sine rise reaches 185 at t ≈ 30.1 and
+        // the parabola lands at t ≈ 60.2.
+        assert!(apex > 184.9 && apex <= 185.001, "apex {apex}");
+        assert_eq!(landed, Some(60));
         assert_eq!(player.action, Action::Land);
         assert_eq!(player.position[1], 0.);
         for _ in 0..12 {

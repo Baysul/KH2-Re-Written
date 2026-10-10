@@ -10,6 +10,7 @@
 //! frame (`trap_frametime` = 1.0). Test-room choices are named constants.
 
 use crate::combat::{self, AttackParams, AttackerStats, TargetStats};
+use crate::physics;
 
 pub type Vec3 = [f32; 3];
 
@@ -94,8 +95,8 @@ pub trait Env {
 /// Default turn rate (sysobj+0x134, untraced); `turn_dir` turns by up to
 /// 2.0 x rate per call.
 pub const TURN_RATE: f32 = 0.13;
-/// Jump gravity constant read from the jump setup (FUN_1403cbb00).
-pub const GRAVITY: f32 = 0.408_163;
+/// Gravity (`DAT_1405ce184`).
+pub const GRAVITY: f32 = physics::G;
 /// Flinch slide brake and blow brake (SSTM BlowBrakeXZ 0.8, BlowMinXZ 0.1).
 pub const SLIDE_BRAKE: f32 = 0.8;
 pub const BLOW_BRAKE_XZ: f32 = 0.8;
@@ -202,6 +203,10 @@ pub struct Shadow {
     /// Increments on every motion start (attack-instance identity).
     pub motion_serial: u32,
     velocity: Vec3,
+    /// Jump curve while a jump (not a blow) is airborne (FUN_1403cbb00).
+    arc: Option<physics::Arc>,
+    /// Downward speed cap, obj+0x138 (SSTM FallMax).
+    pub fall_max: f32,
     slide: Vec3,
     /// Knock-slide (FUN_1403d4960): unit direction and speed.
     knock: Option<(Vec3, f32)>,
@@ -234,6 +239,8 @@ impl Shadow {
             sunk: false,
             motion_serial: 0,
             velocity: [0.; 3],
+            arc: None,
+            fall_max: 16.,
             slide: [0.; 3],
             knock: None,
             airborne: false,
@@ -341,6 +348,7 @@ impl Shadow {
         if class == 4 {
             let [up, speed] = attack.knockback.map(|v| v as f32);
             self.velocity = [direction[0] * speed, up, direction[2] * speed];
+            self.arc = None;
             self.airborne = true;
             self.reaction = Reaction::Blow { back };
             self.motion_start(motion::BLOW[back as usize]);
@@ -396,8 +404,9 @@ impl Shadow {
             self.gone_ticks += 1;
             if self.gone_ticks >= RESPAWN_TICKS {
                 let stats = self.stats;
-                let (spawn, yaw) = (self.spawn, self.yaw);
+                let (spawn, yaw, fall_max) = (self.spawn, self.yaw, self.fall_max);
                 *self = Shadow::new(spawn, yaw, stats);
+                self.fall_max = fall_max;
             }
             return;
         }
@@ -439,7 +448,16 @@ impl Shadow {
             self.slide = self.slide.map(|v| v * SLIDE_BRAKE);
         }
         if self.airborne {
-            self.position = add(self.position, self.velocity);
+            self.position[0] += self.velocity[0];
+            self.position[2] += self.velocity[2];
+            match self.arc.as_mut() {
+                Some(arc) => {
+                    let dy = arc.step(self.position[1], self.fall_max, false);
+                    self.velocity[1] = dy;
+                    self.position[1] += dy;
+                }
+                None => self.position[1] += self.velocity[1],
+            }
             if matches!(self.reaction, Reaction::Blow { .. }) {
                 self.velocity[0] *= BLOW_BRAKE_XZ;
                 self.velocity[2] *= BLOW_BRAKE_XZ;
@@ -448,7 +466,9 @@ impl Shadow {
                     self.velocity[2] = 0.;
                 }
             }
-            self.velocity[1] -= GRAVITY;
+            if self.arc.is_none() {
+                self.velocity[1] -= GRAVITY;
+            }
             if let Some(floor) =
                 env.floor(self.position[0], self.position[2], self.position[1] + 30.)
                 && self.position[1] <= floor
@@ -456,6 +476,7 @@ impl Shadow {
             {
                 self.position[1] = floor;
                 self.velocity = [0.; 3];
+                self.arc = None;
                 self.airborne = false;
                 if let Reaction::Blow { back } = self.reaction {
                     self.reaction = Reaction::BlowLand;
@@ -677,8 +698,11 @@ impl Shadow {
                     if hlen(to_target) > 1e-4 {
                         self.yaw = to_target[0].atan2(to_target[2]);
                     }
+                    // method_obj_jump → FUN_1403cbb00: height 100 on the
+                    // closed-form curve, horizontal speed 5 along the facing.
                     let f = self.forward();
-                    self.velocity = [f[0] * 5., (2. * GRAVITY * 100.).sqrt(), f[2] * 5.];
+                    self.velocity = [f[0] * 5., 0., f[2] * 5.];
+                    self.arc = Some(physics::Arc::launch(self.position[1], 100.));
                     self.airborne = true;
                     self.motion_start(motion::JUMP);
                     self.set(act.kind, Step::Air { stage: 0 });
