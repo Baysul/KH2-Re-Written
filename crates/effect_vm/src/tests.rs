@@ -74,3 +74,267 @@ fn rng_matches_the_msvc_sequence() {
     let mut r = Rng::default();
     assert_eq!([r.rand(), r.rand(), r.rand()], [41, 18467, 6334]);
 }
+
+/// One program of a synthetic entry: type, keyframe size in bytes, the
+/// keyframe words (time word first) and the work-variable offsets.
+struct Prog {
+    kind: u32,
+    size: u16,
+    keys: Vec<u32>,
+    use_val: Vec<u32>,
+}
+
+fn f(v: f32) -> u32 {
+    v.to_bits()
+}
+
+/// A DPD with one PDATA whose entries run `entries` (start frame, total
+/// ticks, programs), the given OMD models (id, vertices) and VSFs
+/// (id, model, indices).
+fn build(
+    entries: &[(i32, u32, Vec<Prog>)],
+    models: &[(i16, Vec<[i16; 3]>)],
+    vsfs: &[(i32, i32, Vec<u16>)],
+) -> Arc<Dpd> {
+    let mut b = vec![0u8; 0x8000];
+    put(&mut b, 0, 0x96);
+    // Lists: pdata, textures, shapes, models, vsf (offsets from 0x1000).
+    let mut at = 4;
+    let mut list = |b: &mut Vec<u8>, items: &[u32]| {
+        put(b, at, items.len() as u32);
+        for (i, v) in items.iter().enumerate() {
+            put(b, at + 4 + 4 * i, *v);
+        }
+        at += 4 + 4 * items.len();
+    };
+    let model_at: Vec<u32> = (0..models.len())
+        .map(|i| 0x1000 + 0x200 * i as u32)
+        .collect();
+    let vsf_at: Vec<u32> = (0..vsfs.len()).map(|i| 0x2000 + 0x100 * i as u32).collect();
+    list(&mut b, &[0x40]);
+    list(&mut b, &[]);
+    list(&mut b, &[]);
+    list(&mut b, &model_at);
+    list(&mut b, &vsf_at);
+    for (i, (id, v)) in models.iter().enumerate() {
+        let m = model_at[i] as usize;
+        b[m..m + 2].copy_from_slice(&id.to_le_bytes());
+        let hdr = m + 0x10;
+        put(&mut b, hdr + 8, 0x40);
+        b[hdr + 0x12..hdr + 0x14].copy_from_slice(&(v.len() as i16).to_le_bytes());
+        for (k, p) in v.iter().enumerate() {
+            for (c, x) in p.iter().enumerate() {
+                let o = hdr + 0x40 + 6 * k + 2 * c;
+                b[o..o + 2].copy_from_slice(&x.to_le_bytes());
+            }
+        }
+    }
+    for (i, (id, model, idx)) in vsfs.iter().enumerate() {
+        let v = vsf_at[i] as usize;
+        put(&mut b, v, *id as u32);
+        put(&mut b, v + 4, *model as u32);
+        put(&mut b, v + 8, idx.len() as u32);
+        for (k, x) in idx.iter().enumerate() {
+            b[v + 12 + 2 * k..v + 14 + 2 * k].copy_from_slice(&x.to_le_bytes());
+        }
+    }
+    for k in 0..4 {
+        put(&mut b, 0x40 + 0xa0 + 4 * k, f(1.));
+    }
+    let block = 0x40 + 0x110;
+    put(&mut b, block, 0x1000 * 64);
+    put(&mut b, block + 0xc, 0x100);
+    put(&mut b, block + 0x100, entries.len() as u32);
+    let mut data = 0x4000;
+    for (n, (start, ticks, programs)) in entries.iter().enumerate() {
+        let off = 0x200 + 0x200 * n;
+        put(&mut b, block + 0x100 + 4 + 4 * n, off as u32);
+        let e = block + off;
+        put(&mut b, e + 0x10, *start as u32);
+        put(&mut b, e + 0x14, ticks * 0x1000);
+        put(&mut b, e + 0x18, 0x7000_0000);
+        put(&mut b, e + 0x1c, 0x7000_0000);
+        put(&mut b, e + 0x20, 0xa0 + 0x100);
+        b[e + 0x26] = programs.len() as u8;
+        for (j, p) in programs.iter().enumerate() {
+            let r = e + 0x28 + 0x10 * j;
+            put(&mut b, r, p.kind);
+            b[r + 4..r + 6].copy_from_slice(&p.size.to_le_bytes());
+            b[r + 6] = 1;
+            put(&mut b, r + 8, (data - block) as u32);
+            for (k, w) in p.keys.iter().enumerate() {
+                put(&mut b, data + 4 * k, *w);
+            }
+            // The word after the keyframes is the next key's time: never.
+            put(&mut b, data + 4 * p.keys.len(), u32::MAX);
+            data += 4 * p.keys.len() + 8;
+            put(&mut b, r + 12, (data - block) as u32);
+            for (k, w) in p.use_val.iter().enumerate() {
+                put(&mut b, data + 4 * k, *w);
+            }
+            data += 4 * p.use_val.len() + 8;
+        }
+    }
+    Arc::new(read_dpd(&b).unwrap())
+}
+
+fn colour(var: u32) -> Prog {
+    // Colour var (RGBA16 at +0, bytes at +8): 0x4000 = 128 after /128.
+    Prog {
+        kind: 43,
+        size: 12,
+        keys: vec![0, 0x4000_4000, 0x4000_4000],
+        use_val: vec![var],
+    }
+}
+
+#[test]
+fn matrix_programs_place_a_model_draw() {
+    // Point (u0 = 0) at (1,2,3), unit Scale (u0 = 32), MatrixZXY with a
+    // 90 degree Y angle, DrawMatrix, DrawMdl3 of model 5 (u0 = colour 48).
+    let progs = vec![
+        Prog {
+            kind: 40,
+            size: 16,
+            keys: vec![0, f(1.), f(2.), f(3.)],
+            use_val: vec![0],
+        },
+        Prog {
+            kind: 42,
+            size: 16,
+            keys: vec![0, f(1.), f(1.), f(1.)],
+            use_val: vec![32],
+        },
+        Prog {
+            kind: 41,
+            size: 16,
+            keys: vec![0, 0, 0x4000, 0],
+            use_val: vec![16],
+        },
+        colour(48),
+        Prog {
+            kind: 91,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0, 16, 32],
+        },
+        Prog {
+            kind: 112,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![],
+        },
+        Prog {
+            kind: 137,
+            size: 16,
+            keys: vec![0, 5, 0, 0],
+            use_val: vec![48, 0, 64],
+        },
+    ];
+    let dpd = build(&[(0, 8, progs)], &[(5, vec![[10, 0, 0], [0, 10, 0]])], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    inst.frame(&math::IDENTITY, &mut rng);
+    assert_eq!(inst.model_draws.len(), 1);
+    let d = &inst.model_draws[0];
+    assert_eq!(d.model, 5);
+    assert_eq!(d.rgba, [128; 4]);
+    assert_eq!(&d.a[3][..3], &[1., 2., 3.]);
+    // The Y quarter turn takes the model's +X axis to -Z.
+    assert!(d.a[0][0].abs() < 1e-3 && (d.a[0][2] + 1.).abs() < 1e-3);
+}
+
+#[test]
+fn vt_mime_morphs_between_models_and_ts3_scrolls() {
+    let progs = vec![
+        colour(48),
+        // VtMime u0 = 0: model 0 -> 1, t += 0.5 at the key.
+        Prog {
+            kind: 49,
+            size: 24,
+            keys: vec![0, 0, 1, f(0.5), 0xff7f_ffff, 0],
+            use_val: vec![0],
+        },
+        // Ts3: scroll block at 64, U += 2 at the key, Vvel = FLT_MAX overflows.
+        Prog {
+            kind: 139,
+            size: 40,
+            keys: vec![0, 0, f(2.), 0, 0, 0, 0, 0, 0x7f7f_ffff, 0],
+            use_val: vec![48, 0, 64, 96],
+        },
+    ];
+    let dpd = build(
+        &[(0, 8, progs)],
+        &[
+            (0, vec![[0, 0, 0], [100, 0, 0]]),
+            (1, vec![[10, 0, 0], [0, -50, 0]]),
+        ],
+        &[],
+    );
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    inst.frame(&math::IDENTITY, &mut Rng::default());
+    let d = &inst.model_draws[0];
+    let v = d.vertices.as_ref().unwrap();
+    assert_eq!(v[0], [5, 0, 0]);
+    assert_eq!(v[1], [50, -25, 0]);
+    assert_eq!(d.scroll[0], 2 * 65536);
+}
+
+#[test]
+fn vertex_ap_births_children_at_model_vertices() {
+    // Entry 0: VertexAp (VSF 0 = vertices 1, 0 of model 0, 1 birth every
+    // tick, sequential, child entry 1, var 0). Entry 1 (spawned only by
+    // births): Point at var 0.
+    let emitter = vec![
+        Prog {
+            kind: 40,
+            size: 16,
+            keys: vec![0, f(0.), f(0.), f(0.)],
+            use_val: vec![0],
+        },
+        Prog {
+            kind: 42,
+            size: 16,
+            keys: vec![0, f(1.), f(1.), f(1.)],
+            use_val: vec![32],
+        },
+        Prog {
+            kind: 87,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0, 16, 32],
+        },
+        Prog {
+            kind: 174,
+            size: 20,
+            keys: vec![0, 0x0101_0000, 0, 1, 0],
+            use_val: vec![64, 64],
+        },
+    ];
+    let child = vec![Prog {
+        kind: 40,
+        size: 16,
+        keys: vec![0, f(0.), f(0.), f(0.)],
+        use_val: vec![0],
+    }];
+    let dpd = build(
+        &[(0, 8, emitter), (i32::MAX, 8, child)],
+        &[(0, vec![[1, 2, 3], [4, 5, 6]])],
+        &[(0, 0, vec![1, 0])],
+    );
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    for _ in 0..4 {
+        inst.frame(&math::IDENTITY, &mut rng);
+    }
+    // The emitter plus at least two children (vertices 1 then 0).
+    let positions: Vec<[f32; 3]> = inst
+        .parts
+        .iter()
+        .flatten()
+        .skip(1)
+        .map(|p| [p.f32(0), p.f32(4), p.f32(8)])
+        .collect();
+    assert!(positions.contains(&[4., 5., 6.]), "{positions:?}");
+    assert!(positions.contains(&[1., 2., 3.]), "{positions:?}");
+}

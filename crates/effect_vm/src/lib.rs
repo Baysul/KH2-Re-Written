@@ -9,6 +9,8 @@
 //! second game frame (one VM tick = 2.0 frame units, 30 Hz at 60 fps).
 pub mod math;
 mod mega_birth;
+mod mega_model;
+mod models;
 mod programs;
 
 use math::{IDENTITY, Mat, Vec4};
@@ -58,6 +60,25 @@ pub struct Quad {
     pub blend: u8,
     /// Texture base pointer from the frame's TEX0 (selects the atlas).
     pub tbp: u16,
+    /// The frame's full TEX0 register (TBP, CBP, size, format).
+    pub tex0: u64,
+}
+
+/// One OMD model draw (pppDrawMdl3 / pppDrawMdlTs3): the model of the
+/// instance's DPD through draw matrix `a` (view space: position = a·v).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelDraw {
+    /// DPD-local model id.
+    pub model: i16,
+    /// Morphed vertices (pppVtMime) replacing the model's own array.
+    pub vertices: Option<Arc<Vec<[i16; 3]>>>,
+    pub a: Mat,
+    /// The "Z correct" matrix of the exe's depth output (only depth).
+    pub b: Option<Mat>,
+    /// Part colour bytes, 0x80 = 1.0.
+    pub rgba: [u8; 4],
+    /// UV scroll ints (texels × 65536, as the exe's cvttss2si gives them).
+    pub scroll: [i32; 2],
 }
 
 pub(crate) struct Part {
@@ -71,6 +92,10 @@ pub(crate) struct Part {
     pub cursors: Vec<usize>,
     /// pppRyjMegaBirth sub-particle pools by work offset u0.
     pub mega: std::collections::HashMap<usize, mega_birth::Pool>,
+    /// pppRyjMegaBirthModel pools by work offset.
+    pub mega_model: std::collections::HashMap<usize, mega_model::Pool>,
+    /// Work +0x90 vertex handle: the array pppVtMime morphed this frame.
+    pub vertex_override: Option<Arc<Vec<[i16; 3]>>>,
 }
 
 impl Part {
@@ -144,8 +169,12 @@ pub(crate) struct Ctx<'a> {
     pub skip: bool,
     pub rng: &'a mut Rng,
     pub quads: &'a mut Vec<Quad>,
+    pub model_draws: &'a mut Vec<ModelDraw>,
     pub births: Vec<programs::Birth>,
     pub unsupported: &'a mut Vec<u32>,
+    /// Instance flag bytes set by pppRyjMngFlag: draw layer (+0xc0),
+    /// pause (+0xc1), camera offset (+0xc2).
+    pub flags: &'a mut [u8; 3],
 }
 
 /// A running effect.
@@ -164,6 +193,10 @@ pub struct Instance {
     finished: bool,
     /// Program types met that this translation does not run.
     pub unsupported: Vec<u32>,
+    /// Model draws of the last [`Instance::frame`].
+    pub model_draws: Vec<ModelDraw>,
+    /// pppRyjMngFlag bytes: draw layer, pause, camera offset.
+    flags: [u8; 3],
 }
 
 impl Instance {
@@ -196,7 +229,25 @@ impl Instance {
             colour: [1.; 4],
             finished: false,
             unsupported: Vec::new(),
+            model_draws: Vec::new(),
+            flags: [0; 3],
         })
+    }
+
+    /// The DPD this instance reads its models, shapes and textures from.
+    pub fn dpd(&self) -> &Arc<Dpd> {
+        &self.dpd
+    }
+
+    /// The draw layer pppRyjMngFlag set: odd values draw behind the
+    /// depth-sorted effects, even values in front, 0 sorts by depth.
+    pub fn layer(&self) -> u8 {
+        self.flags[0]
+    }
+
+    /// The PDATA header's loop flag (a looping effect runs until stopped).
+    pub fn looping(&self) -> bool {
+        self.looping
     }
 
     pub fn finished(&self) -> bool {
@@ -223,6 +274,7 @@ impl Instance {
     /// time every second frame). Returns the quads drawn this frame.
     pub fn frame(&mut self, view: &Mat, rng: &mut Rng) -> Vec<Quad> {
         let mut quads = Vec::new();
+        self.model_draws.clear();
         if self.finished {
             return quads;
         }
@@ -244,6 +296,8 @@ impl Instance {
             (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
         });
         let mut unsupported = std::mem::take(&mut self.unsupported);
+        let mut model_draws = Vec::new();
+        let mut flags = self.flags;
         let mut ctx = Ctx {
             dpd: &dpd,
             world,
@@ -255,12 +309,16 @@ impl Instance {
             skip,
             rng,
             quads: &mut quads,
+            model_draws: &mut model_draws,
             births: Vec::new(),
             unsupported: &mut unsupported,
+            flags: &mut flags,
         };
         self.update_pass(&mut ctx);
         self.draw_pass(&mut ctx, true);
         self.unsupported = unsupported;
+        self.model_draws = model_draws;
+        self.flags = flags;
         if !skip {
             self.time += 0x1000;
             if !self.looping && self.end <= self.time {
@@ -291,6 +349,8 @@ impl Instance {
             vars: vec![0; entry.work_size.saturating_sub(0xa0)],
             cursors: entry.programs.iter().map(|p| p.params).collect(),
             mega: Default::default(),
+            mega_model: Default::default(),
+            vertex_override: None,
         };
         for p in &entry.programs {
             programs::create(p, &mut part, ctx);
@@ -330,8 +390,12 @@ impl Instance {
             }
             let id = self.create(b.entry, ctx);
             if let Some(p) = self.parts[id].as_mut() {
-                p.set_vec4(b.position_var, b.position);
-                p.set_vec4(b.velocity_var, b.velocity);
+                for (i, v) in b.position.iter().take(b.position_len).enumerate() {
+                    p.set_f32(b.position_var + 4 * i, *v);
+                }
+                if let Some(var) = b.velocity_var {
+                    p.set_vec4(var, b.velocity);
+                }
             }
         }
     }
@@ -365,7 +429,9 @@ impl Instance {
                     }
                     Self::advance(ctx.dpd, part, j, p);
                     let cursor = part.cursors[j];
-                    programs::update(p, cursor, part, ctx);
+                    if ctx.flags[1] == 0 || p.kind == programs::MNG_FLAG {
+                        programs::update(p, cursor, part, ctx);
+                    }
                     self.births(ctx);
                 }
             }
@@ -393,7 +459,7 @@ impl Instance {
                     }
                     Self::advance(ctx.dpd, part, j, p);
                     let cursor = part.cursors[j];
-                    if programs::has_update(p.kind) {
+                    if programs::has_update(p.kind) && ctx.flags[1] == 0 {
                         programs::update(p, cursor, part, ctx);
                     }
                     if draw {

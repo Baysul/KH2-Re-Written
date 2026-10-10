@@ -2,6 +2,7 @@
 //! installation — tt19 event 613 by default, the scene before the Roxas vs
 //! Axel fight in Betwixt and Between — from the event script's own cameras,
 //! actors, motions, voices, music and subtitles.
+mod fx;
 mod load;
 
 use bevy::{
@@ -14,7 +15,7 @@ use bevy::{
         screenshot::{Screenshot, ScreenshotCaptured},
     },
 };
-use event_sim::{Timeline, camera};
+use event_sim::Timeline;
 use package_reader::{
     model_inspection::InspectionModel, model_inspection_textures::TextureMode,
     motion::InterpolatedMotion, probe::ProbeSource,
@@ -300,7 +301,12 @@ fn hold_audio(audio: &Audio, held: bool) {
 
 /// The event clock: two simulation ticks per event frame; frozen while
 /// the pause menu is open.
-fn tick(mut event: ResMut<Event>, keys: Res<ButtonInput<KeyCode>>, mut audio: ResMut<Audio>) {
+fn tick(
+    mut event: ResMut<Event>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut audio: ResMut<Audio>,
+    mut fx: ResMut<fx::Fx>,
+) {
     // Start (Esc on PC) opens the pause menu: Continue / Skip Scene.
     let start = keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Tab);
     match audio.pause {
@@ -408,6 +414,9 @@ fn tick(mut event: ResMut<Event>, keys: Res<ButtonInput<KeyCode>>, mut audio: Re
             mixer.play(m.0, MUSIC_KEY, m.1 * 0x3000 as f32 / 16383., 1.);
         }
     }
+    fx.step(frame, &event.timeline);
+    let logged = std::mem::take(&mut fx.log);
+    event.log.extend(logged);
     if event.timeline.end_frame > 0 && frame >= event.timeline.end_frame as f32 {
         event.finished = true;
     }
@@ -456,7 +465,21 @@ fn present(
                 .map(|p| p.map(f32::from_bits))
                 .collect(),
         );
-        *visibility = Visibility::Inherited;
+        let listed = event
+            .timeline
+            .actors
+            .iter()
+            .find(|a| a.id == actor.id)
+            .and_then(|a| a.parts.iter().rev().find(|(at, _)| *at as f32 <= frame))
+            .map(|(_, list)| list.as_slice());
+        // Part lists are visible mesh groups (core/screen spec); w_ex010's
+        // meshes are all group 0, so a list without 0 hides it.
+        let hidden = actor.name.starts_with("w_") && listed.is_some_and(|l| !l.contains(&0));
+        *visibility = if hidden {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
         if let Some(p) = state.placement {
             transform.translation = Vec3::from_array(p.position);
             transform.rotation = Quat::from_euler(
@@ -482,20 +505,14 @@ fn present(
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         }
     }
-    if let Some(cut) = event.timeline.cut_at(frame)
-        && let Some(data) = event.timeline.camera(cut.camera)
+    // The exe's camera output negates y and z (FUN_1402d3d40; camera
+    // space is y-down), actors use the raw script coordinates.
+    if let Some((pose, fov)) = fx::camera_pose(&event.timeline, frame)
         && let Ok((mut transform, mut projection)) = cameras.single_mut()
     {
-        let seconds = (frame - cut.start as f32).min((cut.end - cut.start) as f32) / EVENT_FPS;
-        let v = camera::view(data, seconds);
-        // The exe's camera output negates y and z (FUN_1402d3d40; camera
-        // space is y-down), actors use the raw script coordinates.
-        let eye = Vec3::new(v.eye[0], v.eye[1], -v.eye[2]);
-        let target = Vec3::new(v.target[0], v.target[1], -v.target[2]);
-        *transform = Transform::from_translation(eye).looking_at(target, Vec3::Y);
-        transform.rotate_local_z(v.roll.to_radians());
+        *transform = pose;
         if let Projection::Perspective(p) = projection.as_mut() {
-            p.fov = v.fov.to_radians();
+            p.fov = fov;
         }
     }
 }
@@ -511,6 +528,24 @@ fn compose(
     };
     frame.full_screen(scene, [1.; 4]);
     let f = event.frame;
+    let bars = event
+        .timeline
+        .wide_masks
+        .iter()
+        .rev()
+        .find(|(at, _)| *at as f32 <= f)
+        .is_some_and(|(_, flag)| *flag != 0);
+    if bars && let Some(white) = overlay.white_sheet {
+        let quad = |top: f32, bottom: f32| package_reader::sequence::Quad {
+            corners: [[-86., top], [598., top], [-86., bottom], [598., bottom]],
+            uv: [0, 0, 1, 1],
+            colors: [[0., 0., 0., 1.]; 4],
+            blend: 0,
+        };
+        frame
+            .draws
+            .push((white, vec![quad(-1., 35.), quad(381., 417.)]));
+    }
     for (_slot, message) in event.timeline.subtitles_at(f) {
         let Some(bytes) = overlay.messages.get(&message) else {
             continue;
@@ -522,6 +557,14 @@ fn compose(
             if text.complete {
                 break;
             }
+        }
+        for g in &mut glyphs {
+            g.rect = [
+                256. + (g.rect[0] - 256.) * 0.8,
+                400. + (g.rect[1] - 400.) * 0.8,
+                256. + (g.rect[2] - 256.) * 0.8,
+                400. + (g.rect[3] - 400.) * 0.8,
+            ];
         }
         frame
             .draws
@@ -809,6 +852,11 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         scene: Handle::default(),
         messages: loaded.messages,
     })
+    .insert_resource(fx::Fx::new(
+        loaded.paxes,
+        loaded.texcommon,
+        &loaded.commands,
+    ))
     .insert_resource(StartupRes(Some(Startup { room: loaded.room })))
     .insert_resource(Time::<Fixed>::from_hz(TICK_HZ))
     .insert_resource(ClearColor(Color::BLACK))
@@ -828,7 +876,7 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     })
     .add_systems(Startup, setup)
     .add_systems(FixedUpdate, tick)
-    .add_systems(Update, (present, compose, finish).chain());
+    .add_systems(Update, (present, fx::present, compose, finish).chain());
     if autoplaying {
         app.add_systems(Startup, |mut time: ResMut<Time<Virtual>>| time.pause());
     }

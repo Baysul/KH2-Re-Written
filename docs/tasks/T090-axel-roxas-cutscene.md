@@ -22,10 +22,15 @@ Steam app 2552430, build 15194255, content identity `a9ca1e03…`, quarantined; 
 - PASS fmt, clippy, test (workspace, locked); release build.
 - PASS windowed captures of frames 60–1000 (cameras on Axel and Roxas, subtitle at the exe position).
 
+## Added in the second pass
+
+- Effects from `tt_event_613.pax` (effect elements 0, 1, 4, 5, 6) through new `effect_vm` programs (VtMime, MatrixZXY, DrawMatrix, DrawMdl3, DrawMdlTs3, VertexAp, MegaBirthModel, MngFlag) and an OMD mesh reader.
+- Letterbox bars (WideMask): opaque black, y -1..35 and 381..417 in the 512x416 space, no slide.
+- Subtitles at 0.8x about the bottom-centre anchor; Keyblade actors hidden while the part list lacks group 0.
+
 ## Not done / uncertain (verdict: PARTIAL, not a 1:1 pass)
 
-- NOT DONE effects (tt_event_613.pax: ~12 effect program types missing in `effect_vm`, OMD model renderer undecoded), SeqBlur, WideMask bars, SeqTextureAnim, SeqPart visibility lists.
-- [U] fade curve/colour, music after the event ends, pause menu art (plain list, not pause.2ld), exact subtitle vertical transform, pause cursor sounds.
-- Audio not compared against a real capture; no in-game reference run.
-
-Next: effects programs, WideMask/blur, pause.2ld layout, then comparison against the original.
+- Axel's hand fire (elements 7-9: ParMatrix, SMatrix, KeBornRnd6, VertexApLc, EiDrawShipoly), MegaBirthModel matrix modes 2/4/6/8, effect layer ordering, blend 0x88, PS2 gamma-space additive blending, HD textures; AttachEffect/StopEffect and end types 2/3/5 are ignored.
+- SeqBlur feedback pass (equation known: out = prev*a/128 + cur*(1-a/128), previous frame zoomed ~1.004) and SeqTextureAnim (talk/blink patches) not built; SeqPart is only applied to the Keyblade actors, not Axel/the Roxas copy mesh groups.
+- [U] music after the event ends and what clears the black fade; pause menu art (plain list, not pause.2ld); cursor sounds.
+- No comparison against a real capture of the original.

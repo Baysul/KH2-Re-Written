@@ -1,6 +1,7 @@
 //! Reads everything one event needs from the bound installation, by the
 //! names the event script itself gives.
 use package_reader::{
+    effect,
     event::{self, Command, Load},
     model_inspection::{self, InspectionModel, ModelItem, ModelOptions},
     model_inspection_textures::{TextureMode, UvProfile},
@@ -49,6 +50,10 @@ pub struct Loaded {
     /// Pause menu rows: "Continue" and "Skip Scene" (sys.bar 0x8ab4, 0x8ab3).
     pub pause_labels: [Vec<u8>; 2],
     pub font: SystemFont,
+    /// ReadEffect PAX files (`event/effect/<name>.pax`) by their Id.
+    pub paxes: Vec<(i16, effect::Pax)>,
+    /// The resident common effect textures (`effect/texcommon.dpd`).
+    pub texcommon: Option<effect::Dpd>,
     pub summary: serde_json::Value,
 }
 
@@ -82,6 +87,7 @@ pub fn load(source: &ProbeSource, id: &EventId) -> Result<Loaded> {
     let mut music_ids = Vec::new();
     let mut message_ids = Vec::new();
     let mut bank_numbers = Vec::new();
+    let mut effect_files = Vec::new();
     for command in &commands {
         match command {
             Command::SoundData { bank, .. } => bank_numbers.push(*bank),
@@ -98,6 +104,7 @@ pub fn load(source: &ProbeSource, id: &EventId) -> Result<Loaded> {
                         Load::Motion { actor, name, .. } => {
                             motion_requests.push((*actor, name.clone()))
                         }
+                        Load::Effect { id, name } => effect_files.push((*id, name.clone())),
                         _ => {}
                     }
                 }
@@ -207,6 +214,19 @@ pub fn load(source: &ProbeSource, id: &EventId) -> Result<Loaded> {
         b"evt\0",
     )?;
 
+    let mut paxes = Vec::new();
+    for (id, name) in effect_files {
+        let bytes = library.read(&format!("event/effect/{name}.pax"))?;
+        paxes.push((id, effect::read_pax(&bytes)?));
+    }
+    let texcommon = match library.read("effect/texcommon.dpd") {
+        Ok(bytes) => Some(effect::read_dpd(&bytes)?),
+        Err(e) => {
+            eprintln!("effect/texcommon.dpd unavailable: {e}");
+            None
+        }
+    };
+
     let summary = serde_json::json!({
         "event": "event_loaded",
         "commands": commands.len(),
@@ -218,6 +238,8 @@ pub fn load(source: &ProbeSource, id: &EventId) -> Result<Loaded> {
         "music": music.keys().collect::<Vec<_>>(),
         "messages": message_ids,
         "room_models": room.rooms.len(),
+        "effect_paxes": paxes.iter().map(|(i, p)| (*i, p.name.clone(), p.elements.len())).collect::<Vec<_>>(),
+        "texcommon_textures": texcommon.as_ref().map(|d| d.textures.len()),
     });
     Ok(Loaded {
         commands,
@@ -230,6 +252,8 @@ pub fn load(source: &ProbeSource, id: &EventId) -> Result<Loaded> {
         banks,
         pause_labels: [labels.remove(0), labels.remove(0)],
         font,
+        paxes,
+        texcommon,
         summary,
     })
 }

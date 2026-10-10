@@ -3,6 +3,7 @@
 //! their decompilations. `V[o]` is work offset 0xa0 + o (`Part::vars[o]`);
 //! `u[k]` is the program's k-th work-variable offset.
 use crate::math::{self, Mat, Vec4};
+use crate::models;
 use crate::{Ctx, Part, Quad, key_i32};
 use package_reader::effect::{self, Program, f32_at, i16_at, u32_at};
 
@@ -10,7 +11,9 @@ pub(crate) struct Birth {
     pub entry: usize,
     pub position_var: usize,
     pub position: Vec4,
-    pub velocity_var: usize,
+    /// Floats written at `position_var` (3 = xyz only, 4 = with w).
+    pub position_len: usize,
+    pub velocity_var: Option<usize>,
     pub velocity: Vec4,
 }
 
@@ -33,17 +36,26 @@ const MATRIX_SCL: u32 = 94;
 const DRAW_MATRIX_FRONT: u32 = 113;
 const KE_Z_CRCT: u32 = 124;
 const KE_Z_CRCT_SHP: u32 = 125;
-const DRAW_MDL3: u32 = 137;
 const DRAW_SHAPE_X: u32 = 142;
 const KE_BORN_RND5: u32 = 183;
 pub(crate) const MEGA_BIRTH: u32 = 201;
+pub(crate) const MNG_FLAG: u32 = 202;
+pub(crate) const MEGA_BIRTH_MODEL: u32 = 208;
 
 pub(crate) fn has_update(kind: u32) -> bool {
-    kind != DRAW_MDL3
+    kind != models::DRAW_MDL3
 }
 
 pub(crate) fn has_draw(kind: u32) -> bool {
-    matches!(kind, DRAW_SHAPE_X | DRAW_MDL3 | MEGA_BIRTH)
+    matches!(
+        kind,
+        DRAW_SHAPE_X
+            | MEGA_BIRTH
+            | MEGA_BIRTH_MODEL
+            | models::VT_MIME
+            | models::DRAW_MDL3
+            | models::DRAW_MDL_TS3
+    )
 }
 
 pub(crate) fn use_val(ctx: &Ctx, p: &Program, k: usize) -> usize {
@@ -100,13 +112,17 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
             part.zero(o, 3);
         }
         MEGA_BIRTH => crate::mega_birth::create(p, part, ctx),
+        MEGA_BIRTH_MODEL => crate::mega_model::create(p, part, ctx),
+        models::VT_MIME | models::DRAW_MDL_TS3 | models::VERTEX_AP => models::create(p, part, ctx),
         _ => {}
     }
 }
 
 pub(crate) fn destroy(p: &Program, part: &mut Part, ctx: &mut Ctx) {
-    if p.kind == MEGA_BIRTH {
-        crate::mega_birth::destroy(p, part, ctx);
+    match p.kind {
+        MEGA_BIRTH => crate::mega_birth::destroy(p, part, ctx),
+        MEGA_BIRTH_MODEL => crate::mega_model::destroy(p, part, ctx),
+        _ => {}
     }
 }
 
@@ -172,6 +188,13 @@ pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx)
         DRAW_SHAPE_X => shape_advance(p, cursor, part, ctx),
         KE_BORN_RND5 => born_rnd5(p, cursor, part, ctx),
         MEGA_BIRTH => crate::mega_birth::update(p, cursor, part, ctx),
+        MEGA_BIRTH_MODEL => crate::mega_model::update(p, cursor, part, ctx),
+        MNG_FLAG => crate::mega_model::mng_flag(cursor, part, ctx),
+        models::VT_MIME
+        | models::MATRIX_ZXY
+        | models::DRAW_MATRIX
+        | models::DRAW_MDL_TS3
+        | models::VERTEX_AP => models::update(p, cursor, part, ctx),
         _ => {
             if !ctx.unsupported.contains(&p.kind) {
                 ctx.unsupported.push(p.kind);
@@ -184,6 +207,10 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
     match p.kind {
         DRAW_SHAPE_X => draw_shape(p, cursor, part, ctx),
         MEGA_BIRTH => crate::mega_birth::draw(p, cursor, part, ctx),
+        MEGA_BIRTH_MODEL => crate::mega_model::draw(p, cursor, part, ctx),
+        models::VT_MIME | models::DRAW_MDL3 | models::DRAW_MDL_TS3 => {
+            models::draw(p, cursor, part, ctx)
+        }
         _ => {
             if !ctx.unsupported.contains(&p.kind) {
                 ctx.unsupported.push(p.kind);
@@ -478,7 +505,9 @@ pub(crate) fn emit_sprites(ctx: &mut Ctx, anim: usize, index: usize, m: &Mat, pa
     };
     let address = i16_at(b, anim + 0x10 + index * 8).unwrap_or(0) as isize;
     let frame = (anim as isize + address) as usize;
-    let tbp = (u32_at(b, frame + 0x10).unwrap_or(0) & 0x3fff) as u16;
+    let tex0 = u32_at(b, frame + 0x10).unwrap_or(0) as u64
+        | (u32_at(b, frame + 0x14).unwrap_or(0) as u64) << 32;
+    let tbp = (tex0 & 0x3fff) as u16;
     for s in sprites {
         let corners = s.corners.map(|[x, y]| {
             let v = math::apply(m, [x as f32 / 16., y as f32 / 16., 0., 1.]);
@@ -498,6 +527,7 @@ pub(crate) fn emit_sprites(ctx: &mut Ctx, anim: usize, index: usize, m: &Mat, pa
             colour,
             blend: s.colour[4],
             tbp,
+            tex0,
         });
     }
 }
@@ -549,7 +579,8 @@ fn born_rnd5(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
                 entry: child as usize,
                 position_var,
                 position: at,
-                velocity_var: velocity_var as usize,
+                position_len: 4,
+                velocity_var: Some(velocity_var as usize),
                 velocity: math::scale(away, speed),
             });
             k = if random {
