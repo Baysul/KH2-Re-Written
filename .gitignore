@@ -6,12 +6,14 @@
 !/AGENTS.md
 !/README.md
 !/ARCHITECTURE.md
+!/CONTRIBUTING.md
 !/LICENSE
 !/NOTICE
 !/Cargo.toml
 !/Cargo.lock
 !/rust-toolchain.toml
 !/.github/workflows/*.yml
+!/.github/pull_request_template.md
 !/crates/*/Cargo.toml
 !/crates/*/src/**/*.rs
 !/crates/*/src/**/*.wgsl
@@ -28,6 +30,7 @@
 !/docs/release/*-MIT.txt
 !/docs/release/*-Zlib.txt
 !/tools/*.ps1
+!/tools/*.md
 !/tools/*.cs
 !/tools/*.cpp
 !/tools/*.java
