@@ -19,7 +19,7 @@ Prerequisites/authority: user's linked roadmap and explicit KH2FM-only/Steam-sou
 | Workspace native debug build | PASS | Cargo local build; not a playable rewrite |
 | Formatting / warnings-denied Clippy | PASS after fixes | New Rust 1.99 lint changed fixed-size chunk iteration; no warnings suppressed |
 | Synthetic source/index/header regressions | PASS, 11 tests | UTF-8/Unicode and long paths, relocation, incomplete/empty/damaged sources, bound Steam clues, SHA vector/read-only timestamps, output protection, signed/truncated/bounded records and package metadata |
-| Native smoke: image/window/timed exit | PASS | `.local/smoke-first.log`: sample loaded, 180 frames, exit 0; final smoke recheck recorded locally |
+| Native smoke: image/window/timed exit | PASS | `%USERPROFILE%/KH2FinalRewrite-private/logs/evidence-2026-10-03/smoke-first.log`: sample loaded, 180 frames, exit 0; final smoke recheck recorded locally |
 | Native smoke rendered inspection / Escape | PASS | Computer Use observed imported checker on dark background; Escape logged clean exit; movement and controller calibration remain NOT RUN |
 | User stopped Computer Use | OBSERVED | Physical Escape stop reported; no further Windows UI input was issued |
 | Two full candidate source scans | PASS | External `source-manifest-release-before.json` / `source-manifest-release-after.json`: 13 files, 16,406,876,704 bytes; content/size/mtime identical; 133.98 s combined local optimized runs |
@@ -31,6 +31,6 @@ Prerequisites/authority: user's linked roadmap and explicit KH2FM-only/Steam-sou
 | CI execution / physical controller / secondary account | NOT RUN | CI authored; local pad mapping needs user calibration |
 | Clean checkout and backup recovery | PASS | External bundle restored, offline pinned build/tests and its own synthetic asset smoke passed; see T001R for exact identity/limits |
 
-External evidence root: `%LOCALAPPDATA%/KH2FinalRewrite/research/foundation-20261003/`. Local build/smoke logs are `.local/`. Initial unoptimized multi-gigabyte scan was explicitly superseded by optimized scanner runs; it produced no candidate manifest and is not counted as a pass. Reads, fingerprints and structural checks support only the stated file subset; they do not prove clean vendor bytes or complete dependency/language coverage.
+External evidence root: `%LOCALAPPDATA%/KH2FinalRewrite/research/foundation-20261003/`. Local build/smoke logs are `%USERPROFILE%/KH2FinalRewrite-private/logs/evidence-2026-10-03/`. Initial unoptimized multi-gigabyte scan was explicitly superseded by optimized scanner runs; it produced no candidate manifest and is not counted as a pass. Reads, fingerprints and structural checks support only the stated file subset; they do not prove clean vendor bytes or complete dependency/language coverage.
 
 Verdict: foundation implementation and measured subchecks complete; P00-P05 final gates incomplete; preliminary P07 is inspection only. Next owner: user for a usable reference baseline/mod history/devices and scope choices, then Codex T002/T003. No public push or release is performed.

@@ -24,7 +24,7 @@
 # Banner text drawn by tools/Make-BannerText.ps1 from a system font (no game data).
 !/crates/windows_shell/assets/final-rewrite-text.png
 !/docs/**/*.md
-!/docs/*.csv
+!/docs/research/*.csv
 !/docs/release/dependency-inventory.csv
 !/docs/release/*-LICENSE.txt
 !/docs/release/*-MIT.txt
