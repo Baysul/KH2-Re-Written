@@ -7,14 +7,14 @@
 //! (glove pointer, LightCur), list input FUN_1402f9440, title tabs
 //! FUN_140323c60, help FUN_1402fa1d0 and the digit rows FUN_1402fb450 /
 //! FUN_140324690. Everything draws from `menu/<lang>/camp.2ld` sequence 1 in
-//! layout space (x origin 0). The other sub-screens (Items, Abilities,
-//! Customize, Party, Journal) are not built: deciding those entries plays
-//! the decide sound only. The 3D party models are pasted from off-screen
+//! layout space (x origin 0). The sub-screens live in the child modules;
+//! the Journal runs after the camp (`journal`). The 3D party models are pasted from off-screen
 //! renders the caller makes (Tz::MenuObj).
 pub mod abilities;
 pub mod customize;
 pub mod equip;
 pub mod items;
+pub mod journal;
 pub mod party;
 
 use crate::command::Font;
@@ -541,6 +541,10 @@ pub struct Camp {
     pending: Option<State>,
     pub exit: bool,
     pub closed: bool,
+    /// Set when Jiminy's (1) or Roxas's (2) Journal was decided: the camp
+    /// leaves under the curtain and the journal runs next (FUN_1402e4930 /
+    /// FUN_14031ad20).
+    pub journal: Option<u8>,
     // Top level.
     top: MenuList,
     frame_sprite: Option<Id>,
@@ -609,6 +613,7 @@ impl Camp {
             pending: None,
             exit: false,
             closed: false,
+            journal: None,
             top: MenuList::default(),
             frame_sprite: None,
             prompt: None,
@@ -1072,6 +1077,10 @@ impl Camp {
                 };
                 if let Some(p) = pending {
                     self.leave_top(seq, p, entry.label);
+                } else if matches!(entry.id, 5 | 6) {
+                    // The curtain comes down while the camp closes.
+                    self.journal = Some(entry.id - 4);
+                    self.exit = true;
                 }
             }
             _ => {}
@@ -1989,6 +1998,17 @@ impl Camp {
             self.sprites.kill(f);
         }
         self.item_ui.kill_dim(&mut self.sprites);
+    }
+
+    /// FUN_140305480 (the curtain's callback): every camp sprite goes and
+    /// the camp ends.
+    pub fn kill_all(&mut self) {
+        self.layout.kill();
+        for s in &mut self.sprites.list {
+            s.dead = true;
+        }
+        self.model_time = None;
+        self.closed = true;
     }
 
     /// The draw list: the layout (0x7532), then every sprite in priority

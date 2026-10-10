@@ -261,6 +261,11 @@ impl Sprites {
         m
     }
 
+    /// The alpha a child attached to `id` (flags 0x200|0x400) draws with.
+    pub fn child_alpha(&self, id: Id) -> f32 {
+        self.list[id.0].ctx_color[3] * self.modifiers(id.0).color[3]
+    }
+
     /// Resolved base (FUN_14016abf0): the parent's context + offset + base.
     pub fn resolved_base(&self, id: Id) -> [f32; 2] {
         let s = self.get(id);

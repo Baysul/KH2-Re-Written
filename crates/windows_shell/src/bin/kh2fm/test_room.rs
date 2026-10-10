@@ -39,6 +39,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use windows_shell::camp::journal::{self, Curtain, Journal};
 use windows_shell::camp::{self, Camp};
 use windows_shell::command::{self, CommandMenu, Decision, Item};
 use windows_shell::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
@@ -124,10 +125,27 @@ struct Config {
     /// The camp (pause) menu: menu/<lang>/camp.2ld (needs `menu`).
     #[serde(default)]
     camp: Option<Locator>,
+    /// Jiminy's Journal (needs `camp`).
+    #[serde(default)]
+    journal: Option<JournalConfig>,
     /// The room's field and battle music (03system 'arif': tt08 set 0 =
     /// bgm/music118 and music119).
     #[serde(default)]
     music: Option<RoomMusic>,
+}
+
+/// The journal's files: menu/<lang>/jmemo.2ld (the book), jiminy.bar (the
+/// tables), msg/<lang>/jm.bar (message slot 0x65), menu/jm_world.2ld (the
+/// world icons), menu/jm_top_<code>.2ld by code and the menu-chain curtain
+/// menu/<lang>/pause.2ld.
+#[derive(Deserialize)]
+struct JournalConfig {
+    book: Locator,
+    tables: Locator,
+    messages: Locator,
+    worlds: Locator,
+    tops: std::collections::BTreeMap<String, Locator>,
+    curtain: Locator,
 }
 
 #[derive(Deserialize)]
@@ -615,8 +633,84 @@ struct Loaded {
     effects: Option<EffectSources>,
     npc: Option<NpcSource>,
     camp: Option<CampSource>,
+    journal: Option<JournalSource>,
     /// Field and battle music SCD bytes.
     music: Option<[Vec<u8>; 2]>,
+}
+
+/// The journal's art, tables and messages.
+struct JournalSource {
+    book: Menu2ld,
+    curtain: Menu2ld,
+    world_icons: Vec<layout2d::Texture>,
+    tops: Vec<(String, Vec<layout2d::Texture>)>,
+    worlds: Vec<package_reader::journal_table::World>,
+    stories: Vec<package_reader::journal_table::Story>,
+    texts: HashMap<u16, Vec<u8>>,
+}
+
+fn load_journal(
+    source: &ProbeSource,
+    j: &JournalConfig,
+    sys: &Locator,
+) -> Result<JournalSource, Box<dyn std::error::Error>> {
+    use package_reader::journal_table;
+    use windows_shell::camp::journal;
+    let two_ld = |l: &Locator| layout2d::load(source, &l.index, l.ordinal, l.name_hash);
+    let images = |l: &Locator| layout2d::load_images(source, &l.index, l.ordinal, l.name_hash);
+    let book = two_ld(&j.book)?;
+    let curtain = two_ld(&j.curtain)?;
+    let world_icons = images(&j.worlds)?;
+    let mut tops = Vec::new();
+    for (code, l) in &j.tops {
+        tops.push((code.clone(), images(l)?));
+    }
+    let tables = read_archive(source, &j.tables)?;
+    let worlds = journal_table::read_worlds(bar_entry(&tables, b"worl")?)?;
+    let stories = journal_table::read_stories(bar_entry(&tables, b"stor")?)?;
+    let mut ids: Vec<u32> = journal::MESSAGES.iter().map(|&i| i as u32).collect();
+    for w in &worlds {
+        ids.extend([w.names[0], w.alt_names[0]].map(u32::from));
+    }
+    for s in &stories {
+        ids.extend([s.summary, s.objective].map(u32::from));
+    }
+    ids.retain(|&i| i != 0);
+    ids.sort_unstable();
+    ids.dedup();
+    let found = hud::load_messages_optional(
+        source,
+        &j.messages.index,
+        j.messages.ordinal,
+        j.messages.name_hash,
+        &ids,
+    )?;
+    let mut texts: HashMap<u16, Vec<u8>> = ids
+        .iter()
+        .zip(found)
+        .filter_map(|(&id, m)| m.map(|m| (id as u16, m)))
+        .collect();
+    // 0x8adc is the system message 0xadc.
+    let fake = hud::load_messages(
+        source,
+        &sys.index,
+        sys.ordinal,
+        sys.name_hash,
+        &[journal::NO_STORY as u32],
+    )?;
+    texts.insert(
+        journal::NO_STORY,
+        fake.into_iter().next().unwrap_or_default(),
+    );
+    Ok(JournalSource {
+        book,
+        curtain,
+        world_icons,
+        tops,
+        worlds,
+        stories,
+        texts,
+    })
 }
 
 /// Camp (pause) menu sources: camp.2ld, the entries' labels and help
@@ -1772,6 +1866,10 @@ fn load(
         }
         _ => None,
     };
+    let journal = match (&config.journal, &config.menu, &camp) {
+        (Some(j), Some(m), Some(_)) => Some(load_journal(source, j, &m.messages)?),
+        _ => None,
+    };
     let music = match &config.music {
         Some(m) => Some([
             sound::load_bank(
@@ -1820,6 +1918,7 @@ fn load(
         effects,
         npc,
         camp,
+        journal,
         music,
     })
 }
@@ -2760,7 +2859,7 @@ fn compose_2d(
     {
         frame.full_screen(s, [1., 1., 1., t.dissolve as f32 / DISSOLVE_FRAMES as f32]);
     }
-    let camp_open = camp.is_some_and(|c| c.open.is_some());
+    let camp_open = camp.is_some_and(|c| c.menu_up());
     if let Some(h) = c.hud_sheet
         && !camp_open
     {
@@ -2784,7 +2883,7 @@ fn read_pad(
         return;
     }
     let (data, _, _) = input::read_devices(&keys, &mouse, 0., &pads);
-    let menu = camp.is_some_and(|c| c.open.is_some());
+    let menu = camp.is_some_and(|c| c.menu_up());
     let mode = if menu {
         pad::MODE_TITLE
     } else {
@@ -2816,12 +2915,12 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 70] = [
+const AUTOPLAY_CAPTURES: [u64; 81] = [
     90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1198, 1300, 1500,
     1700, 1830, 1900, 1930, 1990, 2030, 2050, 2070, 2110, 2230, 2310, 2330, 2390, 2420, 2450, 2520,
     2690, 2715, 2760, 2780, 2840, 2880, 2920, 2970, 3080, 3200, 3220, 3270, 3300, 3560, 3660, 3690,
     3730, 3800, 3830, 3900, 4060, 4150, 4420, 4450, 4800, 4880, 5000, 5100, 5500, 5560, 5650, 5690,
-    5800, 5840, 5940, 6000,
+    5800, 5840, 5940, 6000, 6210, 6270, 6300, 6390, 6460, 6530, 6600, 6670, 6705, 6725, 6760,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -2833,7 +2932,7 @@ const AUTOPLAY_TALK_END: u64 = 260;
 /// in earlier unattended runs.
 const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 /// The last stretch leaves Sora standing so an enemy can attack him.
-const AUTOPLAY_END: u64 = 6100;
+const AUTOPLAY_END: u64 = 6860;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
@@ -4459,13 +4558,34 @@ struct CampRes {
     /// Sora's equipment [test-room values]: the Kingdom Key, one empty
     /// armor and accessory slot, two empty item slots.
     equipment: camp::items::Equipment,
+    /// The menu chain past the camp: the journal and the curtain between.
+    journal_source: Option<JournalSource>,
+    journal: Option<Journal>,
+    curtain: Option<Curtain>,
+    journal_sheets: JournalSheets,
+}
+
+/// Sheet slots of the journal's images.
+#[derive(Default)]
+struct JournalSheets {
+    book: usize,
+    curtain: usize,
+    worlds: Vec<usize>,
+    tops: HashMap<String, Vec<usize>>,
+}
+
+impl CampRes {
+    /// A menu (camp, curtain or journal) holds the screen and the pad.
+    fn menu_up(&self) -> bool {
+        self.open.is_some() || self.journal.is_some() || self.curtain.is_some()
+    }
 }
 
 /// Unattended camp check after the combat plan: open, down to Status,
 /// the character list, the stat browser (column switch, move), back out,
 /// down to Config, change Field Camera and Summon Effects, jump to the
 /// bottom with R1, back out, close with START.
-const AUTOPLAY_CAMP: [(u64, u64); 92] = [
+const AUTOPLAY_CAMP: [(u64, u64); 108] = [
     (1810, 0x2),
     (1840, 0x20),
     (1850, 0x20),
@@ -4568,6 +4688,26 @@ const AUTOPLAY_CAMP: [(u64, u64); 92] = [
     (5860, 0x8),
     (5960, 0x8),
     (6030, 0x2),
+    // Journal: reopen, down to Jiminy's Journal (curtain, Notes of the
+    // world), a row down, decide (no category page), R1 Collection, R1
+    // Select World, L1 Collection, L1 Notes, cancel to Select World,
+    // cancel out (the camp comes back as the curtain lifts), close.
+    (6100, 0x2),
+    (6140, 0x20),
+    (6150, 0x20),
+    (6160, 0x20),
+    (6170, 0x20),
+    (6180, 0x20),
+    (6200, 0x4),
+    (6290, 0x20),
+    (6320, 0x4),
+    (6340, 0x4000),
+    (6410, 0x4000),
+    (6480, 0x8000),
+    (6550, 0x8000),
+    (6620, 0x8),
+    (6690, 0x8),
+    (6780, 0x2),
 ];
 fn camp_setup(
     camp: Option<ResMut<CampRes>>,
@@ -4594,10 +4734,36 @@ fn camp_setup(
         c.source.icons.size,
         c.source.icons.texel_scale as f32,
     );
+    if let Some(j) = c.journal_source.as_mut() {
+        let mut add = |t: &mut layout2d::Texture| {
+            frame.add_sheet(
+                &mut images,
+                std::mem::take(&mut t.rgba),
+                t.size,
+                t.texel_scale,
+            )
+        };
+        let s = &mut c.journal_sheets;
+        let book = j.book.texture_for(0, 0).map(|(_, k)| k);
+        if let (Some(t), Some(k)) = (j.book.replacements[0].as_mut(), book) {
+            t.texel_scale = k;
+            s.book = add(t);
+        }
+        let curtain = j.curtain.texture_for(0, 0).map(|(_, k)| k);
+        if let (Some(t), Some(k)) = (j.curtain.replacements[0].as_mut(), curtain) {
+            t.texel_scale = k;
+            s.curtain = add(t);
+        }
+        s.worlds = j.world_icons.iter_mut().map(&mut add).collect();
+        for (code, t) in &mut j.tops {
+            s.tops
+                .insert(code.clone(), t.iter_mut().map(&mut add).collect());
+        }
+    }
 }
 
 fn field_running(camp: Option<Res<CampRes>>) -> bool {
-    camp.is_none_or(|c| c.open.is_none())
+    camp.is_none_or(|c| !c.menu_up())
 }
 
 /// START (logical 0x2 in the field's pad mode) opens the camp
@@ -4628,7 +4794,8 @@ fn camp_tick(
     if c.art[g].is_some() {
         c.glyph = g;
     }
-    let mode = if c.open.is_some() {
+    let menu = c.menu_up();
+    let mode = if menu {
         pad::MODE_TITLE
     } else {
         pad::MODE_FIELD
@@ -4640,11 +4807,7 @@ fn camp_tick(
             .filter(|(at, _)| *at == tick)
             .fold(0, |acc, &(_, b)| {
                 // Menu START is 0x100 in mode 7.
-                acc | if c.open.is_some() && b == 0x2 {
-                    0x100
-                } else {
-                    b
-                }
+                acc | if menu && b == 0x2 { 0x100 } else { b }
             });
         c.pad.update(logical, 1.);
     } else {
@@ -4677,123 +4840,183 @@ fn camp_tick(
         }],
         labels: c.source.labels.clone(),
     };
-    match c.open.as_mut() {
-        None => {
-            if c.pad.pressed & 0x2 != 0 && !game.talking {
-                // Status values are built when the camp opens (FUN_140354340).
-                let n = c.source.numbers;
-                let sora_abilities = camp::abilities::MemberAbilities {
-                    slots: c.ability_slots.clone(),
-                    ap_max: n.ap,
-                    weapon_ability: c.source.weapon_ability,
-                };
-                let ap_used = camp::abilities::used(&camp::abilities::entries(
-                    &c.source.items.table,
-                    &sora_abilities,
-                ));
-                let value = |bit: usize| -> String {
-                    match bit {
-                        0 => "1".into(),
-                        1 | 7 => "0".into(),
-                        2 => format!("{}", n.next_exp),
-                        3 => format!("{hp}/{max_hp}"),
-                        4 => format!("{mp}/{max_mp}"),
-                        5 => format!("{ap_used}/{}", n.ap),
-                        10 => format!("{}", n.strength),
-                        11 => format!("{}", n.magic),
-                        12 => format!("{}", n.defense),
-                        _ => "0%".into(),
-                    }
-                };
-                let mut stats = vec![None; 20];
-                for (bit, label, help, style) in &c.source.stats {
-                    stats[*bit] = Some(camp::Stat {
-                        label: label.clone(),
-                        help: help.clone(),
-                        style: *style,
-                        value: camp::encode_number(&value(*bit)),
-                    });
+    // Status values are built when the camp opens (FUN_140354340).
+    let camp_data = |c: &CampRes, panels: camp::Panels| -> camp::Data {
+        let n = c.source.numbers;
+        let sora_abilities = camp::abilities::MemberAbilities {
+            slots: c.ability_slots.clone(),
+            ap_max: n.ap,
+            weapon_ability: c.source.weapon_ability,
+        };
+        let ap_used = camp::abilities::used(&camp::abilities::entries(
+            &c.source.items.table,
+            &sora_abilities,
+        ));
+        let value = |bit: usize| -> String {
+            match bit {
+                0 => "1".into(),
+                1 | 7 => "0".into(),
+                2 => format!("{}", n.next_exp),
+                3 => format!("{hp}/{max_hp}"),
+                4 => format!("{mp}/{max_mp}"),
+                5 => format!("{ap_used}/{}", n.ap),
+                10 => format!("{}", n.strength),
+                11 => format!("{}", n.magic),
+                12 => format!("{}", n.defense),
+                _ => "0%".into(),
+            }
+        };
+        let mut stats = vec![None; 20];
+        for (bit, label, help, style) in &c.source.stats {
+            stats[*bit] = Some(camp::Stat {
+                label: label.clone(),
+                help: help.clone(),
+                style: *style,
+                value: camp::encode_number(&value(*bit)),
+            });
+        }
+        camp::Data {
+            entries: c.source.entries.clone(),
+            panels,
+            status: vec![camp::StatusEntry {
+                bit: 0,
+                label: c.source.name.clone(),
+                help: c.source.help.clone(),
+                stats,
+            }],
+            banner: c.source.banner.clone(),
+            config: c.source.config.clone(),
+            config_flags: c.config_flags,
+            game_mode: c.game_mode,
+            items: camp::items::ItemsData {
+                counts: c.stock.clone(),
+                equipment: vec![c.equipment.clone()],
+                seen: c.seen.clone(),
+                ..c.source.items.clone()
+            },
+            abilities: camp::abilities::AbilitiesData {
+                members: vec![sora_abilities.clone()],
+                texts: c.source.abilities.clone(),
+            },
+            party_help: c.source.party_help.clone(),
+            equip: camp::equip::EquipData {
+                stats: c.source.equip_stats.clone(),
+                totals: vec![camp::equip::Totals {
+                    ap: n.ap,
+                    strength: n.strength,
+                    magic: n.magic,
+                    defense: n.defense,
+                    resists: [100; 4],
+                }],
+                texts: c.source.equip_texts.clone(),
+            },
+            customize: camp::customize::CustomizeData {
+                shortcuts: c.shortcuts,
+                no_charge: c.no_charge,
+                texts: c.source.customize.clone(),
+            },
+        }
+    };
+    // The menu chain (menu mode 10, FUN_14031aac0): the camp; deciding a
+    // journal brings the curtain down over the camp's close; the journal
+    // runs; then the camp is rebuilt as the curtain lifts.
+    if let Some(menu) = c.open.as_mut() {
+        sounds = menu.frame(layout, c.pad.pressed, c.pad.repeat, tick as u32);
+        game.tick += 1;
+        if menu.journal.is_some()
+            && c.curtain.is_none()
+            && let Some(j) = &c.journal_source
+        {
+            c.curtain = Some(Curtain::cover(&j.curtain.layout));
+        }
+        // FUN_140305480 once the curtain holds black.
+        if menu.journal.is_some()
+            && !menu.closed
+            && c.curtain.as_ref().is_some_and(Curtain::covered)
+        {
+            menu.kill_all();
+        }
+        if menu.closed {
+            c.memory = menu.memory;
+            c.config_flags = menu.data.config_flags;
+            c.stock = menu.data.items.counts.clone();
+            c.seen = menu.data.items.seen.clone();
+            c.shortcuts = menu.data.customize.shortcuts;
+            if let Some(e) = menu.data.items.equipment.first() {
+                c.equipment = e.clone();
+            }
+            c.no_charge = menu.data.customize.no_charge;
+            if let Some(m) = menu.data.abilities.members.first() {
+                c.ability_slots = m.slots.clone();
+            }
+            // Guard's ability bit gates PTYA 0x0b (FUN_140402750).
+            game.guard_equipped = c.ability_slots.contains(&(0x8000 | GUARD_ABILITY));
+            // Items used in the camp change the room's HP / MP.
+            if let Some(sora) = menu.data.panels.members.first() {
+                if let Some(rt) = game.enemy.as_mut() {
+                    rt.sora_hp = sora.hp;
                 }
-                let data = camp::Data {
-                    entries: c.source.entries.clone(),
-                    panels,
-                    status: vec![camp::StatusEntry {
-                        bit: 0,
-                        label: c.source.name.clone(),
-                        help: c.source.help.clone(),
-                        stats,
-                    }],
-                    banner: c.source.banner.clone(),
-                    config: c.source.config.clone(),
-                    config_flags: c.config_flags,
-                    game_mode: c.game_mode,
-                    items: camp::items::ItemsData {
-                        counts: c.stock.clone(),
-                        equipment: vec![c.equipment.clone()],
-                        seen: c.seen.clone(),
-                        ..c.source.items.clone()
-                    },
-                    abilities: camp::abilities::AbilitiesData {
-                        members: vec![sora_abilities.clone()],
-                        texts: c.source.abilities.clone(),
-                    },
-                    party_help: c.source.party_help.clone(),
-                    equip: camp::equip::EquipData {
-                        stats: c.source.equip_stats.clone(),
-                        totals: vec![camp::equip::Totals {
-                            ap: n.ap,
-                            strength: n.strength,
-                            magic: n.magic,
-                            defense: n.defense,
-                            resists: [100; 4],
-                        }],
-                        texts: c.source.equip_texts.clone(),
-                    },
-                    customize: camp::customize::CustomizeData {
-                        shortcuts: c.shortcuts,
-                        no_charge: c.no_charge,
-                        texts: c.source.customize.clone(),
-                    },
+                if let Some(h) = hud.as_mut() {
+                    h.stats.hp = sora.hp;
+                    h.stats.mp = sora.mp;
+                }
+            }
+            let kind = menu.journal;
+            c.open = None;
+            game.event(serde_json::json!({"event":"camp_close","tick":tick}));
+            if let (Some(kind), Some(j)) = (kind, &c.journal_source) {
+                let data = journal::JournalData {
+                    kind,
+                    // The room stands in for Twilight Town (world 2) and a
+                    // save with no story flags [test-room values].
+                    world: 2,
+                    worlds: j.worlds.clone(),
+                    stories: j.stories.clone(),
+                    flags: Vec::new(),
+                    // FUN_140339500 counts each `limi` command's limit in
+                    // save+0x3d48 (FUN_1403e7c30 / FUN_1403e8150): none
+                    // in this save; no reports, pieces, missions, minigames
+                    // or synthesis either [test-room values].
+                    unlocks: journal::Unlocks::default(),
+                    texts: j.texts.clone(),
+                    tops: j.tops.iter().map(|(code, _)| code.clone()).collect(),
+                    world_icons: !j.world_icons.is_empty(),
                 };
-                let (menu, s) = Camp::open(layout, data, c.memory);
-                c.open = Some(menu);
-                sounds = s;
-                game.tick += 1;
-                game.event(serde_json::json!({"event":"camp_open","tick":tick}));
+                let (opened, s) = Journal::open(&j.book.layout, data);
+                game.event(serde_json::json!({"event":"journal_open","tick":tick,
+                    "kind":kind,"state":opened.state}));
+                c.journal = Some(opened);
+                sounds.extend(s);
             }
         }
-        Some(menu) => {
-            sounds = menu.frame(layout, c.pad.pressed, c.pad.repeat, tick as u32);
-
-            game.tick += 1;
-            if menu.closed {
-                c.memory = menu.memory;
-                c.config_flags = menu.data.config_flags;
-                c.stock = menu.data.items.counts.clone();
-                c.seen = menu.data.items.seen.clone();
-                c.shortcuts = menu.data.customize.shortcuts;
-                if let Some(e) = menu.data.items.equipment.first() {
-                    c.equipment = e.clone();
-                }
-                c.no_charge = menu.data.customize.no_charge;
-                if let Some(m) = menu.data.abilities.members.first() {
-                    c.ability_slots = m.slots.clone();
-                }
-                // Guard's ability bit gates PTYA 0x0b (FUN_140402750).
-                game.guard_equipped = c.ability_slots.contains(&(0x8000 | GUARD_ABILITY));
-                // Items used in the camp change the room's HP / MP.
-                if let Some(sora) = menu.data.panels.members.first() {
-                    if let Some(rt) = game.enemy.as_mut() {
-                        rt.sora_hp = sora.hp;
-                    }
-                    if let Some(h) = hud.as_mut() {
-                        h.stats.hp = sora.hp;
-                        h.stats.mp = sora.mp;
-                    }
-                }
-                c.open = None;
-                game.event(serde_json::json!({"event":"camp_close","tick":tick}));
+    } else if let Some(open) = c.journal.as_mut() {
+        let j = c.journal_source.as_ref().expect("journal source");
+        sounds = open.frame(&j.book.layout, c.pad.pressed, c.pad.repeat);
+        game.tick += 1;
+        if open.closed {
+            c.journal = None;
+            game.event(serde_json::json!({"event":"journal_close","tick":tick}));
+            // FUN_140304ea0: the camp is rebuilt (its open sound) and the
+            // curtain lifts (FUN_14031a690).
+            let (menu, s) = Camp::open(layout, camp_data(c, panels), c.memory);
+            c.open = Some(menu);
+            sounds.extend(s);
+            if let Some(cur) = c.curtain.as_mut() {
+                cur.uncover(&j.curtain.layout);
             }
+            game.event(serde_json::json!({"event":"camp_open","tick":tick}));
+        }
+    } else if c.curtain.is_none() && c.pad.pressed & 0x2 != 0 && !game.talking {
+        let (menu, s) = Camp::open(layout, camp_data(c, panels), c.memory);
+        c.open = Some(menu);
+        sounds = s;
+        game.tick += 1;
+        game.event(serde_json::json!({"event":"camp_open","tick":tick}));
+    }
+    if let (Some(cur), Some(j)) = (c.curtain.as_mut(), c.journal_source.as_ref()) {
+        cur.update(&j.curtain.layout);
+        if cur.dead {
+            c.curtain = None;
         }
     }
     for n in sounds {
@@ -4809,8 +5032,9 @@ fn camp_tick(
     }
 }
 
-/// The camp over the frozen field; the field HUD is hidden meanwhile
-/// [inferred].
+/// The camp over the frozen field (the field HUD is hidden meanwhile
+/// [inferred]), the curtain (0x7554) over it, the journal (0x7557 up) over
+/// that.
 fn camp_present(
     camp: Option<ResMut<CampRes>>,
     model: Option<Res<MenuModel>>,
@@ -4818,30 +5042,51 @@ fn camp_present(
 ) {
     let Some(mut c) = camp else { return };
     let c = &mut *c;
-    let Some(menu) = c.open.as_mut() else { return };
     let font = command::Font {
         widths: &c.source.font.widths,
         // Keyboard prompts (key caps) are not translated: Xbox icons.
         pad: if c.glyph == 0 { 1 } else { c.glyph as u8 },
     };
-    let art = c.art[c.glyph].or(c.art[0]).expect("camp art");
-    for (sheet, mut quads) in menu.draw(&c.source.menu.layout, &font) {
-        let slot = match sheet {
-            camp::Sheet::Art => art,
-            camp::Sheet::Font => c.font_sheet,
-            camp::Sheet::Icon => c.icon_sheet,
-            // Only Sora's model is rendered in this room.
-            camp::Sheet::Model(i) => {
-                let Some(m) = model.as_ref().filter(|_| i == 0) else {
-                    continue;
-                };
-                for q in &mut quads {
-                    q.uv = [0, 0, MENU_TARGET[0] as i32, MENU_TARGET[1] as i32];
+    if let Some(menu) = c.open.as_mut() {
+        let art = c.art[c.glyph].or(c.art[0]).expect("camp art");
+        for (sheet, mut quads) in menu.draw(&c.source.menu.layout, &font) {
+            let slot = match sheet {
+                camp::Sheet::Art => art,
+                camp::Sheet::Font => c.font_sheet,
+                camp::Sheet::Icon => c.icon_sheet,
+                // Only Sora's model is rendered in this room.
+                camp::Sheet::Model(i) => {
+                    let Some(m) = model.as_ref().filter(|_| i == 0) else {
+                        continue;
+                    };
+                    for q in &mut quads {
+                        q.uv = [0, 0, MENU_TARGET[0] as i32, MENU_TARGET[1] as i32];
+                    }
+                    m.sheet
                 }
-                m.sheet
+            };
+            frame.draws.push((slot, quads));
+        }
+    }
+    let Some(j) = &c.journal_source else { return };
+    let s = &c.journal_sheets;
+    if let Some(cur) = &c.curtain {
+        frame.draws.push((s.curtain, cur.quads(&j.curtain.layout)));
+    }
+    if let Some(open) = &c.journal {
+        let top = open.top.as_ref().and_then(|code| s.tops.get(code));
+        for (sheet, quads) in open.draw(&j.book.layout, &font) {
+            let slot = match sheet {
+                journal::Sheet::Art => Some(s.book),
+                journal::Sheet::Font => Some(c.font_sheet),
+                journal::Sheet::Icon => Some(c.icon_sheet),
+                journal::Sheet::World(i) => s.worlds.get(i).copied(),
+                journal::Sheet::Top(i) => top.and_then(|t| t.get(i).copied()),
+            };
+            if let Some(slot) = slot {
+                frame.draws.push((slot, quads));
             }
-        };
-        frame.draws.push((slot, quads));
+        }
     }
 }
 /// Field (slot 0) and battle (slot 1) music (FUN_140155840 / FUN_140155c30)
@@ -5315,6 +5560,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 s.resize(80, 0);
                 s
             },
+            journal_source: loaded.journal,
+            journal: None,
+            curtain: None,
+            journal_sheets: JournalSheets::default(),
         });
     }
     Ok(app

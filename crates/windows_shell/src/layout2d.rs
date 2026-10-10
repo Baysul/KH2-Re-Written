@@ -12,6 +12,7 @@ use package_reader::{
 
 pub const IMGZ: u16 = 29;
 pub const LAYD: u16 = 28;
+pub const IMGD: u16 = 24;
 
 /// An HD image and its texels per original sequence texel.
 pub struct Texture {
@@ -37,13 +38,69 @@ impl Menu2ld {
     }
 }
 
-/// Number N of a `..._2ld<N>.png` replacement name.
+/// Number N of a `..._2ld<N>.png` (or `.dds`) replacement name.
 fn replacement_number(name: &[u8; 32]) -> Option<usize> {
     let end = name.iter().position(|&b| b == 0).unwrap_or(32);
     let name = std::str::from_utf8(&name[..end]).ok()?;
-    let stem = name.strip_suffix(".png")?;
+    let stem = name
+        .strip_suffix(".png")
+        .or_else(|| name.strip_suffix(".dds"))?;
     let digits = stem.rsplit_once("_2ld")?.1;
     digits.parse().ok()
+}
+
+/// A 2LD of bare IMGDs (e.g. `menu/jm_world.2ld`, `menu/jm_top_<code>.2ld`):
+/// each IMGD's HD replacement, the last replacements in IMGD order.
+pub fn load_images(
+    source: &ProbeSource,
+    index: &str,
+    ordinal: usize,
+    name_hash: [u8; 16],
+) -> Result<Vec<Texture>, Box<dyn std::error::Error>> {
+    let mut checked = source.open_index(index)?;
+    let entry = checked
+        .inventory
+        .entries
+        .get(ordinal)
+        .filter(|e| e.name_hash == name_hash)
+        .ok_or("2LD archive entry mismatch")?;
+    let archive = original::read_original(&mut checked.reader, entry)?.bytes;
+    let hd = replacement::read_all_replacements(&mut checked.reader, entry)?;
+    checked.verify_unchanged()?;
+    let table = bar::read_bar(&archive)?;
+    let images: Vec<_> = table
+        .entries
+        .iter()
+        .filter(|e| e.entry_type == IMGD)
+        .collect();
+    let first = hd
+        .len()
+        .checked_sub(images.len())
+        .ok_or("fewer HD replacements than IMGDs")?;
+    images
+        .iter()
+        .zip(&hd[first..])
+        .map(|(e, r)| {
+            let imgd = archive
+                .get(e.offset as usize..e.offset as usize + e.size as usize)
+                .ok_or("2LD entry exceeds archive")?;
+            let h = image_structure::read_imgd_header(imgd)?;
+            let (w, h) = (h.width as u32, h.height as u32);
+            let d = hd_image::decode_hd_image(
+                &r.bytes,
+                r.metadata.declared_decompressed_length as usize,
+            )?;
+            let scale = d.width / w;
+            if scale == 0 || d.width != w * scale || d.height != h * scale {
+                return Err("2LD HD image is not an integer upscale".into());
+            }
+            Ok(Texture {
+                size: [d.width, d.height],
+                rgba: d.pixels_rgba,
+                texel_scale: scale as f32,
+            })
+        })
+        .collect()
 }
 
 pub fn load(
@@ -151,6 +208,7 @@ mod tests {
         assert_eq!(replacement_number(&name("US_title_2ld0.png")), Some(0));
         assert_eq!(replacement_number(&name("US_title_2ld11.png")), Some(11));
         assert_eq!(replacement_number(&name("US_camp_2ld3.png")), Some(3));
+        assert_eq!(replacement_number(&name("US_jmemo_2ld0.dds")), Some(0));
         assert_eq!(replacement_number(&name("title.dds")), None);
     }
 }
