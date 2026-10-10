@@ -489,6 +489,8 @@ struct AreaRes {
     rendered: usize,
     /// The live background group mask (ARD scripts plus zone switches).
     bg_mask: u64,
+    /// Music to switch at the next tick (taken by `area_music`).
+    music: Option<area::MusicChange>,
     /// The place name banner (text, frames left) shown on entering an
     /// area (BILLBOARD_PLACE_M: 120 frames).
     banner: Option<(Vec<u8>, u32)>,
@@ -2850,6 +2852,7 @@ fn area_transition(
         "spawn":position.to_array(),"yaw":yaw}));
     area.previous = Some(area.current.area);
     area.visited.insert(next.area);
+    area.music = Some(std::mem::take(&mut next.music));
     area.banner = area
         .source
         .place_names
@@ -3147,6 +3150,30 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
         }
         let kind = &source.kinds[n.kind];
         n.tick(&kind.anims, sora, is_target, &mut random);
+    }
+}
+
+/// Applies an area's music change: slots whose track changed fade out over
+/// one second and the new track decodes in the background.
+fn area_music(area: Option<ResMut<AreaRes>>, music: Option<ResMut<MusicRes>>, audio: Res<Audio>) {
+    let (Some(mut area), Some(mut m)) = (area, music) else {
+        return;
+    };
+    let Some(change) = area.music.take() else {
+        return;
+    };
+    for (k, slot) in change.slots.into_iter().enumerate() {
+        let Some(slot) = slot else { continue };
+        if let Some(output) = &audio.output
+            && let Ok(mut mixer) = output.mixer.lock()
+        {
+            mixer.fade(MUSIC_KEYS[k], 0., 1., audio_out::FadeEnd::Stop);
+        }
+        m.clips[k] = None;
+        m.pending[k] = slot.map(sound::decode_music_in_background);
+        if k == 0 {
+            m.started = false;
+        }
     }
 }
 
@@ -6602,7 +6629,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         poses.insert(*action, *clip);
     }
     let stay = loaded.stay;
-    let area_res = loaded.area.map(|(source, current)| AreaRes {
+    let area_res = loaded.area.map(|(source, mut current)| AreaRes {
+        music: Some(std::mem::take(&mut current.music)),
         rendered: current.npcs.len(),
         bg_mask: current.state.setup.bg_mask,
         banner: source
@@ -6995,6 +7023,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             (
                 area_transition,
                 bg_visibility,
+                area_music,
                 uv_scroll_tick,
                 bob_present,
                 field_npc_spawn_new,

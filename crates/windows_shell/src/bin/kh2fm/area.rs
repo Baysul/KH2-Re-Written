@@ -52,6 +52,9 @@ pub struct AreaSource {
     /// Place names by area of the story world (msg/us/place.bin → sys.bar)
     /// and the "???" shown for places not visited yet (sys 0x82b8).
     pub place_names: HashMap<u8, Vec<u8>>,
+    /// 03system 'arif' (per-room table) and the BGM pair last started.
+    arif: Vec<u8>,
+    last_pair: Option<[u16; 2]>,
     pub unknown_place: Vec<u8>,
     /// The ARD language directory (`*0x1408ec5d0`; "us" in this build).
     language: &'static str,
@@ -68,6 +71,8 @@ pub struct LoadedArea {
     /// Entities the scripts created.
     #[allow(dead_code)]
     pub spawns: Vec<Spawn>,
+    /// Music changes for this entry.
+    pub music: MusicChange,
     /// Map objects (lamps, signs, clock) and their placements.
     pub bobs: windows_shell::bobs::LoadedBobs,
     /// The townspeople of this area (objentry type 15, spawn types 0/1/3,
@@ -80,6 +85,14 @@ pub struct LoadedArea {
     pub lines: HashMap<u32, Vec<u8>>,
     /// Player spawn in scene coordinates (Y up) and scene yaw.
     pub player: (Vec3, f32),
+}
+
+/// What the field and battle music slots must do on entering an area
+/// (FUN_140155840): `None` keeps the slot, `Some(None)` silences it,
+/// `Some(Some(bytes))` starts the new track.
+#[derive(Default)]
+pub struct MusicChange {
+    pub slots: [Option<Option<Vec<u8>>>; 2],
 }
 
 /// A zone-spawned townsperson (spawn type 2).
@@ -162,10 +175,22 @@ impl AreaSource {
                 unknown_place = texts.last().cloned().flatten().unwrap_or_default();
             }
         }
+        let arif = library
+            .read("03system.bin")
+            .ok()
+            .and_then(|sys| {
+                let table = bar::read_bar(&sys).ok()?;
+                let e = table.entries.iter().find(|e| e.name_bytes == *b"arif")?;
+                sys.get(e.offset as usize..e.offset as usize + e.size as usize)
+                    .map(<[u8]>::to_vec)
+            })
+            .unwrap_or_default();
         Ok(Self {
             source,
             library,
             progress,
+            arif,
+            last_pair: None,
             place_names,
             unknown_place,
             objects,
@@ -229,6 +254,7 @@ impl AreaSource {
         let spawns = state.activate(|id| types.get(&id).copied());
         let (npcs, deferred, scripts, lines) =
             self.townspeople(code, area, &state, &spawns, &types);
+        let music = self.music_change(world, area, state.setup.bgm);
         let room = load_room_archive(&map, None)?;
         let bobs = windows_shell::bobs::load(&map).unwrap_or_else(|e| {
             eprintln!("{name}: map objects not loaded: {e}");
@@ -255,6 +281,7 @@ impl AreaSource {
                 collision: Some(collision),
                 state,
                 spawns,
+                music,
                 bobs,
                 npcs,
                 deferred,
@@ -263,6 +290,52 @@ impl AreaSource {
                 player,
             },
         ))
+    }
+
+    /// The BGM pair of a room: the ARD override, else the arif row's pair
+    /// for the world's set index (FUN_1403a5960; bgm-input §A4).
+    fn bgm_pair(&self, world: u8, area: u8, ard: Option<[u16; 2]>) -> [u16; 2] {
+        if let Some(p) = ard {
+            return p;
+        }
+        let word = |o: usize| {
+            self.arif
+                .get(o..o + 2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        };
+        let (count, off) = (word(8 + world as usize * 4), word(10 + world as usize * 4));
+        let (Some(count), Some(off)) = (count, off) else {
+            return [0, 0];
+        };
+        if area as u16 >= count {
+            return [0, 0];
+        }
+        let set = self.progress.arif_set[world as usize].max(0) as usize;
+        let at = off as usize + area as usize * 0x40 + 0x10 + set.min(7) * 4;
+        match (word(at), word(at + 2)) {
+            (Some(f), Some(b)) => [f, b],
+            _ => [0, 0],
+        }
+    }
+
+    fn music_change(&mut self, world: u8, area: u8, ard: Option<[u16; 2]>) -> MusicChange {
+        let pair = self.bgm_pair(world, area, ard);
+        let mut change = MusicChange::default();
+        for k in 0..2 {
+            let before = self.last_pair.map(|p| p[k]);
+            if before == Some(pair[k]) {
+                continue;
+            }
+            change.slots[k] = Some(if pair[k] == 0 {
+                None
+            } else {
+                self.library
+                    .read(&format!("bgm/music{:03}.win32.scd", pair[k]))
+                    .ok()
+            });
+        }
+        self.last_pair = Some(pair);
+        change
     }
 
     /// The (index, ordinal, hash) of an installed file for the HUD loaders.
