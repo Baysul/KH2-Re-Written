@@ -30,7 +30,7 @@ use player_sim::{
     Action, AttackStep, Clip, Clips, Input, Params, Player, TriangleWorld, World,
     camera::{self, CameraInput, FollowCamera},
 };
-use player_sim::{combat, physics};
+use player_sim::{abilities, combat, physics};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -78,7 +78,11 @@ struct Config {
     has_weapon: bool,
     battle: Locator,
     ptya_pointer: usize,
+    /// Superseded: the attack is chosen from the whole PTYA set
+    /// (player_sim::ptya); kept only to read older configurations.
+    #[serde(default)]
     ground_combo_ids: Vec<u8>,
+    #[serde(default)]
     air_combo_ids: Vec<u8>,
     system: Locator,
     /// The player's own 00objentry model name; its +0x4e PRTY index selects
@@ -398,6 +402,8 @@ const SE_LOW_HP: u32 = 9;
 #[derive(Resource)]
 struct Game {
     params: Params,
+    /// Builds the player's ability record from equipped slots.
+    ability_source: AbilitySource,
     clips: Clips,
     world: TriangleWorld,
     player: Player,
@@ -574,6 +580,35 @@ fn bar_entry<'a>(bytes: &'a [u8], name: &[u8; 4]) -> Result<&'a [u8], Box<dyn st
 
 /// Clip timing and honoured range triggers from one decoded motion.
 /// Clip timing relative to FrameStart, plus the key time of FrameStart.
+/// A PTYA record for the attack chooser (the 0x44 bytes as read).
+fn ptya_record(e: &ptya::PtyaEntry) -> player_sim::ptya::Record {
+    let f = |k: usize| f32::from_bits(e.float_bits[k]);
+    player_sim::ptya::Record {
+        id: e.id,
+        kind: e.kind,
+        alternate: e.sub,
+        combo_offset: e.combo_offset,
+        flags: e.flag,
+        motion: e.motion_id,
+        blend_arg: e.next_motion_id,
+        jump: f(0),
+        jump_max: f(1),
+        jump_min: f(2),
+        speed_min: f(3),
+        speed_max: f(4),
+        near: f(5),
+        far: f(6),
+        high: f(7),
+        low: f(8),
+        cos_min: f(9),
+        cos_max: f(10),
+        blend: f(11),
+        reach: f(12),
+        ability: e.ability,
+        w42: e.score,
+    }
+}
+
 fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn std::error::Error>> {
     let (frame_start, frame_end, fps, frame_return) = selected.motion.frame_window()?;
     if !(1. ..=60.).contains(&fps)
@@ -599,6 +634,7 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
         };
         match record.trigger {
             11 => clip.combo_windows.push((start, stop)),
+            50 => clip.finisher_windows.push((start, stop)),
             2 => {
                 clip.blend_to_idle = Some(clip.blend_to_idle.map_or(start, |b: u32| b.min(start)));
                 clip.actionable.push((start, stop));
@@ -629,6 +665,35 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
     Ok((clip, start))
 }
 
+/// What builds the battle ability record (stats +0x1d0): the SSTM adders,
+/// each ability item's bit (+4) and growth flag (+6 non-zero), and the
+/// equipped weapon's ability item.
+struct AbilitySource {
+    rates: abilities::Rates,
+    items: HashMap<u16, (u16, bool)>,
+    weapon: u16,
+}
+
+impl AbilitySource {
+    /// FUN_1403c1d90's ability part: reset (FUN_1404016b0), the weapon's
+    /// stat-row ability (FUN_1403c1190), then the equipped slots
+    /// (FUN_1404014a0).
+    fn build(&self, slots: &[u16]) -> abilities::Abilities {
+        let mut a = abilities::Abilities::default();
+        if let Some(&(bit, _)) = self.items.get(&self.weapon) {
+            a.add(self.weapon, bit, &self.rates);
+        }
+        a.equip(
+            slots,
+            None,
+            |id| self.items.get(&id).copied(),
+            &abilities::GROWTH,
+            &self.rates,
+        );
+        a
+    }
+}
+
 struct Loaded {
     room: LoadedRoom,
     arena_mesh: Option<windows_shell::room::ArenaMesh>,
@@ -637,6 +702,7 @@ struct Loaded {
     params: Params,
     /// SSTM battle parameters (blow, hit-back, fall max).
     sstm: physics::Sstm,
+    abilities: AbilitySource,
     clips: Clips,
     actions: Vec<((Action, bool), usize)>,
     clip_poses: Vec<ClipPoses>,
@@ -791,10 +857,18 @@ const ABILITY_MESSAGES: [u32; 15] = [
 ];
 
 /// Sora's abilities [test-room values: a new save's slots are not
-/// decoded]: Guard (0x52) equipped, as the guard-01 recipe asks.
-const ROOM_ABILITIES: [u16; 1] = [0x8052];
-/// Guard's ability item (its bit 1 gates PTYA 0x0b, FUN_140402750).
-const GUARD_ABILITY: u16 = 0x52;
+/// decoded]: Guard (0x52) equipped, as the guard-01 recipe asks, and the
+/// combo abilities unequipped so they can be tried from the camp: the
+/// Square abilities, the combo finishers and starters (PTYA ability bits
+/// 90–101, 177–180, 18), and the combo supports.
+const ROOM_ABILITIES: [u16; 27] = [
+    0x8052, 0x0089, 0x010f, 0x010b, 0x0111, 0x010c, 0x0106, 0x0107, 0x022f, 0x0108, 0x0232, 0x0109,
+    0x010a, 0x010d, 0x0230, 0x010e, 0x0110, 0x0231, 0x00a2, 0x00a3, 0x0186, 0x0187, 0x0188, 0x0189,
+    0x018a, 0x018b, 0x021b,
+];
+/// [test-room value] AP added to Sora's level-1 AP so the room's abilities
+/// fit, giving 50 like the Critical start record (plrp id 7).
+const ROOM_EXTRA_AP: i32 = 48;
 /// The Kingdom Key (its stat record gives the weapon ability).
 const KINGDOM_KEY: u16 = 0x29;
 
@@ -1013,6 +1087,7 @@ impl shadow::Env for RoomFloor<'_> {
 struct EnemyRuntime {
     clips: EnemyClips,
     body: Vec<(usize, Vec3, f32, bool)>,
+    targets: Vec<(usize, Vec3, f32, f32)>,
     blade: HashMap<u8, Vec<(Vec3, f32)>>,
     attacks: HashMap<u16, combat::AttackParams>,
     sora: combat::AttackerStats,
@@ -1054,6 +1129,8 @@ struct EnemySource {
     clips: EnemyClips,
     /// HIT spheres: bone, offset, radius, high-flinch argument.
     body: Vec<(usize, Vec3, f32, bool)>,
+    /// TARGET shapes (type 3, enabled): bone, offset, radius, height.
+    targets: Vec<(usize, Vec3, f32, f32)>,
     /// Keyblade attack spheres by collision group: offset, radius.
     blade: HashMap<u8, Vec<(Vec3, f32)>>,
     attacks: HashMap<u16, combat::AttackParams>,
@@ -1105,12 +1182,7 @@ fn load(
     basic_fk: bool,
 ) -> Result<Loaded, Box<dyn std::error::Error>> {
     let config: Config = serde_json::from_slice(&read_limited(config_path)?)?;
-    if config.schema_version != 1
-        || config.source_content_identity != source.content_identity()
-        || config.ground_combo_ids.is_empty()
-        || config.ground_combo_ids.len() > 8
-        || config.air_combo_ids.len() > 8
-    {
+    if config.schema_version != 1 || config.source_content_identity != source.content_identity() {
         return Err("test room configuration identity/schema invalid".into());
     }
     let base = config_path.parent().ok_or("configuration directory")?;
@@ -1176,6 +1248,32 @@ fn load(
         .get(sstm_offset as usize..)
         .and_then(physics::Sstm::read)
         .ok_or("SSTM record truncated")?;
+    let ability_source = {
+        let rates = sstm_bytes
+            .get(sstm_offset as usize..)
+            .and_then(abilities::Rates::read)
+            .ok_or("SSTM record truncated")?;
+        let item = bar_entry(&system, b"item")?;
+        let table = package_reader::item_table::read(item)?;
+        let stats = package_reader::item_table::read_stats(item)?;
+        // Ability items (types 0x12..0x14): bit at +4, growth flag at +6.
+        let items = table
+            .iter()
+            .filter(|r| (0x12..=0x14).contains(&r.kind))
+            .map(|r| (r.id, (r.amount, r.weapon_stats & 0xff != 0)))
+            .collect();
+        // FUN_1403e3ef0: the weapon's stat entry (+6) carries its ability.
+        let weapon = table
+            .iter()
+            .find(|r| r.id == KINGDOM_KEY)
+            .and_then(|r| stats.iter().find(|s| s.id == r.weapon_stats))
+            .map_or(0, |s| s.ability);
+        AbilitySource {
+            rates,
+            items,
+            weapon,
+        }
+    };
     let mut obj_params = physics::ObjParams::defaults(sstm.fall_max);
     let player_object = objects
         .iter()
@@ -1273,25 +1371,21 @@ fn load(
     let ptya_bytes = bar_entry(&battle, b"ptya")?;
     let table = ptya::read_table(ptya_bytes)?;
     let set = ptya::read_set(ptya_bytes, &table, config.ptya_pointer)?;
-    let pick = |id: u8| {
-        set.iter()
-            .find(|e| e.id == id)
-            .cloned()
-            .ok_or_else(|| format!("PTYA entry {id} absent"))
-    };
-    let ground: Vec<_> = config
-        .ground_combo_ids
-        .iter()
-        .map(|&id| pick(id))
-        .collect::<Result<_, _>>()?;
-    let air: Vec<_> = config
-        .air_combo_ids
-        .iter()
-        .map(|&id| pick(id))
-        .collect::<Result<_, _>>()?;
+    // Every record of the player's PTYA set: the attack command chooses
+    // among them per press (player_sim::ptya). Each distinct motion loads
+    // once.
+    let records: Vec<player_sim::ptya::Record> = set.iter().map(ptya_record).collect();
+    let mut attack_motions: Vec<u16> = Vec::new();
+    for e in &set {
+        if e.motion_id != 0 && !attack_motions.contains(&e.motion_id) {
+            attack_motions.push(e.motion_id);
+        }
+    }
+    if attack_motions.is_empty() {
+        return Err("PTYA set has no attack motions".into());
+    }
 
     let mut ids: Vec<u16> = LOCOMOTION.iter().map(|&(_, id)| id).collect();
-    ids.extend(ground.iter().chain(&air).map(|e| e.motion_id));
     let selection = motion::MotionSetSelection {
         index: config.motion_set.index.clone(),
         ordinal: config.motion_set.ordinal,
@@ -1300,6 +1394,10 @@ fn load(
         has_weapon: config.has_weapon,
     };
     let mut motions = motion::read_motion_ids(source, &selection, &ids)?;
+    for chunk in attack_motions.chunks(32) {
+        motions.extend(motion::read_motion_ids(source, &selection, chunk)?);
+    }
+    ids.extend(&attack_motions);
     // Field-mode (weapon put away) idle/walk/run through the same public
     // chooser with battle=false, has_weapon=false.
     let field_selection = motion::MotionSetSelection {
@@ -1378,7 +1476,10 @@ fn load(
             battle: config.battle_mode,
             has_weapon: config.has_weapon,
         };
-        let found = motion::read_motion_ids(source, &weapon_selection, &ids[..battle_count])?;
+        let mut found = Vec::new();
+        for chunk in ids[..battle_count].chunks(32) {
+            found.extend(motion::read_motion_ids(source, &weapon_selection, chunk)?);
+        }
         for (selected, own) in found.into_iter().zip(&motions) {
             weapon_motions.insert(own.slot, selected);
         }
@@ -1533,7 +1634,13 @@ fn load(
             .collect(),
     };
     let n = LOCOMOTION.len();
-    let field = n + ground.len() + air.len();
+    let field = n + attack_motions.len();
+    let attack_clip = |motion: u16| {
+        &clip_list[n + attack_motions
+            .iter()
+            .position(|&m| m == motion)
+            .unwrap_or(0)]
+    };
     let clips = Clips {
         idle: clip_list[0].0.clone(),
         walk: clip_list[1].0.clone(),
@@ -1544,15 +1651,10 @@ fn load(
         jump: clip_list[3].0.clone(),
         fall: clip_list[4].0.clone(),
         land: clip_list[5].0.clone(),
-        ground_combo: ground
+        records: records.clone(),
+        attacks: set
             .iter()
-            .zip(&clip_list[n..])
-            .map(|(e, c)| step(e, c))
-            .collect(),
-        air_combo: air
-            .iter()
-            .zip(&clip_list[n + ground.len()..])
-            .map(|(e, c)| step(e, c))
+            .map(|e| step(e, attack_clip(e.motion_id)))
             .collect(),
         hurt: clip_list[field + 3..field + 3 + hurt_count]
             .iter()
@@ -1575,11 +1677,10 @@ fn load(
         (Action::Fall, clip_list[4].1),
         (Action::Land, clip_list[5].1),
     ];
-    for i in 0..ground.len() {
-        both.push((Action::Attack(i), clip_list[n + i].1));
-    }
-    for i in 0..air.len() {
-        both.push((Action::AirAttack(i), clip_list[n + ground.len() + i].1));
+    for (i, e) in set.iter().enumerate() {
+        let pose = attack_clip(e.motion_id).1;
+        both.push((Action::Attack(i), pose));
+        both.push((Action::AirAttack(i), pose));
     }
     for i in 0..hurt_count {
         both.push((Action::Hurt(i), clip_list[field + 3 + i].1));
@@ -1656,8 +1757,8 @@ fn load(
         "test_room_choices":{"step_height":STEP_HEIGHT,
             "body_radius":BODY_RADIUS,"body_height":BODY_HEIGHT,"floor_min_normal_y":FLOOR_MIN_NORMAL_Y,
             "blend_ticks":"per action (player_sim::blend_for, PTYA +0x38 after attacks)","clock":"fixed 60 Hz, one motion tick per update"},
-        "ptya":{"ground":ground.iter().map(|e| serde_json::json!({"id":e.id,"kind":e.kind,"flag":e.flag,"motion_id":e.motion_id,"next_motion_id":e.next_motion_id,"floats":e.float_bits.map(f32::from_bits)})).collect::<Vec<_>>(),
-            "air":air.iter().map(|e| serde_json::json!({"id":e.id,"kind":e.kind,"flag":e.flag,"motion_id":e.motion_id,"next_motion_id":e.next_motion_id,"floats":e.float_bits.map(f32::from_bits)})).collect::<Vec<_>>()},
+        "ptya":{"records":set.iter().map(|e| serde_json::json!({"id":e.id,"kind":e.kind,"alternate":e.sub,"combo_offset":e.combo_offset,"flag":e.flag,"motion_id":e.motion_id,"ability":e.ability,"floats":e.float_bits.map(f32::from_bits)})).collect::<Vec<_>>(),
+            "legacy_combo_ids":[&config.ground_combo_ids,&config.air_combo_ids]},
         "motions":slots,"collision":{"floors":floors,"walls":walls,"surface_flags":flag_counts,"bounds":[low.to_array(),high.to_array()],
             "largest_levels":levels.iter().take(8).map(|(area,p)| serde_json::json!({"area":area,"point":p})).collect::<Vec<_>>()},
         "spawn":spawn.to_array(),"pose_evaluator":if basic_fk {"basic public FK (T053)"} else {"motion_eval IK/constraints (T057)"},
@@ -1808,7 +1909,7 @@ fn load(
             // +1 Mag as in the combat setup) [test-room values].
             let numbers = SoraNumbers {
                 next_exp: lv.exp,
-                ap: lv.ap as i32 + byte(5),
+                ap: lv.ap as i32 + byte(5) + ROOM_EXTRA_AP,
                 strength: lv.strength as i32 + byte(6) + 3,
                 magic: lv.magic as i32 + byte(7) + 1,
                 defense: lv.defense as i32 + byte(8),
@@ -1946,6 +2047,7 @@ fn load(
         weapon,
         params,
         sstm,
+        abilities: ability_source,
         clips,
         actions,
         clip_poses,
@@ -2011,6 +2113,24 @@ fn load_enemy(
                 ),
                 e.radius as f32,
                 matches!(e.argument, 0 | 2 | 3 | 4 | 5),
+            )
+        })
+        .collect();
+    // TARGET entries on bones: what the attack chooser and the automatic
+    // target measure (FUN_1403bdac0 / FUN_1403be4b0).
+    let targets: Vec<_> = collision
+        .iter()
+        .filter(|e| e.kind == object_collision::TARGET && e.bone >= 0)
+        .map(|e| {
+            (
+                e.bone as usize,
+                Vec3::new(
+                    e.position[0] as f32,
+                    e.position[1] as f32,
+                    e.position[2] as f32,
+                ),
+                e.radius as f32,
+                e.height as f32,
             )
         })
         .collect();
@@ -2191,6 +2311,7 @@ fn load_enemy(
         model,
         clips: EnemyClips(clips),
         body,
+        targets,
         blade,
         attacks,
         sora,
@@ -3056,6 +3177,19 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
                 rt.enemy.position[2] - p[2],
             ]
         });
+    // The enemy's TARGET shapes: candidates for the attack chooser, and the
+    // current target while it can be hit [test room: one enemy, so the
+    // automatic target is it whenever targetable].
+    let shapes = game
+        .enemy
+        .as_ref()
+        .filter(|rt| rt.enemy.targetable())
+        .map(enemy_targets)
+        .unwrap_or_default();
+    let mut nearby = [None; 4];
+    for (slot, t) in nearby.iter_mut().zip(&shapes) {
+        *slot = Some(*t);
+    }
     let input = Input {
         direction: direction.to_array(),
         jump,
@@ -3066,6 +3200,9 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
         // Test-room choice for FUN_1403d7520's summed body radii: Sora's
         // body radius twice.
         target_reach: 2. * BODY_RADIUS,
+        target_shape: shapes.first().copied(),
+        nearby,
+        probe_blocked: false,
     };
     let Game {
         player,
@@ -3131,9 +3268,15 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
         let position = game.player.position;
         let armed = game.player.armed;
         game.action_started = game.tick;
+        let motion = game.player.motion_id(&game.clips);
+        let ptya_id = match action {
+            Action::Attack(i) | Action::AirAttack(i) => Some(game.clips.records[i].id),
+            _ => None,
+        };
+        let combo = [game.player.combo.step, game.player.combo.finish];
         game.event(
             serde_json::json!({"event":"action","tick":tick,"action":format!("{action:?}"),"armed":armed,
-            "position":position,"landed":step.landed}),
+            "position":position,"landed":step.landed,"motion":motion,"ptya":ptya_id,"combo":combo}),
         );
     }
     sora_sounds(&mut game);
@@ -3953,6 +4096,33 @@ fn hud_present(
 /// enemy's own tick. Attack spheres: weapon bone 2 entries of the window's
 /// collision group, placed through Sora's hand and swept from last frame;
 /// target spheres: the enemy's HIT entries on its animated bones.
+/// The enemy's TARGET shapes this tick, in simulation space.
+fn enemy_targets(rt: &EnemyRuntime) -> Vec<player_sim::ptya::Target> {
+    let e = &rt.enemy;
+    let turn = Quat::from_rotation_y(e.yaw);
+    let at = Vec3::from_array(e.position);
+    let Some(ec) = rt.clips.0.get(&e.motion) else {
+        return Vec::new();
+    };
+    let Some(bones) = ec
+        .bones
+        .get((e.motion_tick as usize).min(ec.bones.len().saturating_sub(1)))
+    else {
+        return Vec::new();
+    };
+    rt.targets
+        .iter()
+        .filter_map(|&(b, offset, radius, height)| {
+            let m = bones.get(&b)?;
+            Some(player_sim::ptya::Target {
+                centre: (at + turn * m.transform_point3(offset)).to_array(),
+                radius,
+                height,
+            })
+        })
+        .collect()
+}
+
 fn combat_tick(game: &mut Game, tick: u64) {
     let Game {
         player,
@@ -4042,6 +4212,9 @@ fn combat_tick(game: &mut Game, tick: u64) {
             .enemy
             .hit(instance, dir.to_array(), high, attack, &rt.sora)
         {
+            // FUN_1403d12c0: the attacker's obj+0x120 bit 25, which lets
+            // the next press chain the combo.
+            player.connected = true;
             // ATKP HitSound (FUN_1403d12c0 → FUN_1403dadf0); 500xxx ids
             // resolve to the equipped weapon's bank, 500 for this Keyblade.
             if let Some(&id) = rt.hit_sounds.get(&atkp)
@@ -4158,6 +4331,8 @@ fn combat_tick(game: &mut Game, tick: u64) {
         && let (Some(&gr_row), Some(&claw_row)) = (rt.rows.get(&guard), rt.rows.get(&claw))
     {
         rt.sora_hit_by.push(instance);
+        // FUN_1403d61d0 first sets obj+0x120 bit 25 ("connected").
+        player.connected = true;
         // FUN_1403d0f00: at the guard sphere's surface toward the claw.
         let contact = g + (claw_at - g).normalize_or_zero() * gr;
         let (s, t) = (gr_row.refact_self, claw_row.refact_other);
@@ -5003,8 +5178,10 @@ fn camp_tick(
             if let Some(m) = menu.data.abilities.members.first() {
                 c.ability_slots = m.slots.clone();
             }
+            // The battle ability record follows the equipped slots;
             // Guard's ability bit gates PTYA 0x0b (FUN_140402750).
-            game.guard_equipped = c.ability_slots.contains(&(0x8000 | GUARD_ABILITY));
+            game.player.abilities = game.ability_source.build(&c.ability_slots);
+            game.guard_equipped = game.player.abilities.has(abilities::bit::GUARD);
             // Items used in the camp change the room's HP / MP.
             if let Some(sora) = menu.data.panels.members.first() {
                 if let Some(rt) = game.enemy.as_mut() {
@@ -5354,11 +5531,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         poses.insert(*action, *clip);
     }
     let talk_room = loaded.npc.is_some();
+    let mut player = Player::new(loaded.spawn.to_array(), 0.);
+    player.abilities = loaded.abilities.build(&ROOM_ABILITIES);
+    let guard_equipped = player.abilities.has(abilities::bit::GUARD);
     let mut game = Game {
+        ability_source: loaded.abilities,
         params: loaded.params,
         clips: loaded.clips,
         world: loaded.world,
-        player: Player::new(loaded.spawn.to_array(), 0.),
+        player,
         poses,
         clip_poses: loaded.clip_poses,
         part_indices: Vec::new(),
@@ -5373,7 +5554,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         jump_queued: false,
         attack_queued: false,
         guard_queued: false,
-        guard_equipped: ROOM_ABILITIES.contains(&(0x8000 | GUARD_ABILITY)),
+        guard_equipped,
         menu_up_queued: false,
         menu_down_queued: false,
         enemy: None,
@@ -5526,6 +5707,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         game.enemy = Some(EnemyRuntime {
             clips: e.clips,
             body: e.body,
+            targets: e.targets,
             blade: e.blade,
             attacks: e.attacks,
             sora: e.sora,
