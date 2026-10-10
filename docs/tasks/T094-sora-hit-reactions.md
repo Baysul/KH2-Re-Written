@@ -1,4 +1,4 @@
-# T093 — Sora's hit reactions: flinch, air flinch, blow, Aerial Recovery, death
+# T094 — Sora's hit reactions: flinch, air flinch, blow, Aerial Recovery, death
 
 Owner Claude, 2026-10-10. Gates P18/P21 (test-room scope). Starts from T092 (`3a14d49`). User request: rewrite the ability and combo system 1:1; this is stage 3a, being hit.
 
