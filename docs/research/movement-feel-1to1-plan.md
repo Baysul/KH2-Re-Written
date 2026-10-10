@@ -221,3 +221,5 @@ Checks: PASS fmt, clippy, workspace tests (40 in `player_sim`), build, smoke, an
 
 The user reported that Sora seemed to float for about a second after an air combo. The rewrite let an aerial swing that touched down play out on the ground; that was a test-room choice. In the exe, landing calls mode 1's land slot FUN_1403cb940, which plays the land motion stored at obj+0x11c. FUN_1403d78d0 sets that to 5 (LAND) for aerial attacks, so touching down cuts the swing short into LAND and its 12-frame lock [O]. The bit at obj+0x194 bit 4, which would skip the land motion, was not traced [U]. In `autoplay-s9`, the combo's finisher (pressed at 617) now lands at 653 and is idle at 679, where before it landed at 683 and idled at 709.
 
+Aerial hop reach [O]: FUN_1403d7520 sums the attacker's TARGET object-collision radius (kind 3, via FUN_1403b5650(obj, 3, -1) / FUN_1403c9c00) and the target's shape radius (FUN_1403be0f0). This was traced by the Twilight Town thread. The test room now reads both TARGET entries from the BAR type-23 tables: Sora plus the Shadow = 100, replacing the test-room 60. Whether the enemy-side shape is its TARGET entry is [I].
+
