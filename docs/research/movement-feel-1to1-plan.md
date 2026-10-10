@@ -217,3 +217,7 @@ The user reported that jump/fall and air combos felt off, and that the rewrite l
 
 Checks: PASS fmt, clippy, workspace tests (40 in `player_sim`), build, smoke, and `autoplay-s8` (exit 0, 81 non-uniform captures; jump pressed 300, lift-off 304, FALL 329, LAND 364, idle 390).
 
+### Fourth pass (2026-10-10): landing during an aerial attack
+
+The user reported that Sora seemed to float for about a second after an air combo. The rewrite let an aerial swing that touched down play out on the ground; that was a test-room choice. In the exe, landing calls mode 1's land slot FUN_1403cb940, which plays the land motion stored at obj+0x11c. FUN_1403d78d0 sets that to 5 (LAND) for aerial attacks, so touching down cuts the swing short into LAND and its 12-frame lock [O]. The bit at obj+0x194 bit 4, which would skip the land motion, was not traced [U]. In `autoplay-s9`, the combo's finisher (pressed at 617) now lands at 653 and is idle at 679, where before it landed at 683 and idled at 709.
+

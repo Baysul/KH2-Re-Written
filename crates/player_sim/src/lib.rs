@@ -883,13 +883,11 @@ impl Player {
         {
             self.position[1] = floor;
             self.vertical_speed = 0.;
-            // Landing switches to the ground mode (FUN_1403cb940); the air
+            // Landing switches to the ground mode and plays the land motion
+            // (FUN_1403cb940: obj+0x11c = 5, which FUN_1403d78d0 also sets
+            // for aerial attacks), cutting an aerial swing short. The air
             // velocity stays in obj+0x20 for LAND's inertial slide.
             self.sampler = physics::Sampler::default();
-            if matches!(self.action, Action::AirAttack(_)) {
-                // Test-room choice: let the aerial swing play out on the ground.
-                return;
-            }
             step.landed = true;
             self.start(Action::Land, step);
             return;
