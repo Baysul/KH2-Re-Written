@@ -34,7 +34,7 @@ fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
 }
 
-fn to_layout(x: f32, y: f32) -> [f32; 2] {
+pub fn to_layout(x: f32, y: f32) -> [f32; 2] {
     [LEFT + x * SX, y * SY]
 }
 
@@ -44,11 +44,9 @@ pub enum Face {
     Heading,
     /// Menu rows and body text: Segoe UI Semibold.
     Body,
-    /// The big title: Palatino Linotype Bold.
-    Title,
 }
 
-const FACES: [(Face, &[&str]); 3] = [
+const FACES: [(Face, &[&str]); 2] = [
     (
         Face::Heading,
         &[
@@ -59,10 +57,6 @@ const FACES: [(Face, &[&str]); 3] = [
         ],
     ),
     (Face::Body, &["seguisb.ttf", "segoeui.ttf", "arial.ttf"]),
-    (
-        Face::Title,
-        &["palab.ttf", "georgiab.ttf", "timesbd.ttf", "seguisb.ttf"],
-    ),
 ];
 
 #[derive(Clone, Copy)]
@@ -77,8 +71,6 @@ struct Glyph {
 pub struct Paint {
     pub white: usize,
     round: usize,
-    pub glow: usize,
-    pub star: usize,
     atlas: usize,
     pixels: Vec<u8>,
     shelf: [u32; 3],
@@ -134,28 +126,6 @@ impl Paint {
             }),
             ROUND,
         );
-        let glow = sheet_from(
-            images,
-            frame,
-            shape(128, |x, y| {
-                let d = ((x - 64.).hypot(y - 64.) / 64.).min(1.);
-                (1. - d * d).powi(3)
-            }),
-            128,
-        );
-        let star = sheet_from(
-            images,
-            frame,
-            shape(64, |x, y| {
-                let (dx, dy) = ((x - 32.) / 32., (y - 32.) / 32.);
-                let d = dx.hypot(dy);
-                let cross = (-(dx.abs() * 9.)).exp() * (1. - dy.abs()).max(0.).powi(2)
-                    + (-(dy.abs() * 9.)).exp() * (1. - dx.abs()).max(0.).powi(2);
-                let core = (1. - d * 2.5).max(0.).powi(2);
-                (cross * 0.9 + core) * (1. - d).max(0.)
-            }),
-            64,
-        );
         let pixels = vec![0; (ATLAS * ATLAS * 4) as usize];
         let atlas = sheet_from(images, frame, pixels.clone(), ATLAS);
         let mut fonts = HashMap::new();
@@ -166,8 +136,6 @@ impl Paint {
         Ok(Self {
             white,
             round,
-            glow,
-            star,
             atlas,
             pixels,
             shelf: [1, 1, 0],
@@ -318,29 +286,8 @@ impl Paint {
         ));
     }
 
-    /// A soft-edged shape from a square texture, centred at `c`.
-    pub fn blob(
-        &self,
-        frame: &mut Ui2dFrame,
-        sheet: usize,
-        c: [f32; 2],
-        size: [f32; 2],
-        color: Rgba,
-    ) {
-        let [w, h] = frame.sheets[sheet].size.map(|v| v as i32);
-        frame.draws.push((
-            sheet,
-            vec![quad(
-                [c[0] - size[0] / 2., c[1] - size[1] / 2., size[0], size[1]],
-                [0, 0, w, h],
-                [color; 4],
-                1,
-            )],
-        ));
-    }
-
     /// A rounded box with corner radius `radius`, its top edge shifted right
-    /// by `skew` (a KH2 menu plate). Colours as in `rect`.
+    /// by `skew`. Colours as in `rect`.
     #[allow(clippy::too_many_arguments)]
     pub fn plate(
         &self,

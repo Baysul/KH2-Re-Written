@@ -289,28 +289,20 @@ fn config_identity(path: &Path) -> Option<String> {
 /// One entry of the test list.
 pub struct Test {
     pub name: &'static str,
-    pub lines: &'static [&'static str],
+    pub blurb: &'static str,
     /// The `kh2fm` command it runs.
     pub program: &'static str,
 }
 
 pub const TESTS: [Test; 2] = [
     Test {
-        name: "Title Screen",
-        lines: &[
-            "The full boot: Disney, Square Enix and GLURBUS STUDIOS,",
-            "the copyright, the intro and the Final Re:WRITE banner,",
-            "then the title menu. Start skips the intro.",
-        ],
+        name: "Title screen",
+        blurb: "Disney, Square Enix and GLURBUS logos, intro, title menu",
         program: "title",
     },
     Test {
-        name: "Test Room",
-        lines: &[
-            "Sora in the arena with a Shadow to fight and Axel",
-            "to talk to. Combat, the HUD, the camp menu, dialogue",
-            "and music in one room.",
-        ],
+        name: "Test room",
+        blurb: "Sora, a Shadow to fight and Axel to talk to",
         program: "play",
     },
 ];

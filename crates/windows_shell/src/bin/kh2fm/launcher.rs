@@ -3,8 +3,8 @@
 //! check it against the supported build, then choose a test. The choice is
 //! remembered, so later launches open on the test list.
 //!
-//! Before a folder is chosen there are no game files, so everything here is
-//! drawn from generated shapes and Windows' fonts in a KH2-like style
+//! Before a folder is chosen there are no game files, so the launcher is
+//! drawn from plain shapes and a Windows font: a dark screen and one list
 //! [launcher design, not the original's menus]. A test runs as a child
 //! `kh2fm <program> ...` process; this window waits hidden and comes back
 //! when the test closes.
@@ -30,20 +30,17 @@ use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
 pub use install::play_args;
 
 // Palette.
-const INK: u32 = 0xeaf3ff;
-const INK_SOFT: u32 = 0xa9bfe6;
-const INK_DIM: u32 = 0x6f86b3;
-const GOLD: u32 = 0xf3cf6b;
-const GOLD_DEEP: u32 = 0xc8902e;
-const NAVY: u32 = 0x0b1d46;
-const BLUE: u32 = 0x2c6be0;
-const EDGE: u32 = 0x5d8fe6;
+const TEXT: u32 = 0xf2f5fb;
+const MUTED: u32 = 0x9aa6bd;
+const FAINT: u32 = 0x5d6880;
+const ACCENT: u32 = 0x2f63d6;
+const ACCENT_DEEP: u32 = 0x1c3f99;
+const GOLD: u32 = 0xe9c45f;
 
-const MARGIN: f32 = 72.;
-const LIST_TOP: f32 = 222.;
-const LIST_BOTTOM: f32 = 640.;
-const LIST_WIDTH: f32 = 540.;
-const PANEL: [f32; 4] = [668., 222., 540., 360.];
+const MARGIN: f32 = 96.;
+const LIST_TOP: f32 = 196.;
+const LIST_BOTTOM: f32 = 630.;
+const LIST_WIDTH: f32 = 620.;
 
 #[derive(Clone, Debug, PartialEq)]
 enum Action {
@@ -138,7 +135,6 @@ struct Launcher {
     hover_drop: bool,
     repeat: Option<(i32, f32)>,
     mouse: Option<Vec2>,
-    sparkles: Vec<[f32; 4]>,
     paint: Option<Paint>,
 }
 
@@ -167,9 +163,9 @@ impl Launcher {
                         let current = self.settings.game_folder.as_ref() == Some(p);
                         Item::new(
                             if current {
-                                "Keep the Steam Install"
+                                "Steam install (current)"
                             } else {
-                                "Use the Steam Install"
+                                "Steam install"
                             },
                             Action::UseFolder(p.clone()),
                         )
@@ -177,19 +173,13 @@ impl Launcher {
                         .tag("STEAM")
                     })
                     .collect();
-                items.push(
-                    Item::new("Browse for the Folder", Action::Browse(None))
-                        .detail("Find the collection's install folder yourself"),
-                );
+                items.push(Item::new("Browse for the folder", Action::Browse(None)));
                 if let Some(remembered) = &self.settings.game_folder
                     && !self.detected.contains(remembered)
                 {
                     items.push(
-                        Item::new(
-                            "Keep the Current Folder",
-                            Action::UseFolder(remembered.clone()),
-                        )
-                        .detail(plain(remembered)),
+                        Item::new("Current folder", Action::UseFolder(remembered.clone()))
+                            .detail(plain(remembered)),
                     );
                 }
                 items.push(Item::new("Quit", Action::Quit));
@@ -200,9 +190,9 @@ impl Launcher {
                 let mut items: Vec<Item> = TESTS
                     .iter()
                     .enumerate()
-                    .map(|(i, t)| Item::new(t.name, Action::Run(i)))
+                    .map(|(i, t)| Item::new(t.name, Action::Run(i)).detail(t.blurb))
                     .collect();
-                items.push(Item::new("Change Game Folder", Action::Pick));
+                items.push(Item::new("Change game folder", Action::Pick));
                 items.push(Item::new("Quit", Action::Quit));
                 items
             }
@@ -210,11 +200,11 @@ impl Launcher {
                 let mut items = Vec::new();
                 if let Some(b) = retry {
                     items.push(Item::new(
-                        "Back to the Tests",
+                        "Back to the tests",
                         Action::UseFolder(b.folder.clone()),
                     ));
                 }
-                items.push(Item::new("Choose Another Folder", Action::Pick));
+                items.push(Item::new("Choose another folder", Action::Pick));
                 items.push(Item::new("Quit", Action::Quit));
                 items
             }
@@ -240,16 +230,14 @@ fn browse_items(path: Option<&Path>) -> Vec<Item> {
         return items;
     };
     let mut items = Vec::new();
-    let here = Item::new("Use This Folder", Action::UseFolder(path.to_path_buf()));
+    let here = Item::new("Use this folder", Action::UseFolder(path.to_path_buf()));
     items.push(if install::has_executable(path) {
-        here.detail("KINGDOM HEARTS II FINAL MIX is here")
-            .tag("KH2FM")
+        here.detail("The game is here").tag("KH2FM")
     } else {
-        here.detail("No KINGDOM HEARTS II FINAL MIX.exe in this folder")
-            .disabled()
+        here.detail("The game is not in this folder").disabled()
     });
     items.push(Item::new(
-        "Up One Level",
+        "Up one level",
         Action::Browse(path.parent().map(Path::to_path_buf)),
     ));
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(path)
@@ -273,11 +261,6 @@ fn browse_items(path: Option<&Path>) -> Vec<Item> {
         });
     }
     items
-}
-
-fn ease(t: f32) -> f32 {
-    let t = t.clamp(0., 1.);
-    1. - (1. - t).powi(3)
 }
 
 /// Words wrapped to `width`.
@@ -469,22 +452,23 @@ fn read_input(
 }
 
 /// Rows of the current list: height, gap, label size.
-fn row_metrics(screen: &Screen) -> (f32, f32, f32) {
-    match screen {
-        Screen::Browse(_) => (40., 8., 21.),
-        _ => (56., 12., 25.),
+fn row_metrics(l: &Launcher) -> (f32, f32, f32) {
+    match l.screen {
+        Screen::Browse(_) => (40., 4., 20.),
+        _ if l.items.iter().any(|i| i.detail.is_some()) => (66., 6., 24.),
+        _ => (48., 6., 24.),
     }
 }
 
-fn visible_rows(screen: &Screen) -> usize {
-    let (h, gap, _) = row_metrics(screen);
-    (((LIST_BOTTOM - LIST_TOP + gap) / (h + gap)) as usize).max(1)
+fn visible_rows(l: &Launcher) -> usize {
+    let (h, gap, _) = row_metrics(l);
+    (((LIST_BOTTOM - list_top(l) + gap) / (h + gap)) as usize).max(1)
 }
 
 fn row_rect(l: &Launcher, i: usize) -> [f32; 4] {
-    let (h, gap, _) = row_metrics(&l.screen);
+    let (h, gap, _) = row_metrics(l);
     let k = i as f32 - l.scroll as f32;
-    [MARGIN, LIST_TOP + k * (h + gap), LIST_WIDTH, h]
+    [MARGIN, list_top(l) + k * (h + gap), LIST_WIDTH, h]
 }
 
 fn move_cursor(l: &mut Launcher, by: i32) {
@@ -504,7 +488,7 @@ fn move_cursor(l: &mut Launcher, by: i32) {
 }
 
 fn keep_visible(l: &mut Launcher) {
-    let rows = visible_rows(&l.screen);
+    let rows = visible_rows(l);
     if l.cursor < l.scroll {
         l.scroll = l.cursor;
     } else if l.cursor >= l.scroll + rows {
@@ -591,11 +575,11 @@ fn checked(l: &mut Launcher, result: Result<Bound, String>, folder: &Path) {
         && *want != b.identity
     {
         return l.go(Screen::Problem {
-            title: "This is not the supported build".into(),
+            title: "Unsupported game version".into(),
             lines: vec![
                 plain(&b.folder),
                 format!(
-                    "The tests were made for the Steam KINGDOM HEARTS II FINAL MIX build {}…; this folder holds {}…. Unknown builds stay quarantined, so the tests won't run on it.",
+                    "The tests only run on the supported Steam version ({}…). This folder has {}….",
                     &want[..12.min(want.len())],
                     &b.identity[..12.min(b.identity.len())]
                 ),
@@ -734,7 +718,7 @@ fn update(
         move_cursor(l, 1);
     }
     if p.page != 0 {
-        let rows = visible_rows(&l.screen) as i32;
+        let rows = visible_rows(l) as i32;
         let n = l.items.len() as i32;
         l.cursor = (l.cursor as i32 + p.page * rows).clamp(0, n - 1) as usize;
         keep_visible(l);
@@ -750,7 +734,7 @@ fn update(
             pos.x * paint::W / window.width(),
             pos.y * paint::H / window.height(),
         );
-        let rows = visible_rows(&l.screen);
+        let rows = visible_rows(l);
         for i in l.scroll..(l.scroll + rows).min(l.items.len()) {
             let [rx, ry, rw, rh] = row_rect(l, i);
             let inside = x >= rx && x <= rx + rw + 20. && y >= ry && y <= ry + rh;
@@ -797,711 +781,290 @@ fn draw(
         }
     }
     let dt = time.delta_secs().min(0.1);
-    l.fade = (l.fade - dt * 3.).max(0.);
+    l.fade = (l.fade - dt * 4.).max(0.);
     for (i, g) in l.glow.iter_mut().enumerate() {
         let want = (i == l.cursor) as u8 as f32;
-        *g += (want - *g) * (1. - (-dt * 14.).exp());
+        *g += (want - *g) * (1. - (-dt * 18.).exp());
     }
     let mut paint = l.paint.take().expect("paint");
-    let f = &mut *frame;
-    background(l, &mut paint, f, dt);
-    header(l, &mut paint, f);
-    match &l.screen {
-        Screen::Check(job) => check_screen(l, job, &mut paint, f),
-        Screen::Loading(run, _) => loading_screen(l, run.name, &mut paint, f),
-        Screen::Boot => {}
-        _ => {
-            list(l, &mut paint, f);
-            side_panel(l, &mut paint, f);
-            footer(l, &mut paint, f);
-        }
-    }
-    if l.hover_drop {
-        paint.rect(
-            f,
-            [0., 0., paint::W, paint::H],
-            [rgba(0x000000, 0.55); 4],
-            false,
-        );
-        paint.plate(
-            f,
-            [340., 300., 600., 120.],
-            22.,
-            0.,
-            [rgba(NAVY, 0.95); 4],
-            false,
-        );
-        paint.text(
-            f,
-            Face::Heading,
-            30.,
-            [640., 340.],
-            0.5,
-            "Drop to use this game folder",
-            [rgba(INK, 1.), rgba(INK_SOFT, 1.)],
-            0.6,
-        );
-    }
-    if l.fade > 0. {
-        paint.rect(
-            f,
-            [0., 0., paint::W, paint::H],
-            [rgba(0x000000, ease(l.fade)); 4],
-            false,
-        );
-    }
-    paint.flush(&mut images, f);
-    l.paint = Some(paint);
-}
-
-fn background(l: &mut Launcher, p: &mut Paint, f: &mut Ui2dFrame, dt: f32) {
-    let (top, bottom) = (rgba(0x081536, 1.), rgba(0x010208, 1.));
+    let (p, f) = (&mut paint, &mut *frame);
+    let (top, bottom) = (rgba(0x0b0f1a, 1.), rgba(0x05070c, 1.));
     p.rect(
         f,
         [0., 0., paint::W, paint::H],
         [top, top, bottom, bottom],
         false,
     );
-    let breathe = 0.85 + 0.15 * (l.now * 0.6).sin();
-    p.blob(
-        f,
-        p.glow,
-        [330., 300.],
-        [1100., 760.],
-        rgba(0x1d4fc4, 0.30 * breathe),
-    );
-    p.blob(f, p.glow, [1080., 620.], [900., 560.], rgba(0x2a7fe0, 0.16));
-    p.blob(f, p.glow, [640., -60.], [1400., 260.], rgba(0x6aa8ff, 0.10));
-    // Drifting sparkles: [x, y, size, phase].
-    if l.sparkles.is_empty() {
-        let mut seed = 0x9e37_79b9_u32;
-        let mut next = || {
-            seed ^= seed << 13;
-            seed ^= seed >> 17;
-            seed ^= seed << 5;
-            (seed % 10_000) as f32 / 10_000.
-        };
-        l.sparkles = (0..46)
-            .map(|_| {
-                [
-                    next() * paint::W,
-                    next() * paint::H,
-                    6. + next() * 16.,
-                    next() * std::f32::consts::TAU,
-                ]
-            })
-            .collect();
-    }
-    for s in &mut l.sparkles {
-        s[1] -= dt * (6. + s[2] * 0.9);
-        s[0] += dt * 3. * (l.now * 0.3 + s[3]).sin();
-        if s[1] < -20. {
-            s[1] = paint::H + 20.;
-        }
-        let twinkle = 0.5 + 0.5 * (l.now * 1.7 + s[3] * 3.).sin();
-        let size = s[2] * (0.6 + 0.4 * twinkle);
-        p.blob(
-            f,
-            p.star,
-            [s[0], s[1]],
-            [size, size],
-            rgba(0x9cc8ff, 0.25 + 0.55 * twinkle),
-        );
-    }
-}
-
-fn header(l: &Launcher, p: &mut Paint, f: &mut Ui2dFrame) {
-    let title_w = p.text(
-        f,
-        Face::Title,
-        40.,
-        [MARGIN, 34.],
-        0.,
-        "KINGDOM HEARTS II",
-        [rgba(0xffffff, 1.), rgba(0xb9d4ff, 1.)],
-        0.7,
-    );
     p.text(
         f,
         Face::Heading,
-        22.,
-        [MARGIN + title_w + 14., 52.],
+        20.,
+        [MARGIN, 56.],
         0.,
-        "FINAL MIX",
-        [rgba(GOLD, 1.), rgba(GOLD_DEEP, 1.)],
-        0.6,
+        "KINGDOM HEARTS II FINAL MIX",
+        [rgba(MUTED, 1.); 2],
+        0.,
     );
-    p.text(
-        f,
-        Face::Heading,
-        24.,
-        [paint::W - MARGIN, 48.],
-        1.,
-        "Final Re:WRITE",
-        [rgba(INK, 0.95), rgba(INK_SOFT, 0.95)],
-        0.6,
-    );
-    // Gold rule fading out at both ends.
-    let y = 104.;
-    let (c, e) = (rgba(GOLD, 0.85), rgba(GOLD, 0.));
-    p.rect(f, [MARGIN - 20., y, 360., 2.], [e, c, e, c], false);
-    p.rect(
-        f,
-        [MARGIN + 340., y, paint::W - 2. * MARGIN - 320., 2.],
-        [c, e, c, e],
-        false,
-    );
-    p.blob(
-        f,
-        p.glow,
-        [MARGIN + 340., y + 1.],
-        [420., 26.],
-        rgba(GOLD, 0.35),
-    );
-    let (title, sub): (&str, String) = match &l.screen {
-        Screen::Boot | Screen::Pick => (
-            "SELECT GAME FOLDER",
-            "Where is KINGDOM HEARTS -HD 1.5+2.5 ReMIX- installed?".into(),
-        ),
-        Screen::Browse(path) => (
-            "BROWSE",
-            path.as_deref()
-                .map_or_else(|| "Choose a drive".into(), plain),
-        ),
-        Screen::Check(_) => ("CHECKING", "Making sure this is the supported game".into()),
-        Screen::Tests(_) | Screen::Loading(..) => {
-            ("TEST MENU", "How do you want to test the game?".into())
-        }
-        Screen::Problem { title, .. } => ("NOTICE", title.clone()),
+    let heading = match &l.screen {
+        Screen::Boot => String::new(),
+        Screen::Pick => "Select the game folder".into(),
+        Screen::Browse(path) => path
+            .as_deref()
+            .map_or_else(|| "Choose a drive".into(), plain),
+        Screen::Check(_) => "Checking the game folder".into(),
+        Screen::Tests(_) => "Choose a test".into(),
+        Screen::Loading(run, _) => format!("Loading {}", run.name),
+        Screen::Problem { title, .. } => title.clone(),
     };
-    let t = ease((l.now - l.entered) * 3.);
+    let heading = p.fit(Face::Heading, 34., &heading, paint::W - 2. * MARGIN);
     p.text(
         f,
         Face::Heading,
-        32.,
-        [MARGIN - 24. * (1. - t), 128.],
+        34.,
+        [MARGIN, 96.],
         0.,
-        title,
-        [
-            with_alpha(rgba(INK, 1.), t),
-            with_alpha(rgba(0x9fc2ff, 1.), t),
-        ],
-        0.7,
-    );
-    let sub = p.fit(Face::Body, 19., &sub, paint::W - 2. * MARGIN);
-    p.text(
-        f,
-        Face::Body,
-        19.,
-        [MARGIN + 2., 172.],
+        &heading,
+        [rgba(TEXT, 1.); 2],
         0.,
-        &sub,
-        [with_alpha(rgba(INK_SOFT, 1.), t); 2],
-        0.5,
     );
-}
-
-fn list(l: &Launcher, p: &mut Paint, f: &mut Ui2dFrame) {
-    let (h, _, label_size) = row_metrics(&l.screen);
-    let rows = visible_rows(&l.screen);
-    let since = l.now - l.entered;
-    for (k, i) in (l.scroll..(l.scroll + rows).min(l.items.len())).enumerate() {
-        let item = &l.items[i];
-        let g = l.glow.get(i).copied().unwrap_or(0.);
-        let intro = ease((since - k as f32 * 0.035) * 4.5);
-        let [x, y, w, _] = row_rect(l, i);
-        let x = x - 40. * (1. - intro) + 14. * g;
-        let a = intro * if item.action.is_some() { 1. } else { 0.55 };
-        // Border, body, then the highlight.
-        p.plate(
-            f,
-            [x - 2., y - 2., w + 4., h + 4.],
-            h * 0.32,
-            12.,
-            [with_alpha(rgba(EDGE, 0.55 + 0.4 * g), a); 4],
-            false,
-        );
-        let (l0, l1) = (rgba(NAVY, 0.96), rgba(0x050c22, 0.92));
-        p.plate(
-            f,
-            [x, y, w, h],
-            h * 0.3,
-            12.,
-            [l0, l1, l0, l1].map(|c| with_alpha(c, a)),
-            false,
-        );
-        if g > 0.01 {
-            let (b0, b1) = (rgba(BLUE, 0.95 * g * a), rgba(0x123a8c, 0.55 * g * a));
-            let (b2, b3) = (rgba(0x1b4fb8, 0.95 * g * a), rgba(0x0a2260, 0.4 * g * a));
-            p.plate(f, [x, y, w, h], h * 0.3, 12., [b0, b1, b2, b3], false);
-            // Sheen on the top half.
-            let s = rgba(0xffffff, 0.16 * g * a);
-            p.plate(
+    match &l.screen {
+        Screen::Check(job) => check_screen(job, p, f),
+        Screen::Loading(..) => {
+            let dots = ".".repeat(1 + (l.now * 3.) as usize % 3);
+            p.text(
                 f,
-                [x + 4., y + 3., w - 8., h * 0.42],
-                h * 0.2,
-                7.,
-                [s, with_alpha(s, 0.2), with_alpha(s, 0.), with_alpha(s, 0.)],
-                true,
+                Face::Body,
+                19.,
+                [MARGIN, 160.],
+                0.,
+                &dots,
+                [rgba(MUTED, 1.); 2],
+                0.,
             );
         }
-        let ink = if item.action.is_some() {
-            [rgba(0xffffff, a), rgba(0xcfe2ff, a)]
-        } else {
-            [rgba(INK_DIM, a); 2]
-        };
-        let text_x = x + 30.;
-        let has_detail = item.detail.is_some() && h > 48.;
-        let label_y = if has_detail {
-            y + 6.
-        } else {
-            y + (h - label_size * 1.32) / 2.
-        };
-        let tag_w = item
-            .tag
-            .map_or(0., |t| p.measure(Face::Heading, 15., t) + 30.);
-        let label = p.fit(Face::Heading, label_size, &item.label, w - 50. - tag_w);
+        Screen::Boot => {}
+        _ => {
+            if let Screen::Problem { lines, .. } = &l.screen {
+                let mut y = 152.;
+                for para in lines {
+                    for line in wrap(p, Face::Body, 18., para, paint::W - 2. * MARGIN) {
+                        p.text(
+                            f,
+                            Face::Body,
+                            18.,
+                            [MARGIN, y],
+                            0.,
+                            &line,
+                            [rgba(MUTED, 1.); 2],
+                            0.,
+                        );
+                        y += 26.;
+                    }
+                }
+            }
+            list(l, p, f);
+            footer(l, p, f);
+        }
+    }
+    if l.hover_drop {
+        p.rect(
+            f,
+            [0., 0., paint::W, paint::H],
+            [rgba(0x000000, 0.7); 4],
+            false,
+        );
         p.text(
             f,
             Face::Heading,
-            label_size,
-            [text_x, label_y],
+            30.,
+            [paint::W / 2., 340.],
+            0.5,
+            "Drop to use this game folder",
+            [rgba(TEXT, 1.); 2],
             0.,
-            &label,
-            ink,
-            0.6,
         );
-        if has_detail && let Some(d) = &item.detail {
-            let d = p.fit(Face::Body, 15., d, w - 50. - tag_w);
+    }
+    if l.fade > 0. {
+        p.rect(
+            f,
+            [0., 0., paint::W, paint::H],
+            [rgba(0x000000, l.fade); 4],
+            false,
+        );
+    }
+    p.flush(&mut images, f);
+    l.paint = Some(paint);
+}
+
+fn list_top(l: &Launcher) -> f32 {
+    match &l.screen {
+        Screen::Problem { lines, .. } => LIST_TOP + 26. * lines.len() as f32 + 24.,
+        _ => LIST_TOP,
+    }
+}
+
+fn list(l: &Launcher, p: &mut Paint, f: &mut Ui2dFrame) {
+    let (h, _, size) = row_metrics(l);
+    let rows = visible_rows(l);
+    for i in l.scroll..(l.scroll + rows).min(l.items.len()) {
+        let item = &l.items[i];
+        let g = l.glow.get(i).copied().unwrap_or(0.);
+        let [x, y, w, _] = row_rect(l, i);
+        if g > 0.01 {
+            let (a, b) = (rgba(ACCENT, g), rgba(ACCENT_DEEP, g));
+            p.plate(f, [x - 18., y, w + 18., h], 7., 0., [a, b, a, b], false);
+        }
+        let (ink, sub) = match (item.action.is_some(), g > 0.5) {
+            (false, _) => (rgba(FAINT, 1.), rgba(FAINT, 1.)),
+            (true, true) => (rgba(TEXT, 1.), rgba(0xc9d6f2, 1.)),
+            (true, false) => (rgba(0xc2cad9, 1.), rgba(FAINT, 1.)),
+        };
+        let tag_w = item.tag.map_or(0., |t| p.measure(Face::Body, 15., t) + 24.);
+        let detail = item.detail.as_ref().filter(|_| h > 48.);
+        let label_y = if detail.is_some() {
+            y + 5.
+        } else {
+            y + (h - size * 1.33) / 2.
+        };
+        let label = p.fit(Face::Body, size, &item.label, w - 20. - tag_w);
+        p.text(f, Face::Body, size, [x, label_y], 0., &label, [ink; 2], 0.);
+        if let Some(d) = detail {
+            let d = p.fit(Face::Body, 15., d, w - 20. - tag_w);
+            p.text(f, Face::Body, 15., [x, y + 39.], 0., &d, [sub; 2], 0.);
+        }
+        if let Some(tag) = item.tag {
+            let ty = y + (h - 20.) / 2.;
             p.text(
                 f,
                 Face::Body,
                 15.,
-                [text_x + 2., y + 33.],
-                0.,
-                &d,
-                [rgba(INK_SOFT, a * (0.75 + 0.25 * g)); 2],
-                0.,
-            );
-        }
-        if let Some(tag) = item.tag {
-            let tw = tag_w - 30.;
-            let tx = x + w - tw - 24.;
-            let ty = y + (h - 22.) / 2.;
-            p.plate(
-                f,
-                [tx - 8., ty, tw + 16., 22.],
-                8.,
-                4.,
-                [
-                    rgba(GOLD_DEEP, 0.85 * a),
-                    rgba(GOLD, 0.85 * a),
-                    rgba(0x7a5414, 0.85 * a),
-                    rgba(GOLD_DEEP, 0.85 * a),
-                ],
-                false,
-            );
-            p.text(
-                f,
-                Face::Heading,
-                15.,
-                [tx, ty + 1.],
-                0.,
+                [x + w - 16., ty],
+                1.,
                 tag,
-                [rgba(0x2a1a02, a); 2],
+                [rgba(GOLD, 1.); 2],
                 0.,
             );
-        }
-        if i == l.cursor && item.action.is_some() {
-            cursor(l, p, f, [x - 30., y + h / 2.], a);
         }
     }
-    // Scroll hints.
+    let c = rgba(MUTED, 0.8);
+    let mid = MARGIN + LIST_WIDTH / 2.;
     if l.scroll > 0 {
-        arrow(p, f, [MARGIN + LIST_WIDTH / 2., LIST_TOP - 16.], -1., l.now);
+        let y = list_top(l) - 14.;
+        triangle(
+            f,
+            p,
+            [[mid - 9., y + 4.], [mid + 9., y + 4.], [mid, y - 5.]],
+            c,
+        );
     }
     if l.scroll + rows < l.items.len() {
-        arrow(
-            p,
+        let y = LIST_BOTTOM + 10.;
+        triangle(
             f,
-            [MARGIN + LIST_WIDTH / 2., LIST_BOTTOM + 12.],
-            1.,
-            l.now,
+            p,
+            [[mid - 9., y - 4.], [mid + 9., y - 4.], [mid, y + 5.]],
+            c,
         );
     }
 }
 
-/// The pointer: a glowing gold triangle that bobs.
-fn cursor(l: &Launcher, p: &mut Paint, f: &mut Ui2dFrame, [x, y]: [f32; 2], a: f32) {
-    let bob = (l.now * 6.).sin() * 3.;
-    let x = x + bob;
-    p.blob(f, p.glow, [x, y], [70., 48.], rgba(0x7fb2ff, 0.55 * a));
-    triangle(
-        p,
-        f,
-        [[x - 11., y - 12.], [x + 12., y], [x - 11., y + 12.]],
-        [rgba(0xfff4c8, a), rgba(GOLD, a), rgba(GOLD_DEEP, a)],
-    );
-    p.blob(f, p.star, [x - 2., y], [26., 26.], rgba(0xffffff, 0.7 * a));
-}
-
-fn arrow(p: &mut Paint, f: &mut Ui2dFrame, [x, y]: [f32; 2], dir: f32, now: f32) {
-    let y = y + dir * (now * 5.).sin().abs() * 3.;
-    let c = rgba(INK_SOFT, 0.8);
-    triangle(
-        p,
-        f,
-        [
-            [x - 10., y - 5. * dir],
-            [x + 10., y - 5. * dir],
-            [x, y + 6. * dir],
-        ],
-        [c; 3],
-    );
-}
-
-fn triangle(p: &Paint, f: &mut Ui2dFrame, pts: [[f32; 2]; 3], colors: [Rgba; 3]) {
-    let at = |[x, y]: [f32; 2]| {
-        [
-            256. - windows_shell::ui2d::WIDE_WIDTH / 2.
-                + x * windows_shell::ui2d::WIDE_WIDTH / paint::W,
-            y * windows_shell::ui2d::HEIGHT / paint::H,
-        ]
-    };
+fn triangle(f: &mut Ui2dFrame, p: &Paint, pts: [[f32; 2]; 3], c: Rgba) {
+    let at = |[x, y]: [f32; 2]| paint::to_layout(x, y);
     f.draws.push((
         p.white,
         vec![package_reader::sequence::Quad {
             corners: [at(pts[0]), at(pts[1]), at(pts[2]), at(pts[1])],
             uv: [1, 1, 3, 3],
-            colors: [colors[0], colors[1], colors[2], colors[1]],
+            colors: [c; 4],
             blend: 0,
         }],
     ));
 }
 
-fn panel_frame(p: &mut Paint, f: &mut Ui2dFrame, r: [f32; 4], a: f32) {
-    let [x, y, w, h] = r;
-    p.plate(
-        f,
-        [x - 2., y - 2., w + 4., h + 4.],
-        20.,
-        0.,
-        [with_alpha(rgba(EDGE, 0.5), a); 4],
-        false,
-    );
-    let (t, b) = (rgba(0x0a1a40, 0.92 * a), rgba(0x030918, 0.92 * a));
-    p.plate(f, r, 18., 0., [t, t, b, b], false);
-    let s = rgba(0x7fb2ff, 0.10 * a);
-    p.plate(
-        f,
-        [x + 3., y + 3., w - 6., 46.],
-        16.,
-        0.,
-        [s, s, with_alpha(s, 0.), with_alpha(s, 0.)],
-        true,
-    );
-}
-
-fn side_panel(l: &Launcher, p: &mut Paint, f: &mut Ui2dFrame) {
-    let a = ease((l.now - l.entered) * 3.5);
-    let [x, y, w, h] = PANEL;
-    let (heading, body): (String, Vec<String>) = match &l.screen {
-        Screen::Pick => (
-            "The Game Folder".into(),
-            vec![
-                "Pick the folder Steam installed KINGDOM HEARTS -HD 1.5+2.5 ReMIX- in; it holds \"KINGDOM HEARTS II FINAL MIX.exe\".".into(),
-                "You can also drop that folder onto this window.".into(),
-                "The game files are only read, never changed. The first check reads every file once; after that, starting is quick.".into(),
-            ],
-        ),
-        Screen::Browse(_) => (
-            "Browsing".into(),
-            vec![
-                "Open folders until you reach the collection's install folder, then choose Use This Folder.".into(),
-                "Folders marked KH2FM hold the game.".into(),
-                "Steam usually installs it in steamapps\\common\\KINGDOM HEARTS -HD 1.5+2.5 ReMIX-.".into(),
-            ],
-        ),
-        Screen::Tests(b) => match l.items.get(l.cursor).and_then(|i| i.action.clone()) {
-            Some(Action::Run(i)) => (TESTS[i].name.into(), vec![TESTS[i].lines.join(" ")]),
-            Some(Action::Pick) => (
-                "Change Game Folder".into(),
-                vec![format!("Currently: {}", plain(&b.folder))],
-            ),
-            _ => ("Quit".into(), vec!["Close the launcher.".into()]),
-        },
-        Screen::Problem { lines, .. } => ("What happened".into(), lines.clone()),
-        _ => return,
-    };
-    panel_frame(p, f, PANEL, a);
-    p.text(
-        f,
-        Face::Heading,
-        26.,
-        [x + 28., y + 18.],
-        0.,
-        &heading,
-        [
-            with_alpha(rgba(GOLD, 1.), a),
-            with_alpha(rgba(GOLD_DEEP, 1.), a),
-        ],
-        0.6,
-    );
-    let mut ty = y + 70.;
-    for para in &body {
-        for line in wrap(p, Face::Body, 18., para, w - 56.) {
-            if ty > y + h - 30. {
-                break;
-            }
-            p.text(
-                f,
-                Face::Body,
-                18.,
-                [x + 28., ty],
-                0.,
-                &line,
-                [with_alpha(rgba(0xd3e1fa, 1.), a); 2],
-                0.4,
-            );
-            ty += 27.;
-        }
-        ty += 12.;
-    }
-    if let Screen::Tests(_) = l.screen {
-        let controls = "Closing a test's window (or Esc) brings you back here.";
-        let mut cy = y + h - 64.;
-        for line in wrap(p, Face::Body, 15., controls, w - 56.) {
-            p.text(
-                f,
-                Face::Body,
-                15.,
-                [x + 28., cy],
-                0.,
-                &line,
-                [with_alpha(rgba(INK_DIM, 1.), a); 2],
-                0.,
-            );
-            cy += 21.;
-        }
-    }
-}
-
 fn footer(l: &Launcher, p: &mut Paint, f: &mut Ui2dFrame) {
     let y = 668.;
-    let (c, e) = (rgba(EDGE, 0.45), rgba(EDGE, 0.));
-    p.rect(
-        f,
-        [
-            MARGIN - 20.,
-            y - 14.,
-            (paint::W - 2. * MARGIN) / 2. + 20.,
-            1.,
-        ],
-        [e, c, e, c],
-        false,
-    );
-    p.rect(
-        f,
-        [
-            paint::W / 2.,
-            y - 14.,
-            (paint::W - 2. * MARGIN) / 2. + 20.,
-            1.,
-        ],
-        [c, e, c, e],
-        false,
-    );
     let hints = match l.screen {
-        Screen::Tests(_) => "Enter or A  Start      F2 or Y  Folder      Esc or B  Quit",
-        _ => "Enter or A  Select      Esc or B  Back",
+        Screen::Tests(_) => "Enter / A  start      F2 / Y  change folder      Esc / B  quit",
+        _ => "Enter / A  select      Esc / B  back",
     };
-    p.text(
-        f,
-        Face::Body,
-        17.,
-        [paint::W - MARGIN, y],
-        1.,
-        hints,
-        [rgba(INK_SOFT, 0.9); 2],
-        0.,
-    );
-    let status = match &l.screen {
-        Screen::Tests(b) => {
-            let build = b
-                .build_id
-                .as_deref()
-                .map_or_else(String::new, |id| format!("  ·  Steam build {id}"));
-            format!("{}{build}", plain(&b.folder))
-        }
-        _ => String::new(),
-    };
-    let status = p.fit(Face::Body, 15., &status, 560.);
-    p.text(
-        f,
-        Face::Body,
-        15.,
-        [MARGIN, y + 2.],
-        0.,
-        &status,
-        [rgba(INK_DIM, 1.); 2],
-        0.,
-    );
-}
-
-fn spinner(l: &Launcher, p: &mut Paint, f: &mut Ui2dFrame, [cx, cy]: [f32; 2], r: f32) {
-    for k in 0..12 {
-        let ang = k as f32 / 12. * std::f32::consts::TAU;
-        let head = (l.now * 1.6).fract();
-        let d = ((k as f32 / 12. - head).rem_euclid(1.)) * 12.;
-        let a = (1. - d / 12.).powi(2);
-        let (x, y) = (cx + ang.cos() * r, cy + ang.sin() * r);
-        p.blob(
-            f,
-            p.star,
-            [x, y],
-            [14. + 10. * a, 14. + 10. * a],
-            rgba(0xbfe0ff, 0.15 + 0.85 * a),
-        );
-    }
-}
-
-fn check_screen(l: &Launcher, job: &Job, p: &mut Paint, f: &mut Ui2dFrame) {
-    let a = ease((l.now - l.entered) * 3.);
-    let r = [240., 250., 800., 300.];
-    panel_frame(p, f, r, a);
-    let scanning = job.scanning.load(Ordering::Relaxed);
-    let title = if scanning {
-        "Reading the game files"
-    } else {
-        "Checking the game folder"
-    };
-    p.text(
-        f,
-        Face::Heading,
-        28.,
-        [640., 276.],
-        0.5,
-        title,
-        [
-            with_alpha(rgba(INK, 1.), a),
-            with_alpha(rgba(0x9fc2ff, 1.), a),
-        ],
-        0.6,
-    );
-    let path = p.fit(Face::Body, 16., &plain(&job.folder), 720.);
     p.text(
         f,
         Face::Body,
         16.,
-        [640., 322.],
-        0.5,
-        &path,
-        [with_alpha(rgba(INK_SOFT, 1.), a); 2],
+        [MARGIN, y],
+        0.,
+        hints,
+        [rgba(FAINT, 1.); 2],
         0.,
     );
-    if scanning {
-        let (done, total) = (
-            job.progress.load(Ordering::Relaxed),
-            job.total.load(Ordering::Relaxed).max(1),
-        );
-        let t = (done as f32 / total as f32).clamp(0., 1.);
-        let bar = [320., 380., 640., 18.];
-        p.plate(f, bar, 9., 0., [rgba(0x02060f, 0.95 * a); 4], false);
-        if t > 0.005 {
-            let fill = [bar[0], bar[1], (bar[2] * t).max(18.), bar[3]];
-            p.plate(
-                f,
-                fill,
-                9.,
-                0.,
-                [
-                    rgba(0x6fb0ff, a),
-                    rgba(BLUE, a),
-                    rgba(0x2f74e6, a),
-                    rgba(0x123a8c, a),
-                ],
-                false,
-            );
-            p.blob(
-                f,
-                p.glow,
-                [bar[0] + bar[2] * t, bar[1] + 9.],
-                [90., 50.],
-                rgba(0x9cd0ff, 0.6 * a),
-            );
-        }
-        let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
-        let line = format!(
-            "{:.0}%   ·   {:.1} of {:.1} GB",
-            t * 100.,
-            gb(done),
-            gb(total)
+    if let Screen::Tests(b) = &l.screen {
+        let build = b
+            .build_id
+            .as_deref()
+            .map_or_else(String::new, |id| format!("   build {id}"));
+        let status = p.fit(
+            Face::Body,
+            16.,
+            &format!("{}{build}", plain(&b.folder)),
+            520.,
         );
         p.text(
             f,
             Face::Body,
-            17.,
-            [640., 410.],
-            0.5,
-            &line,
-            [with_alpha(rgba(INK_SOFT, 1.), a); 2],
+            16.,
+            [paint::W - MARGIN, y],
+            1.,
+            &status,
+            [rgba(FAINT, 1.); 2],
             0.,
         );
-        p.text(
-            f,
-            Face::Body,
-            15.,
-            [640., 476.],
-            0.5,
-            "This happens once per game folder (and again after Steam updates the game).",
-            [with_alpha(rgba(INK_DIM, 1.), a); 2],
-            0.,
-        );
-    } else {
-        spinner(l, p, f, [640., 440.], 34.);
     }
 }
 
-fn loading_screen(l: &Launcher, name: &str, p: &mut Paint, f: &mut Ui2dFrame) {
-    let a = ease((l.now - l.entered) * 3.);
+fn check_screen(job: &Job, p: &mut Paint, f: &mut Ui2dFrame) {
+    let path = p.fit(Face::Body, 18., &plain(&job.folder), paint::W - 2. * MARGIN);
     p.text(
         f,
-        Face::Heading,
-        30.,
-        [640., 300.],
-        0.5,
-        name,
-        [
-            with_alpha(rgba(INK, 1.), a),
-            with_alpha(rgba(0x9fc2ff, 1.), a),
-        ],
-        0.6,
+        Face::Body,
+        18.,
+        [MARGIN, 152.],
+        0.,
+        &path,
+        [rgba(MUTED, 1.); 2],
+        0.,
+    );
+    if !job.scanning.load(Ordering::Relaxed) {
+        return;
+    }
+    let (done, total) = (
+        job.progress.load(Ordering::Relaxed),
+        job.total.load(Ordering::Relaxed).max(1),
+    );
+    let t = (done as f32 / total as f32).clamp(0., 1.);
+    let bar = [MARGIN, 210., paint::W - 2. * MARGIN, 6.];
+    p.rect(f, bar, [rgba(0x1a2234, 1.); 4], false);
+    p.rect(
+        f,
+        [bar[0], bar[1], bar[2] * t, bar[3]],
+        [rgba(ACCENT, 1.); 4],
+        false,
+    );
+    let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
+    let line = format!(
+        "Reading the game files once: {:.0}%  ({:.1} of {:.1} GB)",
+        t * 100.,
+        gb(done),
+        gb(total)
     );
     p.text(
         f,
         Face::Body,
         17.,
-        [640., 348.],
-        0.5,
-        "Checking the game files and loading the test…",
-        [with_alpha(rgba(INK_SOFT, 1.), a); 2],
+        [MARGIN, 232.],
         0.,
-    );
-    spinner(l, p, f, [640., 450.], 30.);
-    // KH2's corner "NOW LOADING".
-    let pulse = 0.65 + 0.35 * (l.now * 3.).sin();
-    p.text(
-        f,
-        Face::Heading,
-        26.,
-        [paint::W - MARGIN, 640.],
-        1.,
-        "NOW LOADING",
-        [
-            with_alpha(rgba(INK, pulse), a),
-            with_alpha(rgba(0x8fb6ff, pulse), a),
-        ],
-        0.6,
+        &line,
+        [with_alpha(rgba(MUTED, 1.), 1.); 2],
+        0.,
     );
 }
 
@@ -1526,7 +1089,6 @@ pub fn main() -> std::process::ExitCode {
             hover_drop: false,
             repeat: None,
             mouse: None,
-            sparkles: Vec::new(),
             paint: None,
         })
         .insert_resource(ClearColor(Color::BLACK))

@@ -13,10 +13,11 @@ Same selected source as T086–T088: Steam app 2552430, build 15194255, content 
 - **`kh2fm` with no arguments** opens the launcher window (`bin/kh2fm/launcher.rs`) instead of the console menu. `kh2fm title|room|talk [args]` are unchanged. `kh2fm play` is new: the combined room.
 - **Windows subsystem.** `kh2fm.exe` no longer opens a console window behind it. Output still reaches pipes and redirects; the launcher reads its tests' output that way.
 - **Drawing without game files** (`launcher/paint.rs`):
-  - shapes are generated in code (rounded/skewed plates, glow, sparkle);
-  - text is rasterised from Windows' own fonts at runtime (Trebuchet MS Bold Italic, Segoe UI Semibold, Palatino Linotype Bold) with `fontdue`;
+  - the look is deliberately plain, at the owner's request: a dark screen, one heading and one list, with a blue bar on the selected row;
+  - text is rasterised from Windows' own fonts at runtime (Trebuchet MS Bold Italic for headings, Segoe UI Semibold for rows) with `fontdue`;
   - everything is drawn through `ui2d`.
   - No font or art is committed.
+  - The first version (glows, sparkles, side panel) was replaced after the owner said it looked too busy.
 - **Finding the folder** (`launcher/install.rs`):
   - Steam's default libraries and `libraryfolders.vdf` are searched for `appmanifest_2552430.acf`; installs holding the KH2FM executable are offered.
   - The user can also browse drives and folders inside the launcher, or drop the folder (or the exe) onto the window.
