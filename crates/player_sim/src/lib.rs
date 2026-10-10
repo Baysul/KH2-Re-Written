@@ -655,7 +655,9 @@ impl Player {
             self.arm();
             self.start(Action::AirAttack(0), step);
             self.lift(clips.air_combo[0].hop);
-        } else if self.action == Action::Jump && self.arc.rise <= self.arc.t {
+        } else if self.action == Action::Jump && self.arc.falling_motion() {
+            // FUN_1403cb680 → FUN_1403cb610: FALL (motion 4) blended over 8
+            // once the apex is within 5 ticks.
             self.start(Action::Fall, step);
         }
         // ANB "No gravity" ranges hold the height while the curve's time
@@ -994,6 +996,30 @@ mod tests {
         player.tick(&hold([1., 0.]), &p, &c, &w);
         assert!((player.air_velocity[0] - 0.8).abs() < 1e-5);
         assert!((player.air_velocity[1] - 7.6 * 0.9).abs() < 1e-4);
+    }
+
+    #[test]
+    fn fall_motion_starts_five_ticks_before_the_apex() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([0., 0., 0.], 0.);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&jump, &p, &c, &w);
+        let mut fell = None;
+        for tick in 1..40 {
+            let step = player.tick(&Input::default(), &p, &c, &w);
+            if step.started == Some(Action::Fall) {
+                fell = Some(tick);
+                break;
+            }
+        }
+        // rise √(2·185/g) = 30.1 ticks; FALL starts when rise ≤ t + 5,
+        // tested before this tick's t advances (t = 26 on tick 27).
+        assert_eq!(fell, Some(27));
+        assert_eq!(player.blend, 8.);
+        assert!(player.position[1] < 185.);
     }
 
     #[test]
