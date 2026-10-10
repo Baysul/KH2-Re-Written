@@ -10,6 +10,7 @@
 //! frame (`trap_frametime` = 1.0). Test-room choices are named constants.
 
 use crate::combat::{self, AttackParams, AttackerStats, TargetStats};
+use crate::physics;
 
 pub type Vec3 = [f32; 3];
 
@@ -94,17 +95,11 @@ pub trait Env {
 /// Default turn rate (sysobj+0x134, untraced); `turn_dir` turns by up to
 /// 2.0 x rate per call.
 pub const TURN_RATE: f32 = 0.13;
-/// Jump gravity constant read from the jump setup (FUN_1403cbb00).
-pub const GRAVITY: f32 = 0.408_163;
-/// Flinch slide brake and blow brake (SSTM BlowBrakeXZ 0.8, BlowMinXZ 0.1).
-pub const SLIDE_BRAKE: f32 = 0.8;
-pub const BLOW_BRAKE_XZ: f32 = 0.8;
-pub const BLOW_MIN_XZ: f32 = 0.1;
+/// Gravity (`DAT_1405ce184`).
+pub const GRAVITY: f32 = physics::G;
 /// Respawn delay after leaving/dying (test room only).
 pub const RESPAWN_TICKS: u32 = 120;
-/// Knock-slide decay per tick (DAT_1405aaa40) and the ReflectHitBack used
-/// when the ATKP field is −1 (DAT_1405b532c).
-pub const KNOCK_DECAY: f32 = 0.9;
+/// The ReflectHitBack used when the ATKP field is −1 (DAT_1405b532c).
 pub const DEFAULT_HIT_BACK: f32 = 50.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,9 +197,15 @@ pub struct Shadow {
     /// Increments on every motion start (attack-instance identity).
     pub motion_serial: u32,
     velocity: Vec3,
-    slide: Vec3,
-    /// Knock-slide (FUN_1403d4960): unit direction and speed.
-    knock: Option<(Vec3, f32)>,
+    /// Jump curve while a jump (not a blow) is airborne (FUN_1403cbb00).
+    arc: Option<physics::Arc>,
+    /// Blow flight (physics mode 4, FUN_140422780).
+    blow: Option<physics::Blow>,
+    /// Knock-slide (FUN_1403d4960 / FUN_1403d4570), for flinches and
+    /// reflects.
+    knock: Option<physics::Knock>,
+    /// SSTM battle parameters (FallMax is obj+0x138, FUN_14040a440).
+    pub sstm: physics::Sstm,
     airborne: bool,
     /// Weave phase in degrees (W4).
     weave: f32,
@@ -218,7 +219,7 @@ pub struct Shadow {
 }
 
 impl Shadow {
-    pub fn new(position: Vec3, yaw: f32, stats: TargetStats) -> Self {
+    pub fn new(position: Vec3, yaw: f32, stats: TargetStats, sstm: physics::Sstm) -> Self {
         let mut s = Shadow {
             position,
             spawn: position,
@@ -234,8 +235,10 @@ impl Shadow {
             sunk: false,
             motion_serial: 0,
             velocity: [0.; 3],
-            slide: [0.; 3],
+            arc: None,
+            blow: None,
             knock: None,
+            sstm,
             airborne: false,
             weave: 0.,
             act: None,
@@ -339,14 +342,33 @@ impl Shadow {
         let back = self.forward()[0] * direction[0] + self.forward()[2] * direction[2] >= 0.;
         let class = combat::reaction_class(attack.reaction);
         if class == 4 {
-            let [up, speed] = attack.knockback.map(|v| v as f32);
-            self.velocity = [direction[0] * speed, up, direction[2] * speed];
+            // FUN_1403d2fe0: KB1 up, KB2 along the hit; both 0 → SSTM BlowUp
+            // and BlowSpeed. FUN_140409d30 → mode 4, whose enter
+            // (FUN_1404228b0) sets the horizontal floor.
+            let [mut up, mut speed] = attack.knockback.map(|v| v as f32);
+            if up == 0. && speed == 0. {
+                up = self.sstm.blow_up;
+                speed = self.sstm.blow_speed;
+            }
+            let h = hlen(direction);
+            let (dx, dz) = if h > 0. {
+                (direction[0] / h, direction[2] / h)
+            } else {
+                (0., 0.)
+            };
+            self.velocity = [dx * speed, up, dz * speed];
+            self.blow = Some(physics::Blow::new(self.velocity, &self.sstm));
+            self.arc = None;
+            self.knock = None;
             self.airborne = true;
             self.reaction = Reaction::Blow { back };
             self.motion_start(motion::BLOW[back as usize]);
         } else {
-            let speed = attack.knockback[0] as f32 * 0.1;
-            self.slide = direction.map(|c| c * speed);
+            // FUN_1403ceab0 strength → FUN_1403d4960 knock-slide.
+            let strength = self
+                .sstm
+                .knock_strength(attack.knockback[0], class, attack.reaction);
+            self.knock = physics::Knock::new([direction[0], 0., direction[2]], strength, 0.);
             self.reaction = Reaction::Flinch;
             self.motion_start(motion::FLINCH[(back as usize) * 2 + (!high) as usize]);
         }
@@ -377,7 +399,7 @@ impl Shadow {
         };
         if hb > 0. {
             let f = self.forward();
-            self.knock = Some(([-f[0], 0., -f[2]], hb * 0.1));
+            self.knock = physics::Knock::new([-f[0], 0., -f[2]], hb, 0.);
         }
         self.act_clear();
         self.act_start(ActKind::ModeRevenge);
@@ -396,8 +418,8 @@ impl Shadow {
             self.gone_ticks += 1;
             if self.gone_ticks >= RESPAWN_TICKS {
                 let stats = self.stats;
-                let (spawn, yaw) = (self.spawn, self.yaw);
-                *self = Shadow::new(spawn, yaw, stats);
+                let (spawn, yaw, sstm) = (self.spawn, self.yaw, self.sstm);
+                *self = Shadow::new(spawn, yaw, stats, sstm);
             }
             return;
         }
@@ -426,29 +448,46 @@ impl Shadow {
             Reaction::BlowLand if finished => self.reaction = Reaction::None,
             _ => {}
         }
-        if let Some((dir, v)) = self.knock {
-            if v < 1. {
-                self.knock = None;
-            } else {
-                self.position = add(self.position, dir.map(|c| c * v));
-                self.knock = Some((dir, v * KNOCK_DECAY));
+        if let Some(knock) = self.knock.as_mut() {
+            match knock.step() {
+                Some(d) => self.position = add(self.position, d),
+                None => self.knock = None,
             }
-        }
-        if self.slide.iter().any(|v| v.abs() > 1e-3) {
-            self.position = add(self.position, self.slide);
-            self.slide = self.slide.map(|v| v * SLIDE_BRAKE);
         }
         if self.airborne {
-            self.position = add(self.position, self.velocity);
-            if matches!(self.reaction, Reaction::Blow { .. }) {
-                self.velocity[0] *= BLOW_BRAKE_XZ;
-                self.velocity[2] *= BLOW_BRAKE_XZ;
-                if self.velocity[0].hypot(self.velocity[2]) < BLOW_MIN_XZ {
-                    self.velocity[0] = 0.;
-                    self.velocity[2] = 0.;
+            if self.arc.is_some() {
+                // Mode 1 horizontal (FUN_1403b7ad0): no move request during
+                // the jump claw, so the take-off velocity decays ×0.95 [I:
+                // the AI leaves obj+0x1c at 0 here].
+                let [x, z] = physics::steer(
+                    [self.velocity[0], self.velocity[2]],
+                    [0.; 2],
+                    0.,
+                    physics::AIR_INERTIA,
+                    physics::AIR_DRAG,
+                );
+                self.velocity[0] = x;
+                self.velocity[2] = z;
+            }
+            if let Some(blow) = self.blow.as_mut() {
+                let d = blow.step(&self.sstm, self.sstm.fall_max);
+                self.velocity = blow.velocity;
+                self.position = add(self.position, d);
+            } else {
+                self.position[0] += self.velocity[0];
+                self.position[2] += self.velocity[2];
+                match self.arc.as_mut() {
+                    Some(arc) => {
+                        let dy = arc.step(self.position[1], self.sstm.fall_max, false);
+                        self.velocity[1] = dy;
+                        self.position[1] += dy;
+                    }
+                    None => {
+                        self.position[1] += self.velocity[1];
+                        self.velocity[1] -= GRAVITY;
+                    }
                 }
             }
-            self.velocity[1] -= GRAVITY;
             if let Some(floor) =
                 env.floor(self.position[0], self.position[2], self.position[1] + 30.)
                 && self.position[1] <= floor
@@ -456,6 +495,8 @@ impl Shadow {
             {
                 self.position[1] = floor;
                 self.velocity = [0.; 3];
+                self.arc = None;
+                self.blow = None;
                 self.airborne = false;
                 if let Reaction::Blow { back } = self.reaction {
                     self.reaction = Reaction::BlowLand;
@@ -677,8 +718,11 @@ impl Shadow {
                     if hlen(to_target) > 1e-4 {
                         self.yaw = to_target[0].atan2(to_target[2]);
                     }
+                    // method_obj_jump → FUN_1403cbb00: height 100 on the
+                    // closed-form curve, horizontal speed 5 along the facing.
                     let f = self.forward();
-                    self.velocity = [f[0] * 5., (2. * GRAVITY * 100.).sqrt(), f[2] * 5.];
+                    self.velocity = [f[0] * 5., 0., f[2] * 5.];
+                    self.arc = Some(physics::Arc::launch(self.position[1], 100.));
                     self.airborne = true;
                     self.motion_start(motion::JUMP);
                     self.set(act.kind, Step::Air { stage: 0 });
@@ -931,6 +975,19 @@ mod tests {
         }
     }
 
+    fn sstm() -> physics::Sstm {
+        physics::Sstm {
+            fall_max: 16.,
+            blow_brake_xz: 0.8,
+            blow_min_xz: 0.1,
+            blow_brake_up: 0.8,
+            blow_up: 24.,
+            blow_speed: 40.,
+            hit_back: 200.,
+            hit_back_small: 200.,
+        }
+    }
+
     fn stats() -> TargetStats {
         TargetStats::enemy(50, 10000, 1000, [100; 7], 20, 2)
     }
@@ -946,7 +1003,7 @@ mod tests {
     fn appears_then_fights_near_the_target() {
         let clips = TestClips(HashMap::new());
         let mut rng = ScriptRandom::default();
-        let mut s = Shadow::new([0.; 3], 0., stats());
+        let mut s = Shadow::new([0.; 3], 0., stats(), sstm());
         assert_eq!(s.current_act(), Some(ActKind::AppearShadow));
         let mut acts = Vec::new();
         for _ in 0..600 {
@@ -968,7 +1025,7 @@ mod tests {
     fn killing_hit_starts_dead_and_leaves() {
         let clips = TestClips(HashMap::new());
         let mut rng = ScriptRandom::default();
-        let mut s = Shadow::new([0.; 3], 0., stats());
+        let mut s = Shadow::new([0.; 3], 0., stats(), sstm());
         for _ in 0..200 {
             s.tick(&mut rng, &clips, &Flat, [0., 0., 500.], [0., 0., 500.]);
         }
