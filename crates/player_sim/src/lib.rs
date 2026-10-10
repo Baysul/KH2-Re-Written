@@ -105,6 +105,8 @@ pub struct Clip {
     pub takeoff: Option<u32>,
     /// Range trigger 27: invulnerable (obj+0x18c bit 22, FUN_1403d3570).
     pub invulnerable: Vec<(u32, u32)>,
+    /// Frame trigger 6: the item is used (FUN_14040dd70 → FUN_1403f6790).
+    pub item_use: Option<u32>,
 }
 
 impl Clip {
@@ -190,6 +192,8 @@ pub struct Clips {
     /// Guard (motion 173) and its success recoil (motion 42), when loaded.
     pub guard: Option<Clip>,
     pub guard_recoil: Option<Clip>,
+    /// The item-use motion (9), when loaded.
+    pub item: Option<Clip>,
 }
 
 /// Sora's damage-reaction motions in `Clips::hurt` order (P_EX100 slots
@@ -242,6 +246,8 @@ pub enum Action {
     Guard,
     /// Guard success recoil (motion 42).
     GuardRecoil,
+    /// Using an item (motion 9): actionable again from its range-2 tick.
+    Item,
 }
 
 impl Action {
@@ -410,6 +416,8 @@ pub struct Player {
     flight: Option<Flight>,
     /// Dead and still falling (physics mode 0x29).
     dead_air: bool,
+    /// The item-use trigger fired this tick (frame trigger 6).
+    item_fired: bool,
 }
 
 /// A blow in flight: mode 4's velocity with the SSTM brakes it runs on, and
@@ -514,6 +522,7 @@ impl Player {
             knock: None,
             flight: None,
             dead_air: false,
+            item_fired: false,
         }
     }
 
@@ -649,6 +658,24 @@ impl Player {
         self.frame = 0;
         self.blend = 0.;
         self.arm();
+    }
+
+    /// The item command (FUN_1403d6fc0 execute 3): motion 9 with a 8-tick
+    /// blend, no combo counting. Needs an active ANB range 0–2 or the
+    /// unlocked tail of a reaction, the ground (FUN_1403b6cf0) and a living
+    /// Sora; the use itself fires at the motion's frame trigger 6.
+    pub fn use_item(&mut self, clips: &Clips) -> Option<Action> {
+        if self.dead() || self.in_air() || clips.item.is_none() || !self.command_ready(clips) {
+            return None;
+        }
+        self.begin_reaction(Action::Item);
+        self.blend = physics::MOTION_BLEND;
+        Some(self.action)
+    }
+
+    /// Whether the item-use trigger fired since the last call.
+    pub fn take_item(&mut self) -> bool {
+        std::mem::take(&mut self.item_fired)
     }
 
     /// Whether the DEAD motion is playing (obj+0x9b8 bit 2).
@@ -828,6 +855,7 @@ impl Player {
             (Action::Hurt(i), _) => &clips.hurt[i],
             (Action::Guard, _) => clips.guard.as_ref().unwrap_or(&clips.idle),
             (Action::GuardRecoil, _) => clips.guard_recoil.as_ref().unwrap_or(&clips.idle),
+            (Action::Item, _) => clips.item.as_ref().unwrap_or(&clips.idle),
         }
     }
 
@@ -965,6 +993,11 @@ impl Player {
     pub fn tick(&mut self, input: &Input, p: &Params, clips: &Clips, world: &impl World) -> Step {
         let mut step = Step::default();
         self.frame = self.frame.saturating_add(1);
+        if self.action == Action::Item
+            && clips.item.as_ref().and_then(|c| c.item_use) == Some(self.frame)
+        {
+            self.item_fired = true;
+        }
         // MP Charge runs down at 1 + the MP Haste terms (FUN_1403c0de0).
         self.mp.tick(1., self.abilities.mp_haste);
         self.mp_charging = self.mp.charging();
@@ -1127,7 +1160,7 @@ impl Player {
             Action::Hurt(_) if self.in_air() => {
                 disp = self.airborne(input, moving, magnitude, direction, p, clips, &mut step);
             }
-            Action::Hurt(_) | Action::Guard | Action::GuardRecoil => {
+            Action::Hurt(_) | Action::Guard | Action::GuardRecoil | Action::Item => {
                 // Locked until the clip's range-2 tick (hurt 50, guard 52,
                 // recoil 40 installed), then input is taken again
                 // (FUN_1401b15f0 actionable bits).
@@ -1244,6 +1277,7 @@ impl Player {
             Action::Hurt(i) => HURT_MOTIONS[i.min(HURT_MOTIONS.len() - 1)],
             Action::Guard => 173,
             Action::GuardRecoil => 42,
+            Action::Item => 9,
         }
     }
 
@@ -1338,7 +1372,7 @@ impl Player {
     /// tail of a reaction (FUN_1401b15f0).
     fn command_ready(&self, clips: &Clips) -> bool {
         match self.action {
-            Action::Hurt(_) | Action::Guard | Action::GuardRecoil => {
+            Action::Hurt(_) | Action::Guard | Action::GuardRecoil | Action::Item => {
                 let clip = self.clip(clips);
                 self.frame >= clip.blend_to_idle.unwrap_or(clip.end)
             }
@@ -1859,6 +1893,12 @@ mod tests {
             guard_recoil: Some(Clip {
                 end: 80,
                 blend_to_idle: Some(40),
+                ..Clip::default()
+            }),
+            item: Some(Clip {
+                end: 60,
+                blend_to_idle: Some(36),
+                item_use: Some(18),
                 ..Clip::default()
             }),
         }
@@ -2685,6 +2725,35 @@ mod tests {
         assert_eq!(player.react(&claw([0., -1.], 3), &sstm(), &c), None);
         player.revive();
         assert_eq!(player.action, Action::Idle);
+    }
+
+    #[test]
+    fn using_an_item_fires_at_trigger_six_and_unlocks_at_range_two() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([0.; 3], 0.);
+        assert_eq!(player.use_item(&c), Some(Action::Item));
+        assert_eq!(player.motion_id(&c), 9);
+        // The combo counters are untouched.
+        assert_eq!(player.combo, ptya::Combo::default());
+        let mut fired = None;
+        for t in 1..=40 {
+            player.tick(&Input::default(), &p, &c, &w);
+            if player.take_item() {
+                fired = Some(t);
+            }
+            if t < 36 {
+                assert_eq!(player.action, Action::Item, "locked at {t}");
+            }
+        }
+        assert_eq!(fired, Some(18));
+        // Not in the air, not while locked, not while dead.
+        let mut air = Player::new([0., 50., 0.], 0.);
+        air.arc = physics::Arc::fall(50., 0.);
+        air.action = Action::Fall;
+        assert_eq!(air.use_item(&c), None);
+        let mut busy = Player::new([0.; 3], 0.);
+        busy.use_item(&c);
+        assert_eq!(busy.use_item(&c), None);
     }
 
     fn fire(level: u8) -> magic::Record {

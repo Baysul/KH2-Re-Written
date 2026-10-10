@@ -57,6 +57,7 @@ struct Locator {
     ordinal: usize,
     name_hash: [u8; 16],
 }
+mod item_room;
 mod magic_room;
 
 fn player_object_default() -> String {
@@ -333,8 +334,31 @@ struct HudSource {
 const MENU_MESSAGES: [u32; 4] = [0x81e0, 0x81e1, 0x81e2, 0x81e3];
 
 /// Sora's damage motions (10..19, Aerial Recovery 40, DEAD 54), in
-/// `Clips::hurt` order.
-const SORA_HURT: [u16; 12] = player_sim::HURT_MOTIONS;
+/// `Clips::hurt` order, then the item-use motion (9).
+const SORA_HURT: [u16; 13] = {
+    let mut m = [9u16; 13];
+    let mut i = 0;
+    while i < 12 {
+        m[i] = player_sim::HURT_MOTIONS[i];
+        i += 1;
+    }
+    m
+};
+/// How many of `SORA_HURT` are damage motions.
+const HURT_COUNT: usize = 12;
+
+/// Sora's item slots in a fresh room [test-room values]: a Potion and an
+/// Ether, taken out of the stock.
+const ROOM_ITEM_SLOTS: [u16; 2] = [1, 3];
+fn room_stock() -> std::collections::BTreeMap<u16, u8> {
+    let mut s: std::collections::BTreeMap<u16, u8> = ROOM_STOCK.into_iter().collect();
+    for id in ROOM_ITEM_SLOTS {
+        if let Some(n) = s.get_mut(&id) {
+            *n = n.saturating_sub(1);
+        }
+    }
+    s
+}
 
 /// Guard (PTYA 0x0b) and its success recoil (guard-01).
 const SORA_GUARD: [u16; 2] = [173, 42];
@@ -443,6 +467,7 @@ struct Game {
     debug_blow: bool,
     /// Sora's magic: owned spells, running casts and their volumes.
     magic: Option<magic_room::MagicRt>,
+    items: Option<item_room::ItemRt>,
     /// Guard's ability is equipped (the camp's Abilities screen sets it).
     guard_equipped: bool,
     menu_up_queued: bool,
@@ -714,6 +739,8 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
                     clip.face_target.push((frame, deg as f32));
                 }
             }
+            // Item use (FUN_14040dd70 case 6 → FUN_1403f6790).
+            6 => clip.item_use = Some(clip.item_use.map_or(frame, |f: u32| f.min(frame))),
             // Spell release (FUN_14040dd70 case 0x11), filtered by the
             // motion id when it has an argument.
             17 => clip
@@ -764,6 +791,7 @@ struct Loaded {
     sstm: physics::Sstm,
     abilities: AbilitySource,
     magic: Option<magic_room::MagicSource>,
+    items: Option<item_room::ItemSource>,
     clips: Clips,
     actions: Vec<((Action, bool), usize)>,
     clip_poses: Vec<ClipPoses>,
@@ -1831,12 +1859,13 @@ fn load(
             .iter()
             .map(|e| step(e, attack_clip(e.motion_id)))
             .collect(),
-        hurt: clip_list[field + 3..field + 3 + hurt_count]
+        hurt: clip_list[field + 3..field + 3 + hurt_count.min(HURT_COUNT)]
             .iter()
             .map(|c| c.0.clone())
             .collect(),
         guard: Some(clip_list[field + 3 + hurt_count].0.clone()),
         guard_recoil: Some(clip_list[field + 4 + hurt_count].0.clone()),
+        item: (hurt_count > HURT_COUNT).then(|| clip_list[field + 3 + HURT_COUNT].0.clone()),
     };
     // Pose clip per (action, weapon drawn).
     let mut actions = vec![
@@ -1862,8 +1891,11 @@ fn load(
         both.push((Action::Cast(i), pose));
         both.push((Action::AirCast(i), pose));
     }
-    for i in 0..hurt_count {
+    for i in 0..hurt_count.min(HURT_COUNT) {
         both.push((Action::Hurt(i), clip_list[field + 3 + i].1));
+    }
+    if hurt_count > HURT_COUNT {
+        both.push((Action::Item, clip_list[field + 3 + HURT_COUNT].1));
     }
     both.push((Action::Guard, clip_list[field + 3 + hurt_count].1));
     both.push((Action::GuardRecoil, clip_list[field + 4 + hurt_count].1));
@@ -2216,11 +2248,18 @@ fn load(
     // The spells' names for the Magic submenu (cmd +8 message ids).
     let magic_src = match (magic_src, &config.menu) {
         (Some(mut m), Some(menu)) => {
-            let wanted: Vec<(u16, u32)> = m
+            let mut wanted: Vec<(u16, u32)> = m
                 .records
                 .iter()
                 .filter_map(|r| m.commands.get(&r.command).map(|c| (r.command, c.name)))
                 .collect();
+            // The item commands (execute 3) for the Items submenu.
+            wanted.extend(
+                m.commands
+                    .values()
+                    .filter(|c| c.execute == 3)
+                    .map(|c| (c.id, c.name)),
+            );
             let ids: Vec<u32> = wanted.iter().map(|w| w.1).collect();
             let texts = hud::load_messages_optional(
                 source,
@@ -2259,6 +2298,7 @@ fn load(
         sstm,
         abilities: ability_source,
         magic: magic_src,
+        items: item_room::load(&system).ok(),
         clips,
         actions,
         clip_poses,
@@ -2709,7 +2749,7 @@ fn setup(
                     .collect();
                 let mut menu = CommandMenu::new(&sheet.sequence, items);
                 // The Magic row opens submenu 1 (command-01 section 0.6).
-                menu.opens = vec![None, Some(1), None, None];
+                menu.opens = vec![None, Some(1), Some(2), None];
                 MenuState { menu, sheet, font }
             }),
             stats,
@@ -3394,6 +3434,7 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
     let mut attack = decide;
     let mut sub_was_open = false;
     let mut menu_cast = None;
+    let mut menu_item = None;
     let mut denied = false;
     if let Some(mut h) = hud
         && let Some(m) = h.menu.as_mut()
@@ -3411,10 +3452,25 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
                     0
                 };
             }
-            if let Some(sub) = m.menu.sub.as_mut() {
+            if let Some(sub) = m.menu.sub.as_mut()
+                && sub.kind == 1
+            {
                 for (item, (_, c)) in sub.items.iter_mut().zip(&list) {
                     item.colour = *c;
                 }
+            }
+        }
+        // Items row: 5 without items, 1 when every row is unusable.
+        if let Some(it) = game.items.as_ref() {
+            let list = it.menu_list(game.player.in_air());
+            if let Some(row) = m.menu.items.get_mut(2) {
+                row.colour = if list.is_empty() {
+                    5
+                } else if list.iter().all(|c| c.1 >= 4) {
+                    1
+                } else {
+                    0
+                };
             }
         }
         sub_was_open = m.menu.sub.is_some();
@@ -3443,6 +3499,34 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
                     m.menu.open_sub(1, items);
                     cursor_moved = true;
                 }
+            }
+            Decision::Open(2) => {
+                let air = game.player.in_air();
+                let g = &mut *game;
+                let (items, magic) = (&mut g.items, &g.magic);
+                if let (Some(it), Some(mg)) = (items.as_mut(), magic.as_ref()) {
+                    let list = it.menu_list(air);
+                    let items = list
+                        .iter()
+                        .map(|&(slot, colour)| {
+                            let cmd = it.command_of(slot).unwrap_or(0);
+                            Item {
+                                label: mg.src.names.get(&cmd).cloned().unwrap_or_default(),
+                                icon: mg.src.commands.get(&cmd).map_or(0, |c| c.icon),
+                                colour,
+                            }
+                        })
+                        .collect();
+                    it.menu_slots = list.iter().map(|l| l.0).collect();
+                    m.menu.open_sub(2, items);
+                    cursor_moved = true;
+                }
+            }
+            Decision::ExecuteSub { row: 2, index } => {
+                menu_item = game
+                    .items
+                    .as_ref()
+                    .and_then(|it| it.menu_slots.get(index).copied());
             }
             Decision::ExecuteSub { row: 1, index } => {
                 menu_cast = game
@@ -3524,6 +3608,11 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
             .and_then(|m| m.src.commands.get(&cmd))
             .filter(|c| c.execute == 2)
             .map(|c| c.argument as u8);
+        // An item shortcut uses the slot holding that item's command.
+        if cast.is_none() {
+            menu_item =
+                menu_item.or_else(|| game.items.as_ref().and_then(|it| it.slot_for_command(cmd)));
+        }
     }
     if game.autoplay.is_some() && game.autoplay_end != AUTOPLAY_TALK_END {
         cast = match tick {
@@ -3536,11 +3625,24 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
             _ => None,
         };
     }
+    if game.autoplay.is_some() && game.autoplay_end != AUTOPLAY_TALK_END {
+        // The unattended run uses the Potion and the Ether.
+        menu_item = match tick {
+            1400 => Some(0),
+            1460 => Some(1),
+            _ => menu_item,
+        };
+    }
     let cast = cast.or(menu_cast);
     if let Some(t) = cast
         && !talking
     {
         magic_room::request(&mut game, t, tick);
+    }
+    if let Some(slot) = menu_item
+        && !talking
+    {
+        item_room::request(&mut game, slot, tick);
     }
     let Game {
         player,
@@ -3551,6 +3653,7 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
     } = &mut *game;
     let step = player.tick(&input, params, clips, world);
     magic_room::tick(&mut game, tick);
+    item_room::tick(&mut game, tick);
     combat_tick(&mut game, tick);
     // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
     // recenters (test-room bindings for the original's camera buttons).
@@ -5701,7 +5804,18 @@ fn camp_tick(
         labels: c.source.labels.clone(),
     };
     // Status values are built when the camp opens (FUN_140354340).
-    let camp_data = |c: &CampRes, panels: camp::Panels| -> camp::Data {
+    let camp_data = |c: &CampRes,
+                     panels: camp::Panels,
+                     battle_items: Option<&item_room::ItemRt>|
+     -> camp::Data {
+        // The battle's item slots and stock are the live ones.
+        let mut equipment = c.equipment.clone();
+        let mut counts = c.stock.clone();
+        if let Some(it) = battle_items {
+            equipment.items = it.slots.clone();
+            equipment.originals = it.originals.clone();
+            counts = it.stock.clone();
+        }
         let n = c.source.numbers;
         let sora_abilities = camp::abilities::MemberAbilities {
             slots: c.ability_slots.clone(),
@@ -5749,8 +5863,8 @@ fn camp_tick(
             config_flags: c.config_flags,
             game_mode: c.game_mode,
             items: camp::items::ItemsData {
-                counts: c.stock.clone(),
-                equipment: vec![c.equipment.clone()],
+                counts,
+                equipment: vec![equipment],
                 seen: c.seen.clone(),
                 ..c.source.items.clone()
             },
@@ -5806,6 +5920,11 @@ fn camp_tick(
                 c.equipment = e.clone();
             }
             c.no_charge = menu.data.customize.no_charge;
+            if let Some(it) = game.items.as_mut() {
+                it.slots = c.equipment.items.clone();
+                it.originals = c.equipment.originals.clone();
+                it.stock = c.stock.clone();
+            }
             if let Some(m) = menu.data.abilities.members.first() {
                 c.ability_slots = m.slots.clone();
             }
@@ -5874,7 +5993,7 @@ fn camp_tick(
             game.event(serde_json::json!({"event":"journal_close","tick":tick}));
             // FUN_140304ea0: the camp is rebuilt (its open sound) and the
             // curtain lifts (FUN_14031a690).
-            let (menu, s) = Camp::open(layout, camp_data(c, panels), c.memory);
+            let (menu, s) = Camp::open(layout, camp_data(c, panels, game.items.as_ref()), c.memory);
             c.open = Some(menu);
             sounds.extend(s);
             if let Some(cur) = c.curtain.as_mut() {
@@ -5883,7 +6002,7 @@ fn camp_tick(
             game.event(serde_json::json!({"event":"camp_open","tick":tick}));
         }
     } else if c.curtain.is_none() && c.pad.pressed & 0x2 != 0 && !game.talking {
-        let (menu, s) = Camp::open(layout, camp_data(c, panels), c.memory);
+        let (menu, s) = Camp::open(layout, camp_data(c, panels, game.items.as_ref()), c.memory);
         c.open = Some(menu);
         sounds = s;
         game.tick += 1;
@@ -6212,6 +6331,14 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         back_queued: false,
         debug_blow: false,
         shortcuts: ROOM_SHORTCUTS,
+        items: loaded.items.map(|src| {
+            item_room::ItemRt::new(
+                src,
+                ROOM_ITEM_SLOTS.to_vec(),
+                ROOM_ITEM_SLOTS.to_vec(),
+                room_stock(),
+            )
+        }),
         magic: loaded.magic.map(|src| {
             let mut levels = [0u8; 6];
             for (t, item) in ELEMENT_ITEMS.iter().enumerate() {
@@ -6457,7 +6584,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             icon_sheet: 0,
             glyph: 0,
             keyboard_last: true,
-            stock: ROOM_STOCK.into_iter().collect(),
+            stock: room_stock(),
             seen: Vec::new(),
             shortcuts: ROOM_SHORTCUTS,
             no_charge: 0,
@@ -6465,8 +6592,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 weapon: KINGDOM_KEY,
                 armor: vec![0],
                 accessories: vec![0],
-                items: vec![0, 0],
-                originals: vec![0, 0],
+                items: ROOM_ITEM_SLOTS.to_vec(),
+                originals: ROOM_ITEM_SLOTS.to_vec(),
                 ..Default::default()
             },
             ability_slots: {
