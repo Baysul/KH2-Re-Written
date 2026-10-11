@@ -1,0 +1,31 @@
+[package]
+name = "skate-sim"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license = "GPL-3.0-only"
+description = "Skate 3 skater simulation from skate-game, without rendering, for a Bevy 0.19 host"
+
+[lib]
+# skate-game's unit tests need its private asset captures and were not carried over.
+test = false
+doctest = false
+
+[dependencies]
+bevy = { version = "=0.19.1", default-features = false, features = ["std", "bevy_log"] }
+skate-core = { git = "https://github.com/SK8-ENGINE/skate-3-rust-engine", rev = "2e16697797c8358d16f747a8259354ff2921041a" }
+skate-data = { git = "https://github.com/SK8-ENGINE/skate-3-rust-engine", rev = "2e16697797c8358d16f747a8259354ff2921041a" }
+skate-dynamics = { git = "https://github.com/SK8-ENGINE/skate-3-rust-engine", rev = "2e16697797c8358d16f747a8259354ff2921041a" }
+half = "=2.7.1"
+serde.workspace = true
+serde_json.workspace = true
+blake3 = "=1.8.7"
+
+# Code carried over from skate-game keeps its own style; only safety is
+# enforced here. GPL-3.0-only: see ../LICENSE and ../README.md.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "allow", priority = -1 }

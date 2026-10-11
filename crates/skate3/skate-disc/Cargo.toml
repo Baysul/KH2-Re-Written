@@ -1,0 +1,17 @@
+[package]
+name = "skate-disc"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license = "GPL-3.0-only"
+description = "Skate 3's core asset setup in Rust: BIG/chunkref/RefPack, AttribSys VLT and physics skeletons from the user's own disc"
+
+[dependencies]
+flate2 = "=1.1.10"
+serde_json.workspace = true
+sha2.workspace = true
+skate-data = { git = "https://github.com/SK8-ENGINE/skate-3-rust-engine", rev = "2e16697797c8358d16f747a8259354ff2921041a" }
+
+[lints.rust]
+unsafe_code = "forbid"

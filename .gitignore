@@ -18,6 +18,13 @@
 !/crates/*/src/**/*.rs
 !/crates/*/src/**/*.wgsl
 !/crates/*/examples/*.rs
+# The optional Skate 3 skateboard (GPL-3.0-only; see crates/skate3/README.md).
+!/crates/skate3/README.md
+!/crates/skate3/LICENSE
+!/crates/skate3/*/Cargo.toml
+!/crates/skate3/*/src/**/*.rs
+# AttribSys name dictionary carried from the Skate 3 engine's setup (names only).
+!/crates/skate3/skate-disc/src/names.txt
 !/crates/windows_shell/assets/development-checker.bmp
 # The project owner's own studio splash art (not game data).
 !/crates/windows_shell/assets/glurbus-splash.png
