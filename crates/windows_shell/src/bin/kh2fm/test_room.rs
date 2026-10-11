@@ -64,6 +64,7 @@ mod drive_room;
 mod item_room;
 mod kit;
 mod magic_room;
+mod party_room;
 mod prize_room;
 mod settings_room;
 
@@ -718,6 +719,8 @@ struct Game {
     debug_blow: bool,
     /// Sora's magic: owned spells, running casts and their volumes.
     magic: Option<magic_room::MagicRt>,
+    /// Donald and Goofy, following Sora.
+    party: Vec<party_room::MemberRt>,
     items: Option<item_room::ItemRt>,
     /// Drive forms (None when the form tables could not be read).
     drive: Option<drive_room::DriveRt>,
@@ -1084,6 +1087,8 @@ struct Loaded {
     forms: Option<drive_room::FormSources>,
     enemy_character: u16,
     fmab: player_sim::growth::Fmab,
+    /// Donald and Goofy's models and motions (empty when not installed).
+    party: Vec<std::sync::Arc<party_room::PartyKind>>,
     spawn: Vec3,
     /// Sora's facing at the spawn (scene yaw).
     yaw: f32,
@@ -2593,6 +2598,37 @@ fn load(
         abilities: ability_source,
         magic: magic_src,
         items: item_room::load(&system).ok(),
+        party: match config.enemy {
+            // The party stands in rooms with a fight to join.
+            Some(_) => {
+                let mut kinds = Vec::new();
+                if let Ok(mut library) = package_reader::named::Library::open(source) {
+                    let lvup = bar_entry(&battle, b"lvup").unwrap_or(&[]);
+                    for (name, character, records) in [
+                        ("P_EX020", 2, &player_sim::party::DONALD[..]),
+                        ("P_EX030", 3, &player_sim::party::GOOFY[..]),
+                    ] {
+                        match party_room::load(
+                            source,
+                            &mut library,
+                            &system,
+                            lvup,
+                            name,
+                            character,
+                            records,
+                        ) {
+                            Ok(k) => {
+                                eprintln!("party member {} loaded", k.name);
+                                kinds.push(std::sync::Arc::new(k));
+                            }
+                            Err(e) => eprintln!("party member {name}: {e}"),
+                        }
+                    }
+                }
+                kinds
+            }
+            None => Vec::new(),
+        },
         forms,
         enemy_character,
         fmab,
@@ -4136,6 +4172,57 @@ fn setup(
         }
         rt.indices = indices;
     }
+    // Donald and Goofy: one root per member with a mesh per model part.
+    for (i, member) in game.party.iter().enumerate() {
+        let kind = &member.kind;
+        let Some(idle) = kind.motions.get(&0) else {
+            continue;
+        };
+        let root = commands
+            .spawn((
+                party_room::PartyRoot(i),
+                ChildOf(world),
+                Transform::from_translation(Vec3::from_array(member.follower.position)),
+                Visibility::default(),
+            ))
+            .id();
+        for (ordinal, entity) in spawn_model(
+            &mut commands,
+            &kind.model,
+            &idle.frames[0],
+            root,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+        ) {
+            if let Some(entity) = entity {
+                commands.entity(entity).insert(party_room::PartyPart {
+                    member: i,
+                    ordinal,
+                    weapon: false,
+                });
+            }
+        }
+        if let (Some(weapon), Some(pose)) = (&kind.weapon, idle.weapon.first()) {
+            for (ordinal, entity) in spawn_model(
+                &mut commands,
+                weapon,
+                pose,
+                root,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+            ) {
+                if let Some(entity) = entity {
+                    commands.entity(entity).insert(party_room::PartyPart {
+                        member: i,
+                        ordinal,
+                        weapon: true,
+                    });
+                }
+            }
+        }
+    }
     if let (Some(model), Some(mut talk)) = (startup.npc_model.take(), talk) {
         let root = commands
             .spawn((
@@ -4945,6 +5032,7 @@ fn simulate(
     }
     combat_tick(&mut game, tick);
     prize_room::tick(&mut game, tick);
+    party_room::tick(&mut game, tick);
     // Drive: requests, the form change, the form gauge (after the player
     // tick, like FUN_1403a92c0 / FUN_140404a40).
     {
@@ -8575,6 +8663,21 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         debug_blow: false,
         shortcuts: ROOM_SHORTCUTS,
         drive: None,
+        party: loaded
+            .party
+            .into_iter()
+            .enumerate()
+            .map(|(i, kind)| party_room::MemberRt {
+                kind,
+                follower: player_sim::party::Follower::spawn(
+                    loaded.spawn.to_array(),
+                    loaded.yaw,
+                    i as u8,
+                ),
+                started: 0,
+                stored: false,
+            })
+            .collect(),
         items: loaded.items.map(|src| {
             item_room::ItemRt::new(
                 src,
@@ -9006,6 +9109,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 present_enemy,
                 present_spells,
                 present_orbs,
+                party_room::present,
+                drive_room::party_visibility,
                 present_npc,
                 present_effects,
                 hud_present,

@@ -15,6 +15,7 @@ pub mod drive;
 pub mod forms;
 pub mod growth;
 pub mod magic;
+pub mod party;
 pub mod physics;
 pub mod prize;
 pub mod ptya;

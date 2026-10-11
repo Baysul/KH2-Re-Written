@@ -360,9 +360,17 @@ pub struct DriveRt {
     /// The shared battle RNG DAT_140783ca0 (image value 1).
     pub seed: u32,
     pub battle: BattleState,
-    /// Test-room aid (F12): Donald and Goofy count as present and usable
-    /// for the party requirement until the party is ported.
+    /// Test-room aid (F12): with no party in the room, Donald and Goofy
+    /// count as present and usable for the party requirement.
     pub party: bool,
+    /// The room has party members (party_room): the slots come from them.
+    real_party: bool,
+    slots: [Option<forms::Member>; 2],
+    /// Members absorbed by the form and the frames since they left
+    /// (FUN_140400990: they fade out over 15).
+    stored: Vec<(usize, u32)>,
+    /// FUN_1403f3fa0's rotating base sector (DAT_142ae5d78).
+    sector: u8,
     /// A menu request: drive into a form (its command's form), or 0 to
     /// revert.
     pub request: Option<u8>,
@@ -413,6 +421,10 @@ impl DriveRt {
             seed: 1,
             battle: BattleState::default(),
             party: false,
+            real_party: false,
+            slots: [None, None],
+            stored: Vec::new(),
+            sector: 0,
             request: None,
             respawn: None,
             overlay: 0.,
@@ -434,7 +446,9 @@ impl DriveRt {
 
     /// The party slots as FUN_140400740 sees them.
     pub fn members(&self) -> [Option<forms::Member>; 2] {
-        if self.party {
+        if self.real_party {
+            self.slots
+        } else if self.party {
             [
                 Some(forms::Member {
                     character: 2,
@@ -588,6 +602,16 @@ fn start_change(game: &mut Game, form: u8) {
         d.start_load(form);
         // FUN_1403f6f80 / FUN_1403f76e0: the grey overlay, 12 frames in.
         d.overlay_step = 1. / OVERLAY_IN;
+        // FUN_140400b20: the members the form takes leave the field.
+        let mut leaving = Vec::new();
+        for (i, m) in game.party.iter_mut().enumerate() {
+            if !m.stored && forms::absorbs(form, character_of(m.kind.name)) {
+                m.stored = true;
+                m.follower.attack = None;
+                leaving.push((i, 0));
+            }
+        }
+        d.stored.extend(leaving);
     }
     d.form = form;
     game.sound_queue.push(if form != 0 {
@@ -734,6 +758,22 @@ fn finish_change(game: &mut Game, abilities: Option<&[u16]>) -> Result<(), Strin
     } else {
         d.active = false;
         game.player.drive.leave_form();
+        // FUN_140400440: the absorbed members come back around Sora.
+        let stored = std::mem::take(&mut d.stored);
+        let (mut seed, mut sector) = (d.seed, d.sector);
+        for (i, _) in stored {
+            let spot =
+                forms::return_spot(&game.world, game.player.position, &mut seed, &mut sector);
+            if let Some(m) = game.party.get_mut(i) {
+                m.stored = false;
+                m.follower.position = spot.0;
+                m.follower.yaw = spot.1;
+                m.follower.attack = None;
+            }
+        }
+        if let Some(d) = game.drive.as_mut() {
+            (d.seed, d.sector) = (seed, sector);
+        }
     }
     game.player.shoot = f == forms::WISDOM;
     rebuild_abilities(game, abilities);
@@ -816,6 +856,18 @@ pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
         ) && ((e[0] - p[0]).powi(2) + (e[2] - p[2]).powi(2)).sqrt() < BATTLE_DISTANCE
     });
     d.battle.update(target);
+    // The party slots (FUN_1403c3270): Donald and Goofy when in the room;
+    // a member the form took is unavailable.
+    d.real_party = !game.party.is_empty();
+    d.slots = [0, 1].map(|k| {
+        game.party.get(k).map(|m| forms::Member {
+            character: character_of(m.kind.name),
+            usable: !m.stored,
+        })
+    });
+    for s in &mut d.stored {
+        s.1 += 1;
+    }
     // Unattended runs (between the camp visits): Limit Form at 7500, Valor
     // (with the stand-in party) at 7850 and Wisdom at 8120, each reverted
     // by the command.
@@ -869,9 +921,13 @@ pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
         // still in the field (FUN_140400840): the stand-in party's
         // remaining member for Valor, Wisdom and Limit [I: members that
         // left count as gone].
-        let party_present = game.drive.as_ref().is_some_and(|d| {
-            d.party && matches!(target, forms::VALOR | forms::WISDOM | forms::LIMIT)
-        });
+        let party_present = if game.party.is_empty() {
+            game.drive.as_ref().is_some_and(|d| {
+                d.party && matches!(target, forms::VALOR | forms::WISDOM | forms::LIMIT)
+            })
+        } else {
+            game.party.iter().any(|m| !m.stored)
+        };
         match ready {
             Ok(true) if target == 0 || !party_present || game.player.drive_done(&game.clips) => {
                 if target != 0
@@ -1145,3 +1201,39 @@ pub fn shots(game: &mut Game) {
 
 /// Wisdom bullets' volume keys (below the spells' serial keys' range).
 const BULLET_KEYS: u64 = 1 << 60;
+
+/// A party member's character id (objentry +0x4c) by its model.
+fn character_of(name: &str) -> u16 {
+    match name {
+        "P_EX020" => 2,
+        "P_EX030" => 3,
+        _ => 0,
+    }
+}
+
+/// FUN_140400990: an absorbed member fades out over 15 frames and is
+/// then gone from view [the fade itself is not drawn: the member shows
+/// until the 15th frame].
+pub fn party_visibility(
+    game: Res<Game>,
+    mut roots: Query<(&party_room::PartyRoot, &mut Visibility)>,
+) {
+    let Some(d) = game.drive.as_ref() else { return };
+    for (root, mut v) in &mut roots {
+        let hidden = d
+            .stored
+            .iter()
+            .any(|&(i, frames)| i == root.0 && frames >= PARTY_FADE);
+        let want = if hidden {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if *v != want {
+            *v = want;
+        }
+    }
+}
+
+/// FUN_140400990's fade, in frames.
+const PARTY_FADE: u32 = 15;

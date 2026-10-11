@@ -100,7 +100,7 @@ const SLOT_IDLE: usize = 0;
 const SLOT_WALK: usize = 1;
 const SLOT_TURN: usize = 129;
 
-fn build_anim(
+pub(crate) fn build_anim(
     model: &InspectionModel,
     selected: &Arc<motion::SelectedMotion>,
     bone: Option<usize>,

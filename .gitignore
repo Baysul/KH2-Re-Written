@@ -9,6 +9,7 @@
 !/CONTRIBUTING.md
 !/LICENSE
 !/NOTICE
+!/CREDITS.md
 !/Cargo.toml
 !/Cargo.lock
 !/rust-toolchain.toml
@@ -26,8 +27,6 @@
 # AttribSys name dictionary carried from the Skate 3 engine's setup (names only).
 !/crates/skate3/skate-disc/src/names.txt
 !/crates/windows_shell/assets/development-checker.bmp
-# The project owner's own studio splash art (not game data).
-!/crates/windows_shell/assets/glurbus-splash.png
 # Banner text drawn by tools/Make-BannerText.ps1 from a system font (no game data).
 !/crates/windows_shell/assets/final-rewrite-text.png
 !/docs/**/*.md

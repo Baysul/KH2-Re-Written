@@ -430,6 +430,61 @@ pub fn kill_exp(form: u8, enemy: u16) -> i32 {
     }
 }
 
+/// FUN_140400b20's rule: whether party member `character` leaves for form
+/// `form` (Valor takes Goofy, Wisdom Donald, Master, Final and Antiform
+/// both, Limit nobody).
+pub fn absorbs(form: u8, character: u16) -> bool {
+    match form {
+        VALOR => character == 3,
+        WISDOM => character == 2,
+        LIMIT => false,
+        f => (1..7).contains(&f),
+    }
+}
+
+/// FUN_1403c2fc0(id, 0, 100, 200, 300) → FUN_1403f3fa0 / FUN_1403f4180:
+/// where a member returns after a revert. From 100 above Sora's feet, at
+/// a radius drawn in 200..300 (two LCG draws), the eight directions π/4
+/// apart are tried from a rotating base sector plus jitter; a spot needs
+/// ground within 200 above and 1200 below it, and every failed ring
+/// moves 100 inward. Returns the spot and the yaw facing Sora. The line
+/// of sight test from Sora is not reproduced (no ray query here).
+pub fn return_spot(
+    world: &impl crate::World,
+    sora: crate::Vec3,
+    seed: &mut u32,
+    sector: &mut u8,
+) -> (crate::Vec3, f32) {
+    use std::f32::consts::FRAC_PI_4;
+    let (rmin, rmax) = (200f32, 300f32);
+    let p = [sora[0], sora[1] + 100., sora[2]];
+    let s1 = draw(seed);
+    let s2 = draw(seed);
+    let mut r = s1 as f32 * 2.328_306_4e-10 * (rmax - rmin) + rmin;
+    let c = *sector as u32;
+    *sector = (*sector + 1) & 7;
+    let a0 =
+        ((c * 2) | ((c >> 2) & 1)) as f32 * FRAC_PI_4 + s2 as f32 * 2.328_306_4e-10 * FRAC_PI_4;
+    let face = |q: crate::Vec3| (sora[0] - q[0]).atan2(sora[2] - q[2]);
+    let mut k = 0;
+    while rmin <= r {
+        k += 1;
+        let a = k as f32 * FRAC_PI_4 + a0;
+        let cand = [p[0] + a.sin() * r, p[1], p[2] + a.cos() * r];
+        if let Some(y) = world.floor(cand[0], cand[2], cand[1] + 200.)
+            && y >= cand[1] - 1200.
+        {
+            let q = [cand[0], y, cand[2]];
+            return (q, face(q));
+        }
+        if k > 7 {
+            r -= 100.;
+            k = 0;
+        }
+    }
+    (sora, face(sora))
+}
+
 /// Limit Form's EXP commands (FUN_1403d8b40 → FUN_1403e8730).
 pub const LIMIT_EXP_COMMANDS: [u16; 4] = [0x2ae, 0x2bc, 0x2bf, 0x2c2];
 
@@ -570,6 +625,29 @@ mod tests {
         f.records[5].exp = 14;
         assert_eq!(f.roll(FINAL, &ctx, &fmlv(), &mut seed).form, FINAL);
         assert_eq!(f.records[5].exp, 4);
+    }
+
+    #[test]
+    fn members_leave_by_form_and_return_on_the_ground() {
+        assert!(absorbs(VALOR, 3) && !absorbs(VALOR, 2));
+        assert!(absorbs(WISDOM, 2) && !absorbs(LIMIT, 2));
+        assert!(absorbs(MASTER, 2) && absorbs(FINAL, 3));
+        struct Flat;
+        impl crate::World for Flat {
+            fn floor(&self, _: f32, _: f32, top: f32) -> Option<f32> {
+                (top >= 0.).then_some(0.)
+            }
+            fn resolve_walls(&self, p: [f32; 2], _: f32, _: f32, _: f32) -> [f32; 2] {
+                p
+            }
+        }
+        let (mut seed, mut sector) = (1, 0);
+        let (q, yaw) = return_spot(&Flat, [10., 0., 20.], &mut seed, &mut sector);
+        let d = ((q[0] - 10.).powi(2) + (q[2] - 20.).powi(2)).sqrt();
+        assert!((200. ..=300.).contains(&d), "{d}");
+        assert_eq!((q[1], sector), (0., 1));
+        let back = [10. - q[0], 20. - q[2]];
+        assert!((back[0].atan2(back[1]) - yaw).abs() < 1e-5);
     }
 
     #[test]
