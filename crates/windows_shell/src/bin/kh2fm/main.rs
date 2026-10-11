@@ -9,6 +9,7 @@
 //! its tests' output that way).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod area;
+mod cutscene;
 mod launcher;
 mod npcs;
 mod test_room;
@@ -40,8 +41,9 @@ fn run(program: &str, args: Vec<PathBuf>) -> ExitCode {
             }
         },
         "tt" => test_room::main(args, false),
+        "event" => cutscene::main(args, false),
         _ => {
-            eprintln!("usage: kh2fm [title|room|talk|play|tt] [program arguments]");
+            eprintln!("usage: kh2fm [title|room|talk|play|tt|event] [program arguments]");
             ExitCode::FAILURE
         }
     }

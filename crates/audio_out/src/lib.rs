@@ -109,6 +109,14 @@ impl Mixer {
         self.fade(key, target, seconds, FadeEnd::Hold);
     }
 
+    /// Holds (`true`) or releases every voice of `key` at its position,
+    /// without a fade.
+    pub fn hold(&mut self, key: u32, held: bool) {
+        for v in self.voices.iter_mut().filter(|v| v.key == key) {
+            v.paused = held;
+        }
+    }
+
     pub fn paused(&self, key: u32) -> bool {
         self.voices.iter().any(|v| v.key == key && v.paused)
     }

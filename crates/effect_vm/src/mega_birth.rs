@@ -913,6 +913,7 @@ mod tests {
             pdata: Vec::new(),
             shapes,
             model_vertices: HashMap::new(),
+            models: HashMap::new(),
             vsf: HashMap::new(),
             textures: Vec::new(),
         }
@@ -937,6 +938,11 @@ mod tests {
             vars: vec![0; 164],
             cursors: vec![CURSOR],
             mega: HashMap::new(),
+            mega_model: HashMap::new(),
+            vertex_override: None,
+            ribbons: HashMap::new(),
+            serial: 1,
+            parent: None,
         };
         // Colour variable u1 = 44: bytes +8..+0xb = 1.0 each.
         part.vars[52..56].fill(0x80);
@@ -971,11 +977,14 @@ mod tests {
                     ede0: IDENTITY,
                     scales: [1.; 3],
                     colour: [1.; 4],
+                    parent_cur: None,
                     skip,
                     rng: &mut rng,
                     quads: &mut quads,
+                    model_draws: &mut Vec::new(),
                     births: Vec::new(),
                     unsupported: &mut unsupported,
+                    flags: &mut [0; 3],
                 };
                 if first {
                     create(&p, part, &mut ctx);

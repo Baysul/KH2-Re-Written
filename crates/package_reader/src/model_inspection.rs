@@ -43,6 +43,10 @@ pub struct InspectionPart {
     pub source_is_opaque: bool,
     pub indices: Vec<u32>,
     pub cross_part_corners: usize,
+    /// The mesh's part group, bits 6..10 of its descriptor word 0 (what a
+    /// script's `SeqPart` list names); filled by `read_models`.
+    #[serde(skip)]
+    pub mesh_group: u8,
 }
 pub struct InspectionModel {
     pub index: String,
@@ -121,6 +125,7 @@ fn parts(geometry: &Geometry, poses: &[ModelPose]) -> io::Result<Vec<InspectionP
             source_is_opaque: part.is_opaque,
             indices,
             cross_part_corners,
+            mesh_group: 0,
         });
         vertex_base = end;
     }
@@ -143,7 +148,7 @@ pub fn read_selected_models(
         return Err("model selection exceeds 1 MiB".into());
     }
     let selection: SelectionFile = serde_json::from_slice(&bytes)?;
-    read_models(source, selection)
+    read_selection_models(source, selection)
 }
 
 /// One installed model by its HED identity, with the explicit profiles the
@@ -155,7 +160,7 @@ pub fn read_model_at(
     ordinal: usize,
     name_hash: [u8; 16],
 ) -> Result<Vec<InspectionModel>, Box<dyn std::error::Error>> {
-    read_models(
+    read_selection_models(
         source,
         SelectionFile {
             schema_version: 1,
@@ -174,7 +179,7 @@ pub fn read_model_at(
     )
 }
 
-fn read_models(
+fn read_selection_models(
     source: &ProbeSource,
     selection: SelectionFile,
 ) -> Result<Vec<InspectionModel>, Box<dyn std::error::Error>> {
@@ -219,6 +224,51 @@ fn read_models(
         }
     }
     source.verify_full_source()?;
+    let items: Vec<_> = selection
+        .selections
+        .iter()
+        .map(|s| ModelItem {
+            index: s.index.clone(),
+            ordinal: s.ordinal,
+            name_hash: s.name_hash,
+        })
+        .collect();
+    read_models(
+        source,
+        &items,
+        &ModelOptions {
+            pose_profiles: selection.model_pose_profiles,
+            textures: selection.inspect_model_textures,
+            texture_modes: selection.model_texture_modes,
+            uv_profiles: selection.model_uv_profiles,
+        },
+    )
+}
+
+/// One installed model archive (`obj/<NAME>.mdlx`) by HED locator.
+#[derive(Clone, Debug)]
+pub struct ModelItem {
+    pub index: String,
+    pub ordinal: usize,
+    pub name_hash: [u8; 16],
+}
+
+/// Decoding choices for [`read_models`].
+#[derive(Clone, Debug)]
+pub struct ModelOptions {
+    pub pose_profiles: Vec<PoseProfile>,
+    pub textures: bool,
+    pub texture_modes: Vec<TextureMode>,
+    pub uv_profiles: Vec<UvProfile>,
+}
+
+/// Decodes the type-4 models of already admitted archives; the caller has
+/// verified the bound source.
+pub fn read_models(
+    source: &ProbeSource,
+    items: &[ModelItem],
+    options: &ModelOptions,
+) -> Result<Vec<InspectionModel>, Box<dyn std::error::Error>> {
     let mut models = Vec::new();
     let mut storage_bytes = 0usize;
     let mut position_words = 0usize;
@@ -230,11 +280,7 @@ fn read_models(
         .into_iter()
         .filter(|(name, _)| name.ends_with(".hed"))
     {
-        let selected: Vec<_> = selection
-            .selections
-            .iter()
-            .filter(|item| item.index == relative)
-            .collect();
+        let selected: Vec<_> = items.iter().filter(|item| item.index == relative).collect();
         if selected.is_empty() {
             continue;
         }
@@ -252,7 +298,7 @@ fn read_models(
                 return Err("model storage exceeds 128 MiB".into());
             }
             let bar = crate::bar::read_bar(&original.bytes)?;
-            let textures = if selection.inspect_model_textures {
+            let textures = if options.textures {
                 let replacements =
                     crate::replacement::read_all_replacements(&mut checked.reader, entry)?;
                 storage_bytes += replacements.iter().map(|r| r.bytes.len()).sum::<usize>();
@@ -282,7 +328,7 @@ fn read_models(
                     start,
                     ordinal,
                     &replacements,
-                    &selection.model_texture_modes,
+                    &options.texture_modes,
                     &mut texture_rgba,
                 )?;
                 texture_images += set.images.len();
@@ -307,12 +353,22 @@ fn read_models(
                 let payload = &original.bytes[start..start + entry.size as usize];
                 let geometry = crate::model_geometry::read_geometry(payload)?;
                 let skinning = crate::model_pose::Skinning::read(payload)?;
-                let poses: Vec<_> = selection
-                    .model_pose_profiles
+                let poses: Vec<_> = options
+                    .pose_profiles
                     .iter()
                     .map(|&profile| skinning.bind_pose(profile))
                     .collect::<io::Result<_>>()?;
-                let mesh_parts = parts(&geometry, &poses)?;
+                let mut mesh_parts = parts(&geometry, &poses)?;
+                if let Some(root) = crate::model_skeleton::read_model_structure(payload)?
+                    .blocks
+                    .first()
+                {
+                    for part in &mut mesh_parts {
+                        if let Some(header) = root.group_headers.get(part.group_ordinal) {
+                            part.mesh_group = ((header[0] >> 6) & 0x1f) as u8;
+                        }
+                    }
+                }
                 let texture_routes = if let Some(set) = &textures {
                     let environments = set
                         .images
@@ -328,7 +384,7 @@ fn read_models(
                         payload,
                         &geometry,
                         environments,
-                        &selection.model_uv_profiles,
+                        &options.uv_profiles,
                     )?;
                     uv_corners += routes
                         .iter()

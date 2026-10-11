@@ -294,7 +294,7 @@ pub struct Test {
     pub program: &'static str,
 }
 
-pub const TESTS: [Test; 3] = [
+pub const TESTS: [Test; 4] = [
     Test {
         name: "Title screen",
         blurb: "Disney, Square Enix and GLURBUS logos, intro, title menu",
@@ -309,6 +309,11 @@ pub const TESTS: [Test; 3] = [
         name: "Twilight Town",
         blurb: "Station Plaza and the areas its exits lead to",
         program: "tt",
+    },
+    Test {
+        name: "Cutscene: Roxas and Axel",
+        blurb: "Betwixt and Between, before the fight (event 613)",
+        program: "event",
     },
 ];
 
@@ -488,6 +493,15 @@ pub fn combined_room_config(arena: &Path, talk: &Path) -> Result<PathBuf, String
 /// `kh2fm` arguments for a test on a bound folder: the program, the folder,
 /// its manifest, the config and the launch file's options.
 pub fn test_args(dir: &Path, program: &str, b: &Bound) -> Result<Vec<String>, String> {
+    // The event player reads everything by name from the bound folder and
+    // checks the source itself; it needs no private config.
+    if program == "event" {
+        return Ok(vec![
+            "event".into(),
+            b.folder.to_string_lossy().into_owned(),
+            b.manifest.to_string_lossy().into_owned(),
+        ]);
+    }
     let (command, config, options) = match program {
         "title" => {
             let l = launch_file(dir, "launch-title")?;

@@ -11,6 +11,7 @@ audio_out = { path = "../audio_out" }
 effect_vm = { path = "../effect_vm" }
 area_sim = { path = "../area_sim" }
 field_collision = { path = "../field_collision" }
+event_sim = { path = "../event_sim" }
 package_reader = { path = "../package_reader" }
 player_sim = { path = "../player_sim" }
 source_identity = { path = "../source_identity" }

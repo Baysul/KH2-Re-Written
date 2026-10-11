@@ -223,6 +223,28 @@ pub struct DpdTexture {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    /// The 8-bit palette indices (w·h) and the raw 256×RGBA CLUT bytes
+    /// the image was decoded with, so another CLUT can be applied.
+    pub indices: Vec<u8>,
+    pub palette: Vec<u8>,
+    /// GS data buffer pointer (in 64-word blocks), CLUT pointer, buffer
+    /// width in 64-texel units and placement of this image in the buffer.
+    pub dbp: u16,
+    pub cbp: u16,
+    pub dbw: u16,
+    pub x: u16,
+    pub y: u16,
+    /// The TEX0 register a mesh uses to select this texture (low dword
+    /// at header +0x10, high dword at +0x14).
+    pub tex0: u64,
+}
+
+/// An OMD model of a DPD: header position, vertex array and count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelRef {
+    pub hdr: usize,
+    pub vertices: usize,
+    pub vertex_count: usize,
 }
 
 #[derive(Debug)]
@@ -232,6 +254,8 @@ pub struct Dpd {
     pub shapes: HashMap<i16, ShapeRef>,
     /// Model vertex arrays (3×i16 per vertex) by model id.
     pub model_vertices: HashMap<i16, usize>,
+    /// OMD models by DPD-local id.
+    pub models: HashMap<i16, ModelRef>,
     pub vsf: HashMap<i32, Vsf>,
     pub textures: Vec<DpdTexture>,
 }
@@ -288,9 +312,20 @@ pub fn read_dpd(bytes: &[u8]) -> io::Result<Dpd> {
         );
     }
     let mut model_vertices = HashMap::new();
+    let mut models = HashMap::new();
     for &m in &lists[3] {
         let base = m + 0x10;
-        model_vertices.insert(i16_at(bytes, m)?, base + i32_at(bytes, base + 8)? as usize);
+        let id = i16_at(bytes, m)?;
+        let vertices = base + i32_at(bytes, base + 8)? as usize;
+        model_vertices.insert(id, vertices);
+        models.insert(
+            id,
+            ModelRef {
+                hdr: base,
+                vertices,
+                vertex_count: i16_at(bytes, base + 0x12)?.max(0) as usize,
+            },
+        );
     }
     let mut vsf = HashMap::new();
     for &v in &lists[4] {
@@ -313,6 +348,7 @@ pub fn read_dpd(bytes: &[u8]) -> io::Result<Dpd> {
         pdata,
         shapes,
         model_vertices,
+        models,
         vsf,
         textures,
     })
@@ -399,6 +435,14 @@ fn read_texture(b: &[u8], t: usize) -> io::Result<DpdTexture> {
         width: w as u32,
         height: h as u32,
         rgba: decode_psmt8(pixels, palette),
+        indices: pixels.to_vec(),
+        palette: palette.to_vec(),
+        dbp: i16_at(b, t)? as u16,
+        cbp: i16_at(b, t + 2)? as u16,
+        dbw: i16_at(b, t + 4)? as u16,
+        x: i16_at(b, t + 8)? as u16,
+        y: i16_at(b, t + 10)? as u16,
+        tex0: u32_at(b, t + 0x10)? as u64 | (u32_at(b, t + 0x14)? as u64) << 32,
     })
 }
 
@@ -484,9 +528,151 @@ pub fn shape_sequence_count(b: &[u8], anim: usize) -> io::Result<i16> {
     i16_at(b, anim + 6)
 }
 
+/// OMD model header fields the renderer needs (FUN_1404b6860).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OmdHeader {
+    /// bit0 normal, bit1 single-sided, bit2 texture wrap REPEAT.
+    pub flags: u8,
+    /// GS ALPHA register low byte (0x48 additive, 0x44 blend, 0x88 replace).
+    pub alpha: u8,
+    pub vertex_count: usize,
+}
+
+pub fn omd_header(b: &[u8], hdr: usize) -> io::Result<OmdHeader> {
+    Ok(OmdHeader {
+        flags: *b.get(hdr).ok_or_else(|| invalid("OMD header"))?,
+        alpha: *b.get(hdr + 0x16).ok_or_else(|| invalid("OMD header"))?,
+        vertex_count: i16_at(b, hdr + 0x12)?.max(0) as usize,
+    })
+}
+
+/// One OMD triangle: vertex indices, RGBA bytes and u16 texture
+/// coordinates per corner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OmdTriangle {
+    pub index: [u16; 3],
+    pub colour: [[u8; 4]; 3],
+    pub uv: [[u16; 2]; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OmdMesh {
+    /// The mesh's PS2 TEX0; meaningful only when `textured`.
+    pub tex0: u64,
+    pub textured: bool,
+    pub triangles: Vec<OmdTriangle>,
+}
+
+/// The mesh blocks of the model at `hdr` (FUN_1404b6860 node build, drawers
+/// b2520..b3d40): triangles and quads. A quad's records are in strip order
+/// (two top corners, then two bottom corners): the drawers store them in
+/// slots (0, 1, 3, 2) and draw the four slots as a quad, i.e. the
+/// triangles (r0, r1, r3) and (r0, r3, r2). Reading stops at the 0xff
+/// terminator or after ten meshes.
+pub fn omd_meshes(b: &[u8], hdr: usize) -> io::Result<Vec<OmdMesh>> {
+    let mut at = hdr + i32_at(b, hdr + 4)? as usize;
+    let mut meshes = Vec::new();
+    for _ in 0..10 {
+        let kind = *b.get(at + 1).ok_or_else(|| invalid("OMD mesh"))?;
+        if kind == 0xff {
+            break;
+        }
+        let count = i16_at(b, at + 2)?.max(0) as usize;
+        let tex0 = u32_at(b, at + 8)? as u64 | (u32_at(b, at + 12)? as u64) << 32;
+        let (stride, quad, textured) = match kind {
+            0 => (0x14, false, false),
+            1 => (0x1c, false, false),
+            2 => (0x20, false, true),
+            3 => (0x28, false, true),
+            4 => (0x18, true, false),
+            5 => (0x20, true, false),
+            6 => (0x28, true, true),
+            7 => (0x30, true, true),
+            _ => return Err(invalid("OMD mesh type")),
+        };
+        let mut triangles = Vec::new();
+        for k in 0..count {
+            let r = at + 0x10 + k * stride;
+            let n = if quad { 4 } else { 3 };
+            let colour: Vec<[u8; 4]> = (0..n)
+                .map(|i| {
+                    b.get(r + 4 * i..r + 4 * i + 4)
+                        .map(|c| [c[0], c[1], c[2], c[3]])
+                        .ok_or_else(|| invalid("OMD record"))
+                })
+                .collect::<io::Result<_>>()?;
+            let idx_at = r + 4 * n;
+            let index: Vec<u16> = (0..n)
+                .map(|i| i16_at(b, idx_at + 2 * i).map(|v| v as u16))
+                .collect::<io::Result<_>>()?;
+            let uv_at = idx_at + 2 * n;
+            let uv: Vec<[u16; 2]> = (0..n)
+                .map(|i| {
+                    if textured {
+                        Ok([
+                            i16_at(b, uv_at + 4 * i)? as u16,
+                            i16_at(b, uv_at + 4 * i + 2)? as u16,
+                        ])
+                    } else {
+                        Ok([2048, 2048])
+                    }
+                })
+                .collect::<io::Result<_>>()?;
+            let corner = |s: usize| (index[s], colour[s], uv[s]);
+            let order: &[[usize; 3]] = if quad {
+                &[[0, 1, 3], [0, 3, 2]]
+            } else {
+                &[[0, 1, 2]]
+            };
+            for o in order {
+                let c = o.map(corner);
+                triangles.push(OmdTriangle {
+                    index: c.map(|v| v.0),
+                    colour: c.map(|v| v.1),
+                    uv: c.map(|v| v.2),
+                });
+            }
+        }
+        meshes.push(OmdMesh {
+            tex0,
+            textured,
+            triangles,
+        });
+        at += 0x10 + count * stride;
+    }
+    Ok(meshes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omd_quad_splits_as_the_exe_slot_order() {
+        // Header: first mesh at +0x20; one untextured quad (type 4).
+        let mut b = vec![0u8; 0x100];
+        b[4..8].copy_from_slice(&0x20i32.to_le_bytes());
+        b[0x16] = 0x48;
+        b[0x12..0x14].copy_from_slice(&4i16.to_le_bytes());
+        b[0x21] = 4;
+        b[0x22..0x24].copy_from_slice(&1i16.to_le_bytes());
+        let r = 0x30;
+        for i in 0..4 {
+            b[r + 4 * i..r + 4 * i + 4].copy_from_slice(&[i as u8, 0, 0, 0x80]);
+            b[r + 0x10 + 2 * i..r + 0x12 + 2 * i].copy_from_slice(&(10 + i as i16).to_le_bytes());
+        }
+        // Terminator block follows the 0x18-byte record.
+        b[0x30 + 0x18 + 1] = 0xff;
+        let h = omd_header(&b, 0).unwrap();
+        assert_eq!((h.alpha, h.vertex_count), (0x48, 4));
+        let m = omd_meshes(&b, 0).unwrap();
+        assert_eq!(m.len(), 1);
+        assert!(!m[0].textured);
+        let t = &m[0].triangles;
+        assert_eq!(t[0].index, [10, 11, 13]);
+        assert_eq!(t[1].index, [10, 13, 12]);
+        assert_eq!(t[1].colour[2], [2, 0, 0, 0x80]);
+    }
 
     #[test]
     fn decodes_csm1_palette_swizzle_and_alpha() {

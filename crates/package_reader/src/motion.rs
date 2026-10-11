@@ -423,6 +423,28 @@ pub fn read_selected(
     )
 }
 
+/// One motion archive (an ANB BAR holding one type-9 motion and its
+/// triggers), tagged with `slot`.
+pub fn read_anb(anb: &[u8], slot: usize) -> Result<SelectedMotion, Box<dyn std::error::Error>> {
+    let nested = crate::bar::read_bar(anb)?;
+    let entries: Vec<_> = nested
+        .entries
+        .iter()
+        .filter(|e| e.entry_type == 9 && e.offset > 0 && e.size > 0)
+        .collect();
+    if entries.len() != 1 {
+        return Err("one nested motion required".into());
+    }
+    let entry = entries[0];
+    let payload = &anb[entry.offset as usize..entry.offset as usize + entry.size as usize];
+    Ok(SelectedMotion {
+        slot,
+        sha256: format!("{:x}", Sha256::digest(payload)),
+        motion: read_interpolated(payload)?,
+        triggers: crate::motion_trigger::inspect_anb(anb)?,
+    })
+}
+
 /// Motions at explicit BAR slots of a motion set. Sets whose header byte
 /// +0xc bit 0 is clear (e.g. M_EX020.mset) index slots directly by motion id
 /// (executable FUN_1403c7c50 / FUN_14040d7d0).
@@ -456,23 +478,7 @@ pub fn read_slots(
             .bytes
             .get(entry.offset as usize..entry.offset as usize + entry.size as usize)
             .ok_or("motion slot exceeds set")?;
-        let nested = crate::bar::read_bar(anb)?;
-        let entries: Vec<_> = nested
-            .entries
-            .iter()
-            .filter(|e| e.entry_type == 9 && e.offset > 0 && e.size > 0)
-            .collect();
-        if entries.len() != 1 {
-            return Err("one nested motion required".into());
-        }
-        let entry = entries[0];
-        let payload = &anb[entry.offset as usize..entry.offset as usize + entry.size as usize];
-        result.push(SelectedMotion {
-            slot,
-            sha256: format!("{:x}", Sha256::digest(payload)),
-            motion: read_interpolated(payload)?,
-            triggers: crate::motion_trigger::inspect_anb(anb)?,
-        });
+        result.push(read_anb(anb, slot)?);
     }
     checked.verify_unchanged()?;
     Ok(result)
@@ -538,23 +544,7 @@ pub fn read_motion_ids(
             .bytes
             .get(entry.offset as usize..entry.offset as usize + entry.size as usize)
             .ok_or("motion slot exceeds set")?;
-        let nested = crate::bar::read_bar(anb)?;
-        let entries: Vec<_> = nested
-            .entries
-            .iter()
-            .filter(|e| e.entry_type == 9 && e.offset > 0 && e.size > 0)
-            .collect();
-        if entries.len() != 1 {
-            return Err("one nested motion required".into());
-        }
-        let entry = entries[0];
-        let payload = &anb[entry.offset as usize..entry.offset as usize + entry.size as usize];
-        result.push(SelectedMotion {
-            slot,
-            sha256: format!("{:x}", Sha256::digest(payload)),
-            motion: read_interpolated(payload)?,
-            triggers: crate::motion_trigger::inspect_anb(anb)?,
-        });
+        result.push(read_anb(anb, slot)?);
     }
     checked.verify_unchanged()?;
     Ok(result)
