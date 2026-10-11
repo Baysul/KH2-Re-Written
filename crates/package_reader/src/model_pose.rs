@@ -343,6 +343,36 @@ impl Skinning {
     }
 }
 impl Skinning {
+    /// Motion evaluation with the exe's head look-at (look-02 section 1):
+    /// `look(origin)` receives the look bone's animated world origin and
+    /// returns the world point to face and the blend weight.
+    pub fn sample_evaluated_look(
+        &self,
+        motion: &crate::motion::InterpolatedMotion,
+        frame: f32,
+        bone: usize,
+        look: impl FnOnce([f32; 3]) -> Option<([f32; 3], f32)>,
+    ) -> io::Result<(ModelPose, crate::motion_eval::Evaluated)> {
+        let evaluated = crate::motion_eval::evaluate(&self.bones, motion, frame)?;
+        let mut matrices: Vec<Matrix> = evaluated.joints[..self.bones.len()]
+            .iter()
+            .map(|w| w.matrix())
+            .collect();
+        if bone < matrices.len() {
+            let m = &matrices[bone];
+            if let Some((point, weight)) = look([m[3][0], m[3][1], m[3][2]]) {
+                let parents: Vec<i32> = self.bones.iter().map(|b| b.header_i32[1]).collect();
+                apply_look(&mut matrices, &parents, bone, point, weight);
+            }
+        }
+        let pose = self.pose(
+            matrices,
+            PoseProfile::Legacy,
+            "motion_eval_ik_constraints_look_v1",
+        )?;
+        Ok((pose, evaluated))
+    }
+
     /// Full motion evaluation (IK helpers, constraints, IK chains and
     /// expressions; see motion_eval). Returns the skinned pose and the
     /// evaluation, whose root translation drives root motion.
@@ -364,6 +394,146 @@ impl Skinning {
         Ok((pose, evaluated))
     }
 }
+fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+fn len3(a: [f32; 3]) -> f32 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+fn norm3(a: [f32; 3]) -> [f32; 3] {
+    let l = len3(a);
+    if l > 1e-12 {
+        [a[0] / l, a[1] / l, a[2] / l]
+    } else {
+        a
+    }
+}
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+fn scale3(a: [f32; 3], s: f32) -> [f32; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+/// General 4x4 inverse (Gauss-Jordan); `None` when singular.
+fn inverse(m: &Matrix) -> Option<Matrix> {
+    let mut a = *m;
+    let mut r = IDENTITY;
+    for c in 0..4 {
+        let pivot = (c..4).max_by(|&i, &j| a[i][c].abs().total_cmp(&a[j][c].abs()))?;
+        if a[pivot][c].abs() < 1e-12 {
+            return None;
+        }
+        a.swap(c, pivot);
+        r.swap(c, pivot);
+        let d = 1. / a[c][c];
+        for k in 0..4 {
+            a[c][k] *= d;
+            r[c][k] *= d;
+        }
+        for i in 0..4 {
+            if i != c {
+                let f = a[i][c];
+                for k in 0..4 {
+                    a[i][k] -= f * a[c][k];
+                    r[i][k] -= f * r[c][k];
+                }
+            }
+        }
+    }
+    Some(r)
+}
+
+/// The anb evaluator's look branch (look-02 section 1): the look bone's
+/// local forward axis (row 1) turns toward `point` by `weight`, the basis
+/// is re-orthonormalised keeping the bone origin, and the change carries
+/// to the bone's whole subtree (row-vector matrices, world space).
+pub fn apply_look(matrices: &mut [Matrix], parents: &[i32], bone: usize, point: [f32; 3], w: f32) {
+    let parent = parents.get(bone).copied().unwrap_or(-1);
+    let wp = if parent >= 0 {
+        matrices[parent as usize]
+    } else {
+        IDENTITY
+    };
+    let (Some(inv_wp), Some(inv_wb)) = (inverse(&wp), inverse(&matrices[bone])) else {
+        return;
+    };
+    let wb = matrices[bone];
+    let l = multiply(&wb, &inv_wp);
+    let t = [l[3][0], l[3][1], l[3][2]];
+    let row = |i: usize| [l[i][0], l[i][1], l[i][2]];
+    let (lx, ly, lz) = (row(0), row(1), row(2));
+    let (sx, sy, sz) = (len3(lx), len3(ly), len3(lz));
+    if sx < 1e-6 || sy < 1e-6 || sz < 1e-6 {
+        return;
+    }
+    let pp = transform3(point, &inv_wp);
+    let aim = norm3(sub3(pp, t));
+    let y = norm3([
+        ly[0] / sy * (1. - w) + aim[0] * w,
+        ly[1] / sy * (1. - w) + aim[1] * w,
+        ly[2] / sy * (1. - w) + aim[2] * w,
+    ]);
+    let z = norm3(cross3(norm3(lx), y));
+    let x = norm3(cross3(y, z));
+    let z = norm3(cross3(x, y));
+    let [x, y, z] = [scale3(x, sx), scale3(y, sy), scale3(z, sz)];
+    let l2: Matrix = [
+        [x[0], x[1], x[2], 0.],
+        [y[0], y[1], y[2], 0.],
+        [z[0], z[1], z[2], 0.],
+        [t[0], t[1], t[2], 1.],
+    ];
+    let wb2 = multiply(&l2, &wp);
+    let c = multiply(&inv_wb, &wb2);
+    let mut subtree = vec![false; matrices.len()];
+    subtree[bone] = true;
+    for i in bone + 1..matrices.len() {
+        let p = parents.get(i).copied().unwrap_or(-1);
+        if p >= 0 && subtree[p as usize] {
+            subtree[i] = true;
+            matrices[i] = multiply(&matrices[i], &c);
+        }
+    }
+    matrices[bone] = wb2;
+}
+
+#[cfg(test)]
+mod look_tests {
+    use super::*;
+
+    fn at(x: f32, y: f32, z: f32) -> Matrix {
+        let mut m = IDENTITY;
+        m[3] = [x, y, z, 1.];
+        m
+    }
+
+    #[test]
+    fn weight_zero_changes_nothing_and_weight_one_aims_the_forward_axis() {
+        let parents = [-1, 0, 1];
+        let base = vec![at(0., 0., 0.), at(0., 10., 0.), at(0., 5., 0.)];
+        let mut m = base.clone();
+        apply_look(&mut m, &parents, 1, [0., 10., 100.], 0.);
+        for (a, b) in m.iter().zip(&base) {
+            for r in 0..4 {
+                for c in 0..4 {
+                    assert!((a[r][c] - b[r][c]).abs() < 1e-4);
+                }
+            }
+        }
+        let mut m = base.clone();
+        apply_look(&mut m, &parents, 1, [0., 10., 100.], 1.);
+        // Row 1 (forward) now points along +z; the bone origin stays.
+        assert!((m[1][1][2] - 1.).abs() < 1e-4, "{:?}", m[1][1]);
+        assert!(m[1][3][1] - 10. < 1e-4);
+        // The child's origin was carried by the same rotation.
+        assert!(m[2][3][0].abs() > 1e-3 || m[2][3][2].abs() > 1e-3);
+    }
+}
+
 pub fn read_pose(bytes: &[u8], profile: PoseProfile) -> io::Result<ModelPose> {
     Skinning::read(bytes)?.bind_pose(profile)
 }

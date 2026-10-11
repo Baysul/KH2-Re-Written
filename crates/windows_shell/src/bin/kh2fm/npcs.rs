@@ -25,17 +25,37 @@ use package_reader::{
     probe::ProbeSource,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// One animation of a model: per-tick vertex positions (root removed), the
 /// loop start and the bone matrix of the talk-camera bone.
 pub struct Anim {
+    /// The motion and its time mapping, to evaluate the head look-at.
+    pub source: Option<AnimSource>,
     pub frames: Vec<Vec<Vec3>>,
     pub loop_start: u32,
     pub bones: Vec<Option<Mat4>>,
     /// Horizontal root travel per tick over one pass of the motion.
     pub travel: f32,
+}
+
+/// A motion with its tick-to-key-time mapping.
+pub struct AnimSource {
+    pub motion: Arc<motion::SelectedMotion>,
+    pub frame_start: f32,
+    /// Ticks per key-time unit (60 / fps).
+    pub scale: f32,
+}
+
+/// The head look-at shape (collision type 20): bone and the yaw/pitch
+/// limits in radians [npc-01 section 5].
+#[derive(Clone, Copy)]
+pub struct LookShape {
+    pub bone: usize,
+    pub yaw: f32,
+    pub pitch: f32,
 }
 
 pub struct TargetShape {
@@ -64,6 +84,7 @@ pub struct NpcKind {
     pub model: InspectionModel,
     pub anims: Anims,
     pub target: Option<TargetShape>,
+    pub look: Option<LookShape>,
     /// The type-0 (map collision) shape the meet test overlaps: centre
     /// height, radius, height (shape 0/3 ellipsoid, npc-01 section 3.5).
     pub body: [f32; 3],
@@ -81,7 +102,7 @@ const SLOT_TURN: usize = 129;
 
 fn build_anim(
     model: &InspectionModel,
-    selected: &motion::SelectedMotion,
+    selected: &Arc<motion::SelectedMotion>,
     bone: Option<usize>,
 ) -> Result<Anim> {
     let (frame_start, frame_end, fps, frame_return) = selected.motion.frame_window()?;
@@ -128,6 +149,11 @@ fn build_anim(
         .max(1);
     let travel = word(0x20).hypot(word(0x28)) / ticks as f32;
     Ok(Anim {
+        source: Some(AnimSource {
+            motion: Arc::clone(selected),
+            frame_start,
+            scale,
+        }),
         frames,
         loop_start,
         bones,
@@ -158,10 +184,10 @@ impl NpcKind {
                 }
             ))
             .ok_or_else(|| format!("{set_name} motion set is not installed"))?;
-        let slot = |s: usize| -> Option<motion::SelectedMotion> {
+        let slot = |s: usize| -> Option<Arc<motion::SelectedMotion>> {
             motion::read_slots(source, set.index, set.ordinal, set.name_hash, &[s])
                 .ok()
-                .and_then(|mut v| (!v.is_empty()).then(|| v.remove(0)))
+                .and_then(|mut v| (!v.is_empty()).then(|| Arc::new(v.remove(0))))
         };
         let idle = slot(SLOT_IDLE).ok_or("NPC set has no idle motion")?;
         // The talk camera's TARGET shape (FUN_1403be230 fallback) comes
@@ -215,6 +241,14 @@ impl NpcKind {
             .map_or([115., 90., 90.], |e| {
                 [e.position_height as f32, e.radius as f32, e.height as f32]
             });
+        let look = collision
+            .iter()
+            .find(|e| e.kind == LOOK_SHAPE && e.bone >= 0)
+            .map(|e| LookShape {
+                bone: e.bone as usize,
+                yaw: (e.radius as f32).to_radians(),
+                pitch: (e.height as f32).to_radians(),
+            });
         let look_limit = collision
             .iter()
             .find(|e| e.kind == LOOK_SHAPE)
@@ -230,6 +264,7 @@ impl NpcKind {
             },
             model,
             target,
+            look,
             body,
         })
     }
@@ -655,6 +690,13 @@ pub struct FieldNpc {
     partner_position: Vec3,
     /// The partner still points at this NPC and is not talking.
     partner_active: bool,
+    /// Head look-at: weight 0..1 (ramps over 20 ticks) and the current
+    /// yaw/pitch offsets from the body, rate limited 5 and 3 degrees/tick.
+    look_weight: f32,
+    look_yaw: f32,
+    look_pitch: f32,
+    /// Vertex positions with the head turned (None: the cached frame).
+    pub look_positions: Option<Vec<Vec3>>,
     cooldown: f32,
     current_zone: Option<usize>,
     act: Act,
@@ -758,6 +800,10 @@ impl FieldNpc {
             partner: None,
             partner_position: Vec3::ZERO,
             partner_active: false,
+            look_weight: 0.,
+            look_yaw: 0.,
+            look_pitch: 0.,
+            look_positions: None,
             cooldown: 0.,
             current_zone: None,
             act: if fixed { Act::Fixed(0) } else { Act::Static },
@@ -1217,6 +1263,96 @@ impl FieldNpc {
             && !matches!(self.act, Act::Fixed(_))
     }
 
+    /// look_start .. look_end spans: the look act and the encounter's
+    /// face/hold phases (npc-01 section 2.4).
+    fn look_wanted(&self) -> bool {
+        matches!(
+            self.act,
+            Act::Look(_) | Act::Encounter(Phase::Face(_)) | Act::Encounter(Phase::Hold(_))
+        )
+    }
+
+    /// The head look-at for this tick (FUN_1403e4d80 / FUN_1403e5000 and
+    /// the anb evaluator's look branch, look-02): ramps the weight,
+    /// limits the aim to the type-20 shape's yaw/pitch at 5 and 3 degrees
+    /// per tick, and re-evaluates the pose with the head bone turned.
+    pub fn update_look(&mut self, kind: &NpcKind, sora: Vec3) {
+        self.look_positions = None;
+        let Some(shape) = kind.look else { return };
+        // Only while idling or turning in place (range trigger 0x20).
+        let allowed = matches!(self.pose, Pose::Idle | Pose::Turn);
+        let target = if allowed && self.look_wanted() {
+            1.
+        } else {
+            0.
+        };
+        self.look_weight = if !allowed {
+            0.
+        } else if target > self.look_weight {
+            (self.look_weight + 1. / 20.).min(1.)
+        } else {
+            (self.look_weight - 1. / 20.).max(0.)
+        };
+        if self.look_weight <= 0. && self.look_yaw == 0. && self.look_pitch == 0. {
+            return;
+        }
+        let anim = match self.pose {
+            Pose::Turn => kind.anims.turn.as_ref().unwrap_or(&kind.anims.idle),
+            _ => &kind.anims.idle,
+        };
+        let Some(src) = &anim.source else { return };
+        let w = (1. - (std::f32::consts::PI * self.look_weight).cos()) / 2.;
+        let key = src.frame_start + self.frame as f32 / src.scale;
+        let inverse = Quat::from_rotation_y(-self.yaw);
+        let head = sora + Vec3::Y * SORA_OBJ[2];
+        let (yaw_now, pitch_now) = (self.look_yaw, self.look_pitch);
+        let desired = std::cell::Cell::new(None);
+        let position = self.position;
+        let result = kind.model.skinning.sample_evaluated_look(
+            &src.motion.motion,
+            key,
+            shape.bone,
+            |origin| {
+                let origin = Vec3::from_array(origin);
+                let d = inverse * (head - position) - origin;
+                let horizontal = d.x.hypot(d.z);
+                desired.set(Some((d.x.atan2(d.z), d.y.atan2(horizontal))));
+                let dist = d.length().max(1.);
+                // The stored point: shape centre + clamped direction.
+                let dir = Vec3::new(
+                    pitch_now.cos() * yaw_now.sin(),
+                    pitch_now.sin(),
+                    pitch_now.cos() * yaw_now.cos(),
+                );
+                Some(((origin + dir * dist).to_array(), w))
+            },
+        );
+        // Step the aim toward the clamped target for the next tick.
+        if let Some((yaw, pitch)) = desired.get() {
+            let (yaw, pitch) = if self.look_weight > 0. && target > 0. {
+                (
+                    yaw.clamp(-shape.yaw, shape.yaw),
+                    pitch.clamp(-shape.pitch, shape.pitch),
+                )
+            } else {
+                (0., 0.)
+            };
+            const YAW_RATE: f32 = 0.087_266_46;
+            const PITCH_RATE: f32 = 0.052_359_88;
+            self.look_yaw += (yaw - self.look_yaw).clamp(-YAW_RATE, YAW_RATE);
+            self.look_pitch += (pitch - self.look_pitch).clamp(-PITCH_RATE, PITCH_RATE);
+        }
+        if let Ok((pose, evaluated)) = result {
+            let r = Vec3::from_array(evaluated.root_translation);
+            self.look_positions = Some(
+                pose.position_bits
+                    .iter()
+                    .map(|p| Vec3::from_array(p.map(f32::from_bits)) - r)
+                    .collect(),
+            );
+        }
+    }
+
     fn facing(&self) -> Vec3 {
         Vec3::new(self.yaw.sin(), 0., self.yaw.cos())
     }
@@ -1360,6 +1496,7 @@ mod tests {
             frames: vec![vec![Vec3::ZERO]; frames],
             loop_start: 0,
             bones: vec![None; frames],
+            source: None,
             travel,
         };
         let kind = Anims {
@@ -1390,6 +1527,10 @@ mod tests {
             partner: None,
             partner_position: Vec3::ZERO,
             partner_active: false,
+            look_weight: 0.,
+            look_yaw: 0.,
+            look_pitch: 0.,
+            look_positions: None,
             cooldown: 0.,
             current_zone: None,
             act: Act::Path,
@@ -1440,6 +1581,7 @@ mod walk_tests {
             frames: vec![vec![Vec3::ZERO]; frames],
             loop_start: 0,
             bones: vec![None; frames],
+            source: None,
             travel,
         };
         let anims = Anims {

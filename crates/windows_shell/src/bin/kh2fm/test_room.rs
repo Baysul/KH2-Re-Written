@@ -541,6 +541,60 @@ struct UvScroll {
     scale: [f32; 2],
 }
 
+/// TEXA workers of the current area (draw-02 section 1): frame scripts
+/// that swap sprites into an environment's texture.
+#[derive(Resource)]
+struct TexaWorkers {
+    list: Vec<TexaWorker>,
+    last_tick: u64,
+}
+
+struct TexaWorker {
+    image: Handle<Image>,
+    texa: windows_shell::room::Texa,
+    /// Crop origin of the environment's cropped copy.
+    origin: [u32; 2],
+    player: windows_shell::room::TexaPlayer,
+    shown: Option<usize>,
+}
+
+fn texa_tick(
+    game: Res<Game>,
+    workers: Option<ResMut<TexaWorkers>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(mut workers) = workers else { return };
+    let ticks = if workers.last_tick == u64::MAX {
+        1
+    } else {
+        game.tick.saturating_sub(workers.last_tick).min(4)
+    };
+    workers.last_tick = game.tick;
+    for w in &mut workers.list {
+        let mut sprite = None;
+        for _ in 0..ticks {
+            sprite = w.player.tick(&w.texa);
+        }
+        if ticks == 0 || sprite.is_none() || sprite == w.shown {
+            continue;
+        }
+        if let Some(mut image) = images.get_mut(&w.image) {
+            let (width, height) = (image.width(), image.height());
+            if let Some(data) = image.data.as_mut() {
+                windows_shell::room::texa_upload(
+                    &w.texa,
+                    sprite.unwrap_or(0),
+                    w.origin,
+                    width,
+                    height,
+                    data,
+                );
+            }
+            w.shown = sprite;
+        }
+    }
+}
+
 /// UV scroll of the map's chunks: counts accumulate per tick as
 /// `(int)speed`, the offset is `((ratio * acc) >> 16 & 0xfff) / 4096`.
 fn uv_scroll_tick(
@@ -3161,6 +3215,7 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
         }
         let kind = &source.kinds[n.kind];
         n.tick(&kind.anims, sora, is_target, &mut random);
+        n.update_look(kind, sora);
     }
 }
 
@@ -3262,7 +3317,10 @@ fn field_npc_present(
             continue;
         };
         let kind = &kinds[n.kind];
-        let frame = n.frame_positions(&kind.anims);
+        let frame = n
+            .look_positions
+            .as_deref()
+            .unwrap_or_else(|| n.frame_positions(&kind.anims));
         let positions: Vec<[f32; 3]> = kind.model.parts[part.ordinal]
             .indices
             .iter()
@@ -3287,6 +3345,7 @@ fn spawn_room(
     show_collision: bool,
     bg_mask: u64,
 ) {
+    let mut texa_workers = Vec::new();
     // The area's type-14 record: screen clear colour and fog (draw-01 §8.1).
     windows_shell::fog::set_current(room.environment.map(|e| e.fog));
     if let Some(e) = &room.environment {
@@ -3315,6 +3374,21 @@ fn spawn_room(
                 windows_shell::room::region_image(w, h, px, r.wrap, images)
             })
             .collect();
+        for t in &part.texa {
+            if let Some(i) = part
+                .textures
+                .iter()
+                .position(|x| x.environment_ordinal == t.env)
+            {
+                texa_workers.push(TexaWorker {
+                    image: handles[i].clone(),
+                    texa: t.clone(),
+                    origin: [regions[i].crop[0], regions[i].crop[1]],
+                    player: windows_shell::room::TexaPlayer::default(),
+                    shown: None,
+                });
+            }
+        }
         for (chunk_index, chunk) in part.model.chunks.iter().enumerate() {
             if chunk.indices.is_empty() {
                 continue;
@@ -3433,6 +3507,13 @@ fn spawn_room(
             colors.push(color);
         }
     }
+    if !texa_workers.is_empty() {
+        eprintln!("{} TEXA texture animation(s) running", texa_workers.len());
+    }
+    commands.insert_resource(TexaWorkers {
+        list: texa_workers,
+        last_tick: u64::MAX,
+    });
     let corners = positions.len();
     commands.spawn((
         CollisionOverlay,
@@ -7063,6 +7144,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 bg_visibility,
                 area_music,
                 uv_scroll_tick,
+                texa_tick,
                 bob_present,
                 field_npc_spawn_new,
                 field_npc_present,

@@ -28,6 +28,179 @@ pub struct Room {
     /// UV-scroll records of the texture footer: (index, u speed, v speed)
     /// in counts per tick (draw-01 §7).
     pub uv_scroll: Vec<(u32, f32, f32)>,
+    /// TEXA texture animations of the bank (draw-02 section 1).
+    pub texa: Vec<Texa>,
+}
+
+/// A TEXA chunk: sprites of a sheet swapped into an environment's texture
+/// by a frame script (draw-02 section 1.1).
+#[derive(Clone, Debug)]
+pub struct Texa {
+    /// Target environment ordinal.
+    pub env: usize,
+    /// Destination in the environment's full texture and sprite size.
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    /// RGBA sprites (`w * h * 4` bytes each).
+    pub sprites: Vec<Vec<u8>>,
+    /// Frames from the default group: ctrl, duration min, max, sprite.
+    pub frames: Vec<[u16; 4]>,
+    /// Index of the group's first frame.
+    pub start: usize,
+}
+
+impl Texa {
+    /// Reads a TEXA payload; the sprites decode through `clut` (RGBA of
+    /// the environment's palette).
+    pub fn read(p: &[u8], clut: &[u8]) -> Option<Self> {
+        let u16_at = |o: usize| Some(u16::from_le_bytes(p.get(o..o + 2)?.try_into().ok()?));
+        let u32_at = |o: usize| Some(u32::from_le_bytes(p.get(o..o + 4)?.try_into().ok()?));
+        let env = u16_at(2)? as usize;
+        let stride = u16_at(4)? as usize;
+        let bpp = u16_at(6)? as usize;
+        let sprite_count = u16_at(0xe)? as usize;
+        let (x, y) = ((u16_at(0x10)? & 0xfff) as u32, u16_at(0x12)? as u32);
+        let (w, h) = (u16_at(0x14)? as u32, u16_at(0x16)? as u32);
+        let group_table = u32_at(0x1c)? as usize;
+        let pixel_off = u32_at(0x20)? as usize;
+        let default_group = u32_at(0x24)? as usize;
+        if !matches!(bpp, 4 | 8) || w == 0 || h == 0 || sprite_count == 0 || sprite_count > 64 {
+            return None;
+        }
+        let bytes_per_sprite = h as usize * bpp * w as usize / 8;
+        let mut sprites = Vec::with_capacity(sprite_count);
+        for s in 0..sprite_count {
+            let raw =
+                p.get(pixel_off + s * bytes_per_sprite..pixel_off + (s + 1) * bytes_per_sprite)?;
+            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+            for i in 0..(w * h) as usize {
+                let index = if bpp == 8 {
+                    raw[i] as usize
+                } else {
+                    // Linear raster, first texel in the low nibble [I].
+                    ((raw[i / 2] >> if i % 2 == 0 { 0 } else { 4 }) & 15) as usize
+                };
+                rgba.extend_from_slice(clut.get(index * 4..index * 4 + 4)?);
+            }
+            sprites.push(rgba);
+        }
+        let first = u32_at(group_table + default_group * 4)? as usize;
+        let frame_size = 8 + 2 * stride;
+        // Frames run from the group start up to the pixel data.
+        let count = pixel_off.checked_sub(first)? / frame_size;
+        let frames = (0..count)
+            .map(|i| {
+                let o = first + i * frame_size;
+                Some([u16_at(o)?, u16_at(o + 2)?, u16_at(o + 4)?, u16_at(o + 6)?])
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!frames.is_empty()).then_some(Texa {
+            env,
+            x,
+            y,
+            w,
+            h,
+            sprites,
+            frames,
+            start: 0,
+        })
+    }
+}
+
+/// One TEXA worker's frame state machine (FUN_1401c0310).
+#[derive(Clone, Debug, Default)]
+pub struct TexaPlayer {
+    cur: Option<usize>,
+    started: bool,
+    skip: bool,
+    elapsed: f32,
+    dur: f32,
+}
+
+impl TexaPlayer {
+    /// One 60 Hz tick; returns the sprite index to show while the current
+    /// frame displays one (ctrl nibble 0).
+    pub fn tick(&mut self, t: &Texa) -> Option<usize> {
+        if !self.started {
+            self.started = true;
+            self.skip = true;
+            self.elapsed = 0.;
+            self.cur = Some(t.start);
+            self.dur = t.frames[t.start][1] as f32;
+        }
+        let jump = |c: u16| ((c as i16) >> 4) as isize;
+        if let Some(c) = self.cur {
+            let ctrl = t.frames[c][0];
+            if ctrl & 0xf == 3 {
+                return None;
+            }
+            if ctrl & 0xf == 2 {
+                self.cur = (c as isize + jump(ctrl)).try_into().ok();
+            }
+        }
+        if self.skip {
+            self.skip = false;
+        } else {
+            self.elapsed += 1.;
+            while self.dur <= self.elapsed {
+                self.elapsed -= self.dur;
+                let Some(c) = self.cur else { break };
+                let mut next = c + 1;
+                if next >= t.frames.len() {
+                    return None;
+                }
+                let n = t.frames[next][0];
+                if n & 0xf == 2 {
+                    let Ok(j) = usize::try_from(next as isize + jump(n)) else {
+                        return None;
+                    };
+                    next = j;
+                } else if n & 0xf == 3 {
+                    self.cur = Some(next);
+                    return None;
+                }
+                self.cur = Some(next);
+                let f = t.frames.get(next)?;
+                self.dur = f[1] as f32;
+            }
+        }
+        let c = self.cur?;
+        let f = t.frames.get(c)?;
+        (f[0] & 0xf == 0).then_some(f[3] as usize)
+    }
+}
+
+/// Copies sprite `s` into a cropped environment image with the exe's
+/// 1-texel border rule (rows 0 and h-1 keep the static texture).
+pub fn texa_upload(
+    t: &Texa,
+    s: usize,
+    crop_origin: [u32; 2],
+    width: u32,
+    height: u32,
+    data: &mut [u8],
+) {
+    let Some(sprite) = t.sprites.get(s) else {
+        return;
+    };
+    let (dx, dy) = (
+        t.x.saturating_sub(crop_origin[0]),
+        t.y.saturating_sub(crop_origin[1]),
+    );
+    for row in 1..t.h.saturating_sub(1) {
+        let y = dy + row;
+        if y >= height {
+            break;
+        }
+        let w = t.w.min(width.saturating_sub(dx)) as usize;
+        let src = (row * t.w) as usize * 4;
+        let dst = ((y * width + dx) as usize) * 4;
+        if dst + w * 4 <= data.len() {
+            data[dst..dst + w * 4].copy_from_slice(&sprite[src..src + w * 4]);
+        }
+    }
 }
 
 /// A texture environment's CLAMP-register region (draw-01 §4.6): the exe
@@ -359,10 +532,22 @@ pub fn load_room_archive(
         let textures = model_texture_pixels::decode_images(bank)?;
         let mut regions = std::collections::HashMap::new();
         let mut uv_scroll = Vec::new();
+        let mut texa = Vec::new();
         if let Ok(layout) = package_reader::model_texture::read_layout(bank) {
             for f in &layout.footer {
                 if let Some([i, u, v]) = f.uv_scroll_words {
                     uv_scroll.push((i, f32::from_bits(u), f32::from_bits(v)));
+                }
+                if &f.tag == b"TEXA"
+                    && let Some(payload) = bank.get(f.offset + 8..f.offset + 8 + f.length)
+                    && payload.len() >= 4
+                {
+                    let env = u16::from_le_bytes([payload[2], payload[3]]) as usize;
+                    if let Some(t) = textures.iter().find(|t| t.environment_ordinal == env)
+                        && let Some(t) = Texa::read(payload, &t.clut_rgba)
+                    {
+                        texa.push(t);
+                    }
                 }
             }
             for (ordinal, env) in layout.environments.iter().enumerate() {
@@ -389,6 +574,7 @@ pub fn load_room_archive(
             chunk_bits,
             regions,
             uv_scroll,
+            texa,
         });
     }
     if rooms.is_empty() {
@@ -568,4 +754,58 @@ pub fn arena(half_size: f32, wall_height: f32, tile: f32) -> (LoadedRoom, ArenaM
             texture: (size, size, rgba),
         },
     )
+}
+
+#[cfg(test)]
+mod texa_tests {
+    use super::*;
+
+    fn texa(frames: Vec<[u16; 4]>) -> Texa {
+        Texa {
+            env: 0,
+            x: 2,
+            y: 1,
+            w: 2,
+            h: 4,
+            sprites: vec![vec![1; 2 * 4 * 4], vec![2; 2 * 4 * 4]],
+            frames,
+            start: 0,
+        }
+    }
+
+    #[test]
+    fn frames_hold_then_show_sprites_and_jump_back() {
+        // hold 2, sprite 0 for 2, sprite 1 for 2, jump back 3 frames.
+        let t = texa(vec![
+            [1, 2, 2, 0],
+            [0, 2, 2, 0],
+            [0, 2, 2, 1],
+            [0xfff2, 0, 0, 0],
+        ]);
+        // 0xfff2: ctrl nibble 2, jump (i16)0xfff2 >> 4 = -1 frame.
+        let mut p = TexaPlayer::default();
+        let mut seen = Vec::new();
+        for _ in 0..14 {
+            seen.push(p.tick(&t));
+        }
+        assert_eq!(seen[0], None);
+        assert!(seen.contains(&Some(0)));
+        assert!(seen.contains(&Some(1)));
+        // The cycle repeats sprite 1 after the jump.
+        assert_eq!(seen.last().copied().flatten(), Some(1));
+    }
+
+    #[test]
+    fn upload_keeps_the_border_rows() {
+        let t = texa(vec![[0, 1, 1, 1]]);
+        let (w, h) = (4u32, 6u32);
+        let mut data = vec![9u8; (w * h * 4) as usize];
+        texa_upload(&t, 1, [0, 0], w, h, &mut data);
+        let px = |x: u32, y: u32| data[((y * w + x) * 4) as usize];
+        assert_eq!(px(2, 1), 9, "row 0 of the sprite stays");
+        assert_eq!(px(2, 2), 2);
+        assert_eq!(px(3, 3), 2);
+        assert_eq!(px(2, 4), 9, "last sprite row stays");
+        assert_eq!(px(1, 2), 9, "outside the rectangle");
+    }
 }
