@@ -18,9 +18,18 @@ PASS fmt; PASS clippy (warnings denied, workspace); PASS workspace tests (includ
 
 ## Uncertainty
 
-- A new user has no launch files (`launch.json`, `launch-title.json`, `launch-talk.json` and their configs), so the title screen, test room and Twilight Town tests fail with "launch file is missing"; only the cutscene runs. The guide's step 4 assumes those files exist. Generating them from a validated install is the next task.
+- Superseded by the follow-up below: a new user had no launch files, so only the cutscene ran.
 - "Walk" on a controller is the stick's analogue reach; the walk threshold is not restated here.
+
+## Follow-up: test configs for a fresh install
+
+A new player has none of the private launch files (`launch.json`, `launch-title.json`, `launch-talk.json`) or the configs they name. Every installed file the owner's working configs (`title-01`, `test-room-arena-07`, `test-room-talk-03` and the four model selections) point at was matched to its path name by MD5 against the HED keys (for example `obj/P_EX100.mset`, `menu/us/pause.2ld`, `field2d/us/zz0command.2dd`).
+
+- `launcher/test_configs.rs`: those configs (a JSON string) with each file written as `{"$file": "<path name>"}` and their test-room values unchanged. It holds names and test-room numbers only, no game bytes.
+- `install::test_args`: a developer's own launch file for this build still wins. Without one, `made_config` binds the folder's manifest (`ProbeSource::bind`), opens the six checked indexes (`named::Library`), fills in index, ordinal and digest for each name (the first package holding it), and writes `auto-*.json` with the build's identity into the launcher's data folder. Title screen, Test room (room and talk combined) and Twilight Town use them; each program still admits the source itself when it starts.
+- Check: on the installed build, the made configs equal the owner's working configs field for field, except the selection file names. Before the first-package rule, `se/se000.win32.scd` resolved to the sixth package's copy; it now matches. The combined play config equals the owner's `test-room-combined.json`.
+- NOT RUN: an interactive start of each test from an empty data folder (the configs are equal to ones that run).
 
 ## Verdict / next
 
-PASS for the guide and folder help (local checks). Next: create the test configs for a fresh install so the guide's path works for new players.
+PASS for the guide, folder help and made configs (local checks). Next: an interactive first-run check from an empty data folder.

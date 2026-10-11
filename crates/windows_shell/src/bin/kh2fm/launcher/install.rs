@@ -6,6 +6,7 @@
 //! The launcher's check only decides what to offer; every program still
 //! admits its source itself (`ProbeSource::bind_session` +
 //! `verify_session`) when it starts.
+use super::test_configs::TEST_CONFIGS;
 use serde::{Deserialize, Serialize};
 use source_identity::{KH2_EXECUTABLE, SourceManifest};
 use std::fs::{self, File, OpenOptions};
@@ -321,6 +322,81 @@ fn config_identity(path: &Path) -> Option<String> {
     Some(v.get("source_content_identity")?.as_str()?.to_owned())
 }
 
+/// Where a named file is: index, ordinal and the name's MD5 digest.
+type FindFile<'a> = &'a dyn Fn(&str) -> Option<(String, usize, [u8; 16])>;
+
+/// Replaces every `{"$file": name}` with where `name` is: the index, the
+/// ordinal and the name's MD5 digest (the HED key).
+fn fill_files(v: &mut serde_json::Value, find: FindFile) -> Result<(), String> {
+    match v {
+        serde_json::Value::Object(o) => {
+            if let Some(name) = o.remove("$file") {
+                let name = name
+                    .as_str()
+                    .ok_or("A file name in the test configs is not text.")?;
+                let (index, ordinal, hash) = find(name)
+                    .ok_or_else(|| format!("{name} is not in the installed game files."))?;
+                o.insert("index".into(), index.into());
+                o.insert("ordinal".into(), ordinal.into());
+                o.insert("name_hash".into(), hash.to_vec().into());
+            } else {
+                for x in o.values_mut() {
+                    fill_files(x, find)?;
+                }
+            }
+        }
+        serde_json::Value::Array(a) => {
+            for x in a {
+                fill_files(x, find)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Writes every config in TEST_CONFIGS for build `identity` as
+/// `auto-<key>.json` in `dir`.
+fn write_made_configs(dir: &Path, identity: &str, find: FindFile) -> Result<(), String> {
+    let mut all: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(TEST_CONFIGS).map_err(|e| format!("test configs: {e}"))?;
+    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for (key, config) in &mut all {
+        fill_files(config, find)?;
+        config
+            .as_object_mut()
+            .ok_or("A test config is not an object.")?
+            .insert("source_content_identity".into(), identity.into());
+        let path = dir.join(format!("auto-{key}.json"));
+        let bytes = serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?;
+        fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// The made config `key` for `b`, written first if missing or for another
+/// build. The names are looked up in the bound folder's checked indexes.
+fn made_config(dir: &Path, b: &Bound, key: &str) -> Result<PathBuf, String> {
+    let path = dir.join(format!("auto-{key}.json"));
+    if config_identity(&path).as_deref() == Some(b.identity.as_str()) {
+        return Ok(path);
+    }
+    let fail = |e: Box<dyn std::error::Error>| format!("The game files could not be read: {e}");
+    let source = package_reader::probe::ProbeSource::bind(&b.folder, &b.manifest).map_err(fail)?;
+    let library = package_reader::named::Library::open(&source).map_err(fail)?;
+    // The first package holding the name, as in the configs these were
+    // made from (se/se000 is also in the sixth package).
+    let find = |name: &str| {
+        library
+            .find_all(name)
+            .into_iter()
+            .next()
+            .map(|f| (f.index.to_owned(), f.ordinal, f.name_hash))
+    };
+    write_made_configs(dir, &b.identity, &find)?;
+    Ok(path)
+}
+
 /// One entry of the test list.
 pub struct Test {
     pub name: &'static str,
@@ -537,26 +613,36 @@ pub fn test_args(dir: &Path, program: &str, b: &Bound) -> Result<Vec<String>, St
             b.manifest.to_string_lossy().into_owned(),
         ]);
     }
+    // A launch file of this build (a developer's own config) wins; without
+    // one the configs are made from the file names in TEST_CONFIGS.
+    let own = |name: &str| {
+        launch_file(dir, name)
+            .ok()
+            .map(|l| (dir.join(&l.config), l.options))
+            .filter(|(config, _)| config_identity(config).as_deref() == Some(b.identity.as_str()))
+    };
+    let made = |key: &str| made_config(dir, b, key);
     let (command, config, options) = match program {
         "title" => {
-            let l = launch_file(dir, "launch-title")?;
-            ("title", dir.join(l.config), l.options)
+            let (config, options) = match own("launch-title") {
+                Some(own) => own,
+                None => (made("title")?, Vec::new()),
+            };
+            ("title", config, options)
         }
         "play" => {
-            let (arena, talk) = (
-                launch_file(dir, "launch")?,
-                launch_file(dir, "launch-talk")?,
-            );
-            let config = combined_room_config(&dir.join(arena.config), &dir.join(talk.config))?;
-            ("room", config, arena.options)
+            let (arena, talk, options) = match (own("launch"), own("launch-talk")) {
+                (Some((arena, options)), Some((talk, _))) => (arena, talk, options),
+                _ => (made("room")?, made("talk")?, Vec::new()),
+            };
+            ("room", combined_room_config(&arena, &talk)?, options)
         }
         "tt" => {
-            let arena = launch_file(dir, "launch")?;
-            (
-                "room",
-                tt_room_config(&dir.join(arena.config))?,
-                arena.options,
-            )
+            let (arena, options) = match own("launch") {
+                Some(own) => own,
+                None => (made("room")?, Vec::new()),
+            };
+            ("room", tt_room_config(&arena)?, options)
         }
         other => return Err(format!("unknown test {other}")),
     };
@@ -671,6 +757,55 @@ mod tests {
         let second = f.0.join("steamapps").join("common").join("Other");
         fs::write(second.join(KH2_EXECUTABLE), b"synthetic").unwrap();
         assert_eq!(find_game_below(&f.0), None);
+    }
+
+    #[test]
+    fn made_configs_name_every_file() {
+        let f = Fixture::new();
+        // Synthetic lookup: every name is found, keyed by its own digest.
+        let find = |name: &str| {
+            Some((
+                "Image/dt/kh2_first.hed".to_owned(),
+                name.len(),
+                package_reader::named::md5(name.as_bytes()),
+            ))
+        };
+        write_made_configs(&f.0, "synthetic-identity", &find).unwrap();
+        for key in ["title", "room", "talk"] {
+            let path = f.0.join(format!("auto-{key}.json"));
+            assert_eq!(
+                config_identity(&path).as_deref(),
+                Some("synthetic-identity")
+            );
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(!text.contains("$file"), "{key}");
+            // Model selections the config names were written beside it.
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            for sel in [
+                &v["actor_selection"],
+                &v["weapon_selection"],
+                &v["enemy"]["model_selection"],
+                &v["npc"]["model_selection"],
+            ] {
+                if let Some(name) = sel.as_str() {
+                    assert!(f.0.join(name).is_file(), "{name}");
+                }
+            }
+        }
+        let title: serde_json::Value =
+            serde_json::from_slice(&fs::read(f.0.join("auto-title.json")).unwrap()).unwrap();
+        let hash: Vec<u8> = serde_json::from_value(title["music"]["name_hash"].clone()).unwrap();
+        assert_eq!(
+            hash,
+            package_reader::named::md5(b"vagstream/Title.win32.scd")
+        );
+        // A name the install lacks is reported by name.
+        let err = write_made_configs(&f.0, "x", &|_: &str| None).unwrap_err();
+        assert!(err.contains("is not in the installed game files"), "{err}");
+        // The room and talk configs combine into the play config.
+        let combined =
+            combined_room_config(&f.0.join("auto-room.json"), &f.0.join("auto-talk.json"));
+        assert!(combined.is_ok(), "{combined:?}");
     }
 
     #[test]

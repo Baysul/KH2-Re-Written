@@ -21,7 +21,7 @@ cargo build --release -p windows_shell --bin kh2fm --locked
 target\release\kh2fm.exe
 ```
 
-The first launch opens a short quick start guide (F1 in the launcher brings it back). The launcher then finds your Steam install (or lets you browse to it), checks that it is a supported build, and offers the title screen and test room. Each launch re-checks your files.
+The first launch opens a short quick start guide (F1 in the launcher brings it back). The launcher then finds your Steam install (or lets you browse to it), checks that it is a supported build, makes the test configs from your installed files, and offers the title screen and test room. Each launch re-checks your files.
 
 Command-line runs also work:
 

@@ -11,6 +11,7 @@
 //! when the test closes.
 mod install;
 mod paint;
+mod test_configs;
 
 use bevy::app::AppExit;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
