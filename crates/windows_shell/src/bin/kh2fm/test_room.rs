@@ -1051,6 +1051,7 @@ struct Loaded {
     /// Keyblade items' models (the skateboard), and the room's own weapon.
     keyblades: crate::keyblade_board::Keyblades,
     weapon_model: String,
+    board_motion: Option<motion::SelectedMotion>,
     arena_mesh: Option<windows_shell::room::ArenaMesh>,
     actor: model_inspection::InspectionModel,
     weapon: model_inspection::InspectionModel,
@@ -2787,11 +2788,28 @@ fn load(
             Default::default()
         });
     eprintln!(
-        "Equipped Keyblade {KINGDOM_KEY:#x} model: {:?} (room weapon {})",
+        "Equipped Keyblade {KINGDOM_KEY:#x} model: {:?} (room weapon {}), motions {:?}",
         keyblades.model(KINGDOM_KEY),
-        config.object_model_name
+        config.object_model_name,
+        keyblades
+            .model(KINGDOM_KEY)
+            .and_then(|m| keyblades.animation(m)),
     );
+    let board_motion = config.weapon_motion_set.as_ref().and_then(|set| {
+        let selection = motion::MotionSetSelection {
+            index: set.index.clone(),
+            ordinal: set.ordinal,
+            name_hash: set.name_hash,
+            battle: true,
+            has_weapon: true,
+        };
+        motion::read_motion_ids(source, &selection, &[0])
+            .inspect_err(|e| eprintln!("Keyblade idle motion: {e}"))
+            .ok()?
+            .pop()
+    });
     Ok(Loaded {
+        board_motion,
         keyblades,
         weapon_model: config.object_model_name.clone(),
         room,
@@ -6864,18 +6882,48 @@ struct BoardModels {
     /// The room's own weapon model (the hand Keyblade's meshes serve it).
     hand: String,
     source: Arc<ProbeSource>,
-    /// Model name -> the model and its bind-pose vertices (None: unreadable).
-    models: HashMap<String, Option<(model_inspection::InspectionModel, Vec<Vec3>)>>,
+    /// The Keyblades' shared idle motion (W_EX010.mset motion 0: every
+    /// Keyblade model on the install uses that motion set), which swings the
+    /// keychain.
+    motion: Option<motion::SelectedMotion>,
+    /// Model name -> the board model (None: unreadable).
+    models: HashMap<String, Option<BoardModel>>,
     /// The model the spawned board shows.
     shown: Option<String>,
 }
+
+/// A Keyblade as the board: its model and its vertices for each 60 Hz frame
+/// of the idle motion (one bind-pose frame without a usable motion).
+struct BoardModel {
+    model: model_inspection::InspectionModel,
+    frames: Vec<Vec<Vec3>>,
+    loop_start: usize,
+}
+
+impl BoardModel {
+    fn frame(&self, tick: u64) -> &[Vec3] {
+        let n = self.frames.len() as u64;
+        let i = if tick < n {
+            tick
+        } else {
+            let start = (self.loop_start as u64).min(n - 1);
+            start + (tick - start) % (n - start)
+        };
+        &self.frames[i as usize]
+    }
+}
+
+/// One mesh of the board's Keyblade (its model part ordinal).
+#[derive(Component)]
+struct BoardPart(usize);
 
 /// `obj/<name>.mdlx` from whichever index holds it, with its vertices in
 /// its root joint's space (as the hand Keyblade's bind pose).
 fn read_board_model(
     source: &ProbeSource,
     name: &str,
-) -> Result<(model_inspection::InspectionModel, Vec<Vec3>), Box<dyn std::error::Error>> {
+    idle: Option<&motion::SelectedMotion>,
+) -> Result<BoardModel, Box<dyn std::error::Error>> {
     let hash = package_reader::name_hash::of_path(&format!("obj/{name}.mdlx"));
     for (index, _) in source_identity::required_files()
         .into_iter()
@@ -6906,7 +6954,35 @@ fn read_board_model(
             .iter()
             .map(|p| inverse.transform_point3(Vec3::from_array(p.map(f32::from_bits))))
             .collect();
-        return Ok((model, points));
+        // The idle motion's frames, as the hand Keyblade's (its posed
+        // vertices are in the grip joint's space).
+        let animated = idle.and_then(|idle| {
+            let (clip, key_start) = clip_for(idle).ok()?;
+            let frames = (0..=clip.end)
+                .map(|offset| {
+                    let (pose, _) = model
+                        .skinning
+                        .sample_evaluated(&idle.motion, (key_start + offset) as f32)
+                        .ok()?;
+                    Some(
+                        pose.position_bits
+                            .iter()
+                            .map(|p| Vec3::from_array(p.map(f32::from_bits)))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some((frames, clip.loop_start as usize))
+        });
+        let (frames, loop_start) = animated.unwrap_or_else(|| {
+            eprintln!("Keyblade board {name}: no idle motion, shown still");
+            (vec![points], 0)
+        });
+        return Ok(BoardModel {
+            model,
+            frames,
+            loop_start,
+        });
     }
     Err(format!("obj/{name}.mdlx is not in the install").into())
 }
@@ -6927,6 +7003,7 @@ fn skate_present(
     mut hand: Query<&mut Visibility, (With<WeaponRoot>, Without<SkateBoard>)>,
     camp: Option<Res<CampRes>>,
     mut board_models: ResMut<BoardModels>,
+    board_parts: Query<(&BoardPart, &Mesh3d)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut fog_materials: ResMut<Assets<FogMaterial>>,
@@ -6989,36 +7066,57 @@ fn skate_present(
         && let Ok((_, mut transform)) = boards.single_mut()
     {
         *transform = deck;
+        // The keychain: this tick's idle-motion frame.
+        if let Some(Some(b)) = board_models.models.get(&wanted)
+            && b.frames.len() > 1
+        {
+            let frame = b.frame(game.tick);
+            for (part, handle) in &board_parts {
+                let positions: Vec<[f32; 3]> = b.model.parts[part.0]
+                    .indices
+                    .iter()
+                    .filter_map(|&i| frame.get(i as usize).map(|v| v.to_array()))
+                    .collect();
+                if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+                }
+            }
+        }
         return;
     }
     let board = commands
         .spawn((SkateBoard, deck, Visibility::default()))
         .id();
-    if wanted != board_models.hand && !board_models.models.contains_key(&wanted) {
-        let model = read_board_model(&board_models.source, &wanted)
+    if !board_models.models.contains_key(&wanted) {
+        let model = read_board_model(&board_models.source, &wanted, board_models.motion.as_ref())
             .inspect_err(|e| eprintln!("Keyblade board {wanted}: {e}"))
             .ok();
         board_models.models.insert(wanted.clone(), model);
     }
     match board_models.models.get(&wanted).and_then(Option::as_ref) {
-        // Another Keyblade's own model.
-        Some((model, points)) => {
+        // The Keyblade's own model, its keychain swinging with the idle
+        // motion (placed by the first frame).
+        Some(b) => {
             let blade = commands
                 .spawn((
-                    crate::keyblade_board::deck_transform(points),
+                    crate::keyblade_board::deck_transform(&b.frames[0]),
                     Visibility::default(),
                     ChildOf(board),
                 ))
                 .id();
-            spawn_model(
+            for (ordinal, entity) in spawn_model(
                 &mut commands,
-                model,
-                points,
+                &b.model,
+                b.frame(game.tick),
                 blade,
                 &mut meshes,
                 &mut fog_materials,
                 &mut images,
-            );
+            ) {
+                if let Some(entity) = entity {
+                    commands.entity(entity).insert(BoardPart(ordinal));
+                }
+            }
         }
         // The room's own Keyblade: its hand meshes.
         None if !keyblade.is_empty() => {
@@ -8750,6 +8848,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             keyblades: loaded.keyblades,
             hand: loaded.weapon_model,
             source: board_source,
+            motion: loaded.board_motion,
             models: HashMap::new(),
             shown: None,
         })

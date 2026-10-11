@@ -21,6 +21,8 @@ const KEYBLADE: u8 = 2;
 #[derive(Default)]
 pub struct Keyblades {
     by_item: HashMap<u16, String>,
+    /// Model name -> its object entry's motion set name.
+    animations: HashMap<String, String>,
 }
 
 impl Keyblades {
@@ -55,7 +57,27 @@ impl Keyblades {
                 by_item.insert(item.id, String::from_utf8_lossy(&o.model_name).into_owned());
             }
         }
-        Ok(Self { by_item })
+        let animations = by_item
+            .values()
+            .filter_map(|name| {
+                let o = objects.iter().find(|o| o.model_name == name.as_bytes())?;
+                (!o.animation_name.is_empty()).then(|| {
+                    (
+                        name.clone(),
+                        String::from_utf8_lossy(&o.animation_name).into_owned(),
+                    )
+                })
+            })
+            .collect();
+        Ok(Self {
+            by_item,
+            animations,
+        })
+    }
+
+    /// The motion set named by the object entry of model `model`.
+    pub fn animation(&self, model: &str) -> Option<&str> {
+        self.animations.get(model).map(String::as_str)
     }
 
     /// The model name of the Keyblade item `item`.
@@ -97,28 +119,77 @@ fn went_set(went: &[u8], index: usize) -> Result<Vec<u32>, Box<dyn std::error::E
     (1..size).map(|i| word(went, (pointer + i) * 4)).collect()
 }
 
-/// The Keyblade laid flat as a deck, its own pose `points`: the longest
-/// extent along the board, the next across it, centred on the deck frame
-/// and scaled to `BOARD_LENGTH`.
+/// The principal axes of `points` (largest spread first), by power
+/// iteration on their covariance.
+fn principal_axes(points: &[Vec3]) -> [Vec3; 3] {
+    let n = points.len().max(1) as f32;
+    let mean = points.iter().copied().sum::<Vec3>() / n;
+    let mut c = Mat3::ZERO;
+    for &p in points {
+        let d = p - mean;
+        c += Mat3::from_cols(d * d.x, d * d.y, d * d.z);
+    }
+    let dominant = |m: Mat3, seed: Vec3| {
+        let mut v = seed;
+        for _ in 0..64 {
+            let next = m * v;
+            if next.length_squared() < 1e-20 {
+                break;
+            }
+            v = next.normalize();
+        }
+        v
+    };
+    let first = dominant(c, Vec3::new(0.577, 0.577, 0.577));
+    // Deflate, then take the strongest direction left, kept orthogonal.
+    let spread = (c * first).dot(first);
+    let rest = c - Mat3::from_cols(first * first.x, first * first.y, first * first.z) * spread;
+    let second = dominant(rest, first.any_orthonormal_vector());
+    let second = (second - first * second.dot(first)).normalize_or(first.any_orthonormal_vector());
+    [first, second, first.cross(second)]
+}
+
+/// The Keyblade laid flat as a deck, from its pose `points` in its grip
+/// joint's space: its long (principal) axis along the board with the key
+/// end (the end farthest from the grip) forward, its next axis across it,
+/// scaled to `BOARD_LENGTH`, and its top over the middle of the board
+/// (where the feet stand) at the deck's top, so the feet rest on it.
 pub fn deck_transform(points: &[Vec3]) -> Transform {
     if points.is_empty() {
         return Transform::IDENTITY;
     }
-    let (low, high) = points.iter().fold(
+    let [mut along, across, _] = principal_axes(points);
+    // The key end: the point farthest from the grip lies on the forward side.
+    let tip = points
+        .iter()
+        .copied()
+        .max_by(|a, b| a.length_squared().total_cmp(&b.length_squared()))
+        .unwrap_or(Vec3::ZERO);
+    if tip.dot(along) < 0. {
+        along = -along;
+    }
+    // Columns: where the board's X (across), Y (up) and Z (along) come from.
+    let up = along.cross(across);
+    let rotation = Quat::from_mat3(&Mat3::from_cols(across, up, along).transpose());
+    let local: Vec<Vec3> = points.iter().map(|&p| rotation * p).collect();
+    let (low, high) = local.iter().fold(
         (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
         |(l, h), &p| (l.min(p), h.max(p)),
     );
-    let size = high - low;
-    let mut axes = [(size.x, Vec3::X), (size.y, Vec3::Y), (size.z, Vec3::Z)];
-    axes.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let [(long, long_axis), (_, mid_axis), _] = axes;
-    // Columns: where the board's X (across), Y (up) and Z (along) come from.
-    let up = long_axis.cross(mid_axis);
-    let rotation = Quat::from_mat3(&Mat3::from_cols(mid_axis, up, long_axis).transpose());
+    let long = high.z - low.z;
     let scale = if long > 0. { BOARD_LENGTH / long } else { 1. };
     let centre = (low + high) / 2.;
+    // The board's top across its middle 60 %.
+    let half = long * 0.3;
+    let top = local
+        .iter()
+        .filter(|p| (p.z - centre.z).abs() <= half)
+        .map(|p| p.y)
+        .fold(f32::MIN, f32::max);
+    let top = if top.is_finite() { top } else { centre.y };
     Transform {
-        translation: rotation * (-centre * scale) + Vec3::Y * crate::skate::DECK_TOP,
+        translation: Vec3::new(-centre.x, -top, -centre.z) * scale
+            + Vec3::Y * crate::skate::DECK_TOP,
         rotation,
         scale: Vec3::splat(scale),
     }
@@ -143,13 +214,30 @@ mod tests {
     }
 
     #[test]
-    fn the_longest_extent_runs_along_the_board() {
-        // A blade along +Y, wider in X than in Z.
-        let points = [Vec3::new(-5., 0., -1.), Vec3::new(5., 100., 1.)];
-        let t = deck_transform(&points);
-        let tip = t.transform_point(Vec3::new(0., 100., 0.));
-        let hilt = t.transform_point(Vec3::new(0., 0., 0.));
-        assert!(((tip - hilt).length() - BOARD_LENGTH).abs() < 1e-3);
-        assert!((tip - hilt).normalize().z.abs() > 0.999);
+    fn the_key_end_points_forward_along_the_board() {
+        // A blade from the grip (origin) to its key end, a little wider in
+        // X than in Z; straight, then turned diagonally.
+        for tip_y in [100., -100.] {
+            let mut points = Vec::new();
+            for i in 0..=20 {
+                let y = tip_y * i as f32 / 20.;
+                points.extend([Vec3::new(-5., y, -1.), Vec3::new(5., y, 1.)]);
+            }
+            points.push(Vec3::new(0., tip_y, 0.));
+            for turn in [
+                Quat::IDENTITY,
+                Quat::from_rotation_z(0.6) * Quat::from_rotation_x(0.4),
+            ] {
+                let turned: Vec<Vec3> = points.iter().map(|&p| turn * p).collect();
+                let t = deck_transform(&turned);
+                let tip = t.transform_point(turn * Vec3::new(0., tip_y, 0.));
+                let grip = t.transform_point(Vec3::ZERO);
+                assert!(
+                    ((tip - grip).length() - BOARD_LENGTH).abs() < 0.5,
+                    "{tip} {grip}"
+                );
+                assert!((tip - grip).normalize().z > 0.999, "{tip} {grip}");
+            }
+        }
     }
 }
