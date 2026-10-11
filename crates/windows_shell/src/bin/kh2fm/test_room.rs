@@ -6898,7 +6898,13 @@ struct BoardModel {
     model: model_inspection::InspectionModel,
     frames: Vec<Vec<Vec3>>,
     loop_start: usize,
+    /// Its placement on the board frame and how far that raised it.
+    placement: Transform,
+    lift: f32,
 }
+
+/// The rider bone the board is drawn on (skate-sim's skeleton order).
+const BOARD_BONE: usize = 25;
 
 impl BoardModel {
     fn frame(&self, tick: u64) -> &[Vec3] {
@@ -6978,10 +6984,13 @@ fn read_board_model(
             eprintln!("Keyblade board {name}: no idle motion, shown still");
             (vec![points], 0)
         });
+        let (placement, lift) = crate::keyblade_board::deck_transform(&frames[0]);
         return Ok(BoardModel {
             model,
             frames,
             loop_start,
+            placement,
+            lift,
         });
     }
     Err(format!("obj/{name}.mdlx is not in the install").into())
@@ -7009,7 +7018,7 @@ fn skate_present(
     mut fog_materials: ResMut<Assets<FogMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    let Some(deck) = skate.deck() else {
+    let Some(physics_deck) = skate.deck() else {
         for (entity, _) in &boards {
             commands.entity(entity).despawn();
         }
@@ -7032,6 +7041,28 @@ fn skate_present(
     if let Ok(mut visibility) = hand.single_mut() {
         *visibility = Visibility::Hidden;
     }
+    // The board is drawn where Skate 3 draws it: on the rider's animated
+    // board bone (SKATEBOARD_ROOT, 25), which carries flips and shuvits; at
+    // rest it coincides with the physics deck.
+    let deck = skate
+        .rider()
+        .and_then(|(root, bones, rest)| {
+            let (now, rest) = (bones.get(BOARD_BONE)?, rest.get(BOARD_BONE)?);
+            let turn = now.to_scale_rotation_translation().1
+                * rest.to_scale_rotation_translation().1.inverse();
+            Some(Transform {
+                translation: root.transform_point(now.w_axis.truncate()),
+                rotation: (root.rotation * turn).normalize(),
+                scale: Vec3::ONE,
+            })
+        })
+        .unwrap_or(physics_deck);
+    // How far the board was raised to clear the ground: Sora rises with it.
+    let lift = board_models
+        .models
+        .get(&wanted)
+        .and_then(Option::as_ref)
+        .map_or(0., |b| b.lift);
     // With the rider retarget Sora takes the rider's root and pose;
     // otherwise he stands sideways on the deck in his current pose.
     let posed = sora.as_deref().and_then(|s| {
@@ -7043,7 +7074,10 @@ fn skate_present(
     });
     if let Ok(mut root) = roots.single_mut() {
         match &posed {
-            Some((rider, _)) => *root = *rider,
+            Some((rider, _)) => {
+                *root = *rider;
+                root.translation += deck.rotation * Vec3::Y * lift;
+            }
             None => {
                 root.translation =
                     deck.translation + deck.rotation * Vec3::Y * crate::skate::DECK_TOP;
@@ -7098,11 +7132,7 @@ fn skate_present(
         // motion (placed by the first frame).
         Some(b) => {
             let blade = commands
-                .spawn((
-                    crate::keyblade_board::deck_transform(&b.frames[0]),
-                    Visibility::default(),
-                    ChildOf(board),
-                ))
+                .spawn((b.placement, Visibility::default(), ChildOf(board)))
                 .id();
             for (ordinal, entity) in spawn_model(
                 &mut commands,
@@ -7122,7 +7152,7 @@ fn skate_present(
         None if !keyblade.is_empty() => {
             let blade = commands
                 .spawn((
-                    crate::keyblade_board::deck_transform(&game.weapon_display),
+                    crate::keyblade_board::deck_transform(&game.weapon_display).0,
                     Visibility::default(),
                     ChildOf(board),
                 ))

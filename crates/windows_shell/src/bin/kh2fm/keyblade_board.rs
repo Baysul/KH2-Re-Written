@@ -10,6 +10,12 @@ use bevy::prelude::*;
 use package_reader::{item_table, objentry::ObjectEntry};
 use std::collections::HashMap;
 
+/// The ground below the board frame (scene units): Skate 3's deck frame
+/// rides 8.7 units above the floor (measured on the test room's floor).
+const GROUND: f32 = -8.7;
+/// Clearance kept between the board's lowest point and the ground.
+const CLEARANCE: f32 = 0.5;
+
 /// Board length in scene units (test-room choice: a 1.4 m longboard, so
 /// the rider's feet fit; the Kingdom Key is 116 units long as modelled).
 const BOARD_LENGTH: f32 = 140.;
@@ -153,10 +159,13 @@ fn principal_axes(points: &[Vec3]) -> [Vec3; 3] {
 /// joint's space: its long (principal) axis along the board with the key
 /// end (the end farthest from the grip) forward, its next axis across it,
 /// scaled to `BOARD_LENGTH`, and its top over the middle of the board
-/// (where the feet stand) at the deck's top, so the feet rest on it.
-pub fn deck_transform(points: &[Vec3]) -> Transform {
+/// (where the feet stand) at the deck's top, so the feet rest on it. Where
+/// the Keyblade then reaches below the ground (a guard, the keychain), the
+/// board is raised clear and the returned lift says how far the rider must
+/// rise with it.
+pub fn deck_transform(points: &[Vec3]) -> (Transform, f32) {
     if points.is_empty() {
-        return Transform::IDENTITY;
+        return (Transform::IDENTITY, 0.);
     }
     let [mut along, across, _] = principal_axes(points);
     // The key end: the point farthest from the grip lies on the forward side.
@@ -187,12 +196,15 @@ pub fn deck_transform(points: &[Vec3]) -> Transform {
         .map(|p| p.y)
         .fold(f32::MIN, f32::max);
     let top = if top.is_finite() { top } else { centre.y };
-    Transform {
+    let lowest = (low.y - top) * scale + crate::skate::DECK_TOP;
+    let lift = (GROUND + CLEARANCE - lowest).max(0.);
+    let transform = Transform {
         translation: Vec3::new(-centre.x, -top, -centre.z) * scale
-            + Vec3::Y * crate::skate::DECK_TOP,
+            + Vec3::Y * (crate::skate::DECK_TOP + lift),
         rotation,
         scale: Vec3::splat(scale),
-    }
+    };
+    (transform, lift)
 }
 
 #[cfg(test)]
@@ -229,7 +241,7 @@ mod tests {
                 Quat::from_rotation_z(0.6) * Quat::from_rotation_x(0.4),
             ] {
                 let turned: Vec<Vec3> = points.iter().map(|&p| turn * p).collect();
-                let t = deck_transform(&turned);
+                let (t, _) = deck_transform(&turned);
                 let tip = t.transform_point(turn * Vec3::new(0., tip_y, 0.));
                 let grip = t.transform_point(Vec3::ZERO);
                 assert!(
@@ -239,5 +251,23 @@ mod tests {
                 assert!((tip - grip).normalize().z > 0.999, "{tip} {grip}");
             }
         }
+    }
+
+    #[test]
+    fn a_board_reaching_below_the_ground_is_raised_clear() {
+        // A thin blade with a deep guard hanging below it at the grip.
+        let mut points = Vec::new();
+        for i in 0..=20 {
+            let y = 100. * i as f32 / 20.;
+            points.extend([Vec3::new(-5., y, -1.), Vec3::new(5., y, 1.)]);
+        }
+        points.extend([Vec3::new(0., 2., -40.), Vec3::new(0., 100., 0.)]);
+        let (t, lift) = deck_transform(&points);
+        let lowest = points
+            .iter()
+            .map(|&p| t.transform_point(p).y)
+            .fold(f32::MAX, f32::min);
+        assert!(lift > 0.);
+        assert!((lowest - (GROUND + CLEARANCE)).abs() < 1e-3, "{lowest}");
     }
 }
