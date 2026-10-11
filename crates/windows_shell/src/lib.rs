@@ -10,6 +10,7 @@ pub mod gauge;
 pub mod hud;
 pub mod input;
 pub mod layout2d;
+pub mod levelup;
 pub mod newgame;
 pub mod pad;
 pub mod room;

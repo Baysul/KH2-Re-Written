@@ -79,6 +79,11 @@ pub struct FormSources {
     pub names: HashMap<u16, Vec<u8>>,
     pub attack_label: Vec<u8>,
     pub magic_label: Vec<u8>,
+    /// The level-up panels' text: item names (forms and abilities), sys
+    /// 0x43f2 "Form Gauge Powered Up!" and 0x51f "Sora".
+    pub item_names: HashMap<u16, Vec<u8>>,
+    pub gauge_up: Vec<u8>,
+    pub sora_title: Vec<u8>,
     pub drive_label: Vec<u8>,
     pub revert_label: Vec<u8>,
     /// 00effect's PAX (the form level-up's element 16) and the resident
@@ -174,6 +179,9 @@ impl FormSources {
             names: HashMap::new(),
             attack_label: Vec::new(),
             magic_label: Vec::new(),
+            item_names: HashMap::new(),
+            gauge_up: Vec::new(),
+            sora_title: Vec::new(),
             drive_label: Vec::new(),
             system_pax: None,
             texcommon: None,
@@ -444,6 +452,9 @@ pub struct DriveRt {
     pub tint: [u8; 3],
     pub tint_k: f32,
     tint_step: f32,
+    /// The change's afterimage: ramp k (alpha = trunc(0x70·k)), its speed
+    /// and the ticks left once the swap starts its fade.
+    after: Option<(f32, f32, u32)>,
     /// Wisdom Form's bullets in flight.
     pub bullets: Vec<player_sim::wisdom::Bullet>,
     bullet_serial: u64,
@@ -497,6 +508,7 @@ impl DriveRt {
             tint: [128; 3],
             tint_k: 0.,
             tint_step: 0.,
+            after: None,
             paxes: HashMap::new(),
             fx_requests: Vec::new(),
             fx_owner_left: None,
@@ -504,6 +516,11 @@ impl DriveRt {
             previous_shown: 0,
             bullet_serial: 0,
         }
+    }
+
+    /// The afterimage's previous-frame weight, while it is on.
+    pub fn afterimage(&self) -> Option<f32> {
+        self.after.map(|(k, _, _)| (0x70 as f32 * k).trunc() / 128.)
     }
 
     /// FUN_1403f7040 / FUN_1401626f0: the scene light factor,
@@ -997,13 +1014,24 @@ pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
         match game.tick {
             7480 => game.player.drive.refill(),
             7490 => d.request = Some(forms::LIMIT),
-            7695 | 8275 => game.player.mp.cur = game.player.mp.max,
-            7700 => d.limit_request = Some(STRIKE_RAID),
-            8280 => d.limit_request = Some(INFINITY),
+            7695 | 8055 => game.player.mp.cur = game.player.mp.max,
+            7700 => d.limit_request = Some(INFINITY),
+            8060 => d.limit_request = Some(STRIKE_RAID),
             _ => {}
         }
     }
     d.overlay = (d.overlay + d.overlay_step).clamp(0., 1.);
+    // The afterimage (drivefx-02 §3.4): the 42000 driver steps k; after
+    // the swap the task lives one loop tick and yield(2) more [I: 4].
+    if let Some((k, speed, left)) = d.after.as_mut() {
+        *k = (*k + *speed).clamp(0., 1.);
+        if *speed < 0. {
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                d.after = None;
+            }
+        }
+    }
     if let Some(f) = d.request.take() {
         if f == 0 {
             if d.revert_usable() {
@@ -1019,6 +1047,10 @@ pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
         let target = c.target;
         let frames = c.frames;
         let mut log = Vec::new();
+        // T0+30: the afterimage on at full strength (drives only).
+        if target != 0 && frames == CHANGE_WAIT {
+            d.after = Some((1., 0., 0));
+        }
         let ready = if target == 0 {
             Ok(true)
         } else if frames < CHANGE_WAIT {
@@ -1057,6 +1089,12 @@ pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
                 if let Err(e) = finish_change(game, abilities) {
                     eprintln!("Drive form change failed: {e}");
                 }
+                // The swap: lerp k 1 → 0 over 20 (speed −0.05).
+                if let Some(d) = game.drive.as_mut()
+                    && let Some(a) = d.after.as_mut()
+                {
+                    *a = (a.0, -0.05, 4);
+                }
             }
             Ok(_) => {}
             Err(e) => {
@@ -1066,6 +1104,7 @@ pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
                 game.event(serde_json::json!({"event":"form_load_failed","tick":tick,"form":target,"error":e}));
                 if let Some(d) = game.drive.as_mut() {
                     d.change = None;
+                    d.after = None;
                     d.form = d.shown;
                     d.overlay_step = -1. / OVERLAY_OUT;
                     // The members the form took stay with Sora.
@@ -1379,7 +1418,7 @@ pub fn party_visibility(
 }
 
 /// FUN_140400990's fade, in frames.
-const PARTY_FADE: u32 = 15;
+const PARTY_FADE: u32 = 16;
 
 /// Frame trigger 1 of Sora's current motion (FUN_14040dd70 case 1): each
 /// trigger frame passed this tick starts that element of the shown kit's
@@ -1519,4 +1558,143 @@ pub fn limit_tick(game: &mut Game, rc: bool, abilities: Option<&mut Vec<u16>>) {
         d.pending_exp += 1;
     }
     let _ = abilities;
+}
+
+/// Strike Raid's thrown Keyblade (limitform `fly`): drawn where the
+/// thread holds it (the path point plus Judgment's wobble), blade along
+/// its direction [I: motion 235's spin is not applied].
+pub fn thrown_keyblade(
+    game: Res<Game>,
+    roots: Query<&Transform, (With<SoraRoot>, Without<WeaponRoot>)>,
+    mut hands: Query<(&mut Transform, &mut Visibility), (With<WeaponRoot>, Without<SoraRoot>)>,
+) {
+    let Some(k) = game
+        .drive
+        .as_ref()
+        .and_then(|d| d.limit.as_ref())
+        .and_then(|l| l.keyblade)
+    else {
+        return;
+    };
+    let (Ok(root), Ok((mut t, mut v))) = (roots.single(), hands.single_mut()) else {
+        return;
+    };
+    let at = Vec3::from_array(k.pos) + Vec3::from_array(k.offset);
+    let dir = Vec3::from_array(k.dir).normalize_or(Vec3::Z);
+    let world = Transform {
+        translation: at,
+        rotation: Quat::from_rotation_arc(Vec3::NEG_X, dir),
+        scale: Vec3::ONE,
+    };
+    *t = Transform::from_matrix(root.to_matrix().inverse() * world.to_matrix());
+    *v = Visibility::Inherited;
+}
+
+/// DAT_1405c5d08: the form items whose names title the panels.
+pub const FORM_ITEMS: [u16; 6] = [0x1a, 0x1b, 0x233, 0x1f, 0x1d, 0x1e];
+
+/// FUN_1403e8380's panels for one level: the form's (title = its item
+/// name, "Form Gauge Powered Up!", the new form ability) and Sora's (title
+/// "Sora", his growth ability and the bonus ability), skipped when empty.
+/// An ability line is `{icon}<name>!` (msg 0xae8); the icon glyph is not
+/// drawn [I: the system font here has no inline icons].
+pub fn level_panels(src: &FormSources, up: &forms::LevelUp) -> Vec<windows_shell::levelup::Entry> {
+    let line = |item: u16| {
+        src.item_names.get(&item).map(|n| {
+            let mut v = n.clone();
+            v.push(0x48);
+            v
+        })
+    };
+    let title = FORM_ITEMS
+        .get(up.form as usize - 1)
+        .and_then(|i| src.item_names.get(i))
+        .cloned()
+        .unwrap_or_default();
+    let mut out = vec![windows_shell::levelup::Entry {
+        form: up.form,
+        level: up.level,
+        title,
+        line1: src.gauge_up.clone(),
+        line2: up.form_growth.and_then(line),
+    }];
+    let sora: Vec<Vec<u8>> = [up.sora_growth, up.ability]
+        .into_iter()
+        .flatten()
+        .filter_map(line)
+        .collect();
+    if let Some(first) = sora.first() {
+        out.push(windows_shell::levelup::Entry {
+            form: 0,
+            level: up.level,
+            title: src.sora_title.clone(),
+            line1: first.clone(),
+            line2: sora.get(1).cloned(),
+        });
+    }
+    out
+}
+
+/// Battle voices (FUN_1403d69b0 → FUN_1403cdb60): 00battle `vtbl` rows
+/// {u8 char, u8 n, u8 prio, u8 0, 5 × (i8 sound, i8 weight)} and the
+/// character's voice bank.
+pub struct Voices {
+    rows: Vec<[u8; 14]>,
+    bank: u16,
+    /// The voice pick's draws (the shared LCG DAT_140783ca0 [I: kept
+    /// apart here]).
+    seed: u32,
+    pub scan: Option<(u64, Action, u32)>,
+}
+
+impl Voices {
+    pub fn read(vtbl: &[u8], bank: u16) -> Option<Self> {
+        let count = u32::from_le_bytes(vtbl.get(4..8)?.try_into().ok()?) as usize;
+        let rows = (0..count.min(4096))
+            .map(|k| {
+                vtbl.get(8 + k * 14..22 + k * 14)
+                    .map(|r| r.try_into().unwrap())
+            })
+            .collect::<Option<Vec<[u8; 14]>>>()?;
+        Some(Voices {
+            rows,
+            bank,
+            seed: 1,
+            scan: None,
+        })
+    }
+
+    /// voice_pick(char, n): a weighted roll over the row's sounds (0..99),
+    /// else a uniform pick among the unweighted ones. Returns the sound
+    /// request id.
+    pub fn pick(&mut self, character: u8, n: i16) -> Option<u32> {
+        let row = *self
+            .rows
+            .iter()
+            .find(|r| r[0] == character && r[1] as i16 == n)?;
+        self.seed = self.seed.wrapping_mul(0x10dcd);
+        let mut r = (self.seed / 0x28f_5c29) as i32;
+        let mut cand = Vec::new();
+        for k in 0..5 {
+            let (idx, weight) = (row[4 + k * 2] as i8, row[5 + k * 2] as i8);
+            if idx < 0 {
+                continue;
+            }
+            if weight < 1 {
+                cand.push(idx);
+            } else {
+                r -= weight as i32;
+                if r < 0 {
+                    return Some(self.bank as u32 * 1000 + idx as u32);
+                }
+            }
+        }
+        if cand.is_empty() {
+            return None;
+        }
+        self.seed = self.seed.wrapping_mul(0x10dcd);
+        let len = cand.len() as u64;
+        let i = (self.seed as u64 / (((1u64 << 32) + len - 1) / len)) as usize;
+        Some(self.bank as u32 * 1000 + cand[i.min(cand.len() - 1)] as u32)
+    }
 }

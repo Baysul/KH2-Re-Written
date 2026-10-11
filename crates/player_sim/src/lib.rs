@@ -123,6 +123,8 @@ pub struct Clip {
     pub windows: Vec<(u32, u32, u8, i16)>,
     /// Frame trigger 9: a one-frame script mark (ctl+0x155 bit 0).
     pub marks: Vec<u32>,
+    /// Frame trigger 14: a battle voice (`vtbl` row n of the character).
+    pub voices: Vec<(u32, i16)>,
     /// Frame trigger 7: a script event (0x11 → TR17) with its two
     /// parameters.
     pub events: Vec<(u32, i16, i16)>,

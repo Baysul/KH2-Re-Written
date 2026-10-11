@@ -768,6 +768,8 @@ struct Game {
     items: Option<item_room::ItemRt>,
     /// Drive forms (None when the form tables could not be read).
     drive: Option<drive_room::DriveRt>,
+    /// Sora's battle voices: 00battle `vtbl`, the voice bank and the scan.
+    voices: Option<drive_room::Voices>,
     /// The shown kit's attack shapes by collision group (bone, offset,
     /// radius).
     sora_attack: HashMap<u8, Vec<(usize, Vec3, f32)>>,
@@ -829,6 +831,8 @@ struct Hud {
     canvas: Canvas,
     image: Handle<Image>,
     updated: bool,
+    /// The form level-up panels (sprite priority 9000, after the gauge).
+    panels: windows_shell::levelup::FormPanels,
 }
 
 /// The original's default follow camera, ticked with the simulation in the
@@ -1081,6 +1085,11 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
                 record.parameters.get(1).copied().unwrap_or(0),
             )),
             9 => clip.marks.push(frame),
+            14 => {
+                if let Some(&n) = record.parameters.first() {
+                    clip.voices.push((frame, n));
+                }
+            }
             // Item use (FUN_14040dd70 case 6 → FUN_1403f6790).
             6 => clip.item_use = Some(clip.item_use.map_or(frame, |f: u32| f.min(frame))),
             // Spell release (FUN_14040dd70 case 0x11), filtered by the
@@ -1147,6 +1156,7 @@ struct Loaded {
     forms: Option<drive_room::FormSources>,
     enemy_character: u16,
     fmab: player_sim::growth::Fmab,
+    voices: Option<drive_room::Voices>,
     /// Donald and Goofy's models and motions (empty when not installed).
     party: Vec<std::sync::Arc<party_room::PartyKind>>,
     spawn: Vec3,
@@ -2397,6 +2407,34 @@ fn load(
                     }
                 }
             }
+            // The level-up panels' names (item table +8) and sys texts.
+            let table = package_reader::item_table::read(bar_entry(&system, b"item")?)?;
+            let mut items: Vec<u16> = drive_room::FORM_ITEMS.to_vec();
+            items.extend(player_sim::forms::GROWTH_ITEMS.iter().flatten());
+            items.extend(f.fmlv.iter().map(|r| r.ability).filter(|&a| a != 0));
+            items.sort_unstable();
+            items.dedup();
+            let rows: Vec<_> = items
+                .iter()
+                .filter_map(|id| table.iter().find(|r| r.id == *id))
+                .collect();
+            let mut ids: Vec<u32> = rows.iter().map(|r| r.name as u32).collect();
+            ids.extend([0x43f2, 0x51f]);
+            let texts = hud::load_messages_optional(
+                source,
+                &menu.messages.index,
+                menu.messages.ordinal,
+                menu.messages.name_hash,
+                &ids,
+            )?;
+            for (r, text) in rows.iter().zip(&texts) {
+                if let Some(t) = text {
+                    f.item_names.insert(r.id, t.clone());
+                }
+            }
+            let n = rows.len();
+            f.gauge_up = texts.get(n).cloned().flatten().unwrap_or_default();
+            f.sora_title = texts.get(n + 1).cloned().flatten().unwrap_or_default();
             Some(f)
         }
         (f, _) => f,
@@ -2528,6 +2566,21 @@ fn load(
             b.replacement.as_deref(),
         )?)?;
     }
+    // Sora's battle voices: `voice/us/battle/<world>0_sora.win32.scd` (the
+    // arena counts as Twilight Town [I]) and 00battle `vtbl`.
+    let voice_world = config
+        .area
+        .as_ref()
+        .map_or("tt".to_owned(), |a| a.world.clone());
+    let voices = package_reader::named::Library::open(source)
+        .ok()
+        .and_then(|mut library| {
+            library
+                .read(&format!("voice/us/battle/{voice_world}0_sora.win32.scd"))
+                .ok()
+        })
+        .and_then(|bytes| banks.insert(bytes).ok())
+        .and_then(|bank| drive_room::Voices::read(bar_entry(&battle, b"vtbl").ok()?, bank));
     let npc = match &config.npc {
         Some(n) => Some(load_npc(source, base, &config, n)?),
         None => None,
@@ -2740,6 +2793,7 @@ fn load(
         forms,
         enemy_character,
         fmab,
+        voices,
         kit,
         spawn,
         yaw,
@@ -4052,6 +4106,7 @@ fn setup(
     mut frame: ResMut<Ui2dFrame>,
     windows: Query<&Window>,
     area: Option<Res<AreaRes>>,
+    mut layout_materials: ResMut<Assets<windows_shell::ui2d::LayoutMaterial>>,
 ) {
     let room = startup.room.take().expect("room retained for setup");
     let mut compose = Compose {
@@ -4118,6 +4173,7 @@ fn setup(
             compose.white_sheet = Some(frame.add_sheet(&mut images, vec![255; 16], [2, 2], 1.));
         }
         commands.insert_resource(Hud {
+            panels: Default::default(),
             gauge: Gauge::new(
                 &sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(),
                 &stats,
@@ -4590,6 +4646,20 @@ fn setup(
         DebandDither::Disabled,
         NoIndirectDrawing,
     ));
+    // The Drive change's afterimage (drivefx-02 §3): a feedback pass over
+    // the scene, idle until a change turns it on.
+    let blur = crate::cutscene::blur::Blur::spawn(
+        &mut commands,
+        &mut meshes,
+        &mut layout_materials,
+        &mut images,
+        &mut frame,
+        &compose.scene,
+        size,
+        Vec::new(),
+        [1., 1.],
+    );
+    commands.insert_resource(Afterimage { blur, on: false });
     commands.insert_resource(compose);
 }
 
@@ -4673,6 +4743,33 @@ struct Compose {
     stable_frames: u64,
 }
 
+/// The afterimage's feedback cameras and whether they ran last frame.
+#[derive(Resource)]
+struct Afterimage {
+    blur: crate::cutscene::blur::Blur,
+    on: bool,
+}
+
+/// FUN_14015f030 (priority 75000, after the 3D passes, before the 2D
+/// sprites): while a Drive change holds the afterimage, the previous
+/// picture is drawn over the scene at alpha/128 (0x70 → 0.875 [O]). The
+/// first frame on has no history yet and shows the plain scene [I]; the
+/// history lacks the HUD the exe's prevFrameTex holds [I].
+fn afterimage(
+    mut after: ResMut<Afterimage>,
+    game: Res<Game>,
+    mut cameras: Query<&mut Camera>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let alpha = game
+        .drive
+        .as_ref()
+        .and_then(drive_room::DriveRt::afterimage);
+    let weight = alpha.map(|a| if after.on { a } else { 0. });
+    after.on = alpha.is_some();
+    after.blur.feed(weight, &mut cameras, &mut meshes);
+}
+
 /// The scene image follows the window's size.
 fn resize_scene(
     compose: Option<ResMut<Compose>>,
@@ -4715,6 +4812,7 @@ fn compose_2d(
     mut frame: ResMut<Ui2dFrame>,
     settings: Res<settings_room::SettingsRes>,
     game: Res<Game>,
+    after: Option<Res<Afterimage>>,
 ) {
     let Some(c) = compose else { return };
     // Brightness tints the scene; the HUD setting hides the field HUD. A
@@ -4728,7 +4826,11 @@ fn compose_2d(
         .drive
         .as_ref()
         .map_or([1.; 3], drive_room::DriveRt::scene_tint);
-    frame.full_screen(c.scene_sheet, [b * t[0], b * t[1], b * t[2], 1.]);
+    let scene = after
+        .as_ref()
+        .filter(|a| a.on)
+        .map_or(c.scene_sheet, |a| a.blur.sheet());
+    frame.full_screen(scene, [b * t[0], b * t[1], b * t[2], 1.]);
     if let (Some(s), Some(t)) = (c.snapshot_sheet, &talk)
         && t.dissolve > 0
     {
@@ -6081,6 +6183,32 @@ fn sora_sounds(game: &mut Game) {
         }
     }
     game.sound_frame = Some((started, frame));
+    // Frame trigger 14 (FUN_140404d00 → FUN_1403d69b0): a battle voice,
+    // none in Antiform.
+    let anti = game
+        .drive
+        .as_ref()
+        .is_some_and(|d| d.active && d.form == player_sim::forms::ANTI);
+    let clip = game.player.clip(&game.clips).clone();
+    let raw = game.player.frame;
+    let key = (started, game.player.action);
+    if let Some(v) = game.voices.as_mut() {
+        let from = match v.scan {
+            Some((s, a, f)) if (s, a) == key && f <= raw => Some(f),
+            _ => None,
+        };
+        v.scan = Some((key.0, key.1, raw));
+        if !anti {
+            for &(at, n) in &clip.voices {
+                if from.is_none_or(|f| at > f)
+                    && at <= raw
+                    && let Some(id) = v.pick(1, n)
+                {
+                    game.sound_queue.push((id, "voice"));
+                }
+            }
+        }
+    }
 }
 
 /// Plays this tick's requests and keeps the low-HP alarm (system sound 9,
@@ -6202,6 +6330,16 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
         m.menu.update(&m.sheet.sequence);
     }
     gauge.update(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(), &s);
+    // Form levels gained this frame queue their panels (FUN_1403edb90).
+    if let Some(d) = game.drive.as_mut() {
+        for up in std::mem::take(&mut d.level_ups) {
+            for e in drive_room::level_panels(&d.src, &up) {
+                hud.panels.push(e);
+            }
+        }
+    }
+    let Hud { sheets, panels, .. } = &mut *hud;
+    panels.update(&sheets[0].sequence);
     hud.updated = true;
 }
 
@@ -6223,6 +6361,7 @@ fn hud_present(
         canvas,
         image,
         menu,
+        panels,
         ..
     } = &mut *hud;
     let mut textures: Vec<Texture> = sheets
@@ -6268,6 +6407,14 @@ fn hud_present(
     }
     if !skate.replaces_hud() {
         draws.extend(gauge.draw(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>()));
+        if let Some((font_sheet, widths)) = menu_font.as_ref() {
+            draws.extend(panels.draw(
+                &sheets[0].sequence,
+                &command::Font { widths, pad: 1 },
+                0,
+                *font_sheet,
+            ));
+        }
     }
     // Message windows (task priority 25000) draw above the HUD.
     if let Some(t) = &talk {
@@ -9015,6 +9162,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         cheats: debug_menu::Cheats::default(),
         shortcuts: ROOM_SHORTCUTS,
         drive: None,
+        voices: loaded.voices.take(),
         sora_attack: std::mem::take(&mut loaded.kit.attack),
         party: loaded
             .party
@@ -9481,6 +9629,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             (
                 drive_room::present,
                 present,
+                drive_room::thrown_keyblade,
                 skate_present,
                 present_enemy,
                 present_spells,
@@ -9492,6 +9641,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 drive_fx::present,
                 hud_present,
                 resize_scene,
+                afterimage.run_if(resource_exists::<Afterimage>),
                 compose_2d,
                 menu_model_present,
                 camp_present,

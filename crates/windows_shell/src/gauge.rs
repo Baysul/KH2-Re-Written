@@ -66,6 +66,11 @@ enum Id {
     DriveFill,
     DriveDigit,
     Max,
+    /// The ring burst (group 0x82) on a Drive or revert, and the revert's
+    /// return flash (group 0x35) on the drive frame (FUN_140180900,
+    /// FUN_140180b00).
+    Burst,
+    Return,
 }
 
 struct Element {
@@ -216,6 +221,12 @@ impl Gauge {
         // Priority 7010: drawn after the 7000 elements.
         let max = g.sprite(seq, Id::Max, 20, None, Some(frame), 0);
         g.elements[max].hidden = true;
+        // Pool sprites, created hidden (prio 7000, inserted after the
+        // gauge's own: drawn on top).
+        let burst = g.sprite(seq, Id::Burst, 130, None, Some(root), 0);
+        g.elements[burst].hidden = true;
+        let ret = g.sprite(seq, Id::Return, 53, None, Some(frame), 0);
+        g.elements[ret].hidden = true;
         g
     }
 
@@ -411,14 +422,18 @@ impl Gauge {
             let was_form = matches!(self.last_mode, 2 | 3);
             self.last_mode = stats.drive_mode;
             if form && !was_form {
-                // FUN_140180900: the FORM frame (0x33) and bar (0x31).
+                // FUN_140180900: the ring burst, the FORM frame (0x33)
+                // and bar (0x31).
+                self.set_group(seq, Id::Burst, 130);
                 self.set_group(seq, Id::DriveFrame, 51);
                 self.set_group(seq, Id::DriveFill, 49);
                 self.last_form_digit = None;
             } else if !form && was_form {
-                self.set_group(seq, Id::DriveFrame, 21);
-                let i = self.find(Id::DriveFrame);
-                self.elements[i].queued = Some(if self.charging { 26 } else { 23 });
+                // FUN_140180b00: straight to the loop group, the burst and
+                // the return flash.
+                self.set_group(seq, Id::Burst, 130);
+                self.set_group(seq, Id::Return, 53);
+                self.set_group(seq, Id::DriveFrame, if self.charging { 26 } else { 23 });
                 self.set_group(seq, Id::DriveFill, 25);
                 let digit = DRIVE_DIGITS[stats.drive_level.min(9) as usize];
                 self.set_group(seq, Id::DriveDigit, digit);

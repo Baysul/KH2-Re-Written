@@ -23,7 +23,7 @@ use windows_shell::ui2d::{LayoutMaterial, Ui2dFrame};
 /// First render layer used by the two blur cameras.
 const LAYER_BASE: usize = 8;
 /// (x, y) size of the zoomed quad over the screen: (514/512, 418/416).
-const ZOOM: [f32; 2] = [514. / 512., 418. / 416.];
+pub const ZOOM: [f32; 2] = [514. / 512., 418. / 416.];
 
 #[derive(Resource)]
 pub struct Blur {
@@ -99,6 +99,7 @@ impl Blur {
         scene: &Handle<Image>,
         size: [u32; 2],
         switches: Vec<(i32, u8)>,
+        zoom: [f32; 2],
     ) -> Self {
         let outputs: [Handle<Image>; 2] = std::array::from_fn(|_| {
             images.add(Image::new_target_texture(
@@ -126,7 +127,7 @@ impl Blur {
                 Transform::from_xyz(0., 0., 0.),
                 layer.clone(),
             ));
-            let prev = meshes.add(quad([0.5 * ZOOM[0], 0.5 * ZOOM[1]], 0.));
+            let prev = meshes.add(quad([0.5 * zoom[0], 0.5 * zoom[1]], 0.));
             commands.spawn((
                 Mesh2d(prev.clone()),
                 MeshMaterial2d(material(&outputs[1 - i], materials)),
@@ -176,11 +177,36 @@ impl Blur {
     pub fn sheet(&self) -> usize {
         self.sheets[self.shown]
     }
+
+    /// One feedback step outside an event: the last picture becomes the
+    /// history and the other camera draws the scene with the history over
+    /// it at `weight` (0 = the plain scene). `None` stops both cameras.
+    pub fn feed(
+        &mut self,
+        weight: Option<f32>,
+        cameras: &mut Query<&mut Camera>,
+        meshes: &mut Assets<Mesh>,
+    ) {
+        self.history = self.shown;
+        let out = 1 - self.history;
+        for (i, entity) in self.cameras.into_iter().enumerate() {
+            if let Ok(mut camera) = cameras.get_mut(entity) {
+                camera.is_active = weight.is_some() && i == out;
+            }
+        }
+        if let Some(mut mesh) = meshes.get_mut(&self.prev_meshes[out]) {
+            mesh.insert_attribute(
+                Mesh::ATTRIBUTE_COLOR,
+                vec![[1., 1., 1., weight.unwrap_or(0.)]; 4],
+            );
+        }
+        self.shown = out;
+    }
 }
 
 /// Picks this frame's output image, sets the feedback weight and advances
 /// the history on event-frame steps. Runs before `compose`.
-pub fn drive(
+pub(super) fn drive(
     event: Res<super::Event>,
     mut blur: ResMut<Blur>,
     mut cameras: Query<&mut Camera>,

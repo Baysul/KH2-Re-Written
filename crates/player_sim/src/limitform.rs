@@ -338,7 +338,9 @@ impl Limit {
     fn watch(&mut self, player: &Player, clips: &Clips) -> (u16, u16, bool) {
         let m = player.motion_id(clips);
         let (prev, last, end) = self.seen;
-        let ended = m != prev && prev != u16::MAX && last + 1 >= end;
+        // The first tick watches the motion the dispatch just started.
+        let prev = if prev == u16::MAX { m } else { prev };
+        let ended = m != prev && last + 1 >= end;
         self.seen = (m, player.frame, player.clip(clips).end);
         (m, prev, ended)
     }

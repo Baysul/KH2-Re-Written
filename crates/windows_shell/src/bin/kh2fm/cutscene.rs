@@ -2,7 +2,7 @@
 //! installation — tt19 event 613 by default, the scene before the Roxas vs
 //! Axel fight in Betwixt and Between — from the event script's own cameras,
 //! actors, motions, voices, music and subtitles.
-mod blur;
+pub(crate) mod blur;
 mod fx;
 mod load;
 mod screen;
@@ -288,6 +288,7 @@ fn setup(
         &overlay.scene,
         size,
         blur::Blur::switches(&event.timeline.other),
+        blur::ZOOM,
     );
     commands.insert_resource(blur);
     commands.insert_resource(texa::Texa::new(
