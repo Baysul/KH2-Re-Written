@@ -73,6 +73,25 @@ pub type Stream = Box<dyn FnMut(&mut [f32]) + Send>;
 pub struct Mixer {
     voices: Vec<Voice>,
     stream: Option<Stream>,
+    gains: Gains,
+}
+
+/// Output volumes: `music` for the voices of `music_keys`, `effects` for
+/// every other voice and the stream.
+struct Gains {
+    music: f32,
+    effects: f32,
+    music_keys: Vec<u32>,
+}
+
+impl Default for Gains {
+    fn default() -> Self {
+        Self {
+            music: 1.,
+            effects: 1.,
+            music_keys: Vec::new(),
+        }
+    }
 }
 
 impl Mixer {
@@ -146,20 +165,36 @@ impl Mixer {
         self.stream.is_some()
     }
 
+    /// Sets the output volumes (see `Gains`); they apply from the next
+    /// buffer.
+    pub fn set_gains(&mut self, music: f32, effects: f32, music_keys: &[u32]) {
+        self.gains = Gains {
+            music,
+            effects,
+            music_keys: music_keys.to_vec(),
+        };
+    }
+
     /// Mixes into interleaved stereo `out` at `RATE`.
     pub fn mix(&mut self, out: &mut [i16]) {
         let mut sum = vec![0f32; out.len()];
+        let gains = &self.gains;
         if let Some(stream) = self.stream.as_mut() {
             let mut rendered = vec![0f32; out.len()];
             stream(&mut rendered);
             for (s, r) in sum.iter_mut().zip(rendered) {
-                *s += r * 32767.;
+                *s += r * 32767. * gains.effects;
             }
         }
         self.voices.retain_mut(|v| {
             if v.paused {
                 return true;
             }
+            let bus = if gains.music_keys.contains(&v.key) {
+                gains.music
+            } else {
+                gains.effects
+            };
             let frames = v.clip.frames();
             for pair in sum.as_chunks_mut::<2>().0 {
                 let mut ended = None;
@@ -189,8 +224,8 @@ impl Mixer {
                 } else {
                     a
                 };
-                pair[0] += (a[0] + (b[0] - a[0]) * t) * v.gain;
-                pair[1] += (a[1] + (b[1] - a[1]) * t) * v.gain;
+                pair[0] += (a[0] + (b[0] - a[0]) * t) * v.gain * bus;
+                pair[1] += (a[1] + (b[1] - a[1]) * t) * v.gain * bus;
                 v.position += v.step;
                 match ended {
                     Some(FadeEnd::Stop) => return false,
@@ -294,6 +329,21 @@ mod tests {
         assert!(m.playing(3));
         m.stop(3);
         assert!(!m.playing(3));
+    }
+
+    #[test]
+    fn gains_scale_music_and_effects_apart() {
+        let mut m = Mixer::default();
+        m.play(clip(&[1000], 1, RATE), 1, 1., 1.);
+        m.play(clip(&[100], 1, RATE), 2, 1., 1.);
+        m.set_gains(0.5, 0., &[1]);
+        let mut out = [0i16; 2];
+        m.mix(&mut out);
+        assert_eq!(out, [500, 500]);
+        m.set_stream(Some(Box::new(|out: &mut [f32]| out.fill(0.5))));
+        m.set_gains(1., 0.5, &[]);
+        m.mix(&mut out);
+        assert_eq!(out, [8191, 8191]);
     }
 
     #[test]

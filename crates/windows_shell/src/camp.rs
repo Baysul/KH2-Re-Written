@@ -219,6 +219,11 @@ pub struct Data {
     pub picture_sequence: Option<Sequence>,
     /// The tutorial notices' flags, texts and callouts.
     pub notice: notice::NoticeData,
+    /// The rebuild's settings pages after the exe's Config (None: only
+    /// the exe's page); the caller applies them as they change.
+    pub settings: Option<crate::settings::Settings>,
+    /// The language codes the install has (the Text Language choices).
+    pub languages: Vec<String>,
 }
 
 /// Cursor memory kept between camp openings (DAT_140beec30 / 7c).
@@ -229,6 +234,8 @@ pub struct Memory {
     /// Status list bit.
     pub status_bit: u8,
     pub config_row: usize,
+    /// The Config page (0: the exe's; 1.. the settings pages).
+    pub config_page: usize,
     /// mem[1]: the Items row; mem[10]: the stock cursor (in page) and scroll.
     pub items_row: usize,
     pub stock: (usize, usize),
@@ -349,6 +356,22 @@ pub fn encode_number(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// ASCII text into the system font's encoding: `encode_number`'s set plus
+/// lower case 0x9a..0xb3 and ',' 0x50 (OpenKH's InternationalSystemDecode
+/// table); anything else is the 0x01 space.
+pub fn encode_text(s: &str) -> Vec<u8> {
+    s.bytes()
+        .map(|b| match b {
+            b'a'..=b'z' => 0x9a + (b - b'a'),
+            b',' => 0x50,
+            _ => match encode_number(&char::from(b).to_string())[0] {
+                0x7f => 0x01,
+                e => e,
+            },
+        })
+        .collect()
+}
+
 /// Config values from save+0x41a4 / +0x2498 (FUN_140365580, camp-04 §3.1).
 pub fn config_values(flags: u32, mode: u32) -> [usize; 8] {
     let bit = |b: u32| (flags >> b & 1) as usize;
@@ -399,6 +422,14 @@ struct MenuList {
     keys: Option<(u64, u64)>,
     /// +0x20: rows the cursor steps over.
     skip: u32,
+}
+
+/// A Config row as shown (`Camp::config_view`).
+struct ConfigView {
+    label: Vec<u8>,
+    shown: Vec<Vec<u8>>,
+    selected: usize,
+    help: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -606,6 +637,8 @@ pub struct Camp {
     config_list: MenuList,
     choices: Vec<Vec<Id>>,
     config_frame: Option<Id>,
+    config_labels: Vec<Id>,
+    config_page: usize,
     // Items.
     item_ui: items::Ui,
     // Abilities.
@@ -672,6 +705,8 @@ impl Camp {
             config_list: MenuList::default(),
             choices: Vec::new(),
             config_frame: None,
+            config_labels: Vec::new(),
+            config_page: 0,
             item_ui: items::Ui::default(),
             ability_ui: abilities::Ui::default(),
             party_ui: party::Ui::default(),
@@ -1763,8 +1798,22 @@ impl Camp {
 
     // ---- Config 0x24 -----------------------------------------------------
 
+    /// The exe's page, then the settings pages when the caller offers them.
+    fn config_pages(&self) -> usize {
+        if self.data.settings.is_some() {
+            crate::settings::PAGES.len()
+        } else {
+            1
+        }
+    }
+
+    fn page_name(&self) -> Vec<u8> {
+        encode_text(crate::settings::PAGES[self.config_page])
+    }
+
     /// FUN_140365580 + FUN_140364a10: tab 0, the panel, 8 labels, their
-    /// choices and invisible anchor rows.
+    /// choices and invisible anchor rows. With settings pages, tab 1 names
+    /// the page and the Status browser's "Switch" banner marks L2 / R2.
     fn enter_config(&mut self, seq: &Sequence) {
         self.state = State::Config;
         self.substate = 0;
@@ -1780,13 +1829,39 @@ impl Camp {
         );
         self.closers.push((panel, CONFIG_PANEL[2]));
         self.panel = Some(panel);
+        self.config_page = self.memory.config_page.min(self.config_pages() - 1);
+        if self.config_pages() > 1 {
+            let name = self.page_name();
+            self.tab_text(1, name);
+            self.create_tab(seq, 1);
+            let banner = self.data.banner.clone();
+            self.show_banner(seq, banner);
+        }
+        let cursor = if self.config_page == 0 {
+            self.memory.config_row
+        } else {
+            0
+        };
+        self.build_config_rows(seq, cursor);
+    }
+
+    /// The labels, choices and anchor rows of the current page.
+    fn build_config_rows(&mut self, seq: &Sequence, cursor: usize) {
+        let Some(panel) = self.panel else { return };
+        for id in self.config_labels.drain(..) {
+            self.sprites.kill(id);
+        }
+        for id in self.choices.drain(..).flatten() {
+            self.sprites.kill(id);
+        }
+        for &id in &self.config_list.rows {
+            self.sprites.kill(id);
+        }
         let pitch = seq.groups[CONFIG_LABEL].ui_padding as f32;
         let label_size = seq.groups[CONFIG_LABEL].text_scale as f32;
-        self.choices.clear();
         let mut rows = Vec::new();
-        for i in 0..self.data.config.len().min(8) {
-            let row = self.data.config[i].clone();
-            let mut t = Text::new(row.label.clone(), label_size);
+        for i in 0..self.config_row_count() {
+            let mut t = Text::new(self.config_view(i).label, label_size);
             t.align = 2;
             t.group_position = false;
             let l = self
@@ -1794,6 +1869,7 @@ impl Camp {
                 .create(seq, PRIO_PANEL, ART, CONFIG_LABEL, None, Some(t));
             self.child(l, panel);
             self.sprites.get_mut(l).offset = [0., pitch * i as f32];
+            self.config_labels.push(l);
             let mut cs = Vec::new();
             for _ in 0..4 {
                 let mut t = Text::new(Vec::new(), TEXT_SIZE);
@@ -1810,32 +1886,80 @@ impl Camp {
             self.sprites.get_mut(anchor).die_with_parent = true;
             rows.push(anchor);
         }
-        self.config_list = MenuList::new(rows, self.memory.config_row);
+        self.config_list = MenuList::new(rows, cursor);
         self.config_list.page = Some(8);
         self.config_layout(seq);
         self.config_mask();
     }
 
+    fn config_row_count(&self) -> usize {
+        match &self.data.settings {
+            Some(s) if self.config_page > 0 => s.rows(self.config_page, &self.data.languages).len(),
+            _ => self.data.config.len().min(8),
+        }
+    }
+
+    /// Row `i` of the current page: label, the choices shown (at most 3;
+    /// a longer list shows only the current one, as Game Mode does), the
+    /// chosen one and its help.
+    fn config_view(&self, i: usize) -> ConfigView {
+        if let Some(s) = &self.data.settings
+            && self.config_page > 0
+        {
+            let r = &s.rows(self.config_page, &self.data.languages)[i];
+            let (shown, selected) = if r.choices.len() <= 3 {
+                (
+                    r.choices.iter().map(|c| encode_text(c)).collect(),
+                    r.selected,
+                )
+            } else {
+                (vec![encode_text(&r.choices[r.selected])], 0)
+            };
+            return ConfigView {
+                label: encode_text(r.label),
+                shown,
+                selected,
+                help: Some(encode_text(r.help)),
+            };
+        }
+        let row = &self.data.config[i];
+        let (shown, selected, v) = if i == 7 {
+            let mode = self.data.game_mode.min(3) as usize;
+            (
+                vec![row.choices.get(mode).cloned().unwrap_or_default()],
+                0,
+                mode,
+            )
+        } else {
+            let mut shown = row.choices.clone();
+            shown.resize(row.choices.len().clamp(1, 3), Vec::new());
+            (shown, self.config_values[i], self.config_values[i])
+        };
+        ConfigView {
+            label: row.label.clone(),
+            shown,
+            selected,
+            help: row.help.get(v).cloned(),
+        }
+    }
+
     fn config_mask(&mut self) {
         let base = (0x73 & !0x10) | 0x3000;
-        self.config_list.mask = if self.config_list.cursor == 7 {
-            base
+        let sides = if self.config_page == 0 && self.config_list.cursor == 7 {
+            0
         } else {
-            base | 0xc_0000
+            0xc_0000
         };
+        let pages = if self.config_pages() > 1 { 0xc000 } else { 0 };
+        self.config_list.mask = base | sides | pages;
     }
 
     /// FUN_140365a20: each row's choices (selected / unselected looks), the
     /// anchor rows on the selected choice, and the cursor frame.
     fn config_layout(&mut self, seq: &Sequence) {
-        let mode = self.data.game_mode.min(3) as usize;
         for i in 0..self.choices.len() {
-            let row = &self.data.config[i];
-            let n = if i == 7 {
-                1
-            } else {
-                row.choices.len().clamp(1, 3)
-            };
+            let view = self.config_view(i);
+            let n = view.shown.len().clamp(1, 3);
             let pair = CHOICES[n - 1];
             for c in 0..4 {
                 let id = self.choices[i][c];
@@ -1846,47 +1970,36 @@ impl Camp {
                     }
                     continue;
                 }
-                let selected = i == 7 || self.config_values[i] == c;
-                let group = if selected { pair[0] } else { pair[1] };
+                let group = if view.selected == c { pair[0] } else { pair[1] };
                 if self.sprites.get(id).player.group != group {
                     self.sprites.set(seq, id, group, None);
                 }
                 let g = &seq.groups[group];
-                let label = if i == 7 {
-                    row.choices.get(mode).cloned().unwrap_or_default()
-                } else {
-                    row.choices[c].clone()
-                };
                 let s = self.sprites.get_mut(id);
                 s.offset = [g.ui_padding as f32 * c as f32, 26. * i as f32];
                 if let Some(t) = s.text.as_mut() {
-                    t.bytes = label;
+                    t.bytes = view.shown.get(c).cloned().unwrap_or_default();
                     t.offset = [g.text_position_x as f32, 0.];
                 }
             }
-            let chosen = if i == 7 { 0 } else { self.config_values[i] };
             let anchor = self.config_list.rows[i];
-            self.sprites.get_mut(anchor).parent = Some(self.choices[i][chosen]);
+            self.sprites.get_mut(anchor).parent = Some(self.choices[i][view.selected.min(n - 1)]);
         }
         self.update_config_frame(seq);
     }
 
     /// FUN_1403657e0: the cursor frame on the selected choice (substate 1).
     fn update_config_frame(&mut self, seq: &Sequence) {
-        if self.substate != 1 {
+        if self.substate != 1 || self.choices.is_empty() {
             if let Some(f) = self.config_frame.take() {
                 self.sprites.kill(f);
             }
             return;
         }
         let row = self.config_list.cursor;
-        let n = if row == 7 {
-            1
-        } else {
-            self.data.config[row].choices.len().clamp(1, 3)
-        };
-        let chosen = if row == 7 { 0 } else { self.config_values[row] };
-        let parent = self.choices[row][chosen];
+        let view = self.config_view(row);
+        let n = view.shown.len().clamp(1, 3);
+        let parent = self.choices[row][view.selected.min(n - 1)];
         let group = CHOICES[n - 1][2];
         match self.config_frame {
             Some(f) if self.sprites.alive(f) => {
@@ -1906,35 +2019,32 @@ impl Camp {
     }
 
     fn config_help(&mut self, seq: &Sequence) {
-        let row = self.config_list.cursor;
-        let v = if row == 7 {
-            self.data.game_mode.min(3) as usize
-        } else {
-            self.config_values[row]
-        };
-        if let Some(h) = self
-            .data
-            .config
-            .get(row)
-            .and_then(|r| r.help.get(v))
-            .cloned()
-        {
+        if self.choices.is_empty() {
+            return;
+        }
+        if let Some(h) = self.config_view(self.config_list.cursor).help {
             self.show_help(seq, h);
         }
     }
 
-    /// FUN_140364d70.
+    /// FUN_140364d70; L2 / R2 turn the settings pages.
     fn config(&mut self, seq: &Sequence, pad: &Pad, sounds: &mut Vec<u32>) -> bool {
         let (pick, moved) = self.config_list.input(pad);
         if self.substate == 2 {
             let panel_dead = self.panel.is_none_or(|p| !self.sprites.alive(p));
-            if panel_dead && !self.tab_alive(0) {
+            let banner_dead = self.banner.is_none_or(|b| !self.sprites.alive(b));
+            if panel_dead && banner_dead && !self.tab_alive(0) && !self.tab_alive(1) {
+                self.banner = None;
                 self.return_top(seq);
             } else if pick != Pick::None || moved {
                 if let Some(p) = self.panel {
                     self.sprites.kill(p);
                 }
+                if let Some(b) = self.banner.take() {
+                    self.sprites.kill(b);
+                }
                 self.kill_tab(0);
+                self.kill_tab(1);
             }
             return false;
         }
@@ -1945,10 +2055,12 @@ impl Camp {
             if let Some(p) = self.panel {
                 self.sprites.set(seq, p, CONFIG_PANEL[1], None);
             }
-            if let Some(tab) = &self.tabs[0] {
-                let id = tab.id;
-                if self.sprites.alive(id) {
-                    self.sprites.set(seq, id, TAB[1], None);
+            for i in 0..2 {
+                if let Some(tab) = &self.tabs[i] {
+                    let id = tab.id;
+                    if self.sprites.alive(id) {
+                        self.sprites.set(seq, id, TAB[1], None);
+                    }
                 }
             }
         }
@@ -1971,14 +2083,36 @@ impl Camp {
         match pick {
             Pick::Left | Pick::Right => {
                 let row = self.config_list.cursor;
-                let n = self.data.config[row].choices.len().clamp(1, 3);
-                let v = &mut self.config_values[row];
-                *v = if pick == Pick::Left {
-                    (*v + n - 1) % n
-                } else {
-                    (*v + 1) % n
-                };
+                if self.config_page == 0 {
+                    let n = self.data.config[row].choices.len().clamp(1, 3);
+                    let v = &mut self.config_values[row];
+                    *v = if pick == Pick::Left {
+                        (*v + n - 1) % n
+                    } else {
+                        (*v + 1) % n
+                    };
+                } else if let Some(s) = self.data.settings.as_mut() {
+                    s.step(
+                        self.config_page,
+                        row,
+                        pick == Pick::Right,
+                        &self.data.languages,
+                    );
+                }
                 self.config_layout(seq);
+                self.config_help(seq);
+                self.light.retarget();
+            }
+            Pick::Next | Pick::Previous => {
+                let n = self.config_pages();
+                self.config_page = if pick == Pick::Next {
+                    (self.config_page + 1) % n
+                } else {
+                    (self.config_page + n - 1) % n
+                };
+                let name = self.page_name();
+                self.tab_text(1, name);
+                self.build_config_rows(seq, 0);
                 self.config_help(seq);
                 self.light.retarget();
             }
@@ -1990,6 +2124,8 @@ impl Camp {
                 self.save_config();
                 self.hide_help(seq);
                 self.close_tab(seq, 0);
+                self.close_tab(seq, 1);
+                self.close_banner(seq);
                 if let Some(p) = self.panel {
                     self.sprites.close(seq, p, CONFIG_PANEL[2]);
                 }
@@ -2005,10 +2141,75 @@ impl Camp {
     }
 
     /// FUN_140365460: the values back into the save flags; the cursor row
-    /// is remembered.
+    /// (on the exe's page) and the page are remembered.
     fn save_config(&mut self) {
         self.data.config_flags = config_flags(self.data.config_flags, &self.config_values);
-        self.memory.config_row = self.config_list.cursor;
+        if self.config_page == 0 {
+            self.memory.config_row = self.config_list.cursor;
+        }
+        self.memory.config_page = self.config_page;
+    }
+
+    /// The Config values and page into `data` / `memory` now (before the
+    /// caller rebuilds the camp).
+    pub fn commit_config(&mut self) {
+        if self.state == State::Config {
+            self.save_config();
+        }
+    }
+
+    /// The Config row under the cursor (for `open_on_config`).
+    pub fn config_cursor(&self) -> usize {
+        self.config_list.cursor
+    }
+
+    /// The camp reopened straight on Config, on the remembered page, with
+    /// the cursor on `row` (after the caller swapped the text language):
+    /// no opening scene and no top level.
+    pub fn open_on_config(layout: &Layout, data: Data, memory: Memory, row: usize) -> Self {
+        // No tutorial notice opens over it.
+        let quiet = Memory {
+            notices_seen: u16::MAX,
+            ..memory
+        };
+        let (mut camp, _) = Camp::open(layout, data, quiet);
+        camp.memory.notices_seen = memory.notices_seen;
+        let seq = &layout.sequences[SEQUENCE];
+        camp.layout.set_scene(SCENE_IDLE, None);
+        for id in camp.top.rows.clone() {
+            camp.sprites.kill(id);
+        }
+        for id in [camp.frame_sprite, camp.status_block, camp.prompt]
+            .into_iter()
+            .flatten()
+        {
+            camp.sprites.kill(id);
+        }
+        if let Some(h) = camp.help.take() {
+            camp.sprites.kill(h);
+        }
+        let label = camp
+            .data
+            .entries
+            .iter()
+            .find(|e| e.id == 7)
+            .map(|e| e.label.clone())
+            .unwrap_or_default();
+        camp.tab_text(0, label);
+        camp.enter_config(seq);
+        if let Some(p) = camp.panel {
+            camp.sprites.set(seq, p, CONFIG_PANEL[1], None);
+        }
+        for i in 0..2 {
+            if let Some(tab) = &camp.tabs[i] {
+                let id = tab.id;
+                camp.sprites.set(seq, id, TAB[1], None);
+            }
+        }
+        camp.config_list.cursor = row.min(camp.config_list.total.saturating_sub(1));
+        camp.config_mask();
+        camp.config_layout(seq);
+        camp
     }
 
     // ---- exit and drawing ------------------------------------------------

@@ -54,7 +54,7 @@ use windows_shell::room::{CollisionTriangle, LoadedRoom, load_rooms, mesh, rgba_
 use windows_shell::sound::{self, Banks};
 use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Locator {
     index: String,
     ordinal: usize,
@@ -63,6 +63,7 @@ struct Locator {
 mod item_room;
 mod magic_room;
 mod prize_room;
+mod settings_room;
 
 fn player_object_default() -> String {
     "P_EX100".into()
@@ -162,7 +163,7 @@ struct Config {
 /// tables), msg/<lang>/jm.bar (message slot 0x65), menu/jm_world.2ld (the
 /// world icons), menu/jm_top_<code>.2ld by code and the menu-chain curtain
 /// menu/<lang>/pause.2ld.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct JournalConfig {
     book: Locator,
     tables: Locator,
@@ -353,7 +354,7 @@ struct EnemyConfig {
     offset: [f32; 3],
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct MenuSources {
     /// field2d/<lang>/<world><n>command.2dd ('comw' sequence).
     command: Locator,
@@ -1081,6 +1082,8 @@ struct Loaded {
     npc: Option<NpcSource>,
     camp: Option<CampSource>,
     journal: Option<JournalSource>,
+    /// The menus' configured files, for a text language change.
+    language: Option<settings_room::LanguageSources>,
     /// Field and battle music SCD bytes.
     music: Option<[Vec<u8>; 2]>,
 }
@@ -1699,6 +1702,244 @@ fn floor_levels(triangles: &[CollisionTriangle]) -> Vec<(f32, [f32; 3])> {
     let mut levels: Vec<_> = bins.into_values().map(|(a, _, p)| (a, p)).collect();
     levels.sort_by(|x, y| y.0.total_cmp(&x.0));
     levels
+}
+
+/// The camp menu's layout, texts and tables (menu/<lang>/camp.2ld and
+/// msg/<lang>/sys.bar with the system font); again on a language change.
+fn load_camp_source(
+    source: &ProbeSource,
+    l: &Locator,
+    m: &MenuSources,
+    battle: &[u8],
+    system: &[u8],
+) -> Result<CampSource, Box<dyn std::error::Error>> {
+    let menu = layout2d::load(source, &l.index, l.ordinal, l.name_hash)?;
+    let ids: Vec<u32> = CAMP_ENTRIES
+        .iter()
+        .flat_map(|&(_, label, help)| [label, help])
+        .collect();
+    let texts = hud::load_messages(
+        source,
+        &m.messages.index,
+        m.messages.ordinal,
+        m.messages.name_hash,
+        &ids,
+    )?;
+    let entries = CAMP_ENTRIES
+        .iter()
+        .zip(texts.chunks(2))
+        .map(|(&(id, _, _), t)| camp::Entry {
+            id,
+            label: t[0].clone(),
+            help: t[1].clone(),
+        })
+        .collect();
+    let font = hud::load_system_font(
+        source,
+        (
+            &m.font_image.index,
+            m.font_image.ordinal,
+            m.font_image.name_hash,
+        ),
+        (
+            &m.font_info.index,
+            m.font_info.ordinal,
+            m.font_info.name_hash,
+        ),
+    )?;
+    let icons = hud::load_font(
+        source,
+        (
+            &m.font_image.index,
+            m.font_image.ordinal,
+            m.font_image.name_hash,
+        ),
+        (
+            &m.font_info.index,
+            m.font_info.ordinal,
+            m.font_info.name_hash,
+        ),
+        b"icon",
+    )?;
+    let msg = |ids: &[u32]| {
+        hud::load_messages(
+            source,
+            &m.messages.index,
+            m.messages.ordinal,
+            m.messages.name_hash,
+            ids,
+        )
+    };
+    let mut status = msg(&[0xb9fc, 0xb9fd, 0xb9fe, 0x851f, 0xc5ae, 0xb61a])?;
+    let banner = status.pop().unwrap_or_default();
+    let status_help = status.pop().unwrap_or_default();
+    let name = status.pop().unwrap_or_default();
+    let labels = [status[0].clone(), status[1].clone(), status[2].clone()];
+    // "<0d>´s Status.": code 0x0d takes the character's name.
+    let mut help = Vec::new();
+    for &b in &status_help {
+        if b == 0x0d {
+            help.extend_from_slice(&name);
+        } else {
+            help.push(b);
+        }
+    }
+    let stat_ids: Vec<u32> = CAMP_STATS
+        .iter()
+        .flat_map(|&(_, label, help, _)| [label, help])
+        .collect();
+    let stat_texts = msg(&stat_ids)?;
+    let stats = CAMP_STATS
+        .iter()
+        .zip(stat_texts.chunks(2))
+        .map(|(&(bit, _, _, style), t)| (bit, t[0].clone(), t[1].clone(), style))
+        .collect();
+    let config_ids: Vec<u32> = CAMP_CONFIG
+        .iter()
+        .flat_map(|(label, choices, helps)| {
+            std::iter::once(*label)
+                .chain(choices.iter().copied())
+                .chain(helps.iter().copied())
+        })
+        .collect();
+    let mut config_texts = msg(&config_ids)?.into_iter();
+    let config = CAMP_CONFIG
+        .iter()
+        .map(|(_, choices, helps)| {
+            let mut take =
+                |n: usize| -> Vec<Vec<u8>> { (0..n).filter_map(|_| config_texts.next()).collect() };
+            let label = take(1).pop().unwrap_or_default();
+            camp::ConfigRow {
+                label,
+                choices: take(choices.len()),
+                help: take(helps.len()),
+            }
+        })
+        .collect();
+    let lvup = bar_entry(battle, b"lvup")?;
+    let plrp = bar_entry(battle, b"plrp")?;
+    let lv = package_reader::battle_tables::player_level(lvup, 1, 1)?;
+    let byte = |at: usize| plrp.get(8 + at).copied().unwrap_or(0) as i32;
+    // Sora at level 1 (LVUP row + PLRP id 0, Kingdom Key +3 Str /
+    // +1 Mag as in the combat setup) [test-room values].
+    let numbers = SoraNumbers {
+        level: 1,
+        next_exp: lv.exp,
+        ap: lv.ap as i32 + byte(5) + ROOM_EXTRA_AP,
+        strength: lv.strength as i32 + byte(6) + 3,
+        magic: lv.magic as i32 + byte(7) + 1,
+        defense: lv.defense as i32 + byte(8),
+    };
+    let (abilities, weapon_ability) = load_camp_abilities(system, |ids| {
+        hud::load_messages_optional(
+            source,
+            &m.messages.index,
+            m.messages.ordinal,
+            m.messages.name_hash,
+            ids,
+        )
+    })?;
+    // Customize texts (customize-spec §1.3 / §7).
+    let mut cust = msg(&CUSTOMIZE_MESSAGES)?.into_iter();
+    let mut take = || cust.next().unwrap_or_default();
+    let customize = camp::customize::CustomizeTexts {
+        help: [take(), take()],
+        labels: [take(), take(), take()],
+        shortcut_headings: [take(), take(), take(), take()],
+        remove_help: take(),
+        mp_choices: [take(), take()],
+        mp_help: [take(), take()],
+        reload_choices: [take(), take()],
+        reload_help: [take(), take()],
+        reload_warning: take(),
+    };
+    let mut eq = msg(&EQUIP_MESSAGES[..21])?.into_iter();
+    let mut take = || eq.next().unwrap_or_default();
+    let equip_texts = camp::equip::EquipTexts {
+        sections: [take(), take(), take(), take(), take()],
+        none: take(),
+        no_items: take(),
+        unequip_help: [take(), take(), take()],
+        reload_box: take(),
+        accessory_box: take(),
+        stat_labels: [
+            take(),
+            take(),
+            take(),
+            take(),
+            take(),
+            take(),
+            take(),
+            take(),
+            take(),
+        ],
+    };
+    let equip_stats = package_reader::item_table::read_stats(bar_entry(system, b"item")?)?
+        .into_iter()
+        .map(|s| camp::equip::ItemStats {
+            id: s.id,
+            ability: s.ability,
+            strength: s.strength,
+            magic: s.magic,
+            defense: s.defense,
+            ap: s.ap,
+            resists: s.resists,
+        })
+        .collect();
+    // Party help (party-spec §11).
+    let mut party = msg(&[0xbb88, 0x846b, 0x846c])?.into_iter();
+    let mut next = || party.next().unwrap_or_default();
+    let party_help = [next(), next(), next()];
+    let items = load_camp_items(system, |ids| {
+        hud::load_messages_optional(
+            source,
+            &m.messages.index,
+            m.messages.ordinal,
+            m.messages.name_hash,
+            ids,
+        )
+    })?;
+    Ok(CampSource {
+        menu,
+        entries,
+        font,
+        labels,
+        name,
+        help,
+        banner,
+        stats,
+        config,
+        numbers,
+        items,
+        icons,
+        abilities,
+        weapon_ability,
+        party_help,
+        customize,
+        equip_texts,
+        equip_stats,
+        picture_sequence: bar_entry(system, b"ipic")
+            .ok()
+            .map(package_reader::sequence::read)
+            .transpose()?,
+        notice_headings: {
+            let mut h = msg(&camp::notice::HEADING_IDS)?.into_iter();
+            std::array::from_fn(|_| h.next().unwrap_or_default())
+        },
+        notice_page: msg(&[camp::notice::PAGE_ID])?.pop().unwrap_or_default(),
+        notice_callouts: {
+            let texts = msg(&[0x561e, 0x561f, 0x5620])?;
+            let file = read_named(source, "Image/dt/kh2_first.hed", "THelpText.bin")?;
+            file.map_or_else(Vec::new, |b| {
+                camp::notice::parse_callouts(&b, |id| {
+                    texts
+                        .get(id.wrapping_sub(0x561e) as usize)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+            })
+        },
+    })
 }
 
 fn load(
@@ -2432,236 +2673,7 @@ fn load(
         None => None,
     };
     let camp = match (&config.camp, &config.menu) {
-        (Some(l), Some(m)) => {
-            let menu = layout2d::load(source, &l.index, l.ordinal, l.name_hash)?;
-            let ids: Vec<u32> = CAMP_ENTRIES
-                .iter()
-                .flat_map(|&(_, label, help)| [label, help])
-                .collect();
-            let texts = hud::load_messages(
-                source,
-                &m.messages.index,
-                m.messages.ordinal,
-                m.messages.name_hash,
-                &ids,
-            )?;
-            let entries = CAMP_ENTRIES
-                .iter()
-                .zip(texts.chunks(2))
-                .map(|(&(id, _, _), t)| camp::Entry {
-                    id,
-                    label: t[0].clone(),
-                    help: t[1].clone(),
-                })
-                .collect();
-            let font = hud::load_system_font(
-                source,
-                (
-                    &m.font_image.index,
-                    m.font_image.ordinal,
-                    m.font_image.name_hash,
-                ),
-                (
-                    &m.font_info.index,
-                    m.font_info.ordinal,
-                    m.font_info.name_hash,
-                ),
-            )?;
-            let icons = hud::load_font(
-                source,
-                (
-                    &m.font_image.index,
-                    m.font_image.ordinal,
-                    m.font_image.name_hash,
-                ),
-                (
-                    &m.font_info.index,
-                    m.font_info.ordinal,
-                    m.font_info.name_hash,
-                ),
-                b"icon",
-            )?;
-            let msg = |ids: &[u32]| {
-                hud::load_messages(
-                    source,
-                    &m.messages.index,
-                    m.messages.ordinal,
-                    m.messages.name_hash,
-                    ids,
-                )
-            };
-            let mut status = msg(&[0xb9fc, 0xb9fd, 0xb9fe, 0x851f, 0xc5ae, 0xb61a])?;
-            let banner = status.pop().unwrap_or_default();
-            let status_help = status.pop().unwrap_or_default();
-            let name = status.pop().unwrap_or_default();
-            let labels = [status[0].clone(), status[1].clone(), status[2].clone()];
-            // "<0d>´s Status.": code 0x0d takes the character's name.
-            let mut help = Vec::new();
-            for &b in &status_help {
-                if b == 0x0d {
-                    help.extend_from_slice(&name);
-                } else {
-                    help.push(b);
-                }
-            }
-            let stat_ids: Vec<u32> = CAMP_STATS
-                .iter()
-                .flat_map(|&(_, label, help, _)| [label, help])
-                .collect();
-            let stat_texts = msg(&stat_ids)?;
-            let stats = CAMP_STATS
-                .iter()
-                .zip(stat_texts.chunks(2))
-                .map(|(&(bit, _, _, style), t)| (bit, t[0].clone(), t[1].clone(), style))
-                .collect();
-            let config_ids: Vec<u32> = CAMP_CONFIG
-                .iter()
-                .flat_map(|(label, choices, helps)| {
-                    std::iter::once(*label)
-                        .chain(choices.iter().copied())
-                        .chain(helps.iter().copied())
-                })
-                .collect();
-            let mut config_texts = msg(&config_ids)?.into_iter();
-            let config = CAMP_CONFIG
-                .iter()
-                .map(|(_, choices, helps)| {
-                    let mut take = |n: usize| -> Vec<Vec<u8>> {
-                        (0..n).filter_map(|_| config_texts.next()).collect()
-                    };
-                    let label = take(1).pop().unwrap_or_default();
-                    camp::ConfigRow {
-                        label,
-                        choices: take(choices.len()),
-                        help: take(helps.len()),
-                    }
-                })
-                .collect();
-            let lvup = bar_entry(&battle, b"lvup")?;
-            let plrp = bar_entry(&battle, b"plrp")?;
-            let lv = package_reader::battle_tables::player_level(lvup, 1, 1)?;
-            let byte = |at: usize| plrp.get(8 + at).copied().unwrap_or(0) as i32;
-            // Sora at level 1 (LVUP row + PLRP id 0, Kingdom Key +3 Str /
-            // +1 Mag as in the combat setup) [test-room values].
-            let numbers = SoraNumbers {
-                level: 1,
-                next_exp: lv.exp,
-                ap: lv.ap as i32 + byte(5) + ROOM_EXTRA_AP,
-                strength: lv.strength as i32 + byte(6) + 3,
-                magic: lv.magic as i32 + byte(7) + 1,
-                defense: lv.defense as i32 + byte(8),
-            };
-            let (abilities, weapon_ability) = load_camp_abilities(&system, |ids| {
-                hud::load_messages_optional(
-                    source,
-                    &m.messages.index,
-                    m.messages.ordinal,
-                    m.messages.name_hash,
-                    ids,
-                )
-            })?;
-            // Customize texts (customize-spec §1.3 / §7).
-            let mut cust = msg(&CUSTOMIZE_MESSAGES)?.into_iter();
-            let mut take = || cust.next().unwrap_or_default();
-            let customize = camp::customize::CustomizeTexts {
-                help: [take(), take()],
-                labels: [take(), take(), take()],
-                shortcut_headings: [take(), take(), take(), take()],
-                remove_help: take(),
-                mp_choices: [take(), take()],
-                mp_help: [take(), take()],
-                reload_choices: [take(), take()],
-                reload_help: [take(), take()],
-                reload_warning: take(),
-            };
-            let mut eq = msg(&EQUIP_MESSAGES[..21])?.into_iter();
-            let mut take = || eq.next().unwrap_or_default();
-            let equip_texts = camp::equip::EquipTexts {
-                sections: [take(), take(), take(), take(), take()],
-                none: take(),
-                no_items: take(),
-                unequip_help: [take(), take(), take()],
-                reload_box: take(),
-                accessory_box: take(),
-                stat_labels: [
-                    take(),
-                    take(),
-                    take(),
-                    take(),
-                    take(),
-                    take(),
-                    take(),
-                    take(),
-                    take(),
-                ],
-            };
-            let equip_stats = package_reader::item_table::read_stats(bar_entry(&system, b"item")?)?
-                .into_iter()
-                .map(|s| camp::equip::ItemStats {
-                    id: s.id,
-                    ability: s.ability,
-                    strength: s.strength,
-                    magic: s.magic,
-                    defense: s.defense,
-                    ap: s.ap,
-                    resists: s.resists,
-                })
-                .collect();
-            // Party help (party-spec §11).
-            let mut party = msg(&[0xbb88, 0x846b, 0x846c])?.into_iter();
-            let mut next = || party.next().unwrap_or_default();
-            let party_help = [next(), next(), next()];
-            let items = load_camp_items(&system, |ids| {
-                hud::load_messages_optional(
-                    source,
-                    &m.messages.index,
-                    m.messages.ordinal,
-                    m.messages.name_hash,
-                    ids,
-                )
-            })?;
-            Some(CampSource {
-                menu,
-                entries,
-                font,
-                labels,
-                name,
-                help,
-                banner,
-                stats,
-                config,
-                numbers,
-                items,
-                icons,
-                abilities,
-                weapon_ability,
-                party_help,
-                customize,
-                equip_texts,
-                equip_stats,
-                picture_sequence: bar_entry(&system, b"ipic")
-                    .ok()
-                    .map(package_reader::sequence::read)
-                    .transpose()?,
-                notice_headings: {
-                    let mut h = msg(&camp::notice::HEADING_IDS)?.into_iter();
-                    std::array::from_fn(|_| h.next().unwrap_or_default())
-                },
-                notice_page: msg(&[camp::notice::PAGE_ID])?.pop().unwrap_or_default(),
-                notice_callouts: {
-                    let texts = msg(&[0x561e, 0x561f, 0x5620])?;
-                    let file = read_named(source, "Image/dt/kh2_first.hed", "THelpText.bin")?;
-                    file.map_or_else(Vec::new, |b| {
-                        camp::notice::parse_callouts(&b, |id| {
-                            texts
-                                .get(id.wrapping_sub(0x561e) as usize)
-                                .cloned()
-                                .unwrap_or_default()
-                        })
-                    })
-                },
-            })
-        }
+        (Some(l), Some(m)) => Some(load_camp_source(source, l, m, &battle, &system)?),
         _ => None,
     };
     let journal = match (&config.journal, &config.menu, &camp) {
@@ -2838,6 +2850,16 @@ fn load(
         npc,
         camp,
         journal,
+        language: match (&config.camp, &config.menu) {
+            (Some(camp), Some(menu)) => Some(settings_room::LanguageSources {
+                camp: camp.clone(),
+                menu: menu.clone(),
+                journal: config.journal.clone(),
+                battle: config.battle.clone(),
+                system: config.system.clone(),
+            }),
+            _ => None,
+        },
         music,
     })
 }
@@ -4545,11 +4567,15 @@ fn resize_scene(
     windows: Query<&Window>,
     mut images: ResMut<Assets<Image>>,
     mut frame: ResMut<Ui2dFrame>,
+    settings: Res<settings_room::SettingsRes>,
 ) {
     let (Some(mut c), Ok(w)) = (compose, windows.single()) else {
         return;
     };
-    let size = [w.physical_width().max(1), w.physical_height().max(1)];
+    // The Resolution setting scales the scene against the window.
+    let scale = settings.current.scale();
+    let size = [w.physical_width(), w.physical_height()]
+        .map(|v| ((v as f32 * scale).round() as u32).clamp(1, 8192));
     c.stable_frames += 1;
     if frame.sheets[c.scene_sheet].size == size {
         return;
@@ -4572,9 +4598,12 @@ fn compose_2d(
     talk: Option<Res<Talk>>,
     camp: Option<Res<CampRes>>,
     mut frame: ResMut<Ui2dFrame>,
+    settings: Res<settings_room::SettingsRes>,
 ) {
     let Some(c) = compose else { return };
-    frame.full_screen(c.scene_sheet, [1.; 4]);
+    // Brightness tints the scene; the HUD setting hides the field HUD.
+    let b = settings.current.brightness_factor();
+    frame.full_screen(c.scene_sheet, [b, b, b, 1.]);
     if let (Some(s), Some(t)) = (c.snapshot_sheet, &talk)
         && t.dissolve > 0
     {
@@ -4583,6 +4612,7 @@ fn compose_2d(
     let camp_open = camp.is_some_and(|c| c.menu_up());
     if let Some(h) = c.hud_sheet
         && !camp_open
+        && settings.current.show_hud
     {
         frame.full_screen(h, [1.; 4]);
     }
@@ -6775,10 +6805,12 @@ fn camera_control(
     mut rig: ResMut<CameraRig>,
     mut camera: Query<(&mut Transform, &mut Projection), CameraOnly>,
     talk: Option<Res<Talk>>,
+    settings: Res<settings_room::SettingsRes>,
 ) {
     // Mouse-look turns the camera (the PC layer feeds mouse motion to the
-    // right stick; its sensitivity is unresolved).
-    rig.pending_turn = (rig.pending_turn + motion.delta.x * 0.1).clamp(-30., 30.);
+    // right stick; its sensitivity is unresolved): 0.1 at Camera Speed 5.
+    let speed = settings.current.camera_factor();
+    rig.pending_turn = (rig.pending_turn + motion.delta.x * speed).clamp(-30., 30.);
     let (eye, look_at, fov) = match talk.as_ref().and_then(|t| t.camera) {
         // The talk camera (FUN_140175e50): 60° in the game's horizontal
         // 4:3 sense, converted like the follow camera's.
@@ -7433,6 +7465,8 @@ struct CampRes {
     seen_albums: Vec<u16>,
     picture_sheets: HashMap<u16, Option<usize>>,
     notice_sheets: HashMap<String, usize>,
+    /// The menus' language code (`menu/<lang>/` notice and photo files).
+    lang: String,
 }
 
 /// Sheet slots of the journal's images.
@@ -7458,7 +7492,7 @@ impl CampRes {
 /// Unattended camp check after the combat plan: open, down to Status,
 /// the character list, the stat browser (column switch, move), back out,
 /// down to Config, change Field Camera and Summon Effects, jump to the
-/// bottom with R1, back out, close with START.
+/// bottom with R1, R2 to the Graphics page, back out, close with START.
 const AUTOPLAY_CAMP: &[(u64, u64)] = &[
     (1810, 0x2),
     (1840, 0x20),
@@ -7480,6 +7514,8 @@ const AUTOPLAY_CAMP: &[(u64, u64)] = &[
     (2360, 0x20),
     (2380, 0x80),
     (2400, 0x4000),
+    // R2: the Graphics settings page.
+    (2405, 0x1_0000),
     (2430, 0x8),
     (2480, 0x2),
     // Items: reopen, wrap to Items, Stock, the consumables tab, use an
@@ -7643,33 +7679,33 @@ fn camp_setup(
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut c) = camp else { return };
-    let c = &mut *c;
+    upload_camp_sheets(&mut c, &mut frame, &mut images);
+}
+
+/// The camp's and the journal's images as 2D sheets (again after a text
+/// language change).
+fn upload_camp_sheets(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Assets<Image>) {
     for n in 0..4 {
         if let Some((t, scale)) = c.source.menu.texture_for(0, n) {
             let (rgba, size) = (t.rgba.clone(), t.size);
-            c.art[n] = Some(frame.add_sheet(&mut images, rgba, size, scale));
+            c.art[n] = Some(frame.add_sheet(images, rgba, size, scale));
         }
     }
     c.font_sheet = frame.add_sheet(
-        &mut images,
+        images,
         std::mem::take(&mut c.source.font.rgba),
         c.source.font.size,
         c.source.font.texel_scale as f32,
     );
     c.icon_sheet = frame.add_sheet(
-        &mut images,
+        images,
         std::mem::take(&mut c.source.icons.rgba),
         c.source.icons.size,
         c.source.icons.texel_scale as f32,
     );
     if let Some(j) = c.journal_source.as_mut() {
         let mut add = |t: &mut layout2d::Texture| {
-            frame.add_sheet(
-                &mut images,
-                std::mem::take(&mut t.rgba),
-                t.size,
-                t.texel_scale,
-            )
+            frame.add_sheet(images, std::mem::take(&mut t.rgba), t.size, t.texel_scale)
         };
         let s = &mut c.journal_sheets;
         let book = j.book.texture_for(0, 0).map(|(_, k)| k);
@@ -7708,6 +7744,7 @@ fn camp_tick(
     mut hud: Option<ResMut<Hud>>,
     mut frame: ResMut<Ui2dFrame>,
     mut images: ResMut<Assets<Image>>,
+    mut settings: ResMut<settings_room::SettingsRes>,
 ) {
     let Some(mut c) = camp else { return };
     let c = &mut *c;
@@ -7797,10 +7834,12 @@ fn camp_tick(
         }],
         labels: c.source.labels.clone(),
     };
+    let panels_again = panels.clone();
     // Status values are built when the camp opens (FUN_140354340).
     let camp_data = |c: &CampRes,
                      panels: camp::Panels,
-                     battle_items: Option<&item_room::ItemRt>|
+                     battle_items: Option<&item_room::ItemRt>,
+                     settings: &settings_room::SettingsRes|
      -> camp::Data {
         // The battle's item slots and stock are the live ones.
         let mut equipment = c.equipment.clone();
@@ -7893,6 +7932,8 @@ fn camp_tick(
                 page: c.source.notice_page.clone(),
                 callouts: c.source.notice_callouts.clone(),
             },
+            settings: Some(settings.current.clone()),
+            languages: settings.languages.clone(),
         }
     };
     // The menu chain (menu mode 10, FUN_14031aac0): the camp; deciding a
@@ -7908,6 +7949,10 @@ fn camp_tick(
             .collect();
         sounds = menu.frame(layout, c.pad.pressed, c.pad.repeat, tick as u32);
         game.tick += 1;
+        // The settings pages apply as they change.
+        if let Some(s) = &menu.data.settings {
+            settings.current.clone_from(s);
+        }
         if menu.journal.is_some()
             && c.curtain.is_none()
             && let Some(j) = &c.journal_source
@@ -7922,6 +7967,7 @@ fn camp_tick(
             menu.kill_all();
         }
         if menu.closed {
+            settings.save_if_changed();
             c.memory = menu.memory;
             c.config_flags = menu.data.config_flags;
             c.stock = menu.data.items.counts.clone();
@@ -8027,7 +8073,11 @@ fn camp_tick(
             game.event(serde_json::json!({"event":"journal_close","tick":tick}));
             // FUN_140304ea0: the camp is rebuilt (its open sound) and the
             // curtain lifts (FUN_14031a690).
-            let (menu, s) = Camp::open(layout, camp_data(c, panels, game.items.as_ref()), c.memory);
+            let (menu, s) = Camp::open(
+                layout,
+                camp_data(c, panels, game.items.as_ref(), &settings),
+                c.memory,
+            );
             c.open = Some(menu);
             sounds.extend(s);
             if let Some(cur) = c.curtain.as_mut() {
@@ -8036,7 +8086,11 @@ fn camp_tick(
             game.event(serde_json::json!({"event":"camp_open","tick":tick}));
         }
     } else if c.curtain.is_none() && c.pad.pressed & 0x2 != 0 && !game.talking {
-        let (menu, s) = Camp::open(layout, camp_data(c, panels, game.items.as_ref()), c.memory);
+        let (menu, s) = Camp::open(
+            layout,
+            camp_data(c, panels, game.items.as_ref(), &settings),
+            c.memory,
+        );
         c.open = Some(menu);
         sounds = s;
         game.tick += 1;
@@ -8059,6 +8113,47 @@ fn camp_tick(
         {
             for layer in r.layers {
                 mixer.play(layer, n, r.volume, 1.);
+            }
+        }
+    }
+    // A new text language: the menus reload in it and the camp comes back
+    // on Config with its state.
+    if settings.language_pending() && c.open.is_some() {
+        match settings.switch_language(c, hud.as_deref_mut(), &mut frame, &mut images) {
+            Ok(()) => {
+                let mut old = c.open.take().expect("camp open");
+                old.commit_config();
+                let mut data = camp_data(c, panels_again, game.items.as_ref(), &settings);
+                let o = &old.data;
+                data.config_flags = o.config_flags;
+                data.items.counts.clone_from(&o.items.counts);
+                data.items.seen.clone_from(&o.items.seen);
+                data.items.equipment.clone_from(&o.items.equipment);
+                data.customize.shortcuts = o.customize.shortcuts;
+                data.customize.no_charge = o.customize.no_charge;
+                data.abilities.members.clone_from(&o.abilities.members);
+                data.notice.flags.clone_from(&o.notice.flags);
+                for (m, was) in data.panels.members.iter_mut().zip(&o.panels.members) {
+                    m.hp = was.hp;
+                    m.mp = was.mp;
+                }
+                let row = old.config_cursor();
+                c.open = Some(Camp::open_on_config(
+                    &c.source.menu.layout,
+                    data,
+                    old.memory,
+                    row,
+                ));
+                settings.save_if_changed();
+                game.event(serde_json::json!({"event":"language","tick":tick,
+                    "language":settings.current.language}));
+            }
+            Err(e) => {
+                eprintln!("Text language not changed: {e}");
+                settings.keep_loaded_language();
+                if let Some(s) = c.open.as_mut().and_then(|m| m.data.settings.as_mut()) {
+                    s.language.clone_from(&settings.current.language);
+                }
             }
         }
     }
@@ -8148,7 +8243,15 @@ fn load_wanted_journal(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asse
         && let Some(a) = j.albums.get(row as usize)
         && let Some(code) = code_of(a.world as u8)
     {
-        let path = format!("menu/us/jm_photo/{code}{}.bin", a.suffix);
+        let mut path = format!("menu/{}/jm_photo/{code}{}.bin", c.lang, a.suffix);
+        if c.lang != "us"
+            && !matches!(
+                layout2d::load_imgd(source, PICTURE_INDEX, &path),
+                Ok(Some(_))
+            )
+        {
+            path = format!("menu/us/jm_photo/{code}{}.bin", a.suffix);
+        }
         match layout2d::load_imgd(source, PICTURE_INDEX, &path) {
             Ok(Some(t)) => {
                 let slot = frame.add_sheet(images, t.rgba, t.size, t.texel_scale);
@@ -8173,7 +8276,15 @@ fn load_wanted_notice(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asset
     let Some(source) = &c.picture_source else {
         return;
     };
-    let path = format!("menu/us/{file}");
+    let mut path = format!("menu/{}/{file}", c.lang);
+    if c.lang != "us"
+        && !matches!(
+            layout2d::load_imgd(source, PICTURE_INDEX, &path),
+            Ok(Some(_))
+        )
+    {
+        path = format!("menu/us/{file}");
+    }
     match layout2d::load_imgd(source, PICTURE_INDEX, &path) {
         Ok(Some(t)) => {
             let slot = frame.add_sheet(images, t.rgba, t.size, t.texel_scale);
@@ -8464,7 +8575,18 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         None => None,
     };
     eprintln!("Validating the selected KH2FM source, then decoding the test room...");
-    let loaded = load(&source, &args[2], basic_fk)?;
+    let mut loaded = load(&source, &args[2], basic_fk)?;
+    // Beside the room's configuration; unattended runs keep the defaults.
+    let settings = settings_room::SettingsRes::new(
+        source.clone(),
+        autoplay.is_none().then(|| {
+            args[2]
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("kh2fm-settings.json")
+        }),
+        loaded.language.take(),
+    )?;
     let log = match log_path {
         Some(path) => Some(OpenOptions::new().write(true).create_new(true).open(path)?),
         None => None,
@@ -8859,6 +8981,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             seen_albums: Vec::new(),
             picture_sheets: HashMap::new(),
             notice_sheets: HashMap::new(),
+            lang: settings.loaded_or("us"),
         });
     }
     Ok(app
@@ -8883,6 +9006,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             shown: None,
         })
         .insert_resource(audio)
+        .insert_resource(settings)
         .insert_resource(effects)
         .insert_resource(Time::<Fixed>::from_hz(60.))
         .insert_resource(ClearColor(Color::srgb(0.06, 0.07, 0.09)))
@@ -8907,6 +9031,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .add_plugins(SkatePlugins)
         .add_systems(Startup, (setup, pause_for_autoplay, camp_setup))
         .add_systems(Update, crate::skate::toggle)
+        .add_systems(Update, settings_room::apply_settings)
         .add_systems(
             FixedUpdate,
             (
