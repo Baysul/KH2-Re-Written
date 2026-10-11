@@ -16,8 +16,9 @@ const NOTICE_FRAMES: u32 = 300;
 /// units tall, about the Skate 3 rider's height in metres x 100).
 #[cfg(feature = "skate3")]
 pub const UNITS_PER_METRE: f32 = 100.;
-/// The plain stand-in board (scene units): width, thickness, length of a
-/// common 8.0 x 31.5 inch deck, and its top above the deck frame.
+/// A deck's size (scene units): width, thickness, length of a common
+/// 8.0 x 31.5 inch deck (the Keyblade board is scaled to its length; the
+/// plain board is the fallback), and its top above the deck frame.
 pub const DECK_SIZE: [f32; 3] = [20.3, 1.5, 80.];
 pub const DECK_TOP: f32 = 0.75;
 

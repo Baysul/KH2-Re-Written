@@ -15,7 +15,7 @@ Owner Claude, 2026-10-11. Gate: none (owner-requested exception, as T101). Prere
 - J: admit the disc; prepare the riding data once into `<data dir>/skate3` on a worker thread (keyed by ISO path, size and time); build the sim on the room's collision triangles (scene units / 100, two-sided) at Sora's position and facing; step it at 60 Hz with keyboard or pad as an XInput pad; J again gets off. An area change ends the ride.
 - Sora: control is locked while riding; his position and yaw follow the rider root. `skate_rig` gives each mapped Sora bone (legs, feet, spine, neck, arms, hands) the rider bone's rotation change since its rest pose, after a fixed correction from Sora's T-pose bind to the rider's A-pose rest; joints keep Sora's bone lengths and the pelvis sits on the rider's hips. He is skinned on the CPU with those matrices (`Skinning::positions_with`). Bone choices read from P_EX100's bind pose.
 - Camera: while riding, Skate 3's gameplay camera (skate-sim's `CameraRuntime`, its transform and field of view, fed the window's aspect) replaces the KH2 follow camera.
-- Board: a plain stand-in cuboid (8.0 x 31.5 inch deck) on the deck transform. Scale: 100 scene units per metre (Sora's model is 171 units tall).
+- Board: the Kingdom Key (owner's choice, 2026-10-11): the Keyblade's own meshes laid flat on the deck transform, longest extent along the board, scaled to a 31.5 inch deck; the hand Keyblade is hidden while riding. A plain cuboid is the fallback without a weapon model. Scale: 100 scene units per metre (Sora's model is 171 units tall).
 
 ## Checks
 
@@ -30,7 +30,6 @@ Owner Claude, 2026-10-11. Gate: none (owner-requested exception, as T101). Prere
 
 - A build with `skate3` is GPL-3.0; the default build stays Apache-2.0.
 - Fingers and face are not retargeted; the bone map and the rider rest pose (its pose before the first step) are inferred, not named data.
-- The board is not the disc's model yet.
 
 ## Verdict
 
@@ -38,4 +37,4 @@ PROGRESS: riding works in the test room from the owner's disc.
 
 ## Next
 
-Decode the deck, trucks and wheels from `createacharacter.big` (RX2) and their textures.
+Skate 3 sounds while riding, then Skate 3's score system in place of the HUD while riding (owner's requests, 2026-10-11).

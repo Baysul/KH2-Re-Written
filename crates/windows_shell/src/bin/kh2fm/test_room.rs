@@ -6807,7 +6807,40 @@ struct SoraRig {
     rig: Option<crate::skate_rig::Rig>,
 }
 
-/// Sora stands sideways on the deck, and a plain board follows it.
+/// The Keyblade laid flat as a deck: its longest extent along the board,
+/// the next across it, centred, scaled to a deck's length and resting on
+/// the deck frame.
+fn keyblade_deck(points: &[Vec3]) -> Transform {
+    let (low, high) = points.iter().fold(
+        (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+        |(l, h), &p| (l.min(p), h.max(p)),
+    );
+    if points.is_empty() {
+        return Transform::IDENTITY;
+    }
+    let size = high - low;
+    let mut axes = [(size.x, Vec3::X), (size.y, Vec3::Y), (size.z, Vec3::Z)];
+    axes.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let [(long, long_axis), (_, mid_axis), (short, _)] = axes;
+    // Columns: where the board's X (across), Y (up) and Z (along) come from.
+    let up = long_axis.cross(mid_axis);
+    let to_blade = Mat3::from_cols(mid_axis, up, long_axis);
+    let rotation = Quat::from_mat3(&to_blade.transpose());
+    let scale = if long > 0. {
+        crate::skate::DECK_SIZE[2] / long
+    } else {
+        1.
+    };
+    let centre = (low + high) / 2.;
+    Transform {
+        translation: rotation * (-centre * scale) + Vec3::Y * (short * scale / 2.),
+        rotation,
+        scale: Vec3::splat(scale),
+    }
+}
+
+/// Sora rides the Skate 3 rider's pose, and the Kingdom Key follows the
+/// deck as the board.
 // Bevy systems take each resource as a parameter.
 #[allow(clippy::too_many_arguments)]
 fn skate_present(
@@ -6818,6 +6851,8 @@ fn skate_present(
     mut roots: Query<&mut Transform, (With<SoraRoot>, Without<SkateBoard>)>,
     mut boards: Query<(Entity, &mut Transform), BoardOnly>,
     parts: Query<(&SoraPart, &Mesh3d)>,
+    keyblade: Query<(&Mesh3d, &MeshMaterial3d<FogMaterial>), With<WeaponPart>>,
+    mut hand: Query<&mut Visibility, (With<WeaponRoot>, Without<SkateBoard>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -6827,6 +6862,10 @@ fn skate_present(
         }
         return;
     };
+    // The Keyblade is the board, so it leaves Sora's hand.
+    if let Ok(mut visibility) = hand.single_mut() {
+        *visibility = Visibility::Hidden;
+    }
     // With the rider retarget Sora takes the rider's root and pose;
     // otherwise he stands sideways on the deck in his current pose.
     let posed = sora.as_deref().and_then(|s| {
@@ -6859,7 +6898,7 @@ fn skate_present(
     }
     match boards.single_mut() {
         Ok((_, mut transform)) => *transform = deck,
-        Err(_) => {
+        Err(_) if keyblade.is_empty() => {
             let [w, h, l] = crate::skate::DECK_SIZE;
             commands.spawn((
                 SkateBoard,
@@ -6871,6 +6910,22 @@ fn skate_present(
                     ..default()
                 })),
             ));
+        }
+        Err(_) => {
+            // The Keyblade's own meshes (shared with the hand one).
+            let board = commands
+                .spawn((SkateBoard, deck, Visibility::default()))
+                .id();
+            let blade = commands
+                .spawn((
+                    keyblade_deck(&game.weapon_display),
+                    Visibility::default(),
+                    ChildOf(board),
+                ))
+                .id();
+            for (mesh, material) in &keyblade {
+                commands.spawn((mesh.clone(), material.clone(), ChildOf(blade)));
+            }
         }
     }
 }
