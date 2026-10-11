@@ -215,6 +215,7 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
     fx.dirty = true;
     let mut quads: Vec<(Arc<Dpd>, i8, Vec<Quad>)> = Vec::new();
     let mut draws: Vec<(Arc<Dpd>, i8, Vec<ModelDraw>)> = Vec::new();
+    let mut triangles: Vec<(i8, Vec<effect_vm::Triangle>)> = Vec::new();
     let mut unsupported = Vec::new();
     for r in fx.running.iter_mut() {
         if let Some(b) = &r.bind {
@@ -236,6 +237,10 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
         }
         if complete && !d.is_empty() {
             draws.push((r.dpd.clone(), layer, d));
+        }
+        let t = std::mem::take(&mut r.instance.triangles);
+        if complete && !t.is_empty() {
+            triangles.push((layer, t));
         }
     }
     fx.running.retain(|r| !r.instance.finished());
@@ -275,6 +280,32 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
                     .uvs
                     .push([q.uv[i][0] / size[0] as f32, q.uv[i][1] / size[1] as f32]);
                 batch.colors.push(colour);
+            }
+        }
+    }
+    // KeTh lightning: untextured gouraud triangles (GS colour bytes, 0x80 =
+    // 1.0); a subtractive blend (0x42) is drawn as alpha [I].
+    for (layer, list) in triangles {
+        for t in list {
+            let batch = fx
+                .batches
+                .entry(BatchKey {
+                    texture: None,
+                    additive: t.blend == 0x48,
+                    repeat: false,
+                    layer,
+                })
+                .or_default();
+            for i in 0..3 {
+                let c = t.colours[i].map(|v| v as f32 / 128.);
+                batch.positions.push(scene(t.corners[i]));
+                batch.uvs.push([0.; 2]);
+                batch.colors.push([
+                    c[0].clamp(0., 1.99).powf(2.2),
+                    c[1].clamp(0., 1.99).powf(2.2),
+                    c[2].clamp(0., 1.99).powf(2.2),
+                    c[3].clamp(0., 1.),
+                ]);
             }
         }
     }

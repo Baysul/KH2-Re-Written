@@ -24,7 +24,7 @@ Same selected source and private manifest (quarantined; full rehash at every lau
 
 ## Checks
 
-NOT RUN yet (filled in below when run).
+PASS `cargo fmt --all --check`; PASS `cargo clippy --workspace --all-targets --locked -- -D warnings`; PASS `cargo test --workspace --locked` (effect_vm 26, 12 new synthetic: loops, catch-up, YXZ, wood billboard, SRandDown, BornRnd3, PointAp, LoopZ scroll, tail ring, ribbon drift/fade/swap, KeTh bolt); PASS `cargo build --workspace --locked`; PASS smoke `cargo run -p windows_shell --locked -- --frames 180`; PASS release autoplay `drive-03/autoplay-06` (exit 0): Drive refilled, Limit Form entered at 7490 with the afterimage over the change, Infinity (683) with its Shoot follow-up, Strike Raid (704) with three Raids and Judgment hitting with ATKP 1866/1867, Sora's battle voices from bank 5113. A private harness ran every drive element 1200 frames with no unsupported program and no NaN. NOT RUN: interactive playtest of Master, Final and Antiform (#15) by the owner; comparison captures against the installed game.
 
 ## Uncertainty
 
@@ -32,8 +32,8 @@ NOT RUN yet (filled in below when run).
 - Level-up panels: the title uses the system font (the exe's font 1 is not loaded here), the ability lines omit the inline icon glyph, and the text baseline is inferred.
 - Voices draw from their own LCG copy rather than the shared battle RNG, so picks differ from the exe's sequence of draws.
 - The +3 yield ticks after motion 0x34 before the swap are not modelled.
-- Effect programs the effect VM cannot run yet are logged (`drive_effect_unsupported`) and skipped.
+- `effect_vm` now runs every program the drive elements use (P_EX100 1..27, the forms' 1..12 and 100..102, 00effect 16): loop ranges with catch-up and restart, kinds 6/7/11, 48, 77, 90, 93, 115, 116, 126, 128, 129 (KeTh lightning), 138, 157 (KeShpTail3X), 172, 181, 213..217, 219, 238 and ribbon modes 0x242/0x244. 238's frame-buffer refraction draws nothing; lightning width uses the exe's startup camera scale; ribbon and lightning alphas are averaged per primitive; subtractive lightning is drawn as alpha [I]. Non-drive elements in the same files still report kinds 47, 51, 65, 85, 89, 96, 99, 120, 121, 123, 155, 160, 178, 188, 189, 191, 200, 211, 212, 218 and 234.
 
 ## Verdict / next
 
-Filled in after the checks.
+PROGRESS: the room starts with a full Drive gauge, every form enters from the command deck with its change effects, afterimage, gauge burst and level-up panels, Limit Form's four limits and follow-ups run from its Limit menu, and Sora speaks in battle. Next: the owner's interactive check of Master, Final and Antiform; draw 238's refraction; the remaining non-drive effect kinds with the attack effects.

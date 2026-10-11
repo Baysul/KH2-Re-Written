@@ -3,7 +3,12 @@
 //! (91: FUN_1404c48c0), pppDrawMatrix (112: FUN_1404c6450), pppDrawMdl3
 //! (137: draw FUN_1404c8660), pppDrawMdlTs3 (139: update FUN_1404c8da0,
 //! draw FUN_1404c8b10, create FUN_1404c8ea0) and pppVertexAp (174: update
-//! FUN_1404d3b30, create FUN_1404d3d10).
+//! FUN_1404d3b30, create FUN_1404d3d10); pppDrawMatrixLoop (217:
+//! FUN_1404c6470, the same code as pppDrawMatrix), pppDrawMdlSemi3 (138:
+//! draw FUN_1404c88c0), pppDrawMdlLoopZ (219: update FUN_1404c9350, draw
+//! FUN_1404c9540, create FUN_1404c94e0, restart FUN_1404c9510) and
+//! pppSnoMdlDttNorm (238: draw FUN_1404cbba0, create/restart
+//! FUN_1404cbb60/FUN_1404cbb80).
 //!
 //! The exe's model draw (FUN_1404dc760) is not run here: a [`ModelDraw`]
 //! carries what it reads, and the presenting side expands the OMD meshes.
@@ -15,6 +20,10 @@
 //!   state tweaks only steer the exe's GS state and are not represented.
 //! - Global pause flags (`DAT_142b0efc0`, instance +0xc1) and
 //!   `DAT_142b0efe4` are taken as clear.
+//! - pppSnoMdlDttNorm's draw (FUN_1404cad20) redraws the model with its
+//!   vertices pushed along their normals by the u0 value, textured from the
+//!   frame buffer (a refraction "heat haze"). Only its value integrator is
+//!   run here; the frame-buffer pass has no [`ModelDraw`] form.
 use crate::math::{self, Mat};
 use crate::programs::{Birth, active, byte, float, key, read_matrix, use_val, word};
 use crate::{Ctx, ModelDraw, Part};
@@ -25,10 +34,14 @@ pub(crate) const VT_MIME: u32 = 49;
 pub(crate) const MATRIX_ZXY: u32 = 91;
 pub(crate) const DRAW_MATRIX: u32 = 112;
 pub(crate) const DRAW_MDL3: u32 = 137;
+pub(crate) const DRAW_MDL_SEMI3: u32 = 138;
 pub(crate) const DRAW_MDL_TS3: u32 = 139;
 pub(crate) const VERTEX_AP: u32 = 174;
 /// pppVertexApLc (FUN_1404d3e00): VertexAp with raw (untransformed) vertices.
 pub(crate) const VERTEX_AP_LC: u32 = 177;
+pub(crate) const DRAW_MATRIX_LOOP: u32 = 217;
+pub(crate) const DRAW_MDL_LOOP_Z: u32 = 219;
+pub(crate) const SNO_MDL_DTT_NORM: u32 = 238;
 
 /// x86 `cvttss2si`: out-of-range and NaN give 0x80000000.
 pub(crate) fn cvtt(f: f32) -> i32 {
@@ -54,6 +67,34 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
             let o = use_val(ctx, p, 0);
             part.zero(o, 4);
         }
+        // FUN_1404c94e0: no scroll set-up yet.
+        DRAW_MDL_LOOP_Z => {
+            let o = use_val(ctx, p, 2);
+            part.set_i32(o, 0);
+        }
+        SNO_MDL_DTT_NORM => {
+            let o = use_val(ctx, p, 0);
+            part.zero(o, 12);
+        }
+        _ => {}
+    }
+}
+
+/// Restart hooks (table +0x40) of the model programs.
+pub(crate) fn restart(p: &Program, part: &mut Part, ctx: &mut Ctx) {
+    match p.kind {
+        // FUN_1404c1a40: the morph integrator, without the vertex handle.
+        VT_MIME => {
+            let o = use_val(ctx, p, 0);
+            part.zero(o, 12);
+        }
+        // FUN_1404c9510: the scroll velocities and accelerations.
+        DRAW_MDL_LOOP_Z => {
+            let o = use_val(ctx, p, 2);
+            part.zero(o + 8, 8);
+            part.zero(o + 0x14, 8);
+        }
+        DRAW_MDL_TS3 | VERTEX_AP_LC | SNO_MDL_DTT_NORM => create(p, part, ctx),
         _ => {}
     }
 }
@@ -71,11 +112,12 @@ pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx)
             m[3] = [part.f32(u0), part.f32(u0 + 4), part.f32(u0 + 8), m[3][3]];
             part.cur = m;
         }
-        DRAW_MATRIX => {
+        DRAW_MATRIX | DRAW_MATRIX_LOOP => {
             // FUN_1404c6450: ede0 · (ec60 · ec20) · cur.
             part.draw = math::mul(&ctx.ede0, &math::mul(&ctx.ed60, &part.cur));
         }
         DRAW_MDL_TS3 => ts3_update(p, cursor, part, ctx),
+        DRAW_MDL_LOOP_Z => loop_z_update(p, cursor, part, ctx),
         VERTEX_AP | VERTEX_AP_LC => vertex_ap(p, cursor, part, ctx),
         _ => {}
     }
@@ -87,20 +129,51 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
         DRAW_MDL3 => {
             let u0 = use_val(ctx, p, 0);
             let b = (byte(ctx, cursor + 0xc) != 0).then(|| read_matrix(part, use_val(ctx, p, 2)));
-            push_draw(ctx, part, word(ctx, cursor + 4), u0, b, [0, 0]);
+            push_draw(ctx, part, word(ctx, cursor + 4), u0, b, [0, 0], None);
         }
+        // FUN_1404c88c0: DrawMdl3 with its flags at +0xa..+0xe and the
+        // draw-mode word +8 in place of the model's.
+        DRAW_MDL_SEMI3 => {
+            let u0 = use_val(ctx, p, 0);
+            let b = (byte(ctx, cursor + 0xe) != 0).then(|| read_matrix(part, use_val(ctx, p, 2)));
+            let mode = i16_at(&ctx.dpd.bytes, cursor + 8).unwrap_or(0) as u16;
+            push_draw(ctx, part, word(ctx, cursor + 4), u0, b, [0, 0], Some(mode));
+        }
+        // FUN_1404c9540: the u2 scroll pair as cvttss2si(x · 65536), the
+        // mode word +0x20 unless its low byte is 0xff.
+        DRAW_MDL_LOOP_Z => {
+            let u0 = use_val(ctx, p, 0);
+            let s = use_val(ctx, p, 2);
+            let b = (byte(ctx, cursor + 0x26) != 0).then(|| read_matrix(part, use_val(ctx, p, 3)));
+            let mode = (byte(ctx, cursor + 0x20) != 0xff)
+                .then(|| i16_at(&ctx.dpd.bytes, cursor + 0x20).unwrap_or(0) as u16);
+            let scroll = [
+                cvtt(part.f32(s + 4) * 65536.),
+                cvtt(part.f32(s + 0x10) * 65536.),
+            ];
+            push_draw(ctx, part, word(ctx, cursor + 4), u0, b, scroll, mode);
+        }
+        SNO_MDL_DTT_NORM => sno_integrate(p, cursor, part, ctx),
         DRAW_MDL_TS3 => {
             let u0 = use_val(ctx, p, 0);
             let s = use_val(ctx, p, 2);
             let b = (byte(ctx, cursor + 0x24) != 0).then(|| read_matrix(part, use_val(ctx, p, 3)));
             let scroll = [cvtt(part.f32(s) * 65536.), cvtt(part.f32(s + 12) * 65536.)];
-            push_draw(ctx, part, word(ctx, cursor + 4), u0, b, scroll);
+            push_draw(ctx, part, word(ctx, cursor + 4), u0, b, scroll, None);
         }
         _ => {}
     }
 }
 
-fn push_draw(ctx: &mut Ctx, part: &Part, model: u32, u0: usize, b: Option<Mat>, scroll: [i32; 2]) {
+fn push_draw(
+    ctx: &mut Ctx,
+    part: &Part,
+    model: u32,
+    u0: usize,
+    b: Option<Mat>,
+    scroll: [i32; 2],
+    mode: Option<u16>,
+) {
     let alpha = part.u8(u0 + 0xb);
     if model == 0xffff || alpha == 0 || !ctx.dpd.models.contains_key(&(model as i16)) {
         return;
@@ -112,6 +185,7 @@ fn push_draw(ctx: &mut Ctx, part: &Part, model: u32, u0: usize, b: Option<Mat>, 
         b,
         rgba: std::array::from_fn(|i| part.u8(u0 + 8 + i)),
         scroll,
+        mode,
     });
 }
 
@@ -186,6 +260,56 @@ fn ts3_update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
     for (i, v) in f.into_iter().enumerate() {
         part.set_f32(s + 4 * i, v);
     }
+}
+
+/// FUN_1404c9350: the u2 block (+0 first key, +4 U, +8 U rate, +0xc U
+/// acceleration, +0x10 V, +0x14 V rate, +0x18 V acceleration). The first
+/// call (on any frame) seeds U/V from key +8/+0x14; keys add to the rates;
+/// outside catch-up the rates integrate and U/V wrap at 32768.
+fn loop_z_update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
+    let s = use_val(ctx, p, 2);
+    if part.i32(s) == 0 {
+        part.set_i32(s + 4, word(ctx, cursor + 8) as i32);
+        part.set_i32(s + 0x10, word(ctx, cursor + 0x14) as i32);
+        part.zero(s + 0x14, 8);
+        part.zero(s + 8, 8);
+        part.set_i32(s, cursor as i32);
+    }
+    if !active(part) {
+        return;
+    }
+    if key(ctx, part, cursor) {
+        for (o, k) in [(8, 0xc), (0xc, 0x10), (0x14, 0x18), (0x18, 0x1c)] {
+            let v = float(ctx, cursor + k) + part.f32(s + o);
+            part.set_f32(s + o, v);
+        }
+    }
+    if !ctx.catch_up {
+        let u_rate = part.f32(s + 0xc) + part.f32(s + 8);
+        let v_rate = part.f32(s + 0x18) + part.f32(s + 0x14);
+        part.set_f32(s + 8, u_rate);
+        part.set_f32(s + 0x14, v_rate);
+        part.set_f32(s + 4, (u_rate + part.f32(s + 4)) % 32768.);
+        part.set_f32(s + 0x10, (v_rate + part.f32(s + 0x10)) % 32768.);
+    }
+}
+
+/// FUN_1404cbba0's integrator (it runs in the draw, every game frame):
+/// u0 = value, +4 rate, +8 acceleration; the key adds +8/+0xc/+0x10.
+fn sno_integrate(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
+    let o = use_val(ctx, p, 0);
+    let acc = part.f32(o + 8);
+    let rate = acc + part.f32(o + 4);
+    let value = rate + part.f32(o);
+    let (mut v, mut r, mut a) = (value, rate, acc);
+    if key(ctx, part, cursor) {
+        v += float(ctx, cursor + 8);
+        r += float(ctx, cursor + 0xc);
+        a += float(ctx, cursor + 0x10);
+    }
+    part.set_f32(o, v);
+    part.set_f32(o + 4, r);
+    part.set_f32(o + 8, a);
 }
 
 /// FUN_1404d3b30 (VertexAp) / FUN_1404d3e00 (VertexApLc: raw vertices):

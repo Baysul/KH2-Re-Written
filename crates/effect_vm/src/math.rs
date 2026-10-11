@@ -84,6 +84,11 @@ pub fn rot_zxy(a: [i32; 3]) -> Mat {
     mul(&mul(&rot_y(a[1]), &rot_x(a[0])), &rot_z(a[2]))
 }
 
+/// FUN_1404e0150: Rz·Rx·Ry from integer angles (Y applied first).
+pub fn rot_yxz(a: [i32; 3]) -> Mat {
+    mul(&mul(&rot_z(a[2]), &rot_x(a[0])), &rot_y(a[1]))
+}
+
 /// Float-radian rotations (instance matrix, FUN_1404b1280 → libvu0 RotMatrixX/Y/Z).
 pub fn rot_radians(m: &Mat, r: [f32; 3]) -> Mat {
     let rx = {

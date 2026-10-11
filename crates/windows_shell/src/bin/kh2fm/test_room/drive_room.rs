@@ -1563,10 +1563,17 @@ pub fn limit_tick(game: &mut Game, rc: bool, abilities: Option<&mut Vec<u16>>) {
 /// Strike Raid's thrown Keyblade (limitform `fly`): drawn where the
 /// thread holds it (the path point plus Judgment's wobble), blade along
 /// its direction [I: motion 235's spin is not applied].
+type HandQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Transform, &'static mut Visibility),
+    (With<WeaponRoot>, Without<SoraRoot>),
+>;
+
 pub fn thrown_keyblade(
     game: Res<Game>,
     roots: Query<&Transform, (With<SoraRoot>, Without<WeaponRoot>)>,
-    mut hands: Query<(&mut Transform, &mut Visibility), (With<WeaponRoot>, Without<SoraRoot>)>,
+    mut hands: HandQuery,
 ) {
     let Some(k) = game
         .drive
@@ -1694,7 +1701,7 @@ impl Voices {
         }
         self.seed = self.seed.wrapping_mul(0x10dcd);
         let len = cand.len() as u64;
-        let i = (self.seed as u64 / (((1u64 << 32) + len - 1) / len)) as usize;
+        let i = (self.seed as u64 / (1u64 << 32).div_ceil(len)) as usize;
         Some(self.bank as u32 * 1000 + cand[i.min(cand.len() - 1)] as u32)
     }
 }

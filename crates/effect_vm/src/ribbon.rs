@@ -1,7 +1,7 @@
 ﻿//! pppEiDrawShipoly (241): a ribbon that follows the part. Translated from
-//! update FUN_1404b9c00, create FUN_1404ba790, destroy FUN_1404baa40, draw
-//! FUN_1404b9260 with the spline FUN_1404b8f90 / FUN_1404baa90 and the
-//! strip builder FUN_1404b8380.
+//! update FUN_1404b9c00, create FUN_1404ba790, restart FUN_1404ba8c0,
+//! destroy FUN_1404baa40, draw FUN_1404b9260 with the spline FUN_1404b8f90 /
+//! FUN_1404baa90 and the strip builder FUN_1404b8380.
 //!
 //! Each update tick (single mode, key byte +9 != 0) stores the part's
 //! matrix translation in a ring of `+0xb` samples. The draw fits a natural
@@ -10,9 +10,17 @@
 //! to the path in the view plane and emits `+0x13 + 1` strips of quads
 //! across the width, textured with the first mesh of model `+4`.
 //!
-//! Not translated (flagged unsupported where met): pair mode (+9 == 0), the
-//! spring/relax terms (+0x1c, +0x1d, +0x1e), object spaces 2/3 (+0x11),
-//! edge fade (+0x16), UV direction variants +0xa0 >= 2.
+//! In single mode three optional passes then move the older samples:
+//! +0x1c pushes them away from their centroid by each sample's weight (the
+//! keyed value +0x2c, stored in w), +0x1d drifts them by a keyed velocity,
+//! +0x1e pulls them toward a keyed point (in the part's space unless the
+//! byte is 2) with a strength that fades out at distance +0x8c. The strip
+//! builder fades alpha across the width when +0x16 is set and swaps U and V
+//! for +0xa0 >= 2. The exe's vertex alphas are averaged per quad here.
+//!
+//! Not translated (flagged unsupported where met): pair mode (+9 == 0),
+//! object spaces 2/3 (+0x11). The restart hook's +0xb8 term feeds nothing
+//! the update or draw reads and is not kept.
 use crate::math::{self, Mat, Vec4};
 use crate::programs::{active, byte, float, use_val, word};
 use crate::{Ctx, Part, Quad};
@@ -30,6 +38,141 @@ pub(crate) struct Ribbon {
     scroll: [f32; 2],
     /// The part matrix copied each update (+0x30 of the u3 block).
     saved: Option<Mat>,
+    /// The first keyframe the update saw (+0xdc handle of the u3 block).
+    first_key: Option<usize>,
+    /// +0x1c weight: value, rate, acceleration (+0xc/+0x10/+0x14).
+    weight: [f32; 3],
+    /// +0x1d drift: velocity, acceleration, jerk (+0x70/+0x80/+0x90).
+    drift: [Vec4; 3],
+    /// +0x1e pull: point, rate, acceleration (+0xa0/+0xb0/+0xc0) and the
+    /// strength value, rate, acceleration (+0xd0/+0xd4/+0xd8).
+    pull: [Vec4; 3],
+    strength: [f32; 3],
+}
+
+/// FUN_1404ba8c0: the first key's adds come back out of the integrated
+/// values, the rates stop.
+pub(crate) fn restart(p: &Program, part: &mut Part, ctx: &mut Ctx) {
+    let u3 = use_val(ctx, p, 3);
+    let Some(r) = part.ribbons.get_mut(&u3) else {
+        return;
+    };
+    let Some(k) = r.first_key else {
+        return;
+    };
+    for i in 0..3 {
+        r.pull[0][i] -= float(ctx, k + 0x5c + 4 * i);
+        r.drift[0][i] -= float(ctx, k + 0x38 + 4 * i);
+    }
+    r.pull[1] = [0.; 4];
+    r.pull[2] = [0.; 4];
+    r.strength = [r.strength[0] - float(ctx, k + 0x80), 0., 0.];
+    r.drift[1] = [0.; 4];
+    r.drift[2] = [0.; 4];
+    r.weight = [r.weight[0] - float(ctx, k + 0x2c), 0., 0.];
+}
+
+fn add4(a: Vec4, b: Vec4) -> Vec4 {
+    std::array::from_fn(|i| a[i] + b[i])
+}
+
+/// FUN_140140490 + FUN_140142080: (xyz, 0) normalised, and its length.
+fn unit_and_length(v: Vec4) -> (Vec4, f32) {
+    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if l == 0. {
+        return ([v[0], v[1], v[2], 0.], l);
+    }
+    ([v[0] / l, v[1] / l, v[2] / l, 0.], l)
+}
+
+/// Ring index of the sample `back` updates older than slot `cursor`.
+fn older(cursor: usize, back: usize, size: usize) -> usize {
+    (cursor + size - back % size) % size
+}
+
+/// The single-mode passes of FUN_1404b9c00 over the samples behind the
+/// newest (ring slot `r.cursor`), then their integrators and keys.
+fn passes(r: &mut Ribbon, cursor: usize, part: &Part, ctx: &Ctx) {
+    let size = r.ring.len();
+    let hit = crate::programs::key(ctx, part, cursor);
+    if byte(ctx, cursor + 0x1c) != 0 {
+        let mut centre = [0.; 4];
+        for i in 0..r.count {
+            centre = add4(centre, r.ring[older(r.cursor, i, size)]);
+        }
+        let inv = 1. / r.count as f32;
+        centre = [centre[0] * inv, centre[1] * inv, centre[2] * inv, centre[3]];
+        for i in 1..r.count.saturating_sub(2) {
+            let at = older(r.cursor, i, size);
+            let sample = r.ring[at];
+            let w = sample[3];
+            let d = math::normalize([
+                sample[0] - centre[0],
+                sample[1] - centre[1],
+                sample[2] - centre[2],
+                0.,
+            ]);
+            let mut moved = add4(sample, [d[0] * w, d[1] * w, d[2] * w, 0.]);
+            moved[3] = w;
+            r.ring[at] = moved;
+        }
+        let [value, rate, acc] = r.weight;
+        let rate = acc + rate;
+        let value = rate + value;
+        r.weight = [value, rate, acc];
+        if hit {
+            for i in 0..3 {
+                r.weight[i] += float(ctx, cursor + 0x2c + 4 * i);
+            }
+        }
+    }
+    if byte(ctx, cursor + 0x1d) != 0 {
+        for i in 1..r.count {
+            let at = older(r.cursor, i, size);
+            r.ring[at] = add4(r.ring[at], r.drift[0]);
+        }
+        r.drift[1] = add4(r.drift[1], r.drift[2]);
+        r.drift[0] = add4(r.drift[0], r.drift[1]);
+        if hit {
+            for (j, at) in [0x38, 0x44, 0x50].into_iter().enumerate() {
+                for i in 0..3 {
+                    r.drift[j][i] += float(ctx, cursor + at + 4 * i);
+                }
+            }
+        }
+    }
+    let mode = byte(ctx, cursor + 0x1e);
+    if mode != 0 {
+        let range = float(ctx, cursor + 0x8c);
+        for i in 1..r.count {
+            let at = older(r.cursor, i, size);
+            let target = if mode == 2 {
+                r.pull[0]
+            } else {
+                math::apply(&r.saved.unwrap_or(math::IDENTITY), r.pull[0])
+            };
+            let sample = r.ring[at];
+            let (d, distance) = unit_and_length(std::array::from_fn(|k| target[k] - sample[k]));
+            let f = distance / range;
+            let f = if 0. <= f { f.min(1.) } else { 0. };
+            let s = (1. - f) * r.strength[0];
+            r.ring[at] = add4(sample, [d[0] * s, d[1] * s, d[2] * s, 0.]);
+        }
+        r.pull[1] = add4(r.pull[1], r.pull[2]);
+        r.pull[0] = add4(r.pull[0], r.pull[1]);
+        r.strength[1] += r.strength[2];
+        r.strength[0] += r.strength[1];
+        if hit {
+            for (j, at) in [0x5c, 0x68, 0x74].into_iter().enumerate() {
+                for i in 0..3 {
+                    r.pull[j][i] += float(ctx, cursor + at + 4 * i);
+                }
+            }
+            for i in 0..3 {
+                r.strength[i] += float(ctx, cursor + 0x80 + 4 * i);
+            }
+        }
+    }
 }
 
 fn flag(ctx: &mut Ctx, code: u32) {
@@ -58,32 +201,37 @@ pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx)
     if !single {
         flag(ctx, 0x4000_0241);
     }
-    if byte(ctx, cursor + 0x1c) != 0
-        || byte(ctx, cursor + 0x1d) != 0
-        || byte(ctx, cursor + 0x1e) != 0
-    {
-        flag(ctx, 0x4000_0242);
-    }
     if space > 1 {
         flag(ctx, 0x4000_0243);
     }
     let u3 = use_val(ctx, p, 3);
     let mut r = part.ribbons.remove(&u3).unwrap_or_default();
+    if !frozen {
+        r.saved = Some(part.cur);
+    }
+    if r.first_key.is_none() {
+        r.first_key = Some(cursor);
+    }
     if r.ring.is_empty() {
         let size = (byte(ctx, cursor + 0xb) as usize).clamp(4, 0x80);
         r.ring = vec![[0.; 4]; size];
     }
-    if !frozen {
-        r.saved = Some(part.cur);
-        if single {
-            let mut sample = part.cur[3];
-            if space == 1 {
-                sample = math::apply(&ctx.world, sample);
-            }
-            let size = r.ring.len();
-            r.ring[r.cursor % size] = sample;
-            r.count = (r.count + 1).min(size);
+    if !frozen && single {
+        let mut sample = part.cur[3];
+        if space == 1 {
+            sample = math::apply(&ctx.world, sample);
         }
+        if byte(ctx, cursor + 0x1c) != 0 {
+            sample[3] = r.weight[0];
+        }
+        let size = r.ring.len();
+        r.ring[r.cursor % size] = sample;
+        r.count = (r.count + 1).min(size);
+    }
+    if single {
+        passes(&mut r, cursor, part, ctx);
+    }
+    if !frozen {
         r.cursor += 1;
         if r.cursor >= r.ring.len() {
             r.cursor = 0;
@@ -223,9 +371,8 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
     };
     let tex_w = (1u32 << (((tex0 >> 26) & 0xf) as u32).min(10)) as f32;
     let tex_h = (1u32 << (((tex0 >> 30) & 0xf) as u32).min(10)) as f32;
-    if byte(ctx, cursor + 0x16) != 0 || byte(ctx, cursor + 0xa0) > 1 {
-        flag(ctx, 0x4000_0244);
-    }
+    let swap = byte(ctx, cursor + 0xa0) > 1;
+    let edge_fade = byte(ctx, cursor + 0x16) != 0;
     // FUN_1404b8380: UV window and fade set-up.
     let pick = |b: u8| match b {
         1 => 0.5,
@@ -333,6 +480,27 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
                 a.floor() / 128.,
             ]
         };
+        // +0x16: alpha across the width rises 0 → 1 and falls back, in steps
+        // of 2 / (samples − 1), restarting every row.
+        let edge: Vec<f32> = {
+            let (mut e, mut step) = (0f32, 2. / (cross as i32 - 1) as f32);
+            (0..cross)
+                .map(|_| {
+                    if !edge_fade {
+                        return 1.;
+                    }
+                    let here = e;
+                    let up = e + step;
+                    if up < 1. {
+                        e = if 0. <= up { up } else { 0. };
+                    } else {
+                        step = -step;
+                        e = 1.;
+                    }
+                    here
+                })
+                .collect()
+        };
         // Cells between cross-section samples j and j+1 of rows k, k+1.
         for j in 0..cross.saturating_sub(1) {
             let f = |j: usize| j as f32 / (cross - 1) as f32;
@@ -345,14 +513,17 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
                     b[2] + (a[2] - b[2]) * t,
                 ]
             };
-            let v = |j: usize| (v_range * f(j) + 0.01 + sv) * tex_h;
-            let uv = [
-                [u0 * tex_w, v(j)],
-                [u0 * tex_w, v(j + 1)],
-                [u1v * tex_w, v(j + 1)],
-                [u1v * tex_w, v(j)],
-            ];
-            let alpha = (a_row + a_next) * 0.5;
+            let v = |j: usize| v_range * f(j) + 0.01 + sv;
+            // +0xa0 >= 2: the texture runs across the strip instead.
+            let st = |u: f32, j: usize| {
+                if swap {
+                    [v(j) * tex_w, u * tex_h]
+                } else {
+                    [u * tex_w, v(j) * tex_h]
+                }
+            };
+            let uv = [st(u0, j), st(u0, j + 1), st(u1v, j + 1), st(u1v, j)];
+            let alpha = (a_row + a_next) * (edge[j] + edge[j + 1]) * 0.25;
             ctx.quads.push(Quad {
                 corners: [at(k, j), at(k, j + 1), at(k + 1, j + 1), at(k + 1, j)],
                 uv,

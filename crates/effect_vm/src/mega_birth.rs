@@ -941,8 +941,11 @@ mod tests {
             mega_model: HashMap::new(),
             vertex_override: None,
             ribbons: HashMap::new(),
+            thunder: HashMap::new(),
             serial: 1,
             parent: None,
+            restarted: false,
+            restart_pending: false,
         };
         // Colour variable u1 = 44: bytes +8..+0xb = 1.0 each.
         part.vars[52..56].fill(0x80);
@@ -982,8 +985,12 @@ mod tests {
                     rng: &mut rng,
                     quads: &mut quads,
                     model_draws: &mut Vec::new(),
+                    triangles: &mut Vec::new(),
+                    screen: crate::DEFAULT_SCREEN_SCALE,
+                    heads: Vec::new(),
                     births: Vec::new(),
                     unsupported: &mut unsupported,
+                    catch_up: false,
                     flags: &mut [0; 3],
                 };
                 if first {

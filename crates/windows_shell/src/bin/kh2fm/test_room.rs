@@ -4743,6 +4743,9 @@ struct Compose {
     stable_frames: u64,
 }
 
+/// An attack window this frame: key, ATKP and its spheres.
+type ActiveVolume = (u64, u16, Vec<(Vec3, f32)>);
+
 /// The afterimage's feedback cameras and whether they ran last frame.
 #[derive(Resource)]
 struct Afterimage {
@@ -6572,7 +6575,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
     // The attack windows this frame: slot 0's Keyblade, slot 1's (Valor,
     // Master and Final), then Sora's own (the drive motions' ATKP 124 /
     // 125 on his object's attack shapes), each with its spheres.
-    let mut active: Vec<(u64, u16, Vec<(Vec3, f32)>)> = Vec::new();
+    let mut active: Vec<ActiveVolume> = Vec::new();
     for (hand, (blade, weapon, hits)) in [
         (&cp.blade, &cp.weapon, &cp.hits),
         (&cp.blade2, &cp.weapon2, &cp.hits2),

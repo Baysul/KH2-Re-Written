@@ -14,10 +14,18 @@ mod models;
 mod programs;
 mod ribbon;
 mod tail;
+mod thunder;
 
 use math::{IDENTITY, Mat, Vec4};
 use package_reader::effect::{Dpd, Program, i32_at, u32_at};
 use std::sync::Arc;
+
+/// The exe's default view→screen scale (`ede0` = the camera's
+/// view-screen matrix, FUN_14019dc50 / FUN_14019d050): scrz =
+/// (512 / 0.8) · 0.5 / tan(0.75) (DAT_1405b1390, DAT_140585c7c,
+/// DAT_140623a68), times ax = 0.8 and ay = 0.8667 (DAT_1405b1380). The
+/// camera may change scrz at run time.
+pub const DEFAULT_SCREEN_SCALE: [f32; 2] = [274.797_1, 297.696_9];
 
 /// Frame value parts saturate at (FUN_1404b09e0).
 const FRAME_CAP: u32 = 0x6fff_f000;
@@ -81,6 +89,22 @@ pub struct ModelDraw {
     pub rgba: [u8; 4],
     /// UV scroll ints (texels Ã— 65536, as the exe's cvttss2si gives them).
     pub scroll: [i32; 2],
+    /// The draw-mode word a program hands FUN_1404dc760 in place of the
+    /// model's own (header +0x16): pppDrawMdlSemi3's key +8, pppDrawMdlLoopZ's
+    /// key +0x20. `None` = the model's own. Its bits are not decoded.
+    pub mode: Option<u16>,
+}
+
+/// One untextured gouraud triangle (pppKeTh's GS fans and strips, as
+/// FUN_1404dfb20 hands them to the PC renderer). Corners are in the effect's
+/// draw space like [`Quad`]; colours are the GS vertex bytes (RGB 0..255,
+/// alpha 0x80 = 1.0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Triangle {
+    pub corners: [[f32; 3]; 3],
+    pub colours: [[u8; 4]; 3],
+    /// GS ALPHA register byte: 0x48 additive, 0x42 subtractive, 0xa8 replace.
+    pub blend: u8,
 }
 
 pub(crate) struct Part {
@@ -100,6 +124,8 @@ pub(crate) struct Part {
     pub vertex_override: Option<Arc<Vec<[i16; 3]>>>,
     /// pppEiDrawShipoly ribbon state by work offset u3.
     pub ribbons: std::collections::HashMap<usize, ribbon::Ribbon>,
+    /// pppKeTh bolt pools by KeThRes work offset.
+    pub thunder: std::collections::HashMap<usize, thunder::Pool>,
     /// Handle serial (the exe's generational handles, FUN_1404ad240).
     pub serial: u64,
     /// Work +4: the part that birthed this one, if it is still alive.
@@ -186,6 +212,13 @@ pub(crate) struct Ctx<'a> {
     pub rng: &'a mut Rng,
     pub quads: &'a mut Vec<Quad>,
     pub model_draws: &'a mut Vec<ModelDraw>,
+    pub triangles: &'a mut Vec<Triangle>,
+    /// Screen units per view unit at depth 1 (x, y) of the exe's
+    /// view→screen matrix: pppKeTh widths are screen offsets.
+    pub screen: [f32; 2],
+    /// Work variables of each entry's first part (pppKeTh targets), filled
+    /// before a pppKeTh update.
+    pub heads: Vec<Vec<u8>>,
     pub births: Vec<programs::Birth>,
     pub unsupported: &'a mut Vec<u32>,
     /// `DAT_142b0efe4`: set while a loop restart catches the part up to the
@@ -214,6 +247,11 @@ pub struct Instance {
     pub unsupported: Vec<u32>,
     /// Model draws of the last [`Instance::frame`].
     pub model_draws: Vec<ModelDraw>,
+    /// Untextured gouraud triangles of the last [`Instance::frame`].
+    pub triangles: Vec<Triangle>,
+    /// Screen units per view unit at depth 1 (x, y) for screen-space
+    /// widths ([`DEFAULT_SCREEN_SCALE`] unless the camera says otherwise).
+    pub screen_scale: [f32; 2],
     /// pppRyjMngFlag bytes: draw layer, pause, camera offset.
     flags: [u8; 3],
     next_serial: u64,
@@ -254,6 +292,8 @@ impl Instance {
             finished: false,
             unsupported: Vec::new(),
             model_draws: Vec::new(),
+            triangles: Vec::new(),
+            screen_scale: DEFAULT_SCREEN_SCALE,
             flags: [0; 3],
             next_serial: 1,
             released: false,
@@ -319,6 +359,7 @@ impl Instance {
     pub fn frame(&mut self, view: &Mat, rng: &mut Rng) -> Vec<Quad> {
         let mut quads = Vec::new();
         self.model_draws.clear();
+        self.triangles.clear();
         if self.finished {
             return quads;
         }
@@ -354,6 +395,7 @@ impl Instance {
         });
         let mut unsupported = std::mem::take(&mut self.unsupported);
         let mut model_draws = Vec::new();
+        let mut triangles = Vec::new();
         let mut flags = self.flags;
         let mut ctx = Ctx {
             dpd: &dpd,
@@ -368,6 +410,9 @@ impl Instance {
             rng,
             quads: &mut quads,
             model_draws: &mut model_draws,
+            triangles: &mut triangles,
+            screen: self.screen_scale,
+            heads: Vec::new(),
             births: Vec::new(),
             unsupported: &mut unsupported,
             catch_up: false,
@@ -377,6 +422,7 @@ impl Instance {
         self.draw_pass(&mut ctx, true);
         self.unsupported = unsupported;
         self.model_draws = model_draws;
+        self.triangles = triangles;
         self.flags = flags;
         // FUN_1404b08e0: time stands still while the instance is paused.
         if !skip && flags[1] == 0 {
@@ -421,6 +467,7 @@ impl Instance {
             mega_model: Default::default(),
             vertex_override: None,
             ribbons: Default::default(),
+            thunder: Default::default(),
             serial,
             parent,
             restarted: false,
@@ -477,6 +524,19 @@ impl Instance {
                 }
             }
         }
+    }
+
+    /// Each entry's first part's work variables (empty when it has none).
+    fn heads(&self) -> Vec<Vec<u8>> {
+        self.groups
+            .iter()
+            .map(|g| {
+                g.parts
+                    .first()
+                    .and_then(|&id| self.parts[id].as_ref())
+                    .map_or_else(Vec::new, |p| p.vars.clone())
+            })
+            .collect()
     }
 
     /// The `cur` matrix of part `id`'s parent while that part is alive.
@@ -546,6 +606,9 @@ impl Instance {
                 }
                 for id in self.groups[g].parts.clone() {
                     let parent_cur = self.parent_matrix(id);
+                    if p.kind == thunder::KIND {
+                        ctx.heads = self.heads();
+                    }
                     let Some(part) = self.parts[id].as_mut() else {
                         continue;
                     };
@@ -680,6 +743,13 @@ impl Instance {
             };
             Self::advance(ctx.dpd, part, j, p);
             if programs::has_update(p.kind) && !programs::skips_catch_up(p.kind) {
+                if p.kind == thunder::KIND {
+                    let heads = self.heads();
+                    ctx.heads = heads;
+                }
+                let Some(part) = self.parts[id].as_mut() else {
+                    return;
+                };
                 let cursor = part.cursors[j];
                 ctx.parent_cur = parent_cur;
                 programs::update(p, cursor, part, ctx);

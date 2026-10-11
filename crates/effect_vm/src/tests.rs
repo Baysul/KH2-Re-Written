@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use package_reader::effect::read_dpd;
 
 fn put(b: &mut [u8], at: usize, v: u32) {
@@ -96,6 +96,16 @@ fn build(
     models: &[(i16, Vec<[i16; 3]>)],
     vsfs: &[(i32, i32, Vec<u16>)],
 ) -> Arc<Dpd> {
+    build_looped(entries, models, vsfs, &[])
+}
+
+/// [`build`] with loop ranges (entry, loop start, loop end in frames).
+fn build_looped(
+    entries: &[(i32, u32, Vec<Prog>)],
+    models: &[(i16, Vec<[i16; 3]>)],
+    vsfs: &[(i32, i32, Vec<u16>)],
+    loops: &[(usize, i32, i32)],
+) -> Arc<Dpd> {
     let mut b = vec![0u8; 0x8000];
     put(&mut b, 0, 0x96);
     // Lists: pdata, textures, shapes, models, vsf (offsets from 0x1000).
@@ -152,9 +162,13 @@ fn build(
         let e = block + off;
         put(&mut b, e + 0x10, *start as u32);
         put(&mut b, e + 0x14, ticks * 0x1000);
-        put(&mut b, e + 0x18, 0x7000_0000);
-        put(&mut b, e + 0x1c, 0x7000_0000);
-        put(&mut b, e + 0x20, 0xa0 + 0x100);
+        let (ls, le) = loops
+            .iter()
+            .find(|l| l.0 == n)
+            .map_or((0x7000_0000, 0x7000_0000), |l| (l.1, l.2));
+        put(&mut b, e + 0x18, ls as u32);
+        put(&mut b, e + 0x1c, le as u32);
+        put(&mut b, e + 0x20, 0xa0 + 0x400);
         b[e + 0x26] = programs.len() as u8;
         for (j, p) in programs.iter().enumerate() {
             let r = e + 0x28 + 0x10 * j;
@@ -495,4 +509,404 @@ fn eidrawshipoly_ribbon_follows_the_part() {
     // Width: the two edges of a row are 2 x 4 apart in y.
     let q = &last[0];
     assert!((q.corners[0][1] - q.corners[1][1]).abs() > 1.);
+}
+
+fn ticks(inst: &mut Instance, rng: &mut Rng, n: usize) {
+    for _ in 0..2 * n {
+        inst.frame(&math::IDENTITY, rng);
+    }
+}
+
+#[test]
+fn loop_range_restarts_the_part_and_point_loop_does_not_drift() {
+    // PointLoop u0 = 0 adds x + 1 at frame 0; the entry loops back to
+    // frame 0 at frame 2 and would otherwise live 100 ticks. Each restart
+    // runs the frame-0 update twice (catch-up, then the pending restart).
+    let progs = vec![Prog {
+        kind: 213,
+        size: 16,
+        keys: vec![0, f(1.), 0, 0],
+        use_val: vec![0],
+    }];
+    let dpd = build_looped(&[(0, 100, progs)], &[], &[], &[(0, 0, 0x2000)]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    let mut seen = Vec::new();
+    for _ in 0..12 {
+        ticks(&mut inst, &mut rng, 1);
+        let p = inst.parts.iter().flatten().next().expect("part alive");
+        seen.push(p.f32(0));
+    }
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    let p = inst.parts.iter().flatten().next().unwrap();
+    assert!(p.restarted);
+    // The first key's add is taken back at each restart: x stays 1.
+    assert!(seen.iter().all(|&x| x == 1.), "{seen:?}");
+}
+
+#[test]
+fn loop_start_catches_the_part_up_to_the_loop_start() {
+    // Move: x += 1 per tick. Loop range frames 2..4: at frame 4 the part
+    // restarts and runs its updates (cursor keys included) up to frame 2.
+    let progs = vec![Prog {
+        kind: 36,
+        size: 16,
+        keys: vec![0, f(1.), 0, 0],
+        use_val: vec![0, 16],
+    }];
+    let dpd = build_looped(&[(0, 100, progs)], &[], &[], &[(0, 0x2000, 0x4000)]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    // Frame 0 update, then ticks at frames 1, 2, 3; the fourth advance
+    // reaches frame 4 and restarts.
+    ticks(&mut inst, &mut rng, 4);
+    let p = inst.parts.iter().flatten().next().unwrap();
+    assert_eq!(p.frame, 0x2000);
+    // Moves at frames 0..3 (4), the restart clears the rate (create hook),
+    // the catch-up re-keys it at frame 0 and moves at frames 0 and 1.
+    assert_eq!(p.f32(0), 6.);
+}
+
+#[test]
+fn matrix_yxz_turns_about_y_first() {
+    let m = math::rot_yxz([0x4000, 0x4000, 0]);
+    let v = math::apply(&m, [1., 0., 0., 1.]);
+    assert!(
+        v[0].abs() < 1e-5 && (v[1] - 1.).abs() < 1e-5 && v[2].abs() < 1e-5,
+        "{v:?}"
+    );
+}
+
+#[test]
+fn wood_matrix_keeps_the_view_up_axis() {
+    assert_eq!(programs::wood(&math::IDENTITY), math::IDENTITY);
+    // The effect rolled 90 degrees about the view axis: Y now points along
+    // -X; the billboard keeps that up and stays orthonormal.
+    let w = programs::wood(&math::rot_z(0x4000));
+    let up = w[1];
+    assert!((up[0] + 1.).abs() < 1e-5 && up[1].abs() < 1e-5);
+    for col in &w[..3] {
+        let l: f32 = col[..3].iter().map(|x| x * x).sum();
+        assert!((l - 1.).abs() < 1e-5);
+    }
+    let dot: f32 = (0..3).map(|i| w[0][i] * w[1][i]).sum();
+    assert!(dot.abs() < 1e-5);
+}
+
+#[test]
+fn s_rand_down_fv_only_subtracts() {
+    // Target var 16 gains k·r with r in [-1, 0] for k = (10, 20, 30).
+    let progs = vec![Prog {
+        kind: 77,
+        size: 24,
+        keys: vec![0, 16, f(10.), f(20.), f(30.), 0],
+        use_val: vec![0],
+    }];
+    let dpd = build(&[(0, 8, progs)], &[], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    ticks(&mut inst, &mut rng, 1);
+    let p = inst.parts.iter().flatten().next().unwrap();
+    for (i, k) in [10., 20., 30.].into_iter().enumerate() {
+        let r = p.f32(4 * i);
+        assert!((-1. ..=0.).contains(&r));
+        assert_eq!(p.f32(16 + 4 * i), k * r);
+    }
+}
+
+#[test]
+fn ke_born_rnd3_births_with_the_outward_direction() {
+    // Emitter at (5, 0, 0) (MatrixLoc), VSF vertex (10, 0, 0): the child
+    // starts at (15, 0, 0) with direction (1, 0, 0) in var 16.
+    let emitter = vec![
+        Prog {
+            kind: 40,
+            size: 16,
+            keys: vec![0, f(5.), f(0.), f(0.)],
+            use_val: vec![0],
+        },
+        Prog {
+            kind: 93,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0],
+        },
+        Prog {
+            kind: 181,
+            size: 28,
+            // VSF 0, 1 birth, mask 0 (always), sequential; child 1,
+            // position var 0, +0x14 set, direction var 16.
+            keys: vec![0, 0x0001_0000, 0, 1, 0, 0, 16],
+            use_val: vec![64],
+        },
+    ];
+    let child = vec![point(0), point(16)];
+    let dpd = build(
+        &[(0, 8, emitter), (i32::MAX, 8, child)],
+        &[(0, vec![[10, 0, 0]])],
+        &[(0, 0, vec![0])],
+    );
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    ticks(&mut inst, &mut rng, 2);
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    let born = inst.parts.iter().flatten().nth(1).expect("a child");
+    assert_eq!([born.f32(0), born.f32(4), born.f32(8)], [15., 0., 0.]);
+    assert_eq!([born.f32(16), born.f32(20), born.f32(24)], [1., 0., 0.]);
+}
+
+#[test]
+fn point_ap_births_copy_the_position() {
+    let emitter = vec![
+        Prog {
+            kind: 40,
+            size: 16,
+            keys: vec![0, f(1.), f(2.), f(3.)],
+            use_val: vec![0],
+        },
+        // Child entry 1, var 32, every 2 ticks 3 births.
+        Prog {
+            kind: 172,
+            size: 16,
+            keys: vec![0, 1, 32, 0x0000_0302],
+            use_val: vec![0, 64],
+        },
+    ];
+    let child = vec![point(0)];
+    let dpd = build(&[(0, 8, emitter), (i32::MAX, 8, child)], &[], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    ticks(&mut inst, &mut rng, 3);
+    let children: Vec<_> = inst.parts.iter().flatten().skip(1).collect();
+    assert_eq!(children.len(), 6);
+    assert!(
+        children
+            .iter()
+            .all(|c| [c.f32(32), c.f32(36), c.f32(40)] == [1., 2., 3.])
+    );
+}
+
+#[test]
+fn draw_mdl_loop_z_scrolls_and_wraps() {
+    // U starts at 1.0 with rate 0.5 per tick; V starts at 32767.5 with rate
+    // 1 and wraps at 32768.
+    let progs = vec![
+        colour(48),
+        Prog {
+            kind: 219,
+            size: 40,
+            keys: vec![0, 5, f(1.), f(0.5), 0, f(32767.5), f(1.), 0, 0xffff, 0],
+            use_val: vec![48, 0, 64, 96],
+        },
+    ];
+    let dpd = build(&[(0, 8, progs)], &[(5, vec![[0, 0, 0]])], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    inst.frame(&math::IDENTITY, &mut rng);
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    let d = &inst.model_draws[0];
+    assert_eq!(d.model, 5);
+    assert_eq!(d.mode, None);
+    assert_eq!(d.scroll, [(1.5 * 65536.) as i32, (0.5 * 65536.) as i32]);
+}
+
+#[test]
+fn shape_tail_ring_follows_the_part() {
+    // Move +1 x per tick; KeShpTail3X (no shape: only the ring runs) keeps
+    // the newest translation one slot back each tick.
+    let mut tail = vec![0u32; 0x58 / 4];
+    tail[1] = 0xffff;
+    let progs = vec![
+        Prog {
+            kind: 36,
+            size: 16,
+            keys: vec![0, f(1.), 0, 0],
+            use_val: vec![0, 16],
+        },
+        unit_scale(32),
+        Prog {
+            kind: 93,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0],
+        },
+        Prog {
+            kind: 157,
+            size: 0x58,
+            keys: tail,
+            use_val: vec![64, 48, 0, 0],
+        },
+    ];
+    let dpd = build(&[(0, 40, progs)], &[], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    ticks(&mut inst, &mut rng, 3);
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    let p = inst.parts.iter().flatten().next().unwrap();
+    let ring = |i: usize| p.f32(64 + 0x30 + 16 * i);
+    let head = p.u8(64 + 0x1fa) as usize;
+    assert_eq!(head, 28 - 3);
+    // Newest first: x = 3, 2, 1; the slots behind keep the frame-0 fill.
+    assert_eq!([ring(head), ring(head + 1), ring(head + 2)], [3., 2., 1.]);
+    assert_eq!(ring(0), 1.);
+}
+
+#[test]
+fn ribbon_drift_moves_older_samples_and_edge_fade_shades_the_width() {
+    // As eidrawshipoly_ribbon_follows_the_part, with +0x1d drift (y + 3
+    // per tick), +0x16 edge fade and U/V swapped (+0xa0 = 2).
+    let mut ribbon = vec![0u32; 41];
+    ribbon[1] = 1;
+    ribbon[2] = 0x0800_0100;
+    ribbon[3] = f(4.);
+    ribbon[4] = 0x0204_0000; // +0x12 4 steps, +0x13 cross 3
+    ribbon[5] = 0x0001_0000; // +0x16 edge fade
+    ribbon[7] = 0x0000_0100; // +0x1d drift
+    ribbon[15] = f(3.); // +0x3c drift velocity y
+    ribbon[40] = 2; // +0xa0 swap
+    let progs = vec![
+        Prog {
+            kind: 36,
+            size: 16,
+            keys: vec![0, f(1.), f(0.), f(0.)],
+            use_val: vec![0, 96],
+        },
+        point(100),
+        unit_scale(48),
+        colour(60),
+        Prog {
+            kind: 87,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0, 16, 48],
+        },
+        Prog {
+            kind: 241,
+            size: 164,
+            keys: ribbon,
+            use_val: vec![0, 48, 60, 120],
+        },
+    ];
+    let dpd = build(&[(0, 40, progs)], &[(1, vec![[0, 0, 0]])], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    let mut last = Vec::new();
+    for _ in 0..12 {
+        last = inst.frame(&math::IDENTITY, &mut rng);
+    }
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    // 4 steps × 2 cells across.
+    assert_eq!(last.len(), 8);
+    // Older samples drifted up (+y): the tail end sits above the head.
+    let head_y = last[0].corners[0][1];
+    let tail_y = last[6].corners[2][1];
+    assert!(tail_y > head_y + 5., "{head_y} {tail_y}");
+    // Edge fade: both cells of a row average one edge (0) and the centre
+    // (1) sample: half alpha.
+    assert!((last[0].colour[3] - last[1].colour[3]).abs() < 1e-6);
+    assert!(last[0].colour[3] < 0.6);
+    // Swapped UVs: the across-width coordinate is now the first one.
+    assert_ne!(last[0].uv[0][0], last[0].uv[1][0]);
+}
+
+#[test]
+fn ke_th_bolt_grows_to_its_target_and_draws_a_strip() {
+    // Entry 0: emitter at the origin with a 16-point bolt pool (var 0),
+    // KeDrct +x (var 0x380) and KeTh (block 0x300) aiming at entry 1's
+    // KeThTp block (var 0), which sits at (100, 0, 0) with radius 5.
+    let mut th = vec![0u32; 23];
+    th[1] = 1; // target entry 1
+    th[2] = 0; // its KeThTp variable
+    for w in &mut th[3..7] {
+        *w = 0x4000_4000; // colours A and B: 128
+    }
+    th[11] = f(100.); // length
+    th[12] = f(500.); // half width (screen units)
+    th[13] = f(1.); // no taper
+    th[14] = f(0.5); // inner fraction
+    th[17] = f(0.5); // follow
+    th[18] = f(20.); // growth
+    th[19] = f(0.5); // pull
+    th[20] = 0xff00_0000; // no turn, no forks (mask 0xff)
+    let emitter = vec![
+        Prog {
+            kind: 40,
+            size: 16,
+            keys: vec![0, f(0.), f(0.), f(0.)],
+            use_val: vec![0x3c0],
+        },
+        Prog {
+            kind: 93,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0x3c0],
+        },
+        Prog {
+            kind: 6,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0],
+        },
+        Prog {
+            kind: 48,
+            size: 16,
+            keys: vec![0, f(1.), f(0.), f(0.)],
+            use_val: vec![0x380],
+        },
+        Prog {
+            kind: 129,
+            size: 92,
+            keys: th,
+            use_val: vec![0x300, 0, 0x380, 0],
+        },
+    ];
+    let target = vec![
+        Prog {
+            kind: 40,
+            size: 16,
+            keys: vec![0, f(100.), f(0.), f(0.)],
+            use_val: vec![64],
+        },
+        Prog {
+            kind: 93,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![64],
+        },
+        Prog {
+            kind: 126,
+            size: 24,
+            keys: vec![0, f(5.), f(30.), f(0.5), u32::MAX, 0],
+            use_val: vec![0],
+        },
+    ];
+    let dpd = build(&[(0, 40, emitter), (0, 40, target)], &[], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut view = math::IDENTITY;
+    view[3] = [0., 0., 600., 1.];
+    let mut rng = Rng::default();
+    let mut tris = Vec::new();
+    for _ in 0..24 {
+        inst.frame(&view, &mut rng);
+        if !inst.triangles.is_empty() {
+            tris = inst.triangles.clone();
+        }
+    }
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    assert!(!tris.is_empty());
+    let corners: Vec<[f32; 3]> = tris.iter().flat_map(|t| t.corners).collect();
+    assert!(corners.iter().flatten().all(|c| c.is_finite()));
+    // The bolt runs from the emitter toward the target along +x.
+    let far = corners.iter().map(|c| c[0]).fold(f32::MIN, f32::max);
+    assert!(far > 50. && far < 110., "{far}");
+    // Width: 500 screen units = 500 / scale view units each side.
+    let wide = corners.iter().map(|c| c[1].abs()).fold(0., f32::max);
+    assert!(
+        (wide - 500. / DEFAULT_SCREEN_SCALE[1]).abs() < 0.05,
+        "{wide}"
+    );
+    // Additive blend, transparent edges, opaque axis.
+    assert!(tris.iter().all(|t| t.blend == 0x48));
+    assert!(tris.iter().flat_map(|t| t.colours).any(|c| c[3] == 0));
+    assert!(tris.iter().flat_map(|t| t.colours).any(|c| c == [128; 4]));
 }
