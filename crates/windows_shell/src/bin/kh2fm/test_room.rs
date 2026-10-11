@@ -2843,8 +2843,20 @@ fn load(
             Some(_) => {
                 let mut kinds = Vec::new();
                 if let Ok(mut library) = package_reader::named::Library::open(source) {
-                    for name in ["P_EX020", "P_EX030"] {
-                        match party_room::load(source, &mut library, name) {
+                    let lvup = bar_entry(&battle, b"lvup").unwrap_or(&[]);
+                    for (name, character, records) in [
+                        ("P_EX020", 2, &player_sim::party::DONALD[..]),
+                        ("P_EX030", 3, &player_sim::party::GOOFY[..]),
+                    ] {
+                        match party_room::load(
+                            source,
+                            &mut library,
+                            &system,
+                            lvup,
+                            name,
+                            character,
+                            records,
+                        ) {
                             Ok(k) => {
                                 eprintln!("party member {} loaded", k.name);
                                 kinds.push(std::sync::Arc::new(k));
@@ -4399,7 +4411,7 @@ fn setup(
     // Donald and Goofy: one root per member with a mesh per model part.
     for (i, member) in game.party.iter().enumerate() {
         let kind = &member.kind;
-        let Some(idle) = kind.anims.get(&0) else {
+        let Some(idle) = kind.motions.get(&0) else {
             continue;
         };
         let root = commands
@@ -4420,9 +4432,30 @@ fn setup(
             &mut images,
         ) {
             if let Some(entity) = entity {
-                commands
-                    .entity(entity)
-                    .insert(party_room::PartyPart { member: i, ordinal });
+                commands.entity(entity).insert(party_room::PartyPart {
+                    member: i,
+                    ordinal,
+                    weapon: false,
+                });
+            }
+        }
+        if let (Some(weapon), Some(pose)) = (&kind.weapon, idle.weapon.first()) {
+            for (ordinal, entity) in spawn_model(
+                &mut commands,
+                weapon,
+                pose,
+                root,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+            ) {
+                if let Some(entity) = entity {
+                    commands.entity(entity).insert(party_room::PartyPart {
+                        member: i,
+                        ordinal,
+                        weapon: true,
+                    });
+                }
             }
         }
     }
@@ -5124,7 +5157,7 @@ fn simulate(
     }
     combat_tick(&mut game, tick);
     prize_room::tick(&mut game, tick);
-    party_room::tick(&mut game);
+    party_room::tick(&mut game, tick);
     // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
     // recenters (test-room bindings for the original's camera buttons).
     let mut turn = 0f32;
@@ -8715,6 +8748,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                     loaded.yaw,
                     i as u8,
                 ),
+                started: 0,
             })
             .collect(),
         items: loaded.items.map(|src| {
