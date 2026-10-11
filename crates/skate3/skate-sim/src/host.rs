@@ -47,6 +47,11 @@ pub struct Sim {
     pub(crate) published: PublishedTickInput,
     packet_number: u32,
     last_state: Option<XboxState>,
+    /// The animation's audible events latched during the last step and the step's seconds, as
+    /// skate-game's `game_audio::skate_events::observe` takes them after every physics step
+    /// (`host_audio::SkaterAudio::tick` reads them).
+    pub(crate) audio_events: crate::physics::AudioEvents,
+    pub(crate) audio_step: f32,
 }
 
 /// One bone of the published skater pose.
@@ -118,6 +123,8 @@ impl Sim {
             published: PublishedTickInput::default(),
             packet_number: 0,
             last_state: None,
+            audio_events: Default::default(),
+            audio_step: 0.0,
         })
     }
 
@@ -162,14 +169,20 @@ impl Sim {
             &self.camera,
             &mut self.controls,
         )?;
-        crate::physics::advance(
+        // `Time<Fixed>`'s delta during this step (the native clock's period as it stood).
+        self.audio_step = self.physics.period().as_secs_f32();
+        let result = crate::physics::advance(
             &mut self.physics,
             &mut self.skater,
             &mut self.controls,
             &self.graphs,
             &self.published,
             &mut self.camera,
-        )
+        );
+        // Animation events latched during the step (physics never reads these): taken once per
+        // step, as skate-game's audio `observe` does after the physics set.
+        self.audio_events = std::mem::take(&mut self.skater.animation_input.audio);
+        result
     }
 
     /// Current fixed-step period. The native clock can change it (camera

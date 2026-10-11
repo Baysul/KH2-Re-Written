@@ -2,7 +2,7 @@
 use super::big::{Big, refpack};
 use super::*;
 
-struct Bytes(Vec<u8>);
+pub(crate) struct Bytes(pub(crate) Vec<u8>);
 
 impl ReadAt for Bytes {
     fn len(&self) -> u64 {
@@ -29,7 +29,7 @@ fn refpack_literals_and_overlapping_backrefs() {
     assert!(refpack(&[0x00, 0x09, 0xFC], None).is_err());
 }
 
-fn big(entries: &[(&str, &str, &[u8], u8, u32)]) -> Vec<u8> {
+pub(crate) fn big(entries: &[(&str, &str, &[u8], u8, u32)]) -> Vec<u8> {
     let count = entries.len();
     let index_size = 48 + (16 * count).div_ceil(16) * 16 + count.div_ceil(16) * 16;
     let name_record = 16usize;

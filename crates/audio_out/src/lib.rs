@@ -66,9 +66,13 @@ pub enum FadeEnd {
     Pause,
 }
 
+/// A source that renders its own interleaved stereo at `RATE` (-1..1).
+pub type Stream = Box<dyn FnMut(&mut [f32]) + Send>;
+
 #[derive(Default)]
 pub struct Mixer {
     voices: Vec<Voice>,
+    stream: Option<Stream>,
 }
 
 impl Mixer {
@@ -133,9 +137,25 @@ impl Mixer {
         self.voices.len()
     }
 
+    /// Adds (or with None removes) a stream mixed over the voices.
+    pub fn set_stream(&mut self, stream: Option<Stream>) {
+        self.stream = stream;
+    }
+
+    pub fn has_stream(&self) -> bool {
+        self.stream.is_some()
+    }
+
     /// Mixes into interleaved stereo `out` at `RATE`.
     pub fn mix(&mut self, out: &mut [i16]) {
         let mut sum = vec![0f32; out.len()];
+        if let Some(stream) = self.stream.as_mut() {
+            let mut rendered = vec![0f32; out.len()];
+            stream(&mut rendered);
+            for (s, r) in sum.iter_mut().zip(rendered) {
+                *s += r * 32767.;
+            }
+        }
         self.voices.retain_mut(|v| {
             if v.paused {
                 return true;
@@ -225,6 +245,18 @@ impl Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stream_is_mixed_over_the_voices() {
+        let mut m = Mixer::default();
+        m.set_stream(Some(Box::new(|out: &mut [f32]| out.fill(0.5))));
+        let mut out = [0i16; 4];
+        m.mix(&mut out);
+        assert_eq!(out, [16383; 4]);
+        m.set_stream(None);
+        m.mix(&mut out);
+        assert_eq!(out, [0; 4]);
+    }
 
     fn clip(samples: &[i16], channels: u16, rate: u32) -> Clip {
         Clip {

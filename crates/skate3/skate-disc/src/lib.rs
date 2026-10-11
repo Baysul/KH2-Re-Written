@@ -13,11 +13,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+pub mod audio;
 pub mod big;
 pub mod hud;
 pub mod skeleton;
 pub mod vlt;
 
+pub use audio::prepare_audio;
 pub use hud::prepare_hud;
 
 /// Bumped whenever the prepared output changes.

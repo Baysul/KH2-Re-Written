@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 license = "GPL-3.0-only"
-description = "Skate 3 skater simulation from skate-game, without rendering, for a Bevy 0.19 host"
+description = "Skate 3 skater simulation and sounds from skate-game, without rendering, for a Bevy 0.19 host"
 
 [lib]
 # skate-game's unit tests need its private asset captures and were not carried over.
@@ -17,6 +17,8 @@ bevy = { version = "=0.19.1", default-features = false, features = ["std", "bevy
 skate-core = { git = "https://github.com/SK8-ENGINE/skate-3-rust-engine", rev = "2e16697797c8358d16f747a8259354ff2921041a" }
 skate-data = { git = "https://github.com/SK8-ENGINE/skate-3-rust-engine", rev = "2e16697797c8358d16f747a8259354ff2921041a" }
 skate-dynamics = { git = "https://github.com/SK8-ENGINE/skate-3-rust-engine", rev = "2e16697797c8358d16f747a8259354ff2921041a" }
+skate-audio = { git = "https://github.com/SK8-ENGINE/skate-3-rust-engine", rev = "2e16697797c8358d16f747a8259354ff2921041a" }
+skate-audio-fma = { git = "https://github.com/SK8-ENGINE/skate-3-rust-engine", rev = "2e16697797c8358d16f747a8259354ff2921041a" }
 half = "=2.7.1"
 serde.workspace = true
 serde_json.workspace = true

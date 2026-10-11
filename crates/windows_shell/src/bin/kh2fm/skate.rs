@@ -53,6 +53,15 @@ pub struct Skate {
     /// Skate 3's score HUD, when its data was prepared from the disc.
     #[cfg(feature = "skate3")]
     hud: Option<skate_sim::host_hud::ScoreHud>,
+    /// Converting the disc's sounds (vgmstream), once, beside a ride.
+    #[cfg(feature = "skate3")]
+    audio_worker: Option<JoinHandle<Result<(), String>>>,
+    /// Skate 3's riding sounds, once prepared, while riding.
+    #[cfg(feature = "skate3")]
+    sounds: Option<skate_sim::host_audio::SkaterAudio>,
+    /// A mixer stream to install (Some) or remove (None) for the host.
+    /// (In a mutex: a stream is Send but not Sync.)
+    stream_change: std::sync::Mutex<Option<Option<audio_out::Stream>>>,
     /// The notice line (system-font bytes) and its remaining frames.
     pub notice: Option<(Vec<u8>, u32)>,
     /// The latest pad state for the simulation (read every frame).
@@ -72,6 +81,11 @@ impl Default for Skate {
             aspect: 16. / 9.,
             #[cfg(feature = "skate3")]
             hud: None,
+            #[cfg(feature = "skate3")]
+            audio_worker: None,
+            #[cfg(feature = "skate3")]
+            sounds: None,
+            stream_change: std::sync::Mutex::new(None),
             notice: None,
             #[cfg(feature = "skate3")]
             pad: XboxState::default(),
@@ -146,6 +160,18 @@ impl Skate {
         self.deck = None;
         self.rider = None;
         self.camera = None;
+        #[cfg(feature = "skate3")]
+        if self.sounds.take().is_some()
+            && let Ok(slot) = self.stream_change.get_mut()
+        {
+            *slot = Some(None);
+        }
+    }
+
+    /// The riding sounds' stream to hand the mixer (Some) or to take back
+    /// from it (None), once per change.
+    pub fn take_stream_change(&mut self) -> Option<Option<audio_out::Stream>> {
+        self.stream_change.get_mut().ok()?.take()
     }
 
     /// Skate 3's score HUD and the folder its textures are in, while riding.
@@ -219,6 +245,31 @@ impl Skate {
         {
             eprintln!("Skate 3 score HUD stopped: {e}");
         }
+        // The sounds join the ride once their conversion has finished.
+        let cache = crate::launcher::skate3_cache();
+        if self.sounds.is_none()
+            && self.audio_worker.is_none()
+            && cache.join(AUDIO_MANIFEST).is_file()
+        {
+            match skate_sim::host_audio::SkaterAudio::load(&cache, sim) {
+                Ok(sounds) => {
+                    eprintln!("Skate 3 sounds loaded");
+                    let mut stream = sounds.stream();
+                    if let Ok(slot) = self.stream_change.get_mut() {
+                        *slot = Some(Some(Box::new(move |out: &mut [f32]| stream.fill(out))));
+                    }
+                    self.sounds = Some(sounds);
+                }
+                Err(e) => {
+                    eprintln!("Skate 3 sounds not loaded: {e}");
+                    // Do not retry every tick.
+                    self.audio_worker = Some(std::thread::spawn(move || Err(e)));
+                }
+            }
+        }
+        if let Some(sounds) = &mut self.sounds {
+            sounds.tick(sim);
+        }
         self.camera = sim.camera().map(|(mut t, fov)| {
             t.translation *= UNITS_PER_METRE;
             (t, fov)
@@ -233,6 +284,63 @@ impl Skate {
     pub fn step(&mut self) -> Option<Ride> {
         None
     }
+}
+
+/// vgmstream decodes the disc's EA-XMA audio, as the Skate 3 engine's own
+/// setup does (owner's choice, 2026-10-11): the same pinned release, its
+/// SHA-256 checked against the digest GitHub publishes for the asset.
+#[cfg(feature = "skate3")]
+const VGMSTREAM_URL: &str =
+    "https://github.com/vgmstream/vgmstream/releases/download/r2117/vgmstream-win64.zip";
+#[cfg(feature = "skate3")]
+const VGMSTREAM_SHA256: &str = "6c4a8a3813864fefed081bbd337dbc0ad93bf88e0b92f5db98d7ab258b22dc6c";
+
+/// The vgmstream command-line decoder, downloaded once into `tools` and
+/// unpacked only after its checksum matches.
+#[cfg(feature = "skate3")]
+fn vgmstream(tools: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    use sha2::Digest;
+    let dir = tools.join("vgmstream-r2117");
+    let exe = dir.join("vgmstream-cli.exe");
+    if exe.is_file() {
+        return Ok(exe);
+    }
+    std::fs::create_dir_all(tools).map_err(|e| e.to_string())?;
+    let zip = tools.join("vgmstream-win64.zip");
+    let status = std::process::Command::new("curl.exe")
+        .args(["-sSLf", "-o"])
+        .arg(&zip)
+        .arg(VGMSTREAM_URL)
+        .status()
+        .map_err(|e| format!("curl: {e}"))?;
+    if !status.success() {
+        return Err(format!("downloading vgmstream failed ({status})"));
+    }
+    let bytes = std::fs::read(&zip).map_err(|e| e.to_string())?;
+    let digest: String = sha2::Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if digest != VGMSTREAM_SHA256 {
+        let _ = std::fs::remove_file(&zip);
+        return Err("the downloaded vgmstream does not match its checksum".into());
+    }
+    let staging = tools.join("vgmstream-r2117.tmp");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let status = std::process::Command::new("tar.exe")
+        .arg("-xf")
+        .arg(&zip)
+        .arg("-C")
+        .arg(&staging)
+        .status()
+        .map_err(|e| format!("tar: {e}"))?;
+    if !status.success() || !staging.join("vgmstream-cli.exe").is_file() {
+        return Err("unpacking vgmstream failed".into());
+    }
+    std::fs::rename(&staging, &dir).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&zip);
+    Ok(exe)
 }
 
 /// Where the score HUD's prepared data is.
@@ -329,9 +437,49 @@ pub fn toggle(keys: Res<ButtonInput<KeyCode>>, pads: Query<&Gamepad>, mut skate:
     prepare_or_start(&mut skate, iso.as_deref());
 }
 
+/// Converts the disc's sounds once (minutes: vgmstream decodes every bank)
+/// on its own thread and disc handle; riding does not wait for it.
+#[cfg(feature = "skate3")]
+fn prepare_audio(skate: &mut Skate, iso: Option<&std::path::Path>, cache: &std::path::Path) {
+    if skate.audio_worker.is_some() || cache.join(AUDIO_MANIFEST).is_file() {
+        return;
+    }
+    let (Some(iso), cache) = (iso.map(std::path::Path::to_path_buf), cache.to_path_buf()) else {
+        return;
+    };
+    skate.audio_worker = Some(std::thread::spawn(move || {
+        let disc = skate_source::admit(Some(&iso)).map_err(|e| e.to_string())?;
+        let vgmstream = vgmstream(&cache.join("tools"))?;
+        let collections: serde_json::Value =
+            std::fs::read(cache.join("private/stock/skater-collections.json"))
+                .map_err(|e| e.to_string())
+                .and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string()))?;
+        skate_disc::prepare_audio(&mut DiscHost(disc), &collections, &vgmstream, &cache, |m| {
+            eprintln!("Skate 3 sounds: {m}")
+        })
+        .map_err(|e| e.to_string())
+    }));
+}
+
+/// The prepared sounds' manifest (under the cache root).
+#[cfg(feature = "skate3")]
+const AUDIO_MANIFEST: &str = "private/audio/audio_manifest.json";
+
 /// A finished preparation starts the ride or reports why it cannot.
 #[cfg(feature = "skate3")]
 fn poll_preparation(skate: &mut Skate) {
+    if skate.audio_worker.as_ref().is_some_and(|w| w.is_finished())
+        && let Some(worker) = skate.audio_worker.take()
+    {
+        match worker.join() {
+            Ok(Ok(())) => skate.say("Skate 3 sounds are ready."),
+            Ok(Err(e)) => {
+                eprintln!("Skate 3 sounds not prepared: {e}");
+                skate.say("Skate 3 sounds could not be prepared. See the log.");
+            }
+            Err(_) => skate.say("Skate 3 sounds could not be prepared. See the log."),
+        }
+    }
     if matches!(&skate.state, State::Preparing(worker) if worker.is_finished())
         && let State::Preparing(worker) = std::mem::replace(&mut skate.state, State::Off)
     {
@@ -341,7 +489,11 @@ fn poll_preparation(skate: &mut Skate) {
         };
         skate.disc = Some(disc);
         match result {
-            Ok(()) => skate.state = State::Starting,
+            Ok(()) => {
+                skate.state = State::Starting;
+                let iso = crate::launcher::skate3_iso();
+                prepare_audio(skate, iso.as_deref(), &crate::launcher::skate3_cache());
+            }
             Err(e) => {
                 eprintln!("Skate 3 data not prepared: {e}");
                 skate.say("The Skate 3 disc could not be read. See the log.");
@@ -357,6 +509,7 @@ fn prepare_or_start(skate: &mut Skate, iso: Option<&std::path::Path>) {
     let cache = crate::launcher::skate3_cache();
     let identity = disc_identity(iso);
     if skate_disc::is_prepared(&cache, &identity) {
+        prepare_audio(skate, iso, &cache);
         skate.state = State::Starting;
         return;
     }

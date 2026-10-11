@@ -6768,7 +6768,15 @@ fn skate_tick(
     mut skate: ResMut<crate::skate::Skate>,
     mut game: ResMut<Game>,
     area: Option<Res<AreaRes>>,
+    audio: Option<Res<Audio>>,
 ) {
+    // Skate 3's riding sounds play through the room's mixer.
+    if let Some(change) = skate.take_stream_change()
+        && let Some(output) = audio.as_ref().and_then(|a| a.output.as_ref())
+        && let Ok(mut mixer) = output.mixer.lock()
+    {
+        mixer.set_stream(change);
+    }
     if area.as_deref().is_some_and(|a| a.transition.is_some()) {
         if skate.riding() {
             skate.stop();

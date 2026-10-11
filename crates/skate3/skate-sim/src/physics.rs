@@ -39,6 +39,8 @@ pub(crate) use skater::SkaterRuntime;
 mod animation_feedback;
 mod animation_feedback_settings;
 mod animation_input;
+// skate-sim: the latched animation events `host_audio` takes after each step.
+pub(crate) use animation_input::AudioEvents;
 mod animation_phase;
 mod biped_ground;
 #[cfg(debug_assertions)]
