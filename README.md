@@ -1,5 +1,9 @@
 # KH2FinalRewrite
 
+<p align="center">
+  <img src="crates/windows_shell/assets/final-rewrite-text.png" alt="Final Re:WRITE" width="314">
+</p>
+
 A native Windows rewrite of **Kingdom Hearts II Final Mix** in Rust, using [Bevy](https://bevy.org). It reads your own Steam installation at runtime. No game assets are distributed.
 
 > **Status: early.** A playable test room runs. The rest of the game does not work yet.
