@@ -78,7 +78,8 @@ pub struct Item {
 pub struct Font<'a> {
     pub widths: &'a [u8],
     /// Pad kind for the 09 da..f9 button prompts (FUN_1403af840): 1 Xbox,
-    /// 2 PlayStation, 3 generic.
+    /// 2 PlayStation, 3 generic; 0 = the keyboard / mouse was used last (key
+    /// caps, FUN_1403af130).
     pub pad: u8,
 }
 

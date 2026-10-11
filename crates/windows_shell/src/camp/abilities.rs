@@ -655,6 +655,10 @@ impl Camp {
         if self.cursor_entry().is_some_and(|e| e.cost != 0) {
             mask |= 0x200;
         }
+        // SELECT: the Abilities notice (category 2).
+        if self.notice_available(2) {
+            mask |= 0x400;
+        }
         if n == 0 {
             mask &= !0x10;
         }
@@ -980,6 +984,10 @@ impl Camp {
                     self.ability_skin(seq);
                     self.update_gauge(seq, true);
                     self.ability_list_help(seq);
+                }
+                Pick::Select => {
+                    self.memory.ability_list = cursor;
+                    self.start_notices(seq, Some(2), State::AbilityList);
                 }
                 Pick::Start => {
                     self.memory.ability_list = cursor;

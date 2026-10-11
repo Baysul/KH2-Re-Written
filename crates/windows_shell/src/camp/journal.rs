@@ -15,10 +15,16 @@ use super::bits;
 use super::{MenuList, Pad, SOUND_CLOSE, SOUND_CURSOR, SOUND_DECIDE, SOUND_INVALID, SOUND_OPEN};
 use crate::command::Font;
 use crate::sprite2d::{self, Id, LightCur, Sprites, Text};
-use package_reader::journal_table::{Story, World};
+use package_reader::journal_table::{Album, Char, Diag, Story, World};
 use package_reader::layout::{Layout, LayoutTask};
 use package_reader::sequence::{Modifiers, Player, Quad, Sequence};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+mod album;
+mod category;
+mod characters;
+mod files;
+mod treasure;
 
 /// The journal sprites' SEQD (DAT_1407434e8) and image (DAT_1407434e4).
 pub const SEQUENCE: usize = 5;
@@ -165,6 +171,12 @@ pub const MESSAGES: [u16; 52] = [
     0x26c3,
     0x26b3,
 ];
+/// Messages of the category pages (help lines and the empty album).
+pub const PAGE_MESSAGES: [u16; 21] = [
+    0x48d5, 0x48d6, 0x48d8, 0x48d9, 0x32dd, 0x48ee, 0x48ef, 0x48f0, 0x48f1, 0x48f2, 0x36b3, 0x2874,
+    0x2dc6, 0x48f4, 0x48f5, 0x4a0f, 0x4a12, 0x4a11, 0x4a13, 0x48ec, 0x48ed,
+];
+
 /// FUN_1402f5db0: the "show everything" story flag.
 const SHOW_ALL: u16 = 0x4837;
 /// Roxas's journal world (a8[0]).
@@ -211,6 +223,15 @@ pub struct Unlocks {
     pub synthesis: bool,
 }
 
+/// An item a chest or map holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TreasureItem {
+    pub name: Vec<u8>,
+    pub icon: u8,
+    /// Item type 22.
+    pub map: bool,
+}
+
 /// Everything the journal shows besides its art.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct JournalData {
@@ -230,6 +251,33 @@ pub struct JournalData {
     pub tops: Vec<String>,
     /// Whether jm_world.2ld is there (else no world icons).
     pub world_icons: bool,
+    /// jiminy.bar `char`, `diag` and `albu`.
+    pub chars: Vec<Char>,
+    pub diag: Vec<Diag>,
+    pub albums: Vec<Album>,
+    /// 03system `trsr`, the items they hold (names, icons, map type) and
+    /// the save's opened-chest bits and owned map items.
+    pub treasures: Vec<package_reader::journal_table::Treasure>,
+    pub item_names: HashMap<u16, TreasureItem>,
+    pub opened_bits: Vec<u16>,
+    pub owned_items: Vec<u16>,
+    /// jiminy.bar `anse`.
+    pub reports: Vec<package_reader::journal_table::Report>,
+    /// The `char` rows and `albu` rows already seen (save+0x4c38 / +0x4c7c).
+    pub seen_chars: Vec<u16>,
+    pub seen_albums: Vec<u16>,
+}
+
+/// The face and photo files the caller has loaded for the journal, and
+/// the ones it should load next.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JournalCache {
+    /// `menu/jmface_<code>.2ld` by journal world (0x10 = Links).
+    pub faces: HashSet<u8>,
+    /// `menu/<lang>/jm_photo/<code><nn>.bin` by `albu` row.
+    pub photos: HashSet<u16>,
+    pub wanted_face: Option<u8>,
+    pub wanted_photo: Option<u16>,
 }
 
 /// What a draw item samples.
@@ -242,6 +290,10 @@ pub enum Sheet {
     World(usize),
     /// Image i of the page's jm_top file (`Journal::top`).
     Top(usize),
+    /// Face image `.1` of the world's `jmface` file (`.0`).
+    Face(u8, u8),
+    /// The album photo of `albu` row `.0`.
+    Photo(u16),
 }
 
 /// A dk::Sprite on another 2LD's image (FUN_14016a900 with an image
@@ -268,6 +320,9 @@ enum In {
     /// −8 / −9.
     R1,
     L1,
+    /// R2 / L2 (the album photos).
+    R2,
+    L2,
 }
 
 /// FUN_1402f6270: the sound of a list result.
@@ -275,7 +330,9 @@ fn sound(input: In, moved: bool, valid: bool) -> Option<u32> {
     match input {
         _ if moved => Some(SOUND_CURSOR),
         In::Cancel | In::Start => Some(SOUND_CLOSE),
-        In::Row(_) | In::R1 | In::L1 => Some(if valid { SOUND_DECIDE } else { SOUND_INVALID }),
+        In::Row(_) | In::R1 | In::L1 | In::R2 | In::L2 => {
+            Some(if valid { SOUND_DECIDE } else { SOUND_INVALID })
+        }
         In::None => None,
     }
 }
@@ -477,6 +534,27 @@ pub struct Journal {
     memory: [usize; 0x29],
     /// The page's jm_top file code (FUN_1402f4ae0).
     pub top: Option<String>,
+    /// The category pages' pill and the pages' own state.
+    cat: category::Category,
+    files: files::Page,
+    treasure: treasure::Page,
+    /// First list entry shown by the 10-row file lists (the hand follows
+    /// the row `cursor − scroll`).
+    scroll: usize,
+    chars: characters::Page,
+    album: album::Page,
+    /// Files loaded for the pages and the ones to load next.
+    pub cache: JournalCache,
+    /// This frame's held bits and left stick (x, y, magnitude).
+    held: u64,
+    stick: [f32; 3],
+    /// DAT_140bee4f5: no LightCur (the hand stays).
+    no_light: bool,
+    /// Rows seen so far and when the journal opened.
+    pub seen_chars: HashSet<u16>,
+    pub seen_albums: HashSet<u16>,
+    seen_chars_at_open: HashSet<u16>,
+    seen_albums_at_open: HashSet<u16>,
 }
 
 impl Journal {
@@ -550,7 +628,25 @@ impl Journal {
             no_cursor: false,
             memory: [0; 0x29],
             top: None,
+            cat: category::Category::default(),
+            files: files::Page::default(),
+            treasure: treasure::Page::default(),
+            scroll: 0,
+            chars: characters::Page::default(),
+            album: album::Page::default(),
+            cache: JournalCache::default(),
+            held: 0,
+            stick: [0.; 3],
+            no_light: false,
+            seen_chars: HashSet::new(),
+            seen_albums: HashSet::new(),
+            seen_chars_at_open: HashSet::new(),
+            seen_albums_at_open: HashSet::new(),
         };
+        j.seen_chars = j.data.seen_chars.iter().copied().collect();
+        j.seen_albums = j.data.seen_albums.iter().copied().collect();
+        j.seen_chars_at_open = j.seen_chars.clone();
+        j.seen_albums_at_open = j.seen_albums.clone();
         j.build(layout, first);
         (j, vec![SOUND_OPEN])
     }
@@ -763,6 +859,10 @@ impl Journal {
         for id in self.page.drain(..) {
             self.sprites.kill(id);
         }
+        // The Characters page's bounds anchor has no parent (S0).
+        if let Some(a) = self.chars.take_anchor() {
+            self.sprites.kill(a);
+        }
         for p in &mut self.pictures {
             p.dead = true;
         }
@@ -778,6 +878,7 @@ impl Journal {
     fn reset_list(&mut self) {
         self.list = MenuList::default();
         self.list.mask = 0x73;
+        self.scroll = 0;
         self.grid = None;
         self.cells.clear();
         self.options.clear();
@@ -787,11 +888,27 @@ impl Journal {
         self.state = state;
         self.substate = 0;
         self.no_cursor = false;
+        self.no_light = false;
+        // The pill stays between a category's own pages only.
+        if !category::is_category(state) {
+            self.kill_pill();
+        }
         match state {
             SELECT_WORLD => self.build_worlds(layout),
             ROXAS_NOTES => self.build_roxas(layout),
             NOTES_PAGE => self.build_notes(layout),
-            _ => self.build_collection(layout),
+            COLLECTION_PAGE => self.build_collection(layout),
+            4 => self.build_album_list(layout),
+            5 => self.build_album_photo(layout),
+            6 | 0xc | 0x28 => self.build_characters(layout),
+            0xe => self.build_files_menu(layout),
+            0x18 => self.build_reports_list(layout),
+            0x19 => self.build_report_reader(layout),
+            7 | 9 | 0x1a | 0x22 => self.build_treasure(layout),
+            0xf | 0x12 | 0x15 => self.build_files_list(layout),
+            0x10 | 0x13 | 0x16 => self.build_files_detail(layout),
+            // Pages not built yet go back to the Notes of the world.
+            _ => self.build_notes(layout),
         }
     }
 
@@ -964,8 +1081,8 @@ impl Journal {
         let title = if self.flag(w.unlock) {
             name
         } else {
-            // FUN_1403008d0: one "?" (0x3f) per glyph.
-            name.iter().filter(|&&b| b >= 0x20).map(|_| 0x3f).collect()
+            // FUN_1403008d0: one "?" per glyph (FUN_1403adcc0: 0x49).
+            name.iter().filter(|&&b| b >= 0x20).map(|_| 0x49).collect()
         };
         self.set_text(self.title, title);
     }
@@ -1146,6 +1263,10 @@ impl Journal {
             In::R1
         } else if pad.trig & L1 != 0 && m & 0x2000 != 0 {
             In::L1
+        } else if pad.trig & bits::R2 != 0 && m & 0x4000 != 0 {
+            In::R2
+        } else if pad.trig & bits::L2 != 0 && m & 0x8000 != 0 {
+            In::L2
         } else {
             In::None
         };
@@ -1154,9 +1275,18 @@ impl Journal {
 
     /// One journal frame: the state machine (FUN_1402f24a0), the driver
     /// (FUN_1402f2cf0), then the sprite tasks.
-    pub fn frame(&mut self, layout: &Layout, trig: u64, repeat: u64) -> Vec<u32> {
+    pub fn frame(
+        &mut self,
+        layout: &Layout,
+        trig: u64,
+        repeat: u64,
+        held: u64,
+        stick: [f32; 3],
+    ) -> Vec<u32> {
         let seq = &layout.sequences[SEQUENCE];
         let pad = Pad { trig, repeat };
+        self.held = held;
+        self.stick = stick;
         let mut sounds = Vec::new();
         if !self.exit {
             // No input while the book opens; any press skips it to idle.
@@ -1168,6 +1298,15 @@ impl Journal {
                 let moved = match self.state {
                     SELECT_WORLD => self.select_world(layout, &pad, &mut sounds),
                     ROXAS_NOTES => self.roxas_notes(&pad, seq, &mut sounds),
+                    4 => self.album_list(layout, &pad, &mut sounds),
+                    5 => self.album_photo(layout, &pad, &mut sounds),
+                    6 | 0xc | 0x28 => self.characters(layout, &pad, &mut sounds),
+                    0xe => self.files_menu(layout, &pad, &mut sounds),
+                    0x18 => self.reports_list(layout, &pad, &mut sounds),
+                    0x19 => self.report_reader(layout, &pad, &mut sounds),
+                    7 | 9 | 0x1a | 0x22 => self.treasure_page(layout, &pad, &mut sounds),
+                    0xf | 0x12 | 0x15 => self.files_list(layout, &pad, &mut sounds),
+                    0x10 | 0x13 | 0x16 => self.files_detail(layout, &pad, &mut sounds),
                     _ => self.option_page(layout, &pad, &mut sounds),
                 };
                 self.driver(seq, moved);
@@ -1180,6 +1319,7 @@ impl Journal {
         self.sprites.update(seq);
         self.update_pictures(layout);
         self.place_light(seq);
+        self.place_pill_orb(seq);
         if self.exit && self.layout.dead {
             // FUN_1402f4350: everything goes; the wrapper rebuilds the camp.
             for s in &mut self.sprites.list {
@@ -1279,7 +1419,7 @@ impl Journal {
                 self.pending = Some(if w < 0xf { NOTES_PAGE } else { COLLECTION_PAGE });
                 self.substate = 2;
             }
-            In::None => {}
+            In::R2 | In::L2 | In::None => {}
         }
         moved
     }
@@ -1313,8 +1453,24 @@ impl Journal {
                 self.substate = 2;
             }
             In::R1 | In::L1 => self.switch_top(seq, input),
-            // The category pages are not built: the decide sound only.
-            In::Row(_) | In::None => {}
+            In::Row(k) => {
+                // The pages built so far; the rest play the decide sound.
+                let table: &[(u16, u16, u8)] = if self.state == NOTES_PAGE {
+                    &NOTES_OPTIONS
+                } else {
+                    &COLLECTION_OPTIONS
+                };
+                if let Some(&o) = self.options.get(k) {
+                    let (label, _, state) = table[o];
+                    if matches!(
+                        state,
+                        4 | 6 | 0xc | 0x28 | 0xe | 0x12 | 0x15 | 7 | 9 | 0x1a | 0x22 | 0x18
+                    ) {
+                        self.enter_category(seq, state, label, k);
+                    }
+                }
+            }
+            In::R2 | In::L2 | In::None => {}
         }
         moved
     }
@@ -1343,7 +1499,11 @@ impl Journal {
         let live = self.list.rows[..self.list.total.min(self.list.rows.len())]
             .iter()
             .any(|&r| self.sprites.alive(r));
-        let row = self.list.rows.get(self.list.cursor).copied();
+        let row = self
+            .list
+            .rows
+            .get(self.list.cursor.saturating_sub(self.scroll))
+            .copied();
         if !self.no_cursor && live && self.substate == 1 {
             if self.hand.is_none_or(|h| !self.sprites.alive(h))
                 && let Some(row) = row
@@ -1353,7 +1513,7 @@ impl Journal {
                     .create(seq, PRIO_CURSOR, ART, HAND, Some(HAND), None);
                 self.sprites.get_mut(h).parent = Some(row);
                 self.hand = Some(h);
-                if self.light.id.is_none_or(|l| !self.sprites.alive(l)) {
+                if !self.no_light && self.light.id.is_none_or(|l| !self.sprites.alive(l)) {
                     let l =
                         self.sprites
                             .create(seq, PRIO_CURSOR, ART, LIGHT[0], Some(LIGHT[1]), None);
@@ -1416,6 +1576,7 @@ impl Journal {
             self.dir = 1;
         }
         self.close_light(seq);
+        self.pill_out(seq);
         if let Some(h) = self.help.take() {
             self.sprites.kill(h);
         }
@@ -1466,6 +1627,15 @@ impl Journal {
             c[1] + g.text_position_y as f32,
         ];
         self.light.place(&mut self.sprites, t);
+    }
+
+    /// The seen rows to carry to the next opening (save+0x4c38 / 0x4c7c).
+    pub fn seen(&self) -> (Vec<u16>, Vec<u16>) {
+        let mut c: Vec<u16> = self.seen_chars.iter().copied().collect();
+        let mut a: Vec<u16> = self.seen_albums.iter().copied().collect();
+        c.sort_unstable();
+        a.sort_unstable();
+        (c, a)
     }
 
     /// The draw list: the book layout (0x7557), then sprites and pictures

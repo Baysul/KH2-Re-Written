@@ -489,11 +489,27 @@ impl Camp {
             .copied()
     }
 
+    /// The notice category of the row under the cursor, when one has its
+    /// flag.
+    fn notice_for_entry(&self) -> Option<u8> {
+        let c = match self.customize_cursor_entry()?.cat {
+            1 => 1,
+            2 => 0,
+            _ => return None,
+        };
+        self.notice_available(c).then_some(c)
+    }
+
     /// §4.1 / §4.5: page keys, L2/R2, △ on a non-shortcut row.
     fn customize_mask(&mut self) {
         let mut mask = 0x73 | 0x3000 | 0xc000;
         if self.customize_cursor_entry().is_some_and(|e| e.cat != 0) {
             mask |= 0x200;
+        }
+        // SELECT: MP Charge rows show the MP Charge notice (1), Auto-Reload
+        // rows the Auto-Reload one (0) [I].
+        if self.notice_for_entry().is_some() {
+            mask |= 0x400;
         }
         self.custom_ui.list.list.mask = mask;
     }
@@ -711,6 +727,12 @@ impl Camp {
                         self.custom_ui.entries = self.customize_entries();
                         self.customize_skin(seq);
                         self.customize_list_help(seq);
+                    }
+                }
+                Pick::Select => {
+                    self.memory.customize_list = cursor;
+                    if let Some(c) = self.notice_for_entry() {
+                        self.start_notices(seq, Some(c), State::CustomizeList);
                     }
                 }
                 Pick::Start => {

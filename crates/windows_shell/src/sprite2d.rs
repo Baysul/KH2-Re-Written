@@ -32,6 +32,8 @@ pub struct Text {
     /// Flag 4: colour from the animation; flag 8: keep +0x208's RGB.
     pub anim_colour: bool,
     pub keep_rgb: bool,
+    /// Line spacing override (else the group's UiPadding).
+    pub extra: Option<f32>,
 }
 
 impl Text {
@@ -46,6 +48,7 @@ impl Text {
             group_position: true,
             anim_colour: true,
             keep_rgb: true,
+            extra: None,
         }
     }
 }
@@ -356,7 +359,7 @@ impl Sprites {
             [x, y],
             t.size,
             t.align,
-            g.ui_padding as f32,
+            t.extra.unwrap_or(g.ui_padding as f32),
             rgba,
             true,
             font,
@@ -453,6 +456,49 @@ pub fn prompt_icon(b: u8, kind: u8) -> u8 {
         0xdc..=0xf9 => T[(b - 0xdc) as usize][k],
         _ => b,
     }
+}
+
+/// FUN_1403af130 + FUN_1404e4a30 + FUN_1404e89d0 with the exe's default
+/// key bindings (.data 0x14078278c..0x14078281c: Left mouse confirm, Space
+/// cancel, right mouse, F, Left Shift / R, C / E, X / middle mouse, M / N,
+/// arrows, WASD): the icon-plane cells drawn for `09 xx` while the keyboard
+/// or mouse was the last device. None: xx is outside 0xda..=0xf9 (the raw
+/// cell is drawn).
+pub fn keyboard_prompt(xx: u8) -> Option<&'static [u8]> {
+    Some(match xx {
+        0xda | 0xdd => &[190],
+        0xdb | 0xdc => &[145],
+        0xde => &[191],
+        0xdf => &[116],
+        0xe0 => &[137],
+        0xe1 => &[128],
+        0xe2 => &[113],
+        0xe3 => &[115],
+        0xe4 => &[134],
+        0xe5 => &[192],
+        0xe6 => &[124],
+        0xe7 => &[123],
+        0xe8 => &[133, 111, 129, 114],
+        0xe9 => &[201],
+        // No keyboard branch: the table value resolves to cell 0.
+        0xea => &[0],
+        0xeb => &[174, 176, 175, 177],
+        0xec => &[174, 175],
+        0xed => &[176, 177],
+        0xee => &[174],
+        0xef => &[175],
+        0xf0 => &[176],
+        0xf1 => &[177],
+        0xf2 => &[133],
+        0xf3 => &[129],
+        0xf4 => &[111],
+        0xf5 => &[114],
+        0xf6 => &[195],
+        0xf7 => &[196],
+        0xf8 => &[197],
+        0xf9 => &[198],
+        _ => return None,
+    })
 }
 
 /// System font text as FUN_1403aed80 / FUN_1403afd90 / FUN_1403b0280 /
@@ -557,24 +603,31 @@ pub fn text_quads(
                 }
                 0x09 => {
                     let raw = line.get(i + 1).copied().unwrap_or(0);
-                    let icon = prompt_icon(raw, font.pad);
-                    let side = ((28. * k) as i32 - 4) as f32;
-                    let t = (k * 64. + baseline16) as i32;
-                    let bottom = (t - 16) as f32 / 16.;
-                    let left = x + 2.;
-                    let (u, v) = ((icon as i32 % 21) * 24, (icon as i32 / 21) * 24);
-                    out.icons.push(Quad {
-                        corners: [
-                            [left, bottom - side],
-                            [left + side, bottom - side],
-                            [left, bottom],
-                            [left + side, bottom],
-                        ],
-                        uv: [u, v, u + 24, v + 24],
-                        colors: [[1., 1., 1., colour[3]]; 4],
-                        blend: 0,
-                    });
-                    x += icon_advance(icon_width(icon));
+                    // Keyboard prompts (pad 0): each bound key's cap, one
+                    // after the other (FUN_1403af9e0).
+                    let cells: Vec<u8> = match keyboard_prompt(raw) {
+                        Some(cells) if font.pad == 0 => cells.to_vec(),
+                        _ => vec![prompt_icon(raw, font.pad.max(1))],
+                    };
+                    for icon in cells {
+                        let side = ((28. * k) as i32 - 4) as f32;
+                        let t = (k * 64. + baseline16) as i32;
+                        let bottom = (t - 16) as f32 / 16.;
+                        let left = x + 2.;
+                        let (u, v) = ((icon as i32 % 21) * 24, (icon as i32 / 21) * 24);
+                        out.icons.push(Quad {
+                            corners: [
+                                [left, bottom - side],
+                                [left + side, bottom - side],
+                                [left, bottom],
+                                [left + side, bottom],
+                            ],
+                            uv: [u, v, u + 24, v + 24],
+                            colors: [[1., 1., 1., colour[3]]; 4],
+                            blend: 0,
+                        });
+                        x += icon_advance(icon_width(icon));
+                    }
                     i += n;
                     continue;
                 }
@@ -704,6 +757,10 @@ mod tests {
         assert_eq!(q.glyphs[0].corners[0][0], 118.);
         assert_eq!(q.glyphs[0].colors[0][1], 0.);
         assert_eq!(q.glyphs[1].colors[0], [1.; 4]);
+        // Keyboard: LT / RT are C and E, the stick four keys.
+        assert_eq!(keyboard_prompt(0xe2), Some(&[113u8][..]));
+        assert_eq!(keyboard_prompt(0xe8), Some(&[133u8, 111, 129, 114][..]));
+        assert_eq!(keyboard_prompt(0x20), None);
         // PlayStation prompts: L2 / R2.
         assert_eq!(prompt_icon(0xe2, 2), 74);
         assert_eq!(prompt_icon(0xe3, 1), 31);

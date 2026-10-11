@@ -33,6 +33,7 @@ pub mod model_texture_routing;
 pub mod motion;
 pub mod motion_eval;
 pub mod motion_trigger;
+pub mod name_hash;
 pub mod named;
 pub mod object_collision;
 pub mod objentry;

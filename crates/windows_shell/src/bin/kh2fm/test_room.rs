@@ -170,6 +170,16 @@ struct JournalConfig {
     worlds: Locator,
     tops: std::collections::BTreeMap<String, Locator>,
     curtain: Locator,
+    /// Story flags set in the save [test-room value]; 0x4837 is the exe's
+    /// "show everything" flag.
+    #[serde(default)]
+    flags: Vec<u16>,
+    /// Opened-chest bits (save+0x23ac) and owned map items [test-room
+    /// values].
+    #[serde(default)]
+    opened_bits: Vec<u16>,
+    #[serde(default)]
+    owned_items: Vec<u16>,
 }
 
 /// The area to start in and the story point that fixes its programs.
@@ -832,6 +842,27 @@ fn read_archive(
     Ok(original.bytes)
 }
 
+/// A file of an index found by its path's name hash (None: not there).
+fn read_named(
+    source: &ProbeSource,
+    index: &str,
+    path: &str,
+) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+    let hash = package_reader::name_hash::of_path(path);
+    let mut checked = source.open_index(index)?;
+    let Some(entry) = checked
+        .inventory
+        .entries
+        .iter()
+        .find(|e| e.name_hash == hash)
+    else {
+        return Ok(None);
+    };
+    let bytes = original::read_original(&mut checked.reader, entry)?.bytes;
+    checked.verify_unchanged()?;
+    Ok(Some(bytes))
+}
+
 fn bar_entry<'a>(bytes: &'a [u8], name: &[u8; 4]) -> Result<&'a [u8], Box<dyn std::error::Error>> {
     let table = bar::read_bar(bytes)?;
     let matches: Vec<_> = table
@@ -1049,12 +1080,22 @@ struct JournalSource {
     worlds: Vec<package_reader::journal_table::World>,
     stories: Vec<package_reader::journal_table::Story>,
     texts: HashMap<u16, Vec<u8>>,
+    flags: Vec<u16>,
+    reports: Vec<package_reader::journal_table::Report>,
+    treasures: Vec<package_reader::journal_table::Treasure>,
+    item_names: HashMap<u16, journal::TreasureItem>,
+    opened_bits: Vec<u16>,
+    owned_items: Vec<u16>,
+    chars: Vec<package_reader::journal_table::Char>,
+    diag: Vec<package_reader::journal_table::Diag>,
+    albums: Vec<package_reader::journal_table::Album>,
 }
 
 fn load_journal(
     source: &ProbeSource,
     j: &JournalConfig,
     sys: &Locator,
+    system: &[u8],
 ) -> Result<JournalSource, Box<dyn std::error::Error>> {
     use package_reader::journal_table;
     use windows_shell::camp::journal;
@@ -1070,9 +1111,23 @@ fn load_journal(
     let tables = read_archive(source, &j.tables)?;
     let worlds = journal_table::read_worlds(bar_entry(&tables, b"worl")?)?;
     let stories = journal_table::read_stories(bar_entry(&tables, b"stor")?)?;
+    let chars = journal_table::read_chars(bar_entry(&tables, b"char")?)?;
+    let diag = journal_table::read_diag(bar_entry(&tables, b"diag")?)?;
+    let albums = journal_table::read_albums(bar_entry(&tables, b"albu")?)?;
+    let reports = journal_table::read_reports(bar_entry(&tables, b"anse")?)?;
     let mut ids: Vec<u32> = journal::MESSAGES.iter().map(|&i| i as u32).collect();
+    ids.extend(journal::PAGE_MESSAGES.map(u32::from));
+    for c in &chars {
+        ids.extend([c.name, c.description, c.origin].map(u32::from));
+    }
+    for a in &albums {
+        ids.extend([a.title, a.caption].map(u32::from));
+    }
+    for r in &reports {
+        ids.extend([r.title, r.text].map(u32::from));
+    }
     for w in &worlds {
-        ids.extend([w.names[0], w.alt_names[0]].map(u32::from));
+        ids.extend([w.names[0], w.alt_names[0], w.names[1], w.alt_names[1]].map(u32::from));
     }
     for s in &stories {
         ids.extend([s.summary, s.objective].map(u32::from));
@@ -1087,6 +1142,36 @@ fn load_journal(
         j.messages.name_hash,
         &ids,
     )?;
+    // The chests' items: names from the system table.
+    let treasures = journal_table::read_treasures(bar_entry(system, b"trsr")?)?;
+    let items = package_reader::item_table::read(bar_entry(system, b"item")?)?;
+    let wanted: Vec<u16> = {
+        let mut v: Vec<u16> = treasures.iter().map(|t| t.item).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let rows: Vec<&package_reader::item_table::Item> = wanted
+        .iter()
+        .filter_map(|id| items.iter().find(|r| r.id == *id))
+        .collect();
+    let name_ids: Vec<u32> = rows.iter().map(|r| r.name as u32).collect();
+    let names =
+        hud::load_messages_optional(source, &sys.index, sys.ordinal, sys.name_hash, &name_ids)?;
+    let item_names: HashMap<u16, journal::TreasureItem> = rows
+        .iter()
+        .zip(names)
+        .map(|(r, n)| {
+            (
+                r.id,
+                journal::TreasureItem {
+                    name: n.unwrap_or_default(),
+                    icon: r.icon,
+                    map: r.kind == 22,
+                },
+            )
+        })
+        .collect();
     let mut texts: HashMap<u16, Vec<u8>> = ids
         .iter()
         .zip(found)
@@ -1112,6 +1197,15 @@ fn load_journal(
         worlds,
         stories,
         texts,
+        flags: j.flags.clone(),
+        reports,
+        treasures,
+        item_names,
+        opened_bits: j.opened_bits.clone(),
+        owned_items: j.owned_items.clone(),
+        chars,
+        diag,
+        albums,
     })
 }
 
@@ -1142,6 +1236,12 @@ struct CampSource {
     equip_stats: Vec<camp::equip::ItemStats>,
     /// The font image's icon plane (0x09 icons).
     icons: SystemFont,
+    /// 03system.bin `ipic`: the item pictures' sequence.
+    picture_sequence: Option<package_reader::sequence::Sequence>,
+    /// The tutorial notices' headings, "PAGE " and callouts.
+    notice_headings: [Vec<u8>; 4],
+    notice_page: Vec<u8>,
+    notice_callouts: Vec<(String, Vec<camp::notice::Callout>)>,
 }
 
 /// Items screen messages (camp-05 §9).
@@ -1281,6 +1381,7 @@ fn load_camp_items(
             sell: r.sell,
             icon: r.icon,
             param: r.weapon_stats,
+            picture: r.picture,
             name: t[0].clone().unwrap_or_default(),
             description: t[1].clone().unwrap_or_default(),
         })
@@ -2524,12 +2625,33 @@ fn load(
                 customize,
                 equip_texts,
                 equip_stats,
+                picture_sequence: bar_entry(&system, b"ipic")
+                    .ok()
+                    .map(package_reader::sequence::read)
+                    .transpose()?,
+                notice_headings: {
+                    let mut h = msg(&camp::notice::HEADING_IDS)?.into_iter();
+                    std::array::from_fn(|_| h.next().unwrap_or_default())
+                },
+                notice_page: msg(&[camp::notice::PAGE_ID])?.pop().unwrap_or_default(),
+                notice_callouts: {
+                    let texts = msg(&[0x561e, 0x561f, 0x5620])?;
+                    let file = read_named(source, "Image/dt/kh2_first.hed", "THelpText.bin")?;
+                    file.map_or_else(Vec::new, |b| {
+                        camp::notice::parse_callouts(&b, |id| {
+                            texts
+                                .get(id.wrapping_sub(0x561e) as usize)
+                                .cloned()
+                                .unwrap_or_default()
+                        })
+                    })
+                },
             })
         }
         _ => None,
     };
     let journal = match (&config.journal, &config.menu, &camp) {
-        (Some(j), Some(m), Some(_)) => Some(load_journal(source, j, &m.messages)?),
+        (Some(j), Some(m), Some(_)) => Some(load_journal(source, j, &m.messages, &system)?),
         _ => None,
     };
     let music = match &config.music {
@@ -4462,13 +4584,16 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     );
     (stick, jump, attack)
 }
-const AUTOPLAY_CAPTURES: [u64; 85] = [
+const AUTOPLAY_CAPTURES: &[u64] = &[
     90, 110, 200, 255, 312, 330, 352, 405, 450, 495, 585, 615, 760, 1010, 1100, 1198, 1300, 1500,
     1512, 1530, 1700, 1712, 1730, 1830, 1900, 1930, 1990, 2030, 2050, 2070, 2110, 2230, 2310, 2330,
-    2390, 2420, 2450, 2520, 2690, 2715, 2760, 2780, 2840, 2880, 2920, 2970, 3080, 3200, 3220, 3270,
-    3300, 3560, 3660, 3690, 3730, 3800, 3830, 3900, 4060, 4150, 4420, 4450, 4800, 4880, 5000, 5100,
-    5500, 5560, 5650, 5690, 5800, 5840, 5940, 6000, 6210, 6270, 6300, 6390, 6460, 6530, 6600, 6670,
-    6705, 6725, 6760,
+    2390, 2420, 2450, 2520, 2690, 2715, 2760, 2780, 2840, 2880, 2915, 2920, 2950, 2970, 3000, 3080,
+    3110, 3200, 3220, 3230, 3250, 3270, 3300, 3330, 3560, 3590, 3660, 3690, 3720, 3730, 3760, 3800,
+    3830, 3860, 3900, 3930, 4060, 4090, 4150, 4180, 4420, 4450, 4480, 4800, 4830, 4880, 4910, 5000,
+    5030, 5100, 5130, 5500, 5560, 5590, 5650, 5690, 5740, 5780, 5800, 5840, 5890, 5930, 5940, 6000,
+    6030, 6090, 6210, 6270, 6300, 6330, 6390, 6430, 6460, 6475, 6530, 6560, 6600, 6670, 6705, 6725,
+    6760, 6790, 6900, 7000, 7160, 7200, 7240, 7330, 7560, 7640, 7720, 7800, 7880, 7960, 8060, 8160,
+    8650, 8900, 9100, 9170,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -4482,7 +4607,9 @@ const AUTOPLAY_BLOWS: [u64; 2] = [1500, 1700];
 /// in earlier unattended runs.
 const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 /// The last stretch leaves Sora standing so an enemy can attack him.
-const AUTOPLAY_END: u64 = 6860;
+/// The index that holds the item pictures.
+const PICTURE_INDEX: &str = "Image/dt/kh2_fifth.hed";
+const AUTOPLAY_END: u64 = 9400;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 fn simulate(
@@ -6830,6 +6957,15 @@ struct CampRes {
     journal: Option<Journal>,
     curtain: Option<Curtain>,
     journal_sheets: JournalSheets,
+    /// The item pictures: the selected source they load from at run time
+    /// (`itempic/item-%03d.imd` in kh2_fifth) and their sheets (None:
+    /// the install has no such file).
+    picture_source: Option<std::sync::Arc<ProbeSource>>,
+    /// The journal's seen `char` and `albu` rows (save+0x4c38 / 0x4c7c).
+    seen_chars: Vec<u16>,
+    seen_albums: Vec<u16>,
+    picture_sheets: HashMap<u16, Option<usize>>,
+    notice_sheets: HashMap<String, usize>,
 }
 
 /// Sheet slots of the journal's images.
@@ -6839,6 +6975,10 @@ struct JournalSheets {
     curtain: usize,
     worlds: Vec<usize>,
     tops: HashMap<String, Vec<usize>>,
+    /// jmface_<code>.2ld faces by journal world, photos by `albu` row
+    /// (loaded when the journal asks).
+    faces: HashMap<u8, Vec<usize>>,
+    photos: HashMap<u16, usize>,
 }
 
 impl CampRes {
@@ -6852,7 +6992,7 @@ impl CampRes {
 /// the character list, the stat browser (column switch, move), back out,
 /// down to Config, change Field Camera and Summon Effects, jump to the
 /// bottom with R1, back out, close with START.
-const AUTOPLAY_CAMP: [(u64, u64); 108] = [
+const AUTOPLAY_CAMP: &[(u64, u64)] = &[
     (1810, 0x2),
     (1840, 0x20),
     (1850, 0x20),
@@ -6886,95 +7026,149 @@ const AUTOPLAY_CAMP: [(u64, u64); 108] = [
     (2790, 0x1_0000),
     (2830, 0x20),
     (2850, 0x4),
-    (2890, 0x4),
-    (2930, 0x4),
-    (2980, 0x4),
+    (2920, 0x4),
+    (2960, 0x4),
     (3010, 0x4),
-    (3050, 0x4),
-    (3090, 0x4),
-    (3120, 0x8),
-    (3150, 0x20),
-    (3170, 0x4),
-    (3210, 0x40),
-    (3230, 0x4),
-    (3280, 0x8),
-    (3320, 0x8),
-    (3400, 0x2),
+    (3040, 0x4),
+    (3080, 0x4),
+    (3120, 0x4),
+    (3150, 0x8),
+    (3180, 0x20),
+    (3200, 0x4),
+    (3240, 0x40),
+    (3260, 0x4),
+    (3310, 0x8),
+    (3350, 0x8),
+    (3430, 0x2),
     // Abilities: reopen, down to Abilities, Sora, the list; unequip Guard
     // with TRIANGLE, re-equip it in the popup, back out, SQUARE to Items
     // and back, close.
-    (3460, 0x2),
-    (3500, 0x20),
-    (3520, 0x4),
-    (3580, 0x4),
-    (3680, 0x20),
-    (3700, 0x10),
-    (3720, 0x1000),
-    (3750, 0x4),
-    (3820, 0x20),
-    (3850, 0x4),
-    (3920, 0x8),
-    (3990, 0x800),
-    (4080, 0x800),
-    (4170, 0x8),
-    (4240, 0x2),
+    (3490, 0x2),
+    (3530, 0x20),
+    (3550, 0x4),
+    (3610, 0x4),
+    (3710, 0x20),
+    (3730, 0x10),
+    (3750, 0x1000),
+    (3780, 0x4),
+    (3850, 0x20),
+    (3880, 0x4),
+    (3950, 0x8),
+    (4020, 0x800),
+    (4110, 0x800),
+    (4200, 0x8),
+    (4270, 0x2),
     // Party: reopen, down to Party, the card (nothing to switch), back.
-    (4300, 0x2),
-    (4340, 0x20),
-    (4350, 0x20),
-    (4370, 0x4),
-    (4440, 0x80),
-    (4460, 0x8),
-    (4540, 0x2),
+    (4330, 0x2),
+    (4370, 0x20),
+    (4380, 0x20),
+    (4400, 0x4),
+    (4470, 0x80),
+    (4490, 0x8),
+    (4570, 0x2),
     // Customize: reopen, up to Customize, Sora, shortcut 1 → Potion, back
     // out, close.
-    (4600, 0x2),
-    (4640, 0x10),
-    (4660, 0x4),
-    (4720, 0x4),
-    (4830, 0x4),
-    (4900, 0x20),
-    (4920, 0x4),
-    (5020, 0x8),
-    (5120, 0x8),
-    (5190, 0x2),
+    (4630, 0x2),
+    (4670, 0x10),
+    (4690, 0x4),
+    (4750, 0x4),
+    (4860, 0x4),
+    (4930, 0x20),
+    (4950, 0x4),
+    (5050, 0x8),
+    (5150, 0x8),
+    (5220, 0x2),
     // Equip: reopen, up to Items, Sora, item slot 1 → Potion, auto-reload
     // on with TRIANGLE, back to Items, close.
-    (5260, 0x2),
-    (5300, 0x10),
-    (5310, 0x10),
-    (5330, 0x4),
-    (5410, 0x4),
-    (5520, 0x20),
-    (5530, 0x20),
-    (5540, 0x20),
-    (5580, 0x4),
-    (5670, 0x20),
-    (5710, 0x4),
-    (5820, 0x1000),
-    (5860, 0x8),
-    (5960, 0x8),
-    (6030, 0x2),
+    (5290, 0x2),
+    (5330, 0x10),
+    (5340, 0x10),
+    (5360, 0x4),
+    (5440, 0x4),
+    (5610, 0x20),
+    (5620, 0x20),
+    (5630, 0x20),
+    (5670, 0x4),
+    (5760, 0x20),
+    (5800, 0x4),
+    (5910, 0x1000),
+    (5950, 0x8),
+    (6050, 0x8),
+    (6120, 0x2),
     // Journal: reopen, down to Jiminy's Journal (curtain, Notes of the
-    // world), a row down, decide (no category page), R1 Collection, R1
-    // Select World, L1 Collection, L1 Notes, cancel to Select World,
-    // cancel out (the camp comes back as the curtain lifts), close.
-    (6100, 0x2),
-    (6140, 0x20),
-    (6150, 0x20),
-    (6160, 0x20),
-    (6170, 0x20),
-    (6180, 0x20),
-    (6200, 0x4),
-    (6290, 0x20),
-    (6320, 0x4),
-    (6340, 0x4000),
-    (6410, 0x4000),
-    (6480, 0x8000),
-    (6550, 0x8000),
-    (6620, 0x8),
-    (6690, 0x8),
-    (6780, 0x2),
+    // world), Characters (the free hand walks left and down onto Donald),
+    // back, down to Album, the list, a photo, R2, back out, Select World,
+    // out (the camp comes back as the curtain lifts), close.
+    (6190, 0x2),
+    (6230, 0x20),
+    (6240, 0x20),
+    (6250, 0x20),
+    (6260, 0x20),
+    (6270, 0x20),
+    (6290, 0x4),
+    (6360, 0x4),
+    (6450, 0x40),
+    (6451, 0x40),
+    (6452, 0x40),
+    (6453, 0x40),
+    (6454, 0x40),
+    (6455, 0x40),
+    (6456, 0x40),
+    (6457, 0x40),
+    (6458, 0x40),
+    (6459, 0x40),
+    (6460, 0x40),
+    (6461, 0x40),
+    (6462, 0x40),
+    (6450, 0x20),
+    (6451, 0x20),
+    (6452, 0x20),
+    (6453, 0x20),
+    (6454, 0x20),
+    (6455, 0x20),
+    (6456, 0x20),
+    (6457, 0x20),
+    (6458, 0x20),
+    (6500, 0x4),
+    (6540, 0x8),
+    (6610, 0x20),
+    (6620, 0x20),
+    (6650, 0x4),
+    (6760, 0x4),
+    (6880, 0x1_0000),
+    (6980, 0x8),
+    (7040, 0x8),
+    (7110, 0x8),
+    (7180, 0x8),
+    (7270, 0x2),
+    // Character Files: reopen, Journal (Notes), R1 to Collection, the
+    // first option (Character Files), the world menu, the list, a detail page, R2, then
+    // back out and close.
+    (7450, 0x2),
+    (7500, 0x4),
+    (7580, 0x4000),
+    (7740, 0x4),
+    (7820, 0x4),
+    (7900, 0x4),
+    (7980, 0x1_0000),
+    (8120, 0x8),
+    (8190, 0x8),
+    (8260, 0x8),
+    (8400, 0x2),
+    (8480, 0x2),
+    // Treasures: reopen, Journal (Notes), down to Treasures, the grid, a
+    // few cursor moves, START.
+    (8550, 0x2),
+    (8600, 0x4),
+    (8680, 0x20),
+    (8700, 0x20),
+    (8720, 0x20),
+    (8780, 0x4),
+    (8960, 0x20),
+    (8990, 0x80),
+    (9020, 0x80),
+    (9050, 0x4000),
+    (9200, 0x100),
 ];
 fn camp_setup(
     camp: Option<ResMut<CampRes>>,
@@ -7036,6 +7230,7 @@ fn field_running(camp: Option<Res<CampRes>>) -> bool {
 /// START (logical 0x2 in the field's pad mode) opens the camp
 /// (FUN_1401572b0 → FUN_1402e4950(0)); while it runs the field is not
 /// stepped, the menu reads pad mode 7 and the frame counter keeps going.
+#[allow(clippy::too_many_arguments)]
 fn camp_tick(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -7044,6 +7239,8 @@ fn camp_tick(
     mut game: ResMut<Game>,
     mut audio: ResMut<Audio>,
     mut hud: Option<ResMut<Hud>>,
+    mut frame: ResMut<Ui2dFrame>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut c) = camp else { return };
     let c = &mut *c;
@@ -7219,12 +7416,29 @@ fn camp_tick(
                 no_charge: c.no_charge,
                 texts: c.source.customize.clone(),
             },
+            picture_sequence: c.source.picture_sequence.clone(),
+            notice: camp::notice::NoticeData {
+                flags: c
+                    .journal_source
+                    .as_ref()
+                    .map_or_else(Vec::new, |j| j.flags.clone()),
+                headings: c.source.notice_headings.clone(),
+                page: c.source.notice_page.clone(),
+                callouts: c.source.notice_callouts.clone(),
+            },
         }
     };
     // The menu chain (menu mode 10, FUN_14031aac0): the camp; deciding a
     // journal brings the curtain down over the camp's close; the journal
     // runs; then the camp is rebuilt as the curtain lifts.
     if let Some(menu) = c.open.as_mut() {
+        // The images loaded so far (FUN_1403018e0's cache).
+        menu.pictures.loaded = c
+            .picture_sheets
+            .iter()
+            .filter(|(_, s)| s.is_some())
+            .map(|(&id, _)| id)
+            .collect();
         sounds = menu.frame(layout, c.pad.pressed, c.pad.repeat, tick as u32);
         game.tick += 1;
         if menu.journal.is_some()
@@ -7297,7 +7511,7 @@ fn camp_tick(
                     world: 2,
                     worlds: j.worlds.clone(),
                     stories: j.stories.clone(),
-                    flags: Vec::new(),
+                    flags: j.flags.clone(),
                     // FUN_140339500 counts each `limi` command's limit in
                     // save+0x3d48 (FUN_1403e7c30 / FUN_1403e8150): none
                     // in this save; no reports, pieces, missions, minigames
@@ -7306,6 +7520,16 @@ fn camp_tick(
                     texts: j.texts.clone(),
                     tops: j.tops.iter().map(|(code, _)| code.clone()).collect(),
                     world_icons: !j.world_icons.is_empty(),
+                    chars: j.chars.clone(),
+                    diag: j.diag.clone(),
+                    albums: j.albums.clone(),
+                    reports: j.reports.clone(),
+                    treasures: j.treasures.clone(),
+                    item_names: j.item_names.clone(),
+                    opened_bits: j.opened_bits.clone(),
+                    owned_items: j.owned_items.clone(),
+                    seen_chars: c.seen_chars.clone(),
+                    seen_albums: c.seen_albums.clone(),
                 };
                 let (opened, s) = Journal::open(&j.book.layout, data);
                 game.event(serde_json::json!({"event":"journal_open","tick":tick,
@@ -7316,9 +7540,22 @@ fn camp_tick(
         }
     } else if let Some(open) = c.journal.as_mut() {
         let j = c.journal_source.as_ref().expect("journal source");
-        sounds = open.frame(&j.book.layout, c.pad.pressed, c.pad.repeat);
+        // The left stick drives the Characters page's free hand.
+        let stick = if game.autoplay.is_some() {
+            [0.; 3]
+        } else {
+            pad::analog(data.left)
+        };
+        sounds = open.frame(
+            &j.book.layout,
+            c.pad.pressed,
+            c.pad.repeat,
+            c.pad.held,
+            stick,
+        );
         game.tick += 1;
         if open.closed {
+            (c.seen_chars, c.seen_albums) = open.seen();
             c.journal = None;
             game.event(serde_json::json!({"event":"journal_close","tick":tick}));
             // FUN_140304ea0: the camp is rebuilt (its open sound) and the
@@ -7338,6 +7575,9 @@ fn camp_tick(
         game.tick += 1;
         game.event(serde_json::json!({"event":"camp_open","tick":tick}));
     }
+    load_wanted_picture(c, &mut frame, &mut images);
+    load_wanted_notice(c, &mut frame, &mut images);
+    load_wanted_journal(c, &mut frame, &mut images);
     if let (Some(cur), Some(j)) = (c.curtain.as_mut(), c.journal_source.as_ref()) {
         cur.update(&j.curtain.layout);
         if cur.dead {
@@ -7357,6 +7597,131 @@ fn camp_tick(
     }
 }
 
+/// FUN_1403018e0's load (here at once): the item picture the camp asks for,
+/// from the install (`itempic/item-%03d.imd`).
+fn load_wanted_picture(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Assets<Image>) {
+    let Some(menu) = c.open.as_mut() else { return };
+    let Some(id) = menu.pictures.wanted.take() else {
+        return;
+    };
+    let Some(source) = &c.picture_source else {
+        return;
+    };
+    if c.picture_sheets.contains_key(&id) {
+        return;
+    }
+    let path = format!("itempic/item-{id:03}.imd");
+    let sheet = match layout2d::load_imgd(source, PICTURE_INDEX, &path) {
+        Ok(Some(t)) => Some(frame.add_sheet(images, t.rgba, t.size, t.texel_scale)),
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!("Item picture {path} rejected: {e}");
+            None
+        }
+    };
+    c.picture_sheets.insert(id, sheet);
+    if sheet.is_some() {
+        menu.pictures.loaded.insert(id);
+    }
+}
+
+/// The journal's face and photo files, loaded when a page asks
+/// (FUN_14032db20 / FUN_14032a670): `menu/jmface_<code>.2ld` and
+/// `menu/us/jm_photo/<code><nn>.bin`.
+fn load_wanted_journal(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Assets<Image>) {
+    let (Some(open), Some(j), Some(source)) = (
+        c.journal.as_mut(),
+        c.journal_source.as_ref(),
+        c.picture_source.as_ref(),
+    ) else {
+        return;
+    };
+    let code_of = |world: u8| {
+        match world {
+            0x10 => return Some("ex".to_owned()),
+            0x11 => return Some("heart".to_owned()),
+            0x12 => return Some("no".to_owned()),
+            _ => {}
+        }
+        j.worlds
+            .iter()
+            .find(|w| w.world as u8 == world)
+            .map(|w| w.code.clone())
+    };
+    if let Some(key) = open.cache.wanted_face.take() {
+        if let std::collections::hash_map::Entry::Vacant(slot) = c.journal_sheets.faces.entry(key) {
+            let faces = code_of(key).and_then(|code| {
+                let path = format!("menu/jmface_{code}.2ld");
+                match layout2d::load_images_named(source, PICTURE_INDEX, &path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("Journal faces {path} rejected: {e}");
+                        None
+                    }
+                }
+            });
+            slot.insert(
+                faces
+                    .into_iter()
+                    .flatten()
+                    .map(|t| frame.add_sheet(images, t.rgba, t.size, t.texel_scale))
+                    .collect(),
+            );
+        }
+        open.cache.faces.insert(key);
+    }
+    if let Some(row) = open.cache.wanted_photo
+        && c.journal_sheets.photos.contains_key(&row)
+    {
+        open.cache.wanted_photo = None;
+        open.cache.photos.insert(row);
+    }
+    if let Some(row) = open.cache.wanted_photo.take()
+        && !c.journal_sheets.photos.contains_key(&row)
+        && let Some(a) = j.albums.get(row as usize)
+        && let Some(code) = code_of(a.world as u8)
+    {
+        let path = format!("menu/us/jm_photo/{code}{}.bin", a.suffix);
+        match layout2d::load_imgd(source, PICTURE_INDEX, &path) {
+            Ok(Some(t)) => {
+                let slot = frame.add_sheet(images, t.rgba, t.size, t.texel_scale);
+                c.journal_sheets.photos.insert(row, slot);
+                open.cache.photos.insert(row);
+            }
+            other => {
+                if let Err(e) = other {
+                    eprintln!("Journal photo {path} rejected: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// The notice file the camp asks for (FUN_140367150): `menu/us/<name>.bar`.
+fn load_wanted_notice(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Assets<Image>) {
+    let Some(menu) = c.open.as_mut() else { return };
+    let Some(file) = menu.notice_files.wanted.take() else {
+        return;
+    };
+    let Some(source) = &c.picture_source else {
+        return;
+    };
+    let path = format!("menu/us/{file}");
+    match layout2d::load_imgd(source, PICTURE_INDEX, &path) {
+        Ok(Some(t)) => {
+            let slot = frame.add_sheet(images, t.rgba, t.size, t.texel_scale);
+            c.notice_sheets.insert(file.clone(), slot);
+            menu.notice_files.loaded.insert(file);
+        }
+        other => {
+            if let Err(e) = other {
+                eprintln!("Notice {path} rejected: {e}");
+            }
+            menu.notice_files.missing.insert(file);
+        }
+    }
+}
+
 /// The camp over the frozen field (the field HUD is hidden meanwhile
 /// [inferred]), the curtain (0x7554) over it, the journal (0x7557 up) over
 /// that.
@@ -7369,8 +7734,8 @@ fn camp_present(
     let c = &mut *c;
     let font = command::Font {
         widths: &c.source.font.widths,
-        // Keyboard prompts (key caps) are not translated: Xbox icons.
-        pad: if c.glyph == 0 { 1 } else { c.glyph as u8 },
+        // The keyboard or mouse was last used: key caps (pad 0).
+        pad: c.glyph as u8,
     };
     if let Some(menu) = c.open.as_mut() {
         let art = c.art[c.glyph].or(c.art[0]).expect("camp art");
@@ -7388,6 +7753,18 @@ fn camp_present(
                         q.uv = [0, 0, MENU_TARGET[0] as i32, MENU_TARGET[1] as i32];
                     }
                     m.sheet
+                }
+                camp::Sheet::Picture(id) => {
+                    let Some(&Some(s)) = c.picture_sheets.get(&id) else {
+                        continue;
+                    };
+                    s
+                }
+                camp::Sheet::Notice(name) => {
+                    let Some(&s) = c.notice_sheets.get(&name) else {
+                        continue;
+                    };
+                    s
                 }
             };
             frame.draws.push((slot, quads));
@@ -7407,6 +7784,10 @@ fn camp_present(
                 journal::Sheet::Icon => Some(c.icon_sheet),
                 journal::Sheet::World(i) => s.worlds.get(i).copied(),
                 journal::Sheet::Top(i) => top.and_then(|t| t.get(i).copied()),
+                journal::Sheet::Face(k, i) => {
+                    s.faces.get(&k).and_then(|v| v.get(i as usize).copied())
+                }
+                journal::Sheet::Photo(r) => s.photos.get(&r).copied(),
             };
             if let Some(slot) = slot {
                 frame.draws.push((slot, quads));
@@ -7724,7 +8105,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         captures: if talk_room {
             &AUTOPLAY_TALK_CAPTURES
         } else {
-            &AUTOPLAY_CAPTURES
+            AUTOPLAY_CAPTURES
         },
         autoplay_end: if talk_room {
             AUTOPLAY_TALK_END
@@ -7968,7 +8349,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         game.event(serde_json::json!({"event":"camp_loaded","props":c.menu.layout.props.len(),
             "scenes":c.menu.layout.scenes.len(),"sequences":c.menu.layout.sequences.len(),
             "replacements":c.menu.replacements.iter().map(|r| r.as_ref().map(|t| t.size)).collect::<Vec<_>>(),
-            "entries":c.entries.len(),"stats":c.stats.len(),"config_rows":c.config.len()}));
+            "entries":c.entries.len(),"stats":c.stats.len(),"config_rows":c.config.len(),
+            "picture_groups":c.picture_sequence.as_ref().map(|s| s.groups.len())}));
         app.insert_resource(CampRes {
             source: c,
             open: None,
@@ -8004,6 +8386,11 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             journal: None,
             curtain: None,
             journal_sheets: JournalSheets::default(),
+            picture_source: Some(source),
+            seen_chars: Vec::new(),
+            seen_albums: Vec::new(),
+            picture_sheets: HashMap::new(),
+            notice_sheets: HashMap::new(),
         });
     }
     Ok(app

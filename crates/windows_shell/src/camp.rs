@@ -15,7 +15,9 @@ pub mod customize;
 pub mod equip;
 pub mod items;
 pub mod journal;
+pub mod notice;
 pub mod party;
+pub mod picture;
 
 use crate::command::Font;
 use crate::sprite2d::{self, Id, LightCur, Sprites, Text};
@@ -213,6 +215,10 @@ pub struct Data {
     pub party_help: [Vec<u8>; 3],
     pub customize: customize::CustomizeData,
     pub equip: equip::EquipData,
+    /// 03system.bin `ipic`: the item pictures' sequence (FUN_1403b0c90).
+    pub picture_sequence: Option<Sequence>,
+    /// The tutorial notices' flags, texts and callouts.
+    pub notice: notice::NoticeData,
 }
 
 /// Cursor memory kept between camp openings (DAT_140beec30 / 7c).
@@ -236,6 +242,8 @@ pub struct Memory {
     pub customize_list: (usize, usize),
     /// mem[2]: the Equip slot list's cursor and scroll.
     pub equip: (usize, usize),
+    /// save+0x4270: the notices already seen (bit per `notice::ROWS`).
+    pub notices_seen: u16,
 }
 
 /// Tz::MenuObj's pastes: priority and (member, layout offset, alpha).
@@ -243,13 +251,17 @@ pub type ModelLayer = (u32, Vec<(usize, [f32; 2], f32)>);
 
 /// What a draw item samples: the camp sheet, the system font, or member
 /// `i`'s off-screen model render (Tz::MenuObj's paste, prio 0x7538).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sheet {
     Art,
     Font,
     /// The font image's icon plane (0x09 icons).
     Icon,
     Model(usize),
+    /// `itempic/item-%03d.imd`.
+    Picture(u16),
+    /// A notice file (`menu/<lang>/<name>_<v>.bar`).
+    Notice(String),
 }
 
 /// The menu model's layout offset for member `i` of `n` (FUN_140306400):
@@ -309,17 +321,30 @@ pub enum State {
     StatusList,
     StatusBrowse,
     Config,
+    /// 0x25: the tutorial notices.
+    Notice,
 }
 
-/// FUN_1403adcc0: sprintf digits, '/', '%' and spaces into the font's
-/// encoding.
+/// FUN_1403adcc0: ASCII into the font's encoding (digits, upper-case
+/// letters and the listed marks; anything else is the 0x7f blank).
 pub fn encode_number(s: &str) -> Vec<u8> {
     s.bytes()
         .map(|b| match b {
             b'0'..=b'9' => 0x21 + (b - b'0'),
-            b'/' => 0x4b,
+            b'A'..=b'Z' => 0x2e + (b - b'A'),
+            b' ' => 0x01,
+            b'!' => 0x48,
+            b'"' => 0x61,
             b'%' => 0x4a,
-            _ => 0x01,
+            b'\'' => 0x57,
+            b'*' => 0x2d,
+            b'+' => 0x2b,
+            b'-' => 0x2c,
+            b'.' => 0x4f,
+            b'/' => 0x4b,
+            b':' => 0x52,
+            b'?' => 0x49,
+            _ => 0x7f,
         })
         .collect()
 }
@@ -591,6 +616,12 @@ pub struct Camp {
     custom_ui: customize::Ui,
     // Equip.
     equip_ui: equip::Ui,
+    /// The item picture and the images the caller has loaded for it.
+    picture: picture::Picture,
+    pub pictures: picture::PictureCache,
+    // Notices.
+    notice: notice::Ui,
+    pub notice_files: notice::NoticeCache,
 }
 
 impl Camp {
@@ -646,8 +677,14 @@ impl Camp {
             party_ui: party::Ui::default(),
             custom_ui: customize::Ui::default(),
             equip_ui: equip::Ui::default(),
+            picture: picture::Picture::default(),
+            pictures: picture::PictureCache::default(),
+            notice: notice::Ui::default(),
+            notice_files: notice::NoticeCache::default(),
         };
         camp.build_top(seq);
+        // FUN_140306790: pending notices open over the camp.
+        camp.start_notices(seq, None, State::Top);
         camp.munny_digits = digits(seq, &munny_groups(camp.data.panels.munny), Vec::new());
         let t = time_groups(camp.data.panels.time_frames);
         camp.time_digits = digits(seq, &t, Vec::new());
@@ -838,6 +875,7 @@ impl Camp {
                     State::StatusList => self.status_list(seq, &pad, &mut sounds),
                     State::StatusBrowse => self.status_browse(seq, &pad, &mut sounds),
                     State::Config => self.config(seq, &pad, &mut sounds),
+                    State::Notice => self.notice(layout, &pad, &mut sounds),
                 };
                 self.driver(seq, moved);
             }
@@ -847,6 +885,10 @@ impl Camp {
         }
         self.layout.update(layout, 1.);
         self.sprites.update(seq);
+        self.notice_update(layout);
+        if let Some(ipic) = &self.data.picture_sequence {
+            self.picture.update(ipic, &self.sprites);
+        }
         for d in self
             .munny_digits
             .iter_mut()
@@ -896,6 +938,7 @@ impl Camp {
             State::StatusList => (&self.status_list, RowGroupsFor::Status),
             State::StatusBrowse => (&self.columns[self.column], RowGroupsFor::None),
             State::Config => (&self.config_list, RowGroupsFor::None),
+            State::Notice => (&self.top, RowGroupsFor::None),
         }
     }
 
@@ -1998,6 +2041,32 @@ impl Camp {
             self.sprites.kill(f);
         }
         self.item_ui.kill_dim(&mut self.sprites);
+        self.picture_close(seq);
+    }
+
+    // ---- item picture --------------------------------------------------
+
+    /// FUN_140302370 for `id` (None: FUN_140302280, no picture).
+    fn picture_request(&mut self, seq: &Sequence, id: Option<u16>) {
+        match (id, &self.data.picture_sequence) {
+            (Some(id), Some(ipic)) => self.picture.request(seq, ipic, &mut self.sprites, id),
+            _ => self.picture.reset(),
+        }
+    }
+
+    /// FUN_140302040.
+    fn picture_close(&mut self, seq: &Sequence) {
+        if let Some(ipic) = &self.data.picture_sequence {
+            self.picture.close(seq, ipic, &mut self.sprites);
+        }
+    }
+
+    /// FUN_140301cc0 + FUN_140301c80.
+    fn picture_timers(&mut self, seq: &Sequence) {
+        if let Some(ipic) = &self.data.picture_sequence {
+            self.picture
+                .timers(seq, ipic, &mut self.sprites, &mut self.pictures);
+        }
     }
 
     /// FUN_140305480 (the curtain's callback): every camp sprite goes and
@@ -2008,6 +2077,8 @@ impl Camp {
             s.dead = true;
         }
         self.model_time = None;
+        self.picture.kill(&mut self.sprites);
+        self.notice.kill();
         self.closed = true;
     }
 
@@ -2036,23 +2107,40 @@ impl Camp {
         // in Party); the digit rows (Tz::MultiSeq) follow the panel band
         // (0x753b) with their labels.
         let layer = self.model_layer();
-        let mut cuts: Vec<(u32, bool)> = vec![(PRIO_PANEL + 1, false)];
+        // The item picture goes after the sprites of its priority.
+        let picture = self
+            .data
+            .picture_sequence
+            .as_ref()
+            .and_then(|ipic| self.picture.quads(ipic, &self.sprites));
+        let mut cuts: Vec<(u32, Cut)> = vec![(PRIO_PANEL + 1, Cut::Digits)];
+        cuts.push((0x7547, Cut::Notice));
         if let Some((prio, _)) = &layer {
-            cuts.push((*prio, true));
+            cuts.push((*prio, Cut::Models));
+        }
+        if let Some((_, prio, _)) = &picture {
+            cuts.push((prio + 1, Cut::Picture));
         }
         cuts.sort_by_key(|c| c.0);
         let mut low = 0;
-        for (cut, models) in cuts {
+        for (cut, kind) in cuts {
             out.extend(convert(
                 self.sprites
                     .draw_where(seq, font, |p| (low..cut).contains(&p)),
             ));
-            if models {
-                for &(member, offset, alpha) in &layer.as_ref().unwrap().1 {
-                    out.push((Sheet::Model(member), model_quads(offset, alpha)));
+            match kind {
+                Cut::Models => {
+                    for &(member, offset, alpha) in &layer.as_ref().unwrap().1 {
+                        out.push((Sheet::Model(member), model_quads(offset, alpha)));
+                    }
                 }
-            } else {
-                out.push((Sheet::Art, self.digit_quads(seq)));
+                Cut::Digits => out.push((Sheet::Art, self.digit_quads(seq))),
+                Cut::Notice => out.extend(self.notice_draw(layout, font)),
+                Cut::Picture => {
+                    if let Some((id, _, quads)) = &picture {
+                        out.push((Sheet::Picture(*id), quads.clone()));
+                    }
+                }
             }
             low = cut;
         }
@@ -2140,6 +2228,15 @@ fn model_quads(offset: [f32; 2], alpha: f32) -> Vec<Quad> {
         colors: [[MODEL_TINT, MODEL_TINT, MODEL_TINT, alpha]; 4],
         blend: 0,
     }]
+}
+
+/// What the draw inserts between priority bands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cut {
+    Digits,
+    Models,
+    Picture,
+    Notice,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

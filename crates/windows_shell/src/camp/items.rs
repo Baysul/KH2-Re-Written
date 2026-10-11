@@ -4,9 +4,8 @@
 //! (state 10: FUN_14034fa20 / FUN_14034dba0 / FUN_1403509b0 / FUN_14034ccc0),
 //! the Use / Throw away menu (11: FUN_14034ef80 / FUN_14034d2d0), the use
 //! target with the party block (12: FUN_14034f5f0 / FUN_14034d640) and the
-//! two dialog boxes (13 / 14: FUN_14034da70 / FUN_14034d120). Equip (state
-//! 2) and the item pictures are not built: deciding a member plays the
-//! decide sound only.
+//! two dialog boxes (13 / 14: FUN_14034da70 / FUN_14034d120); the item
+//! picture (`picture`) shows in states 10 and 11.
 use super::*;
 use std::collections::BTreeMap;
 
@@ -18,6 +17,11 @@ const PRIO_ITEM_TEXT: u32 = 0x753f;
 const PRIO_STOCK_FRAME: u32 = 0x753d;
 const PRIO_STOCK_ROW: u32 = 0x753e;
 const PRIO_STOCK_BADGE: u32 = 0x7540;
+/// The item picture: the stock list's own frame {appear, close, idle} at
+/// 0x753f; on the command screen's holder at 0x753c.
+const PRIO_STOCK_PICTURE: u32 = 0x753f;
+const PRIO_COMMAND_PICTURE: u32 = 0x753c;
+const PICTURE_FRAME: [usize; 3] = [348, 350, 349];
 const PRIO_TAB_BAR: u32 = 0x753c;
 const PRIO_TAB_LABEL: u32 = 0x753d;
 const PRIO_HIGHLIGHT: u32 = 0x753e;
@@ -96,6 +100,8 @@ pub struct ItemInfo {
     pub amount: u16,
     pub sell: u16,
     pub icon: u8,
+    /// +0x14: the picture (`itempic/item-%03d.imd`).
+    pub picture: u16,
     /// +6: an ability's kind (low byte) and AP cost (high byte); a
     /// weapon's stat entry.
     pub param: u16,
@@ -898,6 +904,7 @@ impl Camp {
         );
         self.closers.push((f, STOCK_FRAME[2]));
         self.item_ui.frame = Some(f);
+        self.picture.setup(PRIO_STOCK_PICTURE, Some(PICTURE_FRAME));
         self.item_ui.entries = stock_list(&self.data.items, self.item_ui.tab);
         let c = self.item_ui.entries.len();
         let g = &seq.groups[STOCK_ROWS.idle];
@@ -1096,6 +1103,17 @@ impl Camp {
             .map(|&(id, _)| self.info(id).description)
             .unwrap_or_default();
         self.show_help(seq, help);
+        // FUN_1403508c0 in state 10 also asks for the picture.
+        if self.state == State::Stock {
+            let picture = self
+                .item_ui
+                .entries
+                .get(at)
+                .map(|&(id, _)| self.info(id).picture);
+            if picture.is_some() {
+                self.picture_request(seq, picture);
+            }
+        }
     }
 
     /// FUN_14034ccc0: the bar, its five labels, the L2/R2 arrows and the
@@ -1179,7 +1197,8 @@ impl Camp {
                 || self.item_ui.scroll.iter().any(|&s| self.sprites.alive(s))
                 || (p != Some(State::Stock) && self.tab_bar_alive())
                 || (p == Some(State::Items) && self.tab_alive(1))
-                || self.item_ui.badges.iter().any(|&b| self.sprites.alive(b));
+                || self.item_ui.badges.iter().any(|&b| self.sprites.alive(b))
+                || self.picture.alive();
             if !busy {
                 self.item_ui.no_pointer = false;
                 match self.pending.take() {
@@ -1253,6 +1272,7 @@ impl Camp {
                 self.move_highlight(seq);
                 self.hide_help(seq);
                 self.close_stock_list(seq);
+                self.picture_close(seq);
                 self.memory.stock = (0, 0);
                 self.pending = Some(State::Stock);
                 self.substate = 2;
@@ -1263,6 +1283,7 @@ impl Camp {
                 self.close_tab_bar(seq);
                 self.close_tab(seq, 1);
                 self.close_stock_list(seq);
+                self.picture_close(seq);
                 self.memory.stock = (0, 0);
                 self.pending = Some(State::Items);
                 self.substate = 2;
@@ -1272,11 +1293,15 @@ impl Camp {
                 self.hide_help(seq);
                 self.close_stock_list(seq);
                 self.close_tab_bar(seq);
+                self.picture_close(seq);
                 self.memory.stock = (self.item_ui.grid.list.cursor, self.item_ui.grid.scroll);
                 self.pending = Some(State::ItemCommand);
                 self.substate = 2;
             }
             _ => {}
+        }
+        if self.substate == 1 {
+            self.picture_timers(seq);
         }
         moved
     }
@@ -1334,6 +1359,11 @@ impl Camp {
             self.closers.push((h, HOLDER[2]));
             self.item_ui.holder = Some(h);
         }
+        self.picture.setup(PRIO_COMMAND_PICTURE, None);
+        if let Some(h) = self.item_ui.holder {
+            self.picture.set_parent(h);
+        }
+        self.picture.reset();
         if !self.alive_opt(self.item_ui.name) {
             let name = self.item_name(info.id, false);
             let nm = self.sprites.create(
@@ -1396,6 +1426,9 @@ impl Camp {
         }
         self.place_marker(seq, false);
         self.stock_help(seq);
+        if !self.picture.alive() {
+            self.picture_request(seq, Some(info.picture));
+        }
     }
 
     /// FUN_140350d40: the selection marker (G290) on the list's row.
@@ -1475,13 +1508,14 @@ impl Camp {
                 !self.command_screen_alive()
             } else {
                 !self.alive_opt(self.item_ui.holder)
-            };
+            } && !self.picture.alive();
             if ready {
                 match self.pending.take() {
                     Some(State::Stock) => self.enter_stock(seq),
                     _ => self.enter_target(seq),
                 }
             } else if pad.trig != 0 {
+                self.picture.kill(&mut self.sprites);
                 if p == Some(State::Stock) {
                     self.kill_command_screen();
                 } else {
@@ -1530,12 +1564,16 @@ impl Camp {
                 self.hide_help(seq);
                 self.close_opt(seq, self.item_ui.command, COMMAND_FRAME[2]);
                 self.close_opt(seq, self.item_ui.holder, HOLDER[2]);
+                self.picture_close(seq);
+                self.picture.reset();
                 self.pending = Some(State::Stock);
                 self.substate = 2;
             }
             Pick::Row(_) if action == 0 => {
                 // DAT_140743fdc = 0: the hand stays (dimmed) on "Use".
                 self.dim_glove(seq);
+                self.picture_close(seq);
+                self.picture.reset();
                 self.close_opt(seq, self.item_ui.holder, HOLDER[2]);
                 self.pending = Some(State::UseTarget);
                 self.substate = 2;
@@ -1556,6 +1594,9 @@ impl Camp {
                 self.substate = 0;
             }
             _ => {}
+        }
+        if self.substate == 1 && self.state == State::ItemCommand {
+            self.picture_timers(seq);
         }
         moved
     }
@@ -1681,6 +1722,8 @@ impl Camp {
                 self.close_dialog(seq);
                 self.close_opt(seq, self.item_ui.command, COMMAND_FRAME[2]);
                 self.close_opt(seq, self.item_ui.holder, HOLDER[2]);
+                self.picture_close(seq);
+                self.picture.reset();
                 self.pending = Some(State::Stock);
                 self.substate = 2;
             }
