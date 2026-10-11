@@ -1048,6 +1048,9 @@ impl AbilitySource {
 
 struct Loaded {
     room: LoadedRoom,
+    /// Keyblade items' models (the skateboard), and the room's own weapon.
+    keyblades: crate::keyblade_board::Keyblades,
+    weapon_model: String,
     arena_mesh: Option<windows_shell::room::ArenaMesh>,
     actor: model_inspection::InspectionModel,
     weapon: model_inspection::InspectionModel,
@@ -2770,7 +2773,27 @@ fn load(
         }
         _ => None,
     };
+    let keyblades = bar_entry(&system, b"went")
+        .and_then(|went| {
+            crate::keyblade_board::Keyblades::read(
+                went,
+                bar_entry(&system, b"item")?,
+                &objects,
+                &config.player_object_name,
+            )
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("Keyblade models not read: {e}");
+            Default::default()
+        });
+    eprintln!(
+        "Equipped Keyblade {KINGDOM_KEY:#x} model: {:?} (room weapon {})",
+        keyblades.model(KINGDOM_KEY),
+        config.object_model_name
+    );
     Ok(Loaded {
+        keyblades,
+        weapon_model: config.object_model_name.clone(),
         room,
         arena_mesh,
         area_talk,
@@ -6833,36 +6856,59 @@ struct SoraRig {
     rig: Option<crate::skate_rig::Rig>,
 }
 
-/// The Keyblade laid flat as a deck: its longest extent along the board,
-/// the next across it, centred, scaled to a deck's length and resting on
-/// the deck frame.
-fn keyblade_deck(points: &[Vec3]) -> Transform {
-    let (low, high) = points.iter().fold(
-        (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-        |(l, h), &p| (l.min(p), h.max(p)),
-    );
-    if points.is_empty() {
-        return Transform::IDENTITY;
+/// The skateboard's models: the equipped Keyblade's, read from the install
+/// the first time it is ridden.
+#[derive(Resource)]
+struct BoardModels {
+    keyblades: crate::keyblade_board::Keyblades,
+    /// The room's own weapon model (the hand Keyblade's meshes serve it).
+    hand: String,
+    source: Arc<ProbeSource>,
+    /// Model name -> the model and its bind-pose vertices (None: unreadable).
+    models: HashMap<String, Option<(model_inspection::InspectionModel, Vec<Vec3>)>>,
+    /// The model the spawned board shows.
+    shown: Option<String>,
+}
+
+/// `obj/<name>.mdlx` from whichever index holds it, with its vertices in
+/// its root joint's space (as the hand Keyblade's bind pose).
+fn read_board_model(
+    source: &ProbeSource,
+    name: &str,
+) -> Result<(model_inspection::InspectionModel, Vec<Vec3>), Box<dyn std::error::Error>> {
+    let hash = package_reader::name_hash::of_path(&format!("obj/{name}.mdlx"));
+    for (index, _) in source_identity::required_files()
+        .into_iter()
+        .filter(|(n, _)| n.ends_with(".hed"))
+    {
+        let checked = source.open_index(&index)?;
+        let Some(ordinal) = checked
+            .inventory
+            .entries
+            .iter()
+            .position(|e| e.name_hash == hash)
+        else {
+            continue;
+        };
+        drop(checked);
+        let mut models = model_inspection::read_model_at(source, &index, ordinal, hash)?;
+        if models.is_empty() {
+            break;
+        }
+        let model = models.remove(0);
+        let pose = model.poses.first().ok_or("model pose absent")?;
+        let root = pose.matrix_bits.first().map_or(Mat4::IDENTITY, |m| {
+            Mat4::from_cols_array(&m.map(f32::from_bits))
+        });
+        let inverse = root.inverse();
+        let points = pose
+            .position_bits
+            .iter()
+            .map(|p| inverse.transform_point3(Vec3::from_array(p.map(f32::from_bits))))
+            .collect();
+        return Ok((model, points));
     }
-    let size = high - low;
-    let mut axes = [(size.x, Vec3::X), (size.y, Vec3::Y), (size.z, Vec3::Z)];
-    axes.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let [(long, long_axis), (_, mid_axis), (short, _)] = axes;
-    // Columns: where the board's X (across), Y (up) and Z (along) come from.
-    let up = long_axis.cross(mid_axis);
-    let to_blade = Mat3::from_cols(mid_axis, up, long_axis);
-    let rotation = Quat::from_mat3(&to_blade.transpose());
-    let scale = if long > 0. {
-        crate::skate::DECK_SIZE[2] / long
-    } else {
-        1.
-    };
-    let centre = (low + high) / 2.;
-    Transform {
-        translation: rotation * (-centre * scale) + Vec3::Y * (short * scale / 2.),
-        rotation,
-        scale: Vec3::splat(scale),
-    }
+    Err(format!("obj/{name}.mdlx is not in the install").into())
 }
 
 /// Sora rides the Skate 3 rider's pose, and the Kingdom Key follows the
@@ -6879,15 +6925,32 @@ fn skate_present(
     parts: Query<(&SoraPart, &Mesh3d)>,
     keyblade: Query<(&Mesh3d, &MeshMaterial3d<FogMaterial>), With<WeaponPart>>,
     mut hand: Query<&mut Visibility, (With<WeaponRoot>, Without<SkateBoard>)>,
+    camp: Option<Res<CampRes>>,
+    mut board_models: ResMut<BoardModels>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut fog_materials: ResMut<Assets<FogMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     let Some(deck) = skate.deck() else {
         for (entity, _) in &boards {
             commands.entity(entity).despawn();
         }
+        board_models.shown = None;
         return;
     };
+    // The equipped Keyblade is the board; an equipment change mid-ride
+    // swaps it.
+    let wanted = camp
+        .as_deref()
+        .and_then(|c| board_models.keyblades.model(c.equipment.weapon))
+        .unwrap_or(&board_models.hand)
+        .to_owned();
+    if board_models.shown.as_deref() != Some(wanted.as_str()) {
+        for (entity, _) in &boards {
+            commands.entity(entity).despawn();
+        }
+    }
     // The Keyblade is the board, so it leaves Sora's hand.
     if let Ok(mut visibility) = hand.single_mut() {
         *visibility = Visibility::Hidden;
@@ -6922,29 +6985,46 @@ fn skate_present(
             }
         }
     }
-    match boards.single_mut() {
-        Ok((_, mut transform)) => *transform = deck,
-        Err(_) if keyblade.is_empty() => {
-            let [w, h, l] = crate::skate::DECK_SIZE;
-            commands.spawn((
-                SkateBoard,
-                deck,
-                Mesh3d(meshes.add(Cuboid::new(w, h, l))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.12, 0.12, 0.13),
-                    perceptual_roughness: 0.9,
-                    ..default()
-                })),
-            ));
-        }
-        Err(_) => {
-            // The Keyblade's own meshes (shared with the hand one).
-            let board = commands
-                .spawn((SkateBoard, deck, Visibility::default()))
-                .id();
+    if board_models.shown.as_deref() == Some(wanted.as_str())
+        && let Ok((_, mut transform)) = boards.single_mut()
+    {
+        *transform = deck;
+        return;
+    }
+    let board = commands
+        .spawn((SkateBoard, deck, Visibility::default()))
+        .id();
+    if wanted != board_models.hand && !board_models.models.contains_key(&wanted) {
+        let model = read_board_model(&board_models.source, &wanted)
+            .inspect_err(|e| eprintln!("Keyblade board {wanted}: {e}"))
+            .ok();
+        board_models.models.insert(wanted.clone(), model);
+    }
+    match board_models.models.get(&wanted).and_then(Option::as_ref) {
+        // Another Keyblade's own model.
+        Some((model, points)) => {
             let blade = commands
                 .spawn((
-                    keyblade_deck(&game.weapon_display),
+                    crate::keyblade_board::deck_transform(points),
+                    Visibility::default(),
+                    ChildOf(board),
+                ))
+                .id();
+            spawn_model(
+                &mut commands,
+                model,
+                points,
+                blade,
+                &mut meshes,
+                &mut fog_materials,
+                &mut images,
+            );
+        }
+        // The room's own Keyblade: its hand meshes.
+        None if !keyblade.is_empty() => {
+            let blade = commands
+                .spawn((
+                    crate::keyblade_board::deck_transform(&game.weapon_display),
                     Visibility::default(),
                     ChildOf(board),
                 ))
@@ -6953,7 +7033,20 @@ fn skate_present(
                 commands.spawn((mesh.clone(), material.clone(), ChildOf(blade)));
             }
         }
+        None => {
+            let [w, h, l] = crate::skate::DECK_SIZE;
+            commands.spawn((
+                Mesh3d(meshes.add(Cuboid::new(w, h, l))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.12, 0.12, 0.13),
+                    perceptual_roughness: 0.9,
+                    ..default()
+                })),
+                ChildOf(board),
+            ));
+        }
     }
+    board_models.shown = Some(wanted);
 }
 
 fn present(
@@ -8219,6 +8312,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         }
     }
     let source = Arc::new(ProbeSource::bind_session(&args[0], &args[1])?);
+    let board_source = source.clone();
     // Validate the log path now; the file is created only after admission.
     let log_path = match log_path {
         Some(path) => {
@@ -8652,6 +8746,13 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             npc_model,
         })
         .insert_resource(rig)
+        .insert_resource(BoardModels {
+            keyblades: loaded.keyblades,
+            hand: loaded.weapon_model,
+            source: board_source,
+            models: HashMap::new(),
+            shown: None,
+        })
         .insert_resource(audio)
         .insert_resource(effects)
         .insert_resource(Time::<Fixed>::from_hz(60.))

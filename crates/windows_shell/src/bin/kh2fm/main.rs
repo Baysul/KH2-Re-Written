@@ -10,6 +10,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod area;
 mod cutscene;
+mod keyblade_board;
 mod launcher;
 mod npcs;
 mod skate;
