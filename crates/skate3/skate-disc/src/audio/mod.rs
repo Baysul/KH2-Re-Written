@@ -130,18 +130,32 @@ fn prepare_with(
     root: &Path,
     report: &mut dyn FnMut(&str),
 ) -> Result<(), Error> {
+    // Built aside and moved into place only when complete, so a run cut
+    // short (the game closed mid-conversion) never leaves a partial
+    // private/audio behind.
     let output = root.join("private/audio");
+    let staging = root.join("audio-out.tmp");
     let work = root.join("audio-work.tmp");
-    for stale in [&output, &work] {
+    for stale in [&staging, &work] {
         if stale.exists() {
             fs::remove_dir_all(stale)?;
         }
     }
     fs::create_dir_all(&work)?;
-    let result = convert(disc, collections, banks, decode, &output, &work, report);
+    let result = convert(disc, collections, banks, decode, &staging, &work, report);
     let cleanup = fs::remove_dir_all(&work);
-    result?;
+    if let Err(e) = result {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
+    }
     cleanup?;
+    if output.exists() {
+        fs::remove_dir_all(&output)?;
+    }
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(&staging, &output)?;
     Ok(())
 }
 

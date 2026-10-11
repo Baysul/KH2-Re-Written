@@ -142,7 +142,11 @@ impl Skate {
                     }
                 };
                 self.state = State::Riding(Box::new(sim));
-                self.say("Skateboarding. Space pushes, arrows flick tricks, J gets off.");
+                if self.audio_worker.is_some() {
+                    self.say("Skateboarding. Its sounds are still being prepared (once).");
+                } else {
+                    self.say("Skateboarding. Space pushes, arrows flick tricks, J gets off.");
+                }
             }
             Err(e) => {
                 eprintln!("Skate 3 simulation refused: {e}");
@@ -459,6 +463,7 @@ fn prepare_audio(skate: &mut Skate, iso: Option<&std::path::Path>, cache: &std::
         })
         .map_err(|e| e.to_string())
     }));
+    skate.say("Preparing Skate 3 sounds once (a few minutes). You can ride meanwhile.");
 }
 
 /// The prepared sounds' manifest (under the cache root).
