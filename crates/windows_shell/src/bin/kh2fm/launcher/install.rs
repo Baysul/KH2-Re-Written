@@ -54,6 +54,9 @@ fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
 pub struct Settings {
     pub game_folder: Option<PathBuf>,
     pub manifest: Option<PathBuf>,
+    /// The user's Skate 3 Xbox 360 ISO (or extracted `default.xex`).
+    #[serde(default)]
+    pub skate3_iso: Option<PathBuf>,
 }
 
 pub fn load_settings(dir: &Path) -> Settings {
@@ -638,9 +641,17 @@ mod tests {
         let s = Settings {
             game_folder: Some(f.0.join("game")),
             manifest: Some(f.0.join("m.json")),
+            skate3_iso: Some(f.0.join("skate.iso")),
         };
         save_settings(&f.0, &s).unwrap();
         assert_eq!(load_settings(&f.0), s);
+        // Settings written before the Skate 3 field still load.
+        fs::write(
+            f.0.join(SETTINGS),
+            r#"{"game_folder":null,"manifest":null}"#,
+        )
+        .unwrap();
+        assert_eq!(load_settings(&f.0), Settings::default());
     }
 
     #[test]

@@ -3461,6 +3461,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "skate_source"
+version = "0.1.0"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4303,6 +4307,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "skate_source",
  "source_identity",
 ]
 

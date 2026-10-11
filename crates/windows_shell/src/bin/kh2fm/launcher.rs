@@ -48,6 +48,10 @@ enum Action {
     /// Browse into a folder (None: the drive list).
     Browse(Option<PathBuf>),
     Pick,
+    /// Browse for the Skate 3 disc (None: the drive list).
+    BrowseIso(Option<PathBuf>),
+    /// Remember this Skate 3 ISO or `default.xex`.
+    UseIso(PathBuf),
     Run(usize),
     /// A developer viewer (index into `Launcher::viewers`).
     View(usize),
@@ -109,6 +113,8 @@ enum Screen {
     Boot,
     Pick,
     Browse(Option<PathBuf>),
+    /// Browsing for the Skate 3 disc; the tests screen to return to.
+    BrowseIso(Option<PathBuf>, Bound),
     Check(Job),
     Tests(Bound),
     Loading(Running, Bound),
@@ -189,6 +195,7 @@ impl Launcher {
                 items
             }
             Screen::Browse(path) => browse_items(path.as_deref()),
+            Screen::BrowseIso(path, b) => browse_iso_items(path.as_deref(), b),
             Screen::Tests(_) => {
                 let mut items: Vec<Item> = TESTS
                     .iter()
@@ -199,6 +206,11 @@ impl Launcher {
                     Item::new(v.label.clone(), Action::View(i))
                         .detail("Developer tool, slow to start")
                 }));
+                let iso = self.settings.skate3_iso.as_deref();
+                items.push(
+                    Item::new("Skate 3 ISO", Action::BrowseIso(None))
+                        .detail(iso.map_or("Not set: needed for the J skateboard".into(), plain)),
+                );
                 items.push(Item::new("Change game folder", Action::Pick));
                 items.push(Item::new("Quit", Action::Quit));
                 items
@@ -224,6 +236,52 @@ impl Launcher {
 fn plain(p: &Path) -> String {
     let s = p.display().to_string();
     s.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(s)
+}
+
+/// Drives, folders, `.iso` files and `default.xex` for the Skate 3 disc.
+fn browse_iso_items(path: Option<&Path>, tests: &Bound) -> Vec<Item> {
+    let Some(path) = path else {
+        let mut items: Vec<Item> = ('A'..='Z')
+            .map(|d| PathBuf::from(format!("{d}:\\")))
+            .filter(|p| p.is_dir())
+            .map(|p| Item::new(plain(&p), Action::BrowseIso(Some(p))))
+            .collect();
+        items.push(Item::new("Back", Action::UseFolder(tests.folder.clone())));
+        return items;
+    };
+    let mut items = vec![Item::new(
+        "Up one level",
+        Action::BrowseIso(path.parent().map(Path::to_path_buf)),
+    )];
+    let mut entries: Vec<(bool, PathBuf)> = std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let dir = e.file_type().ok()?.is_dir();
+            let p = e.path();
+            let name = p.file_name()?.to_string_lossy().to_lowercase();
+            (dir || name.ends_with(".iso") || name == "default.xex").then_some((dir, p))
+        })
+        .collect();
+    entries.sort_by_key(|(dir, p)| {
+        (
+            !*dir,
+            p.file_name().map(|n| n.to_string_lossy().to_lowercase()),
+        )
+    });
+    for (dir, p) in entries {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        items.push(if dir {
+            Item::new(name, Action::BrowseIso(Some(p)))
+        } else {
+            Item::new(name, Action::UseIso(p)).tag("DISC")
+        });
+    }
+    items
 }
 
 fn browse_items(path: Option<&Path>) -> Vec<Item> {
@@ -492,7 +550,7 @@ fn read_input(
 /// Rows of the current list: height, gap, label size.
 fn row_metrics(l: &Launcher) -> (f32, f32, f32) {
     match l.screen {
-        Screen::Browse(_) => (40., 4., 20.),
+        Screen::Browse(_) | Screen::BrowseIso(..) => (40., 4., 20.),
         _ if l.items.iter().any(|i| i.detail.is_some()) => (66., 6., 24.),
         _ => (48., 6., 24.),
     }
@@ -557,6 +615,33 @@ fn act(l: &mut Launcher, action: Action, exit: &mut MessageWriter<AppExit>) {
                 keep_visible(l);
             }
         }
+        Action::BrowseIso(path) => {
+            let tests = match &l.screen {
+                Screen::Tests(b) | Screen::BrowseIso(_, b) => b.clone(),
+                _ => return,
+            };
+            l.go(Screen::BrowseIso(path, tests));
+        }
+        Action::UseIso(path) => {
+            let Screen::BrowseIso(_, b) = &l.screen else {
+                return;
+            };
+            let b = b.clone();
+            match skate_source::admit(Some(&path)) {
+                Ok(_) => {
+                    l.settings.skate3_iso = Some(path);
+                    if let Err(e) = install::save_settings(&l.dir, &l.settings) {
+                        eprintln!("Launcher settings not saved: {e}");
+                    }
+                    l.go(Screen::Tests(b));
+                }
+                Err(e) => l.go(Screen::Problem {
+                    title: "That is not a Skate 3 disc".into(),
+                    lines: vec![e.to_string()],
+                    retry: Some(b),
+                }),
+            }
+        }
         Action::UseFolder(folder) => {
             let hint = (l.settings.game_folder.as_deref() == Some(folder.as_path()))
                 .then(|| l.settings.manifest.clone())
@@ -597,6 +682,8 @@ fn back(l: &mut Launcher, exit: &mut MessageWriter<AppExit>) {
     let to = match &l.screen {
         Screen::Browse(Some(p)) => Some(Action::Browse(p.parent().map(Path::to_path_buf))),
         Screen::Browse(None) => Some(Action::Pick),
+        Screen::BrowseIso(Some(p), _) => Some(Action::BrowseIso(p.parent().map(Path::to_path_buf))),
+        Screen::BrowseIso(None, b) => Some(Action::UseFolder(b.folder.clone())),
         Screen::Pick => l.settings.game_folder.clone().map(Action::UseFolder),
         Screen::Problem { retry: Some(b), .. } => Some(Action::UseFolder(b.folder.clone())),
         Screen::Tests(_) => Some(Action::Quit),
@@ -638,6 +725,7 @@ fn checked(l: &mut Launcher, result: Result<Bound, String>, folder: &Path) {
     l.settings = Settings {
         game_folder: Some(b.folder.clone()),
         manifest: Some(b.manifest.clone()),
+        skate3_iso: l.settings.skate3_iso.take(),
     };
     if let Err(e) = install::save_settings(&l.dir, &l.settings) {
         eprintln!("Launcher settings not saved: {e}");
@@ -686,6 +774,16 @@ fn update(
             FileDragAndDrop::HoveredFileCanceled { .. } => l.hover_drop = false,
             FileDragAndDrop::DroppedFile { path_buf, .. } => {
                 l.hover_drop = false;
+                // A Skate 3 ISO dropped on the tests screen sets the disc.
+                let iso = path_buf
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("iso"));
+                if iso && let Screen::Tests(b) = &l.screen {
+                    let b = b.clone();
+                    l.screen = Screen::BrowseIso(None, b);
+                    act(l, Action::UseIso(path_buf.clone()), &mut exit);
+                    continue;
+                }
                 let folder = if path_buf.is_dir() {
                     path_buf.clone()
                 } else {
@@ -870,6 +968,9 @@ fn draw(
         Screen::Browse(path) => path
             .as_deref()
             .map_or_else(|| "Choose a drive".into(), plain),
+        Screen::BrowseIso(path, _) => path
+            .as_deref()
+            .map_or_else(|| "Find your Skate 3 ISO".into(), plain),
         Screen::Check(_) => "Checking the game folder".into(),
         Screen::Tests(_) => "Choose a test".into(),
         Screen::Loading(run, _) => format!("Loading {}", run.name),
@@ -1128,6 +1229,12 @@ fn check_screen(job: &Job, p: &mut Paint, f: &mut Ui2dFrame) {
 }
 
 /// Opens the launcher window. Returns when it closes.
+/// The Skate 3 disc the launcher remembers (an ISO, or an extracted
+/// folder's `default.xex`), for the test room's J key.
+pub fn skate3_iso() -> Option<std::path::PathBuf> {
+    install::load_settings(&install::data_dir()).skate3_iso
+}
+
 pub fn main() -> std::process::ExitCode {
     let dir = install::data_dir();
     let settings = install::load_settings(&dir);

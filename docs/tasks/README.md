@@ -106,3 +106,4 @@ The verdict column quotes the first sentences of each record's `Verdict` line. G
 | [T098](T098-item-pictures.md) | Item pictures (keyblades, items, equipment) | PROGRESS: the Items, Use and Equip screens show their pictures. Next: the Journal category pages with their pictures, or the key-cap prompts. |
 | [T099](T099-axel-roxas-cutscene.md) | Axel and Roxas cutscene (tt19 event 613) | No verdict recorded; read the record. |
 | [T100](T100-merge-work-branches.md) | Merge every work branch into main | PROGRESS: every branch is on `main` and the workspace builds. md`. |
+| [T101](T101-skate3-board.md) | Skate 3 skateboard on J (disc admission) | PROGRESS: J refuses with a notice until a Skate 3 disc is set in the launcher. Next: riding, blocked on the owner's ISO. |

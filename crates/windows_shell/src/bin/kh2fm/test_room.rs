@@ -5792,6 +5792,7 @@ fn hud_present(
     hud: Option<ResMut<Hud>>,
     talk: Option<Res<Talk>>,
     area: Option<Res<AreaRes>>,
+    skate: Res<crate::skate::Skate>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut hud) = hud else { return };
@@ -5883,6 +5884,18 @@ fn hud_present(
                 sheet,
             });
         }
+    }
+    // The skateboard key's notice (system font, white, upper centre).
+    if let (Some((text, _)), Some((sheet, widths))) = (skate.notice.as_ref(), menu_font.as_ref()) {
+        let font = command::Font { widths, pad: 1 };
+        let size = 14.;
+        let width = command::text_width(text, &font, size);
+        let origin = [256. - width / 2., 112. - 24. * size / 18.];
+        draws.push(Draw::Quads {
+            quads: command::text_quads_sized(text, origin, [1.; 4], &font, size),
+            z: 0,
+            sheet: *sheet,
+        });
     }
     if let Some(t) = area.as_ref().and_then(|a| a.transition.as_ref()) {
         if let (Some(sheet), Some(player)) = (iris.as_ref(), t.iris.as_ref()) {
@@ -8427,7 +8440,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             order: 0,
             overlay: false,
         })
+        .init_resource::<crate::skate::Skate>()
         .add_systems(Startup, (setup, pause_for_autoplay, camp_setup))
+        .add_systems(Update, crate::skate::toggle)
         .add_systems(
             FixedUpdate,
             (

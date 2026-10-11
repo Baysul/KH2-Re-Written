@@ -12,6 +12,7 @@ mod area;
 mod cutscene;
 mod launcher;
 mod npcs;
+mod skate;
 mod test_room;
 mod title;
 
