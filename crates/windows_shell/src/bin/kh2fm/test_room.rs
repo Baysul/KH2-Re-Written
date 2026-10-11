@@ -710,8 +710,6 @@ struct Game {
     /// Sora's magic: owned spells, running casts and their volumes.
     magic: Option<magic_room::MagicRt>,
     items: Option<item_room::ItemRt>,
-    /// Guard's ability is equipped (the camp's Abilities screen sets it).
-    guard_equipped: bool,
     menu_up_queued: bool,
     menu_down_queued: bool,
     enemy: Option<EnemyRuntime>,
@@ -4646,11 +4644,7 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     // (1520: Aerial Recovery out of the blow struck at 1500.)
     let jump = matches!(tick, 300 | 560 | 1520);
     // (spell slots are scripted in `simulate`)
-    // (1720: Retaliating Slash out of the blow struck at 1700.)
-    let attack = matches!(
-        tick,
-        400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630 | 1720
-    );
+    let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
 const AUTOPLAY_CAPTURES: &[u64] = &[
@@ -4673,8 +4667,9 @@ const AUTOPLAY_TALK_END: u64 = 260;
 /// Debug blow hits of the unattended run (see `Game::debug_blow`).
 const AUTOPLAY_BLOWS: [u64; 2] = [1500, 1700];
 /// Guard presses ahead of the Shadow's claws seen at ticks 1194 and 1361
-/// in earlier unattended runs.
-const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
+/// in earlier unattended runs, and Square for Retaliating Slash out of the
+/// blow struck at 1700.
+const AUTOPLAY_GUARDS: [u64; 3] = [1170, 1340, 1720];
 /// The last stretch leaves Sora standing so an enemy can attack him.
 /// The index that holds the item pictures.
 const PICTURE_INDEX: &str = "Image/dt/kh2_fifth.hed";
@@ -4873,8 +4868,10 @@ fn simulate(
         AUTOPLAY_GUARDS.contains(&tick)
     } else {
         std::mem::take(&mut game.guard_queued)
-    } && !talking
-        && game.guard_equipped;
+    } && !talking;
+    // The Jump button up this tick (logical 0x100 not held): cuts a rising
+    // jump. Unattended runs hold it.
+    let jump_up = game.autoplay.is_none() && game.pad.held & 0x100 == 0;
     // The current target: the enemy while it can be hit.
     let target = game
         .enemy
@@ -4905,6 +4902,7 @@ fn simulate(
     let input = Input {
         direction: direction.to_array(),
         jump,
+        jump_up,
         attack,
         guard,
         target: target.map(|t| [t[0], t[2]]),
@@ -7942,7 +7940,6 @@ fn camp_tick(
             // The battle ability record follows the equipped slots;
             // Guard's ability bit gates PTYA 0x0b (FUN_140402750).
             game.player.abilities = game.ability_source.build(&c.ability_slots);
-            game.guard_equipped = game.player.abilities.has(abilities::bit::GUARD);
             // Owned spell levels (the element items), the shortcut slots
             // and the MP-charge toggles follow the camp.
             game.shortcuts = c.shortcuts;
@@ -8506,7 +8503,6 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     if let Some(h) = &loaded.hud {
         player.mp = magic::Mp::new(h.stats.1);
     }
-    let guard_equipped = player.abilities.has(abilities::bit::GUARD);
     let mut game = Game {
         ability_source: loaded.abilities,
         params: loaded.params,
@@ -8549,7 +8545,6 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             }
             magic_room::MagicRt::new(src, levels)
         }),
-        guard_equipped,
         menu_up_queued: false,
         menu_down_queued: false,
         enemy: None,

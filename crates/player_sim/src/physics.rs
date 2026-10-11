@@ -37,6 +37,12 @@ pub const MOTION_BLEND: f32 = 8.0;
 /// The fall motion starts this many ticks before the apex
 /// (`DAT_140623b98`, FUN_1403cb680).
 pub const FALL_MOTION_LEAD: f32 = 5.0;
+/// A released jump is cut only once the arc's time is past this
+/// (`DAT_140623b9c`, FUN_1403cb680).
+pub const JUMP_CUT_AFTER: f32 = 6.0;
+/// The rise a cut jump is relaunched with (`DAT_142a243d8`, set at start-up
+/// by FUN_1400259b0 to g × 0.5 × 5 × 5): a 5-tick rise of about 5.1 units.
+pub const JUMP_CUT_HOP: f32 = G * 0.5 * FALL_MOTION_LEAD * FALL_MOTION_LEAD;
 
 /// Default stick magnitude from which the run speed is used
 /// (`DAT_140585c7c`, FUN_1403a8fa0).
@@ -273,6 +279,12 @@ impl Arc {
     /// FUN_1403cb680: true once `rise ≤ t + 5`, when the fall motion plays.
     pub fn falling_motion(&self) -> bool {
         self.rise <= self.t + FALL_MOTION_LEAD
+    }
+
+    /// FUN_1403cb680: a released jump (obj+0x120 bit 18) is cut while
+    /// `6 < t < rise − 5`.
+    pub fn cuttable(&self) -> bool {
+        JUMP_CUT_AFTER < self.t && self.t < self.rise - FALL_MOTION_LEAD
     }
 }
 

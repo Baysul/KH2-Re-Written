@@ -63,13 +63,13 @@ Built (all in the test room, against the one Shadow):
 - Sora's hit reactions: air flinch, blow, Aerial Recovery, death (T094).
 - Battle items from the Items submenu and shortcuts (T095).
 - Kills give EXP and prizes, level-ups change stats, and hits fill the Drive gauge (T096).
+- The jump is variable: letting go of Jump cuts the rise short. Square starts Upper Slash, Finishing Leap and Horizontal Slash mid-combo, and Retaliating Slash out of a blow (T105).
 
 Unfinished:
 - Spell visuals are not drawn (stand-in shapes), and no voices play.
 - Heal effects, prize models and sparkles are not drawn; item drops are only logged.
 - Level-up messages, fanfare and HP/MP/Drive growth are not reproduced.
 - The game-over flow is not modelled.
-- Square-button abilities (Upper Slash, Finishing Leap, Horizontal Slash) are not wired.
 - Only one enemy exists, so targeting between several enemies is untested.
 
 ### Twilight Town (T097)

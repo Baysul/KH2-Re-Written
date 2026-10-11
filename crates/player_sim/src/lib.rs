@@ -224,6 +224,10 @@ pub const RECOVERY_SPEED: f32 = 10.;
 pub const RECOVERY_AFTER: f32 = 16.;
 /// Retaliating Slash's PTYA record id (FUN_1403d6d50).
 pub const RETALIATING_SLASH: u8 = 0x28;
+/// The Square combo abilities in FUN_1403a81f0's order: Finishing Leap
+/// (0x25, motion 167), Upper Slash (0x0c, motion 161), Horizontal Slash
+/// (0x26, motion 193).
+pub const SQUARE_ABILITIES: [u8; 3] = [0x25, 0x0c, 0x26];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
@@ -269,7 +273,12 @@ impl Action {
 pub struct Input {
     pub direction: [f32; 2],
     pub jump: bool,
+    /// The Jump button is up this tick (request byte +4 bit 0 clear): a
+    /// jump still rising is cut (`JumpCut`).
+    pub jump_up: bool,
     pub attack: bool,
+    /// The Square button (request byte +4 bit 3): Retaliating Slash, the
+    /// Square combo abilities, then Guard (FUN_1403d6d50, FUN_1403a81f0).
     pub guard: bool,
     /// XZ direction toward the current target, if any (Guard turns to it
     /// at its first tick: frame trigger 21, up to 360°).
@@ -389,6 +398,8 @@ pub struct Player {
     /// A jump waiting for its take-off trigger (obj+0x648 = 1): height and
     /// take-off velocity (+0xe0).
     pub pending_jump: Option<(f32, [f32; 2])>,
+    /// The variable-height jump flags obj+0x120 bits 16–18.
+    pub jump_cut: JumpCut,
     pub action: Action,
     /// Ticks since the current action started.
     pub frame: u32,
@@ -471,6 +482,21 @@ pub struct Released {
     pub form: u8,
 }
 
+/// The variable-height jump (obj+0x120 bits 16–18). The jump command sets
+/// `variable` (FUN_140422630 with its third argument, as FUN_1403d6fc0
+/// passes for the Jump button); entering the jump mode moves it to
+/// `held` (FUN_1403cbd30); each command pass turns `held` into `released`
+/// once the button is up (FUN_1403d6fc0, request byte +4 bit 0 [I: the
+/// "button held" bit, paired with bit 1 for the press]); the jump mode cuts
+/// a released rise (FUN_1403cb680). Leaving the jump mode clears all three
+/// (FUN_1403cb8a0).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JumpCut {
+    pub variable: bool,
+    pub held: bool,
+    pub released: bool,
+}
+
 /// Guard recoil knock strength (DAT_140585efc).
 pub const GUARD_KNOCK: f32 = 200.;
 /// Horizontal speed cap kept when walking off a ledge (reported by the map
@@ -511,6 +537,7 @@ impl Player {
             air_velocity: [0.; 2],
             sampler: physics::Sampler::default(),
             pending_jump: None,
+            jump_cut: JumpCut::default(),
             action: Action::Idle,
             frame: 0,
             armed: false,
@@ -617,6 +644,7 @@ impl Player {
                 self.knock = None;
                 self.flight = None;
                 self.arc = physics::Arc::launch(self.position[1], AIR_HIT_HOP);
+                self.jump_cut = JumpCut::default();
                 let v = strength * sstm.hit_back_to_jump;
                 self.air_velocity = [dir[0] * v, dir[1] * v];
                 self.sampler.reset();
@@ -640,6 +668,7 @@ impl Player {
                 self.yaw = facing(back);
                 self.knock = None;
                 let v = [dir[0] * side, up, dir[1] * side];
+                self.jump_cut = JumpCut::default();
                 self.flight = Some(Flight {
                     blow: physics::Blow::new(v, sstm),
                     sstm: *sstm,
@@ -701,6 +730,7 @@ impl Player {
         self.sampler = physics::Sampler::default();
         if air {
             self.arc = physics::Arc::fall(self.position[1], self.vertical_speed);
+            self.jump_cut = JumpCut::default();
         }
         self.begin_reaction(Action::Hurt(hurt::DEAD));
         self.dead_air = air;
@@ -726,7 +756,7 @@ impl Player {
     }
 
     /// FUN_1403d6d50, a blow's recovery: Jump with Aerial Recovery plays
-    /// motion 40 and hops; the attack button starts Retaliating Slash (PTYA
+    /// motion 40 and hops; Square starts Retaliating Slash (PTYA
     /// 0x28), setting the counters to 1/1 first. Both wait for the blow to
     /// have run `RECOVERY_AFTER` ticks.
     fn recover(&mut self, input: &Input, clips: &Clips, stick: [f32; 2], step: &mut Step) {
@@ -749,6 +779,7 @@ impl Player {
             };
             self.flight = None;
             self.arc = physics::Arc::launch(self.position[1], RECOVERY_HEIGHT);
+            self.jump_cut = JumpCut::default();
             self.air_velocity = [dir[0] * speed, dir[1] * speed];
             self.sampler.reset();
             self.vertical_speed = 0.;
@@ -756,7 +787,8 @@ impl Player {
             step.started = Some(self.action);
             return;
         }
-        if input.attack {
+        // Square (request bit 3), not Attack, starts it.
+        if input.guard {
             self.combo = ptya::Combo { step: 1, finish: 1 };
             let state = ptya::State {
                 abilities: &self.abilities,
@@ -958,13 +990,19 @@ impl Player {
         self.arc = physics::Arc::launch(self.position[1], height);
         self.air_velocity = [dir[0] * speed, dir[1] * speed];
         self.sampler.reset();
+        self.jump_cut = JumpCut::default();
     }
 
     /// Jump (mode 0 slot +0x48, FUN_140422630 → FUN_1403cbb00): plays JUMP
     /// and queues the arc of the PRTY jump height with the stick velocity
-    /// (obj+0xe0); the jump mode starts at JUMP's take-off trigger.
+    /// (obj+0xe0); the jump mode starts at JUMP's take-off trigger. The
+    /// Jump button's jump is variable (obj+0x120 bit 16).
     fn jump(&mut self, p: &Params, velocity: [f32; 2], step: &mut Step) {
         self.pending_jump = Some((p.jump_height, velocity));
+        self.jump_cut = JumpCut {
+            variable: true,
+            ..JumpCut::default()
+        };
         self.vertical_speed = 0.;
         self.start(Action::Jump, step);
     }
@@ -975,6 +1013,7 @@ impl Player {
     fn drop_off(&mut self, velocity: [f32; 2], step: &mut Step) {
         self.arc = physics::Arc::fall(self.position[1], 0.);
         self.pending_jump = None;
+        self.jump_cut = JumpCut::default();
         self.air_velocity = velocity;
         self.sampler.reset();
         self.vertical_speed = 0.;
@@ -1002,6 +1041,12 @@ impl Player {
             && clips.item.as_ref().and_then(|c| c.item_use) == Some(self.frame)
         {
             self.item_fired = true;
+        }
+        // FUN_1403d6fc0: a rising variable jump whose button is up is
+        // marked released (obj+0x120 bit 17 → bit 18).
+        if self.jump_cut.held && input.jump_up {
+            self.jump_cut.held = false;
+            self.jump_cut.released = true;
         }
         // MP Charge runs down at 1 + the MP Haste terms (FUN_1403c0de0).
         self.mp.tick(1., self.abilities.mp_haste);
@@ -1039,7 +1084,7 @@ impl Player {
                 // 0x1c, FUN_1401b15f0): always during locomotion, from
                 // LAND's range-2 start (tick 12 installed) after a landing.
                 let ready = self.actionable(clips);
-                if ready && input.guard && !input.attack && clips.guard.is_some() {
+                if ready && input.guard && !input.attack && self.can_guard(clips) {
                     self.start_guard(input, &mut step);
                 } else if ready
                     && input.attack
@@ -1103,8 +1148,13 @@ impl Player {
                     && let Some((height, velocity)) = self.pending_jump.take()
                 {
                     // FUN_1403cbd30 (mode 1 enter): the arc's base is the
-                    // take-off height; the stored +0xe0 velocity applies.
+                    // take-off height; the stored +0xe0 velocity applies;
+                    // a variable jump becomes cuttable (bit 16 → bit 17).
                     self.arc = physics::Arc::launch(self.position[1], height);
+                    self.jump_cut = JumpCut {
+                        held: self.jump_cut.variable,
+                        ..JumpCut::default()
+                    };
                     self.air_velocity = velocity;
                     self.sampler.reset();
                     disp = self.airborne(input, moving, magnitude, direction, p, clips, &mut step);
@@ -1124,8 +1174,11 @@ impl Player {
                 }
                 let recovery = self.frame >= clip.blend_to_idle.unwrap_or(clip.end);
                 let ready = self.actionable(clips);
-                if input.attack
-                    && self.try_attack(input, p, clips, ready, moving, direction, &mut step)
+                // FUN_1403d6fc0 takes Square (FUN_1403a81f0) before the
+                // attack command.
+                if (input.guard && self.try_square(input, clips, &mut step))
+                    || (input.attack
+                        && self.try_attack(input, p, clips, ready, moving, direction, &mut step))
                 {
                 } else if recovery && input.jump {
                     self.jump(p, stick, &mut step);
@@ -1143,8 +1196,9 @@ impl Player {
                 // A spell is a combo hit: the next press may chain from the
                 // cast's combo window (range 11 / 35, finisher range 50).
                 let ready = self.actionable(clips);
-                if input.attack
-                    && self.try_attack(input, p, clips, ready, moving, direction, &mut step)
+                if (input.guard && self.try_square(input, clips, &mut step))
+                    || (input.attack
+                        && self.try_attack(input, p, clips, ready, moving, direction, &mut step))
                 {
                 } else if self.frame >= clip.end {
                     self.cast = None;
@@ -1176,7 +1230,7 @@ impl Player {
                     && self.try_attack(input, p, clips, actionable, moving, direction, &mut step)
                 {
                 } else if actionable {
-                    if input.guard && clips.guard.is_some() {
+                    if input.guard && self.can_guard(clips) {
                         self.start_guard(input, &mut step);
                     } else if input.jump {
                         self.jump(p, stick, &mut step);
@@ -1240,6 +1294,7 @@ impl Player {
                 // inertial slide.
                 self.vertical_speed = 0.;
                 self.sampler = physics::Sampler::default();
+                self.jump_cut = JumpCut::default();
                 step.landed = true;
                 match self.action {
                     Action::Hurt(i) if hurt::BLOW.contains(&i) => {
@@ -1351,10 +1406,23 @@ impl Player {
         else {
             return false;
         };
+        self.yaw = facing_yaw;
+        self.execute(i, combo, input, clips, step);
+        true
+    }
+
+    /// FUN_1403d78d0: starts PTYA record `i` with the counters `combo`.
+    fn execute(
+        &mut self,
+        i: usize,
+        combo: ptya::Combo,
+        input: &Input,
+        clips: &Clips,
+        step: &mut Step,
+    ) {
         let airborne = self.in_air();
         self.combo = combo;
         self.connected = false;
-        self.yaw = facing_yaw;
         let record = clips.records[i];
         // FUN_1403d78d0: a hop from the ground starts a fresh count.
         if record.jump > 0. && !airborne {
@@ -1370,7 +1438,52 @@ impl Player {
         self.start(action, step);
         self.face_target(&clips.attacks[i].clip, input);
         self.lift(&clips.attacks[i], input);
-        true
+    }
+
+    /// The Square combo abilities (FUN_1403a81f0 → FUN_1403a9950, tried in
+    /// this order): each needs its record allowed (ability, ground/air,
+    /// combo limit), refuses a non-finisher once a finisher may play
+    /// (FUN_1403d7780 at offset 0), and needs the "allow combo" (11) or
+    /// finisher (50) range plus a counted press (FUN_1403d6ca0).
+    fn try_square(&mut self, input: &Input, clips: &Clips, step: &mut Step) -> bool {
+        if clips.records.is_empty() || clips.attacks.len() < clips.records.len() {
+            return false;
+        }
+        let clip = self.clip(clips);
+        let frame = self.motion_frame(clips);
+        let state = ptya::State {
+            abilities: &self.abilities,
+            airborne: self.in_air(),
+            mp_charging: self.mp_charging,
+            combo_window: Clip::within(&clip.combo_windows, frame),
+            finisher_window: Clip::within(&clip.finisher_windows, frame),
+            actionable: self.actionable(clips),
+        };
+        let chain = self.connected || self.abilities.has(abilities::bit::COMBO_MASTER);
+        for id in SQUARE_ABILITIES {
+            let Some(i) = ptya::find(&clips.records, id) else {
+                continue;
+            };
+            let record = &clips.records[i];
+            if !ptya::allowed(record, &state, self.combo) {
+                continue;
+            }
+            if record.flags & ptya::flag::FINISHER == 0
+                && ptya::finisher_allowed(&state, self.combo, 0)
+            {
+                continue;
+            }
+            if !(state.combo_window || state.finisher_window) {
+                continue;
+            }
+            let mut combo = self.combo;
+            if !ptya::advance(&mut combo, &state, chain) {
+                continue;
+            }
+            self.execute(i, combo, input, clips, step);
+            return true;
+        }
+        false
     }
 
     /// Whether commands are taken now: an ANB range 0–2, or the unlocked
@@ -1430,6 +1543,7 @@ impl Player {
         let action = if airborne {
             // The air cast hop (physics vt+0x20 with SSTM +0x48 = 40).
             self.arc = physics::Arc::launch(self.position[1], magic::AIR_HOP);
+            self.jump_cut = JumpCut::default();
             self.air_velocity = [0.; 2];
             self.sampler.reset();
             self.vertical_speed = 0.;
@@ -1492,6 +1606,12 @@ impl Player {
     }
 
     /// PTYA 0x0b: the guard motion, turning to the target at once.
+    /// Guard (FUN_1403a9c70) needs its PTYA record's ability, Guard (bit 1),
+    /// and the motion loaded.
+    fn can_guard(&self, clips: &Clips) -> bool {
+        self.abilities.has(abilities::bit::GUARD) && clips.guard.is_some()
+    }
+
     fn start_guard(&mut self, input: &Input, step: &mut Step) {
         if let Some(t) = input.target
             && t[0].hypot(t[1]) > 1e-4
@@ -1558,7 +1678,10 @@ impl Player {
             self.face_target(clip, input);
             self.release_if_due(clips, i);
             let ready = self.actionable(clips);
-            if input.attack && self.try_attack(input, p, clips, ready, moving, direction, step) {
+            if (input.guard && self.try_square(input, clips, step))
+                || (input.attack
+                    && self.try_attack(input, p, clips, ready, moving, direction, step))
+            {
             } else if self.frame >= clip.end {
                 self.cast = None;
                 self.start(Action::Fall, step);
@@ -1567,7 +1690,10 @@ impl Player {
             let clip = &clips.attacks[i].clip;
             self.face_target(clip, input);
             let ready = self.actionable(clips);
-            if input.attack && self.try_attack(input, p, clips, ready, moving, direction, step) {
+            if (input.guard && self.try_square(input, clips, step))
+                || (input.attack
+                    && self.try_attack(input, p, clips, ready, moving, direction, step))
+            {
             } else if self.frame >= clip.end {
                 self.start(Action::Fall, step);
                 self.blend = clips.attacks[i].blend;
@@ -1582,6 +1708,21 @@ impl Player {
             // FUN_1403cb680 → FUN_1403cb610: FALL (motion 4) blended over 8
             // once the apex is within 5 ticks.
             self.start(Action::Fall, step);
+        }
+        // FUN_1403cb680: a released jump still rising (6 < t < rise − 5)
+        // plays FALL (FUN_1403cb610) and is relaunched with a 5-tick rise
+        // of g × 12.5 (mode vt+0x20, FUN_140409b00 → FUN_1403cbc30, then
+        // the mode re-entry clears the flags); within 5 ticks of the apex
+        // the jump stops being cuttable.
+        if self.jump_cut.released && self.arc.cuttable() {
+            if self.action == Action::Jump {
+                self.start(Action::Fall, step);
+            }
+            self.arc = physics::Arc::launch(self.position[1], physics::JUMP_CUT_HOP);
+            self.sampler.reset();
+            self.jump_cut = JumpCut::default();
+        } else if self.arc.falling_motion() {
+            self.jump_cut.held = false;
         }
         // ANB "No gravity" ranges (range 3 → obj+0x18c bit 5, FUN_14040d810)
         // hold the height while the curve's time keeps running
@@ -1784,7 +1925,8 @@ mod tests {
         }
     }
     /// A cut of Sora's set: finisher 3, the basic swing 5 (alternate 6),
-    /// the target dash 6, and the air swings 9 (alternate 10) and 10.
+    /// the target dash 6, the air swings 9 (alternate 10) and 10,
+    /// Retaliating Slash and Upper Slash.
     fn records() -> Vec<ptya::Record> {
         use ptya::{flag, kind};
         let r = |id, kind, alternate, flags, motion, jump| ptya::Record {
@@ -1807,6 +1949,10 @@ mod tests {
             ptya::Record {
                 ability: 101,
                 ..r(0x28, kind::MANUAL, -1, flag::AIR, 172, 0.)
+            },
+            ptya::Record {
+                ability: 18,
+                ..r(0x0c, kind::MANUAL, -1, 0, 161, 0.)
             },
         ]
     }
@@ -1866,6 +2012,7 @@ mod tests {
                 attack(30, (8, 20), 20.),
                 attack(30, (8, 20), 20.),
                 attack(30, (8, 20), 0.),
+                attack(40, (10, 25), 0.),
             ],
             hurt: {
                 let flat = |end| Clip {
@@ -2455,6 +2602,13 @@ mod tests {
         let mut player = Player::new([0., 0., 0.], 0.);
         let press = Input {
             guard: true,
+            ..Input::default()
+        };
+        // Guard needs its ability (bit 1).
+        assert_eq!(player.tick(&press, &p, &c, &world).started, None);
+        player.abilities.set(abilities::bit::GUARD);
+        let press = Input {
+            guard: true,
             target: Some([1., 0.]),
             ..Input::default()
         };
@@ -2688,17 +2842,119 @@ mod tests {
         assert!(!with.range_invulnerable(&c));
     }
 
+    fn jump_peak(release_at: Option<u32>) -> f32 {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([0.; 3], 0.);
+        let press = Input {
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&press, &p, &c, &w);
+        let mut peak: f32 = 0.;
+        for t in 1..200 {
+            let up = release_at.is_some_and(|r| t >= r);
+            let input = Input {
+                jump_up: up,
+                ..Input::default()
+            };
+            player.tick(&input, &p, &c, &w);
+            peak = peak.max(player.position[1]);
+        }
+        assert_eq!(player.position[1], 0.);
+        peak
+    }
+
+    #[test]
+    fn releasing_jump_cuts_the_rise_after_six_ticks_of_arc() {
+        let full = jump_peak(None);
+        assert!((full - params().jump_height).abs() < 1.5, "{full}");
+        // Released at once: the cut waits for the arc's time to pass 6,
+        // then a 5-tick rise of g × 12.5 replaces the rest.
+        let tap = jump_peak(Some(1));
+        assert!(tap < full * 0.75, "{tap} vs {full}");
+        // Later releases go higher; past rise − 5 nothing is cut.
+        let mid = jump_peak(Some(14));
+        assert!(tap < mid && mid < full, "{tap} {mid} {full}");
+        let late = jump_peak(Some(40));
+        assert!((late - full).abs() < 1e-3, "{late} vs {full}");
+    }
+
+    #[test]
+    fn cut_hop_is_five_ticks_of_rise() {
+        assert!((physics::rise_time(physics::JUMP_CUT_HOP) - 5.).abs() < 1e-4);
+    }
+
+    #[test]
+    fn upper_slash_takes_square_in_a_combo_window_after_a_hit() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([0.; 3], 0.);
+        player.abilities.set(18);
+        let swing = Input {
+            attack: true,
+            ..Input::default()
+        };
+        player.tick(&swing, &p, &c, &w);
+        assert_eq!(player.action, Action::Attack(1));
+        let square = Input {
+            guard: true,
+            ..Input::default()
+        };
+        // Outside the window, or before the swing connected: nothing.
+        player.tick(&square, &p, &c, &w);
+        assert_eq!(player.action, Action::Attack(1));
+        for _ in 2..12 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        player.tick(&square, &p, &c, &w);
+        assert_eq!(player.action, Action::Attack(1));
+        player.connected = true;
+        player.tick(&square, &p, &c, &w);
+        assert_eq!(player.action, Action::Attack(6));
+        assert_eq!(player.motion_id(&c), 161);
+        assert_eq!(player.combo, ptya::Combo { step: 2, finish: 1 });
+    }
+
+    #[test]
+    fn square_abilities_need_their_ability() {
+        let (p, c, w) = (params(), clips(), room());
+        let mut player = Player::new([0.; 3], 0.);
+        let swing = Input {
+            attack: true,
+            ..Input::default()
+        };
+        player.tick(&swing, &p, &c, &w);
+        for _ in 1..12 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        player.connected = true;
+        let square = Input {
+            guard: true,
+            ..Input::default()
+        };
+        player.tick(&square, &p, &c, &w);
+        assert_eq!(player.action, Action::Attack(1));
+    }
+
     #[test]
     fn retaliating_slash_starts_from_a_blow_with_its_ability() {
         let (p, c, s, w) = (params(), clips(), sstm(), room());
         let mut player = Player::new([0.; 3], 0.);
         player.abilities.set(101);
         player.react(&claw([0., 1.], 4), &s, &c);
-        let swing = Input {
+        // The attack button does not start it; Square does.
+        let attack = Input {
             attack: true,
             ..Input::default()
         };
-        for _ in 0..20 {
+        for _ in 0..17 {
+            player.tick(&attack, &p, &c, &w);
+        }
+        assert!(matches!(player.action, Action::Hurt(_)));
+        let swing = Input {
+            guard: true,
+            ..Input::default()
+        };
+        for _ in 0..3 {
             player.tick(&swing, &p, &c, &w);
         }
         assert_eq!(player.action, Action::AirAttack(5));
