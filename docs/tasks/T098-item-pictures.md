@@ -1,4 +1,4 @@
-# T090 — Item pictures (keyblades, items, equipment)
+# T098 — Item pictures (keyblades, items, equipment)
 
 Owner Claude, 2026-10-10. Gate P22. Starts from T088 (the Journal) and the open gaps of T079 / T085.
 

@@ -1,4 +1,4 @@
-# T090 — Axel and Roxas cutscene (tt19 event 613)
+# T099 — Axel and Roxas cutscene (tt19 event 613)
 
 Owner Claude, 2026-10-10. Gate P23 (events). User request: remake the Axel/Roxas scene before their fight, where Roxas draws two Keyblades, 1:1 from the exe, with cameras, models, animations, subtitles, audio, music and a pause menu with Continue and Skip Scene.
 

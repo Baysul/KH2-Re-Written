@@ -1,6 +1,6 @@
 # T093 — Journal Characters / Links / Album, tutorial notices, keyboard key caps
 
-Owner Claude, 2026-10-10. Gate P22. Starts from T088 (the Journal top pages) and T090 (item pictures).
+Owner Claude, 2026-10-10. Gate P22. Starts from T088 (the Journal top pages) and T098 (item pictures).
 
 ## Source
 

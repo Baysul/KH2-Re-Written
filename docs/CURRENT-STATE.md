@@ -1,33 +1,18 @@
 # Current state of the project
 
-Snapshot written 2026-10-10 from `main` (`7bc0c95`) and the five open work branches. It says what each workstream has built, where that work lives, and what is unfinished. The per-task detail, evidence and checks stay in [`docs/tasks/`](tasks/README.md); this page only summarises them.
+Written 2026-10-10 and updated 2026-10-11, after every work branch was merged into `main`. It says what each workstream has built and what is unfinished. The per-task detail, evidence and checks stay in [`docs/tasks/`](tasks/README.md); this page only summarises them.
 
 Everything below runs from the user's own selected Steam install (KH2 Final Mix, build 15194255), which stays read-only and is re-validated at every launch. No game data is in Git. Nothing has been compared pixel for pixel against captures of the original game, and no workstream claims a 1:1 pass yet: every record listed here is PROGRESS or PARTIAL.
 
 ## Where the work lives
 
-Most recent work is on branches that are not merged into `main` yet. Each has its own local clone so threads do not overwrite each other.
+All work is on `main`. The five work branches (movement, combat, Twilight Town, test room and pause menu, cutscene) were merged on 2026-10-11 (T100), so the separate clones are no longer needed for development.
 
-| Workstream | Branch | Local clone | On `main`? |
-| --- | --- | --- | --- |
-| Title sequence and launcher | (merged) | — | Yes (T086–T089) |
-| Test room, pause menu and Journal | `claude/project-thread-98hhql` | `C:\Users\ANIMA\kh2fr-pause` | Top pages yes (T088); 5 newer commits not merged |
-| Gravity and movement feel | `claude/project-thread-dhv9n6` | `KH2FinalRewrite-movement` | First pass yes; 8 newer commits not merged |
-| Combos, magic, items, EXP, Drive gauge | `claude/project-thread-z71xi8` | `KH2FinalRewrite-combat` | No (stacked on the movement branch) |
-| Twilight Town | `claude/project-thread-b11b2c` | `KH2FinalRewrite-tt` | No (contains the movement branch); has uncommitted work |
-| Axel and Roxas cutscene | `claude/project-thread-f6il92` | `KH2FinalRewrite-cutscene` | No |
-
-The `KH2FinalRewrite-launcher` clone (branch `b6fazq`) is fully merged into `main` and holds nothing new.
-
-### Known merge hazards
-
-- **Task numbers collide.** T090 names three different records (attack selection, item pictures, the cutscene), T091 by two (Twilight Town, hit records), and T092–T096 are spread across branches. They need renumbering when the branches are merged.
-- **Shared files.** `bin/kh2fm/test_room.rs`, `room.rs` and the camp/Journal modules are edited by several branches; expect conflicts there.
-- **Order.** The combat branch is built on the movement branch, and the Twilight Town branch has merged the movement branch, so movement should be merged first.
+Task records that clashed between branches were renumbered during the merge: Twilight Town is now T097, item pictures T098, and the cutscene T099.
 
 ## Workstreams
 
-### Title sequence and launcher — on `main`
+### Title sequence and launcher
 
 Built:
 - The boot sequence plays on every launch: opening fade, Disney, Square Enix, the owner's GLURBUS STUDIOS splash, copyright, then the intro and the title screen with its music (T086).
@@ -39,15 +24,14 @@ Unfinished:
 - The controller and storage dialogs before the title are not built.
 - No comparison against a capture of the installed game.
 
-### Test room, pause menu and Jiminy's Journal — top pages on `main`, the rest on `98hhql`
+### Test room, pause menu and Jiminy's Journal
 
-Built on `main`:
+Built:
 - The test room with Sora, the Keyblade, the follow camera, HUD gauges and command menu, a Shadow that fights back, Guard, hit effects, sounds, music and field talk with Axel as a test NPC (T056–T076).
 - The pause (camp) menu: Items, Abilities, Customize, Party, Status, Config, Equip, and the Journal's top pages (Notes, Select World, Collection, Roxas's notes) (T073–T088).
 
-On the branch, not merged:
-- Item pictures on the Items, Use and Equip screens (branch T090).
-- Journal Characters, Links and Album pages with faces and photos; Character Files, Heartless and Nobodies lists and detail pages; Treasures and Maps grids; Ansem Reports list and reader; first-time tutorial notices; keyboard key-cap prompts (branch T093).
+- Item pictures on the Items, Use and Equip screens (T098).
+- Journal Characters, Links and Album pages with faces and photos; Character Files, Heartless and Nobodies lists and detail pages; Treasures and Maps grids; Ansem Reports list and reader; first-time tutorial notices; keyboard key-cap prompts (T093).
 
 Unfinished:
 - Journal: Story, Pieces, Missions, Minigames, Limits, Synthesis and Puzzles pages; the 3D model pages of Character Files; the "Slain" counts; scroll-bar thumbs.
@@ -56,11 +40,11 @@ Unfinished:
 - NEW! badges, Load/Save and the item shop are not built.
 - Tutorial notices and Journal "seen" marks are kept in memory only, never in a save.
 
-### Gravity and movement feel — first pass on `main`, the rest on `dhv9n6`
+### Gravity and movement feel
 
-On `main`: Sora's movement block is loaded the way the original does; jump and fall follow the original's curve instead of an invented launch speed; air momentum, moving along the stick, 8-frame blends, knock-slides and blow flight.
+First pass: Sora's movement block is loaded the way the original does; jump and fall follow the original's curve instead of an invented launch speed; air momentum, moving along the stick, 8-frame blends, knock-slides and blow flight.
 
-On the branch, not merged:
+Later passes:
 - Physics runs on the original's two-frame step.
 - Jump take-off after the crouch, the landing lock, and aerial hops toward the target.
 - Landing during an aerial attack cuts it into the landing motion, as the original does.
@@ -70,11 +54,11 @@ Unfinished:
 - No interactive playtest sign-off from the owner on the latest pass.
 - `docs/research/movement-feel-1to1-plan.md` is on `main` and contains decompiled addresses and constants. The owner has not decided whether it should stay in the repository.
 
-### Combos, magic, items, EXP and the Drive gauge — `z71xi8`, not merged
+### Combos, magic, items, EXP and the Drive gauge
 
 Built (all in the test room, against the one Shadow):
-- Attacks are chosen the original's way, with combo counters, combo abilities and auto-targeting (branch T090).
-- Damage follows the original's hit records, level rows and ability rules (branch T091).
+- Attacks are chosen the original's way, with combo counters, combo abilities and auto-targeting (T090).
+- Damage follows the original's hit records, level rows and ability rules (T091).
 - Magic: the Magic menu, MP and MP Charge, and Fire, Blizzard, Thunder, Cure, Magnet and Reflect (T092).
 - Sora's hit reactions: air flinch, blow, Aerial Recovery, death (T094).
 - Battle items from the Items submenu and shortcuts (T095).
@@ -88,7 +72,7 @@ Unfinished:
 - Square-button abilities (Upper Slash, Finishing Leap, Horizontal Slash) are not wired.
 - Only one enemy exists, so targeting between several enemies is untested.
 
-### Twilight Town — `b11b2c`, not merged
+### Twilight Town (T097)
 
 Built:
 - All 42 Twilight Town areas load by name, with exits, the iris transition and loading of the next area at its entrance; a launcher entry "Twilight Town".
@@ -98,15 +82,16 @@ Built:
 - Townspeople load, walk their paths, react to Sora, and talk through the field talk window.
 - Every area is unlocked; there are no story blocks.
 
-In progress (uncommitted in the clone): NPC head look-at toward Sora.
+- NPCs turn their heads toward Sora, and map textures animate.
 
 Unfinished:
-- Other NPC programs (sitting and others), NPC push.
+- NPC push, pop-in fade, the other NPC programs (sitting and others).
+- Map effects (sun, lens flare, dust), area enemies and battles, and story events.
 - Glow post-effect, per-object level of detail and fade distances, alpha-pass ordering, subtractive blends, texture frame swaps.
 - Story progression is fixed at a chosen "first visit" point.
 - Exits into other worlds.
 
-### Axel and Roxas cutscene — `f6il92`, not merged
+### Axel and Roxas cutscene (T099)
 
 Built:
 - The scene before the Axel fight plays from the original event data: cameras, actors and motions, subtitles, voices, sound effects and music, and a pause menu with Continue and Skip Scene. Launcher entry "Cutscene: Roxas and Axel".
@@ -126,9 +111,9 @@ The camp's Party screen exists, but Donald and Goofy are not in the field: no mo
 
 ### Drive forms — not started
 
-The Drive gauge fills (combat branch), but no form can be entered. Form commands, the Anti/Final form roll, form EXP, and the form models, motions and attack sets are not implemented, and forms also need the party above.
+The Drive gauge fills, but no form can be entered. Form commands, the Anti/Final form roll, form EXP, and the form models, motions and attack sets are not implemented, and forms also need the party above.
 
-## Next steps that are already decided
+## Open decisions
 
-- Merge every branch into `main` once the threads working on them have stopped, so the separate clones are no longer needed; renumber the clashing task records while doing so.
-- Decide whether `docs/research/movement-feel-1to1-plan.md` stays in the repository.
+- Whether `docs/research/movement-feel-1to1-plan.md` stays in the repository: it contains decompiled addresses and constants.
+- Whether the old clone folders can be deleted. They hold the owner's release builds.
