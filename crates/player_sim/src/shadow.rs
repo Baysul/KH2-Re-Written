@@ -62,6 +62,9 @@ pub mod motion {
     pub const FLINCH: [usize; 4] = [10, 11, 12, 13];
     pub const BLOW: [usize; 2] = [16, 18];
     pub const BLOW_LAND: [usize; 2] = [17, 19];
+    /// TORNADO_FRONT / TORNADO_BACK: the Magnet hold (FUN_14040fbf0 plays
+    /// 20 when the hit direction is in front, else 21).
+    pub const TORNADO: [usize; 2] = [20, 21];
     pub const LEAVE: usize = 45;
     pub const FOOTWORK: usize = 47;
     pub const SINK: usize = 161;
@@ -71,9 +74,9 @@ pub mod motion {
     pub const CLAW_F: usize = 203;
     /// ATKP ReflectMotion of the claws: 140 (ATKP 9/10), 141 (ATKP 11).
     pub const REFLECT: [usize; 2] = [140, 141];
-    pub const ALL: [usize; 22] = [
-        IDLE, WALK, JUMP, FALL, LAND, 10, 11, 12, 13, 16, 17, 18, 19, LEAVE, FOOTWORK, SINK, RISE,
-        CLAW_L, CLAW_R, CLAW_F, 140, 141,
+    pub const ALL: [usize; 24] = [
+        IDLE, WALK, JUMP, FALL, LAND, 10, 11, 12, 13, 16, 17, 18, 19, 20, 21, LEAVE, FOOTWORK,
+        SINK, RISE, CLAW_L, CLAW_R, CLAW_F, 140, 141,
     ];
 }
 
@@ -174,9 +177,27 @@ struct Act {
 pub enum Reaction {
     None,
     Flinch,
-    Blow { back: bool },
+    Blow {
+        back: bool,
+    },
     BlowLand,
+    /// Held by a Magnet (reaction 5, physics modes 0xe / 0xf).
+    Held,
 }
+
+/// A Magnet hold (obj+0xcf8 attack, +0xd00 hold radius, +0xd04 spin).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Held {
+    /// The holding attack's key, and its centre this tick.
+    pub key: u64,
+    pub centre: Vec3,
+    pub hold: f32,
+    pub spin: f32,
+}
+
+/// The Shadow's OBJ shape centre above its origin (FUN_1403b55a0: the first
+/// type-1 collision entry; M_EX020's is a sphere with posH 40).
+pub const OBJ_LIFT: f32 = 40.;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shadow {
@@ -209,11 +230,15 @@ pub struct Shadow {
     /// SSTM battle parameters (FallMax is obj+0x138, FUN_14040a440).
     pub sstm: physics::Sstm,
     airborne: bool,
+    /// The Magnet holding it, if any.
+    pub held: Option<Held>,
     /// Weave phase in degrees (W4).
     weave: f32,
     act: Option<Act>,
     queue: Vec<ActKind>,
-    hit_by: Vec<u32>,
+    /// Hit-once mask, combo-group counter and interval slots
+    /// (FUN_1403cf600); enemies never lock.
+    pub record: combat::HitRecord,
     gone_ticks: u32,
     /// Last tick's moved distance, for the slither's stuck test.
     moved: f32,
@@ -243,10 +268,11 @@ impl Shadow {
             knock: None,
             sstm,
             airborne: false,
+            held: None,
             weave: 0.,
             act: None,
             queue: Vec::new(),
-            hit_by: Vec::new(),
+            record: combat::HitRecord::new(false),
             gone_ticks: 0,
             moved: 0.,
             wished: 0.,
@@ -326,25 +352,33 @@ impl Shadow {
         [self.yaw.sin(), 0., self.yaw.cos()]
     }
 
-    /// Engine hit handling for one attack instance; returns the damage, or
-    /// None if this instance already hit or the Shadow cannot be hit.
+    /// Engine hit handling for a hit the object's `record` counted
+    /// (FUN_1403cf600 says new); returns the damage, or None if the Shadow
+    /// cannot be hit.
     pub fn hit(
         &mut self,
-        instance: u32,
         direction: Vec3,
         high: bool,
         attack: &AttackParams,
         attacker: &AttackerStats,
+        difficulty: combat::Difficulty,
     ) -> Option<i32> {
-        if !self.targetable() || self.hit_by.contains(&instance) {
+        if !self.targetable() {
             return None;
         }
-        self.hit_by.push(instance);
-        let dmg = combat::damage(attacker, attack, &self.stats);
+        let state = combat::TargetState {
+            hp: self.hp,
+            difficulty,
+            ..combat::TargetState::full(self.stats.max_hp)
+        };
+        let dmg = combat::damage_with(attacker, attack, &self.stats, &state);
         self.hp = (self.hp - dmg).max(0);
         let back = self.forward()[0] * direction[0] + self.forward()[2] * direction[2] >= 0.;
         let class = combat::reaction_class(attack.reaction);
-        if class == 4 {
+        if class == 5 {
+            // Reaction 5 only captures (FUN_14040fbf0): `capture` follows
+            // from the caller with the holding volume.
+        } else if class == 4 {
             // FUN_1403d2fe0: KB1 up, KB2 along the hit; both 0 → SSTM BlowUp
             // and BlowSpeed. FUN_140409d30 → mode 4, whose enter
             // (FUN_1404228b0) sets the horizontal floor.
@@ -386,6 +420,61 @@ impl Shadow {
         Some(dmg)
     }
 
+    /// FUN_14040fbf0: held by the Magnet volume `key` centred at `centre`.
+    /// The motion is TORNADO_FRONT when the direction to the centre is in
+    /// front, else TORNADO_BACK (facing away from it); the hold radius and
+    /// spin come from the ATKP row.
+    pub fn capture(&mut self, key: u64, centre: Vec3, hold: f32, spin: f32) {
+        if self.held.is_some_and(|h| h.key == key) || !self.targetable() {
+            return;
+        }
+        let obj = [
+            self.position[0],
+            self.position[1] + OBJ_LIFT,
+            self.position[2],
+        ];
+        let to = [centre[0] - obj[0], centre[2] - obj[2]];
+        let front = {
+            let f = self.forward();
+            f[0] * to[0] + f[2] * to[1] < 0.
+        };
+        // (flag ^ 1) + 0x14 with flag = dot(forward, direction) < 0.
+        let m = motion::TORNADO[!front as usize];
+        self.motion_start(m);
+        if hlen([to[0], 0., to[1]]) > 1e-4 {
+            let away = if m == motion::TORNADO[1] {
+                std::f32::consts::PI
+            } else {
+                0.
+            };
+            self.yaw = wrap(to[0].atan2(to[1]) + away);
+        }
+        self.held = Some(Held {
+            key,
+            centre,
+            hold,
+            spin,
+        });
+        self.reaction = Reaction::Held;
+        self.knock = None;
+        self.blow = None;
+        self.arc = None;
+        self.act_clear();
+    }
+
+    /// The Magnet ended (FUN_1403d22d0 → FUN_14040fb10 / 14040fb60): back to
+    /// the fall motion in the air; acts resume.
+    pub fn release_held(&mut self) {
+        if self.held.take().is_none() {
+            return;
+        }
+        self.reaction = Reaction::None;
+        self.velocity = [0.; 3];
+        self.sampler = physics::Sampler::default();
+        self.airborne = true;
+        self.motion_start(motion::FALL);
+    }
+
     /// The claw was guarded (FUN_140411060 → FUN_1403d4650, ground): play
     /// the ATKP's ReflectMotion, knock-slide back from the facing at
     /// hit_back × 0.1, clear the acts and start ReflectAction
@@ -424,6 +513,39 @@ impl Shadow {
                 let stats = self.stats;
                 let (spawn, yaw, sstm) = (self.spawn, self.yaw, self.sstm);
                 *self = Shadow::new(spawn, yaw, stats, sstm);
+            }
+            return;
+        }
+        if self.held.is_some() && !self.alive() {
+            self.held = None;
+        }
+        if let Some(h) = self.held {
+            // Physics modes 0xe / 0xf (FUN_14040f8e0): a pull toward the
+            // centre (0.1 per unit past the hold radius, capped at 20)
+            // plus a spin about it, over the two-frame sample.
+            self.motion_tick += 1;
+            let length = clips.length(self.motion).max(1);
+            if self.motion_tick >= length {
+                self.motion_tick = clips.loop_start(self.motion).min(length - 1);
+            }
+            let obj = [
+                self.position[0],
+                self.position[1] + OBJ_LIFT,
+                self.position[2],
+            ];
+            let d = sub(h.centre, obj);
+            let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if dist > 1e-4 {
+                let n = [d[0] / dist, d[1] / dist, d[2] / dist];
+                let s = ((dist - h.hold) * 0.1).clamp(-20., 20.);
+                let mut v = [n[0] * s, n[1] * s, n[2] * s];
+                // normalize_xz(roty(n, pi/2)) x spin: (z, 0, -x).
+                let h2 = hlen([n[2], 0., -n[0]]);
+                if h2 > 1e-6 {
+                    v[0] += n[2] / h2 * h.spin;
+                    v[2] += -n[0] / h2 * h.spin;
+                }
+                self.position = add(self.position, v);
             }
             return;
         }
@@ -990,6 +1112,8 @@ mod tests {
             blow_speed: 40.,
             hit_back: 200.,
             hit_back_small: 200.,
+            blow_to_hit_back: 8.,
+            hit_back_to_jump: 0.048,
         }
     }
 
@@ -1041,16 +1165,26 @@ mod tests {
             element: 0,
             reaction: 7,
             knockback: [3, 45],
+            ..AttackParams::default()
         };
         let sora = AttackerStats {
             strength: 5,
             magic: 7,
             max: 99999,
             min: 1,
+            ..AttackerStats::default()
         };
-        assert!(s.hit(1, [0., 0., 1.], true, &finisher, &sora).is_some());
+        let standard = combat::Difficulty::Standard;
+        assert!(
+            s.hit([0., 0., 1.], true, &finisher, &sora, standard)
+                .is_some()
+        );
         assert_eq!(s.current_act(), Some(ActKind::Dead));
-        assert!(s.hit(1, [0., 0., 1.], true, &finisher, &sora).is_none());
+        // Dead objects cannot be hit again.
+        assert!(
+            s.hit([0., 0., 1.], true, &finisher, &sora, standard)
+                .is_none()
+        );
         for _ in 0..60 {
             s.tick(&mut rng, &clips, &Flat, [0., 0., 500.], [0., 0., 500.]);
         }

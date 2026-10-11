@@ -129,9 +129,15 @@ pub struct Sstm {
     /// are both 0).
     pub blow_up: f32,
     pub blow_speed: f32,
+    /// +0x2c BlowToHitBack: the knock strength of a blow is its speed
+    /// vector's length × this.
+    pub blow_to_hit_back: f32,
     /// +0x30 HitBack, +0x34 HitBackSmall (KB1 0x7fff).
     pub hit_back: f32,
     pub hit_back_small: f32,
+    /// +0x38 HitBackToJump: the horizontal speed of the hop an aerial hit
+    /// gives, per unit of knock strength.
+    pub hit_back_to_jump: f32,
 }
 
 impl Sstm {
@@ -150,8 +156,10 @@ impl Sstm {
             blow_brake_up: f(0x20)?,
             blow_up: f(0x24)?,
             blow_speed: f(0x28)?,
+            blow_to_hit_back: f(0x2c)?,
             hit_back: f(0x30)?,
             hit_back_small: f(0x34)?,
+            hit_back_to_jump: f(0x38)?,
         })
     }
 
@@ -538,6 +546,8 @@ mod tests {
             blow_speed: 40.,
             hit_back: 200.,
             hit_back_small: 200.,
+            blow_to_hit_back: 8.,
+            hit_back_to_jump: 0.048,
         };
         let mut b = Blow::new([40., 24., 0.], &s);
         assert!((b.min_xz - 4.).abs() < 1e-6);

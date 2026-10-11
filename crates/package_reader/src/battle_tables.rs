@@ -50,40 +50,116 @@ pub struct Attack {
     pub reflect_hit_back: i8,
     pub reflect_range: u8,
     pub reflect_angle: i8,
+    /// Level-variant selection (executable FUN_1403eb230): the row applies
+    /// from this consecutive-hit count (+0), with Switch (+0x25) choosing
+    /// odd (1) or even (2) hits past it, 0 for every hit.
+    pub step: u8,
+    pub switch: u8,
+    /// Interval (+0x26): ticks before the same attack may hit again.
+    pub interval: u8,
+    /// ComboGroup (+0x2c).
+    pub combo_group: u8,
+    /// DriveDrain (+0x29), RevengeDamage (+0x2a), HpDrain (+0x2f).
+    pub drive_drain: u8,
+    pub revenge: u8,
+    pub hp_drain: u8,
+    /// Kind (+0x2e): 1 ground finisher, 2 air finisher, 4 reaction command
+    /// (the damage routine's combo-boost terms, FUN_1403c12f0).
+    pub combo_kind: u8,
+    /// +0x10 (i16): Magnet's spin, units per tick around its centre.
+    pub spin: i16,
+}
+
+fn parse_row(rec: &[u8]) -> io::Result<Attack> {
+    Ok(Attack {
+        id: u16_at(rec, 2)?,
+        kind: rec[4],
+        stat: rec[5],
+        power: u16_at(rec, 6)?,
+        element: rec[9],
+        reaction: rec[10],
+        knockback: [i16_at(rec, 12)?, i16_at(rec, 14)?],
+        flags: rec[18],
+        hit_sound: u32_at(rec, 0x1c)? as i32,
+        hit_effect: rec[0xb],
+        hit_effect_random: rec[0x2d],
+        refact_self: rec[0x13],
+        refact_other: rec[0x14],
+        reflect_motion: rec[0x15],
+        reflect_hit_back: rec[0x16] as i8,
+        reflect_range: rec[0x22],
+        reflect_angle: rec[0x23] as i8,
+        step: rec[0],
+        switch: rec[0x25],
+        interval: rec[0x26],
+        combo_group: rec[0x2c],
+        drive_drain: rec[0x29],
+        revenge: rec[0x2a],
+        hp_drain: rec[0x2f],
+        combo_kind: rec[0x2e],
+        spin: i16_at(rec, 0x10)?,
+    })
 }
 
 /// The ATKP row for `id` at sub-table 0, hit step 0 (record bytes 0 and 1
 /// zero), as the executable's search key ((id << 8) | sub) << 8 selects.
 pub fn attack(atkp: &[u8], id: u16) -> io::Result<Attack> {
+    attack_steps(atkp, id)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| invalid("ATKP id absent"))
+}
+
+/// Every sub-table 0 row of `id` in file order: step 0 first, then the
+/// level variants that follow it (FUN_1403eafc0 finds the first, FUN_1403eb230
+/// walks the rest while Id and sub-table match).
+pub fn attack_steps(atkp: &[u8], id: u16) -> io::Result<Vec<Attack>> {
+    attack_steps_sub(atkp, id, 0)
+}
+
+/// The rows of `id` in sub-table `sub` (the attacker's stats byte +0x258;
+/// spells pass their `magi` row index).
+pub fn attack_steps_sub(atkp: &[u8], id: u16, sub: u8) -> io::Result<Vec<Attack>> {
     let count = u32_at(atkp, 4)? as usize;
+    let mut out = Vec::new();
     for k in 0..count {
         let r = 8 + k * 48;
         let rec = atkp
             .get(r..r + 48)
             .ok_or_else(|| invalid("ATKP truncated"))?;
-        if u16_at(rec, 2)? == id && rec[0] == 0 && rec[1] == 0 {
-            return Ok(Attack {
-                id,
-                kind: rec[4],
-                stat: rec[5],
-                power: u16_at(rec, 6)?,
-                element: rec[9],
-                reaction: rec[10],
-                knockback: [i16_at(rec, 12)?, i16_at(rec, 14)?],
-                flags: rec[18],
-                hit_sound: u32_at(rec, 0x1c)? as i32,
-                hit_effect: rec[0xb],
-                hit_effect_random: rec[0x2d],
-                refact_self: rec[0x13],
-                refact_other: rec[0x14],
-                reflect_motion: rec[0x15],
-                reflect_hit_back: rec[0x16] as i8,
-                reflect_range: rec[0x22],
-                reflect_angle: rec[0x23] as i8,
-            });
+        if u16_at(rec, 2)? == id && rec[1] == sub {
+            if out.is_empty() && rec[0] != 0 {
+                continue;
+            }
+            out.push(parse_row(rec)?);
+        } else if !out.is_empty() {
+            break;
         }
     }
-    Err(invalid("ATKP id absent"))
+    if out.is_empty() {
+        return Err(invalid("ATKP id absent"));
+    }
+    Ok(out)
+}
+
+/// FUN_1403eb230: the row used for the `count`-th consecutive hit of a
+/// combo group (0-based).
+pub fn step_row(rows: &[Attack], count: u32) -> &Attack {
+    &rows[step_index(rows, count)]
+}
+
+/// The index of [`step_row`]'s row.
+pub fn step_index(rows: &[Attack], count: u32) -> usize {
+    let mut best = 0;
+    for (i, r) in rows.iter().enumerate().skip(1) {
+        if count < r.step as u32 {
+            break;
+        }
+        if r.switch == 0 || ((count - r.step as u32) & 1) + 1 == r.switch as u32 {
+            best = i;
+        }
+    }
+    best
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +174,10 @@ pub struct Enemy {
     pub damage_min: u16,
     /// Physical, fire, blizzard, thunder, dark, light, general (percent).
     pub weakness: [u16; 7],
+    /// +0x56: the EXP multiplier of the kill.
+    pub exp: u16,
+    /// +0x58: the przt id scattered on death (0: none).
+    pub prize: u16,
 }
 
 pub fn enemy(enmp: &[u8], id: u16) -> io::Result<Enemy> {
@@ -119,6 +199,8 @@ pub fn enemy(enmp: &[u8], id: u16) -> io::Result<Enemy> {
                 damage_cap: u16_at(rec, 68)?,
                 damage_min: u16_at(rec, 70)?,
                 weakness,
+                exp: u16_at(rec, 0x56)?,
+                prize: u16_at(rec, 0x58)?,
             });
         }
     }
@@ -151,6 +233,42 @@ pub fn enemy_level(lvpm: &[u8], level: u16) -> io::Result<LevelRow> {
     })
 }
 
+/// One przt record: the nine prize counts and three item drops with their
+/// chances in percent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Prize {
+    pub counts: [u8; 9],
+    pub items: [(u16, u16); 3],
+}
+
+/// The przt record of an id; an absent id falls back to 0x48
+/// (FUN_1403ecc70). Rows are 0x18 bytes after u32 version, u32 count.
+pub fn prize(przt: &[u8], id: u16) -> io::Result<Prize> {
+    let count = u32_at(przt, 4)? as usize;
+    let find = |want: u16| -> io::Result<Option<Prize>> {
+        for k in 0..count {
+            let r = 8 + k * 0x18;
+            let rec = przt
+                .get(r..r + 0x18)
+                .ok_or_else(|| invalid("PRZT truncated"))?;
+            if u16_at(rec, 0)? == want {
+                let mut counts = [0u8; 9];
+                counts.copy_from_slice(&rec[2..11]);
+                let mut items = [(0u16, 0u16); 3];
+                for (i, it) in items.iter_mut().enumerate() {
+                    *it = (u16_at(rec, 0xc + i * 4)?, u16_at(rec, 0xe + i * 4)?);
+                }
+                return Ok(Some(Prize { counts, items }));
+            }
+        }
+        Ok(None)
+    };
+    match find(id)? {
+        Some(p) => Ok(p),
+        None => find(0x48)?.ok_or_else(|| invalid("PRZT has no fallback row")),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayerLevel {
     /// EXP of the row (u32 at +0; the Status "Next LV" subtracts the
@@ -160,6 +278,9 @@ pub struct PlayerLevel {
     pub magic: u8,
     pub defense: u8,
     pub ap: u8,
+    /// +8 / +0xa / +0xc: the ability items learned at this level, one per
+    /// growth choice (FUN_1403ed7d0 reads +8 + choice x 2).
+    pub abilities: [u16; 3],
 }
 
 /// LVUP row for a character id and level: the character block is at the
@@ -180,6 +301,11 @@ pub fn player_level(lvup: &[u8], character: usize, level: usize) -> io::Result<P
         magic: row[5],
         defense: row[6],
         ap: row[7],
+        abilities: [
+            u16::from_le_bytes([row[8], row[9]]),
+            u16::from_le_bytes([row[10], row[11]]),
+            u16::from_le_bytes([row[12], row[13]]),
+        ],
     })
 }
 
@@ -201,6 +327,25 @@ mod tests {
         assert_eq!((a.power, a.reaction, a.knockback), (100, 3, [125, 0]));
         assert_eq!((a.hit_sound, a.hit_effect), (-1, 0));
         assert!(attack(&atkp, 127).is_err());
+
+        // Level variants: step 0 Power 150, step 1 Power 25 (a switch
+        // row applies on every other hit past its step).
+        let mut atkp = vec![6, 0, 0, 0, 3, 0, 0, 0];
+        for (step, power, switch) in [(0u8, 150u16, 0u8), (1, 25, 0), (3, 40, 2)] {
+            let mut rec = [0u8; 48];
+            rec[0] = step;
+            rec[2] = 19;
+            rec[6..8].copy_from_slice(&power.to_le_bytes());
+            rec[0x25] = switch;
+            atkp.extend(rec);
+        }
+        let rows = attack_steps(&atkp, 19).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(step_row(&rows, 0).power, 150);
+        assert_eq!(step_row(&rows, 1).power, 25);
+        assert_eq!(step_row(&rows, 3).power, 25);
+        assert_eq!(step_row(&rows, 4).power, 40);
+        assert_eq!(step_row(&rows, 5).power, 25);
 
         let mut lvpm = vec![0u8; 24];
         lvpm[12..14].copy_from_slice(&21u16.to_le_bytes());

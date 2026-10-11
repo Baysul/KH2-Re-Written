@@ -54,6 +54,8 @@ enum Id {
     MpBackground,
     MpFill,
     MpEndCap,
+    /// The MP-charge streak (0x568, group 27), shown while charging.
+    MpStreak,
     DriveFrame,
     DriveFill,
     DriveDigit,
@@ -105,7 +107,7 @@ enum Node {
     Mask(usize),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GaugeStats {
     pub hp: i32,
     pub max_hp: i32,
@@ -117,6 +119,9 @@ pub struct GaugeStats {
     pub drive: u8,
     pub drive_level: u8,
     pub drive_max: u8,
+    /// MP Charge: remaining and total (slot +0x1bc / +0x1c0); None when MP
+    /// is not charging.
+    pub mp_charge: Option<(f32, f32)>,
 }
 
 pub struct Gauge {
@@ -128,6 +133,8 @@ pub struct Gauge {
     shadow_hp: i32,
     last_level: u8,
     max_shown: bool,
+    /// MP Charge is showing (the byte at +0x29 of FUN_140181af0).
+    charging: bool,
 }
 
 /// A drawable this frame: sprite quads (depth tested when z != 0) or
@@ -158,6 +165,7 @@ impl Gauge {
             shadow_hp: stats.hp,
             last_level: stats.drive_level,
             max_shown: false,
+            charging: false,
         };
         let root = g.sprite(seq, Id::Root, 136, Some(ROOT_LOOP[g.state]), None, 0);
         g.mask(MaskKind::Clear, root, 0);
@@ -179,6 +187,9 @@ impl Gauge {
         g.sprite(seq, Id::MpBackground, 119, None, Some(cap), 0);
         g.sprite(seq, Id::MpFill, 115, None, Some(cap), 0);
         g.sprite(seq, Id::MpEndCap, 120, None, Some(cap), 0);
+        // Created hidden; priority 7005.
+        let streak = g.sprite(seq, Id::MpStreak, 27, None, Some(root), 0);
+        g.elements[streak].hidden = true;
         let frame = g.sprite(seq, Id::DriveFrame, 21, Some(23), Some(root), 0);
         let sector = g.mask(MaskKind::Sector, frame, 6000);
         g.masks[sector].relative = [50., 100.];
@@ -329,13 +340,53 @@ impl Gauge {
         self.bar(Id::ShadowBar, self.shadow_hp, false);
         self.ring_mask(rings[2], stats.hp, false);
         self.bar(Id::HpBar, stats.hp, false);
-        // MP, not charging: 1 MP = 1 px (0.1 at 0x1406239f8).
+        // MP Charge (FUN_140181af0): entering swaps the MP groups to
+        // 110 / 113 / 109 / 114 (queued 111) and the Drive frame loop to 26,
+        // and shows the streak; leaving restores 116 / 119 / 115 / 120
+        // (queued 117) and 23.
+        let charging = stats.mp_charge.is_some();
+        if charging != self.charging {
+            self.charging = charging;
+            let (cap, bg, fill, end, queued, frame) = if charging {
+                (110, 113, 109, 114, 111, 26)
+            } else {
+                (116, 119, 115, 120, 117, 23)
+            };
+            self.set_group(seq, Id::MpCap, cap);
+            let i = self.find(Id::MpCap);
+            self.elements[i].queued = Some(queued);
+            self.set_group(seq, Id::MpBackground, bg);
+            self.set_group(seq, Id::MpFill, fill);
+            self.set_group(seq, Id::MpEndCap, end);
+            if stats.drive_mode <= 1 {
+                self.set_group(seq, Id::DriveFrame, frame);
+            }
+            let streak = self.find(Id::MpStreak);
+            if charging && !matches!(stats.drive_mode, 2..=4) {
+                self.set_group(seq, Id::MpStreak, 27);
+            } else {
+                self.elements[streak].hidden = true;
+            }
+        }
         let bg = self.find(Id::MpBackground);
-        self.elements[bg].modifiers.scale_x = (stats.max_mp as f32 + 0.1) / 100.;
         let fill = self.find(Id::MpFill);
-        self.elements[fill].modifiers.scale_x = (stats.mp as f32 + 0.1) / 100.;
         let end = self.find(Id::MpEndCap);
-        self.elements[end].offset = [-(((stats.max_mp as f32 + 0.1) as i32) as f32), 0.];
+        match stats.mp_charge {
+            Some((remaining, total)) => {
+                // Charging: background 1.0, end cap at -100, fill by the
+                // remaining charge (0x1403c20e0).
+                self.elements[bg].modifiers.scale_x = 1.;
+                self.elements[end].offset = [-100., 0.];
+                self.elements[fill].modifiers.scale_x =
+                    if total > 0. { remaining / total } else { 0. };
+            }
+            None => {
+                // Not charging: 1 MP = 1 px (0.1 at 0x1406239f8).
+                self.elements[bg].modifiers.scale_x = (stats.max_mp as f32 + 0.1) / 100.;
+                self.elements[fill].modifiers.scale_x = (stats.mp as f32 + 0.1) / 100.;
+                self.elements[end].offset = [-(((stats.max_mp as f32 + 0.1) as i32) as f32), 0.];
+            }
+        }
         // Drive, normal mode: a full gauge (100) uses 200 (0x140585efc).
         let d = if stats.drive == 100 {
             200.
@@ -714,6 +765,7 @@ mod tests {
             drive: 0,
             drive_level: 0,
             drive_max: 3,
+            mp_charge: None,
         };
         assert_eq!(Gauge::state_of(&stats(5)), 1);
         assert_eq!(Gauge::state_of(&stats(6)), 0);

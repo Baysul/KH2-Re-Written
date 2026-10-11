@@ -34,6 +34,21 @@ const ROW: usize = 16;
 const LAST_ROW: usize = 11;
 const ICON_FRAME: usize = 45;
 const POINTER: usize = 20;
+/// Submenu art groups by menu kind, style 0 (T_EF0[kind]: panel, cursor,
+/// row, last row; command-01 section 8): Magic 1, Items 2, Drive 3, the
+/// party list 4.
+fn sub_groups(kind: usize) -> Option<[usize; 4]> {
+    match kind {
+        1 => Some([60, 57, 59, 58]),
+        2 => Some([51, 48, 50, 49]),
+        3 => Some([77, 74, 76, 75]),
+        4 | 11 => Some([64, 61, 63, 62]),
+        _ => None,
+    }
+}
+/// Level step: each submenu level sits 16 units right of the one below.
+const LEVEL_STEP: f32 = 16.;
+
 /// Reaction-command slot (0x140718358 normal group 2) at (0x1c, 0x179)
 /// less a row pitch per item, like the panel [inferred: above the rows];
 /// a failed angle gate shows it at RGB x0.6 (0x1405b1c50 mode 5).
@@ -88,6 +103,17 @@ pub struct Reaction {
     pub dimmed: bool,
 }
 
+/// An opened submenu (level 1): its rows and cursor with the kind's art.
+pub struct Sub {
+    pub kind: usize,
+    pub items: Vec<Item>,
+    pub cursor: usize,
+    slots: Vec<Slot>,
+    counter: usize,
+    last_cursor: Option<usize>,
+    last_count: usize,
+}
+
 pub struct CommandMenu {
     root: Player,
     slots: Vec<Slot>,
@@ -97,6 +123,10 @@ pub struct CommandMenu {
     pub cursor: usize,
     last_cursor: Option<usize>,
     last_count: usize,
+    /// The submenu kind each top row opens on decide (None executes).
+    pub opens: Vec<Option<usize>>,
+    /// The open submenu, if any.
+    pub sub: Option<Sub>,
 }
 
 /// What the menu did with this frame's input.
@@ -107,6 +137,16 @@ pub enum Decision {
     Execute(usize),
     /// The row cannot be selected (error sound in the original).
     Invalid,
+    /// The row opens its submenu (the caller supplies it with `open_sub`).
+    Open(usize),
+    /// Execute row `index` of the open submenu (opened by top row `row`);
+    /// the menu closes and the top cursor returns to 0.
+    ExecuteSub {
+        row: usize,
+        index: usize,
+    },
+    /// The submenu was closed with back.
+    Closed,
 }
 
 impl CommandMenu {
@@ -122,12 +162,68 @@ impl CommandMenu {
             cursor: 0,
             last_cursor: None,
             last_count: 0,
+            opens: Vec::new(),
+            sub: None,
         }
+    }
+
+    /// Opens the submenu of `kind` on top of the top level.
+    pub fn open_sub(&mut self, kind: usize, items: Vec<Item>) {
+        self.sub = Some(Sub {
+            kind,
+            items,
+            cursor: 0,
+            slots: Vec::new(),
+            counter: 0,
+            last_cursor: None,
+            last_count: 0,
+        });
+    }
+
+    pub fn close_sub(&mut self) {
+        self.sub = None;
     }
 
     /// Up/down wrap; decide executes or reports an unusable row. After an
     /// execution the cursor returns to the top (FUN_1403b1b80(menu, 0)).
     pub fn input(&mut self, up: bool, down: bool, decide: bool) -> Decision {
+        self.input_with_back(up, down, decide, false)
+    }
+
+    /// `input` with the back button: it closes an open submenu.
+    pub fn input_with_back(&mut self, up: bool, down: bool, decide: bool, back: bool) -> Decision {
+        if let Some(sub) = self.sub.as_mut() {
+            let n = sub.items.len();
+            if back || n == 0 {
+                self.sub = None;
+                return Decision::Closed;
+            }
+            if decide {
+                return if sub.items[sub.cursor].colour < 4 {
+                    let index = sub.cursor;
+                    let row = self.cursor;
+                    self.sub = None;
+                    self.cursor = 0;
+                    Decision::ExecuteSub { row, index }
+                } else {
+                    Decision::Invalid
+                };
+            }
+            if up {
+                sub.cursor = if sub.cursor > 0 {
+                    sub.cursor - 1
+                } else {
+                    n - 1
+                };
+            } else if down {
+                sub.cursor = if sub.cursor < n - 1 {
+                    sub.cursor + 1
+                } else {
+                    0
+                };
+            }
+            return Decision::None;
+        }
         let n = self.items.len();
         if n == 0 {
             return Decision::None;
@@ -135,6 +231,9 @@ impl CommandMenu {
         if decide {
             return if self.items[self.cursor].colour < 4 {
                 let row = self.cursor;
+                if self.opens.get(row).copied().flatten().is_some() {
+                    return Decision::Open(row);
+                }
                 self.cursor = 0;
                 Decision::Execute(row)
             } else {
@@ -196,6 +295,94 @@ impl CommandMenu {
         s.text_colour = colour;
         self.counter += 1;
         i
+    }
+
+    /// The submenu level's build (FUN_14015b6d0 with L = 1): the kind's
+    /// panel, its rows bottom-anchored like the top level, and the cursor
+    /// row moved 8 right.
+    fn update_sub(sub: &mut Sub, seq: &Sequence) {
+        let Some([panel, cursor_group, row_group, last_group]) = sub_groups(sub.kind) else {
+            return;
+        };
+        let n = sub.items.len();
+        let cur = sub.cursor.min(n.saturating_sub(1));
+        if sub.last_count != n {
+            sub.slots.clear();
+        }
+        sub.counter = 0;
+        let x = ROOT_BASE[0] + LEVEL_STEP;
+        let place = |sub: &mut Sub,
+                     group: usize,
+                     force: bool,
+                     base: [f32; 2],
+                     text: Option<Vec<u8>>,
+                     colour: u32| {
+            let i = sub.counter;
+            if i == sub.slots.len() {
+                sub.slots.push(Slot {
+                    player: Player::new(seq, group),
+                    queued: None,
+                    base,
+                    parent: None,
+                    text: None,
+                    text_colour: colour,
+                    disabled: false,
+                    dimmed: false,
+                    context: [0.; 2],
+                    resolved: [0.; 2],
+                });
+            } else if force {
+                sub.slots[i].player = Player::new(seq, group);
+                sub.slots[i].queued = None;
+            }
+            let s = &mut sub.slots[i];
+            if text.is_some() {
+                s.text = text;
+            }
+            s.base = base;
+            s.text_colour = colour;
+            sub.counter += 1;
+        };
+        place(
+            sub,
+            panel,
+            false,
+            [x, PANEL_ANCHOR - PITCH * n as f32],
+            None,
+            0x80b4b4b4,
+        );
+        let mut y = ROW_ANCHOR - PITCH * n as f32;
+        let mut cursor_y = y;
+        for i in 0..n {
+            if i != cur {
+                let group = if i == n - 1 { last_group } else { row_group };
+                let item = &sub.items[i];
+                let (label, colour) = (item.label.clone(), ROW_TEXT[item.colour.min(8)]);
+                place(sub, group, true, [x, y], Some(label), colour);
+            } else {
+                cursor_y = y;
+            }
+            y += PITCH;
+        }
+        if n > 0 {
+            let force = sub.last_cursor != Some(cur) || sub.last_count != n;
+            let item = &sub.items[cur];
+            let (label, colour) = (item.label.clone(), CURSOR_TEXT[item.colour.min(8)]);
+            place(
+                sub,
+                cursor_group,
+                force,
+                [x + CURSOR_SHIFT, cursor_y],
+                Some(label),
+                colour,
+            );
+        }
+        sub.last_cursor = Some(cur);
+        sub.last_count = n;
+        sub.slots.truncate(sub.counter);
+        for s in &mut sub.slots {
+            s.player.update(seq, 1.);
+        }
     }
 
     /// One frame: root update, the level-0 build (FUN_14015b6d0), then the
@@ -294,6 +481,9 @@ impl CommandMenu {
         }
         self.last_cursor = Some(cur);
         self.last_count = n;
+        if let Some(sub) = self.sub.as_mut() {
+            Self::update_sub(sub, seq);
+        }
         self.slots.truncate(self.counter);
         for s in &mut self.slots {
             s.player.update(seq, 1.);
@@ -322,47 +512,63 @@ impl CommandMenu {
             z: 0,
             sheet,
         }];
-        for i in 0..self.slots.len() {
-            let base = match self.slots[i].parent {
-                Some(p) => {
-                    let p = &self.slots[p];
-                    [p.context[0] + p.resolved[0], p.context[1] + p.resolved[1]]
-                }
-                None => self.slots[i].base,
-            };
-            let s = &mut self.slots[i];
-            s.resolved = base;
-            s.context = seq.child_context(&s.player, &m).unwrap_or([0.; 2]);
-            if s.disabled {
-                continue;
-            }
-            let mut m = m;
-            if s.dimmed {
-                m.color = [REACTION_DIM, REACTION_DIM, REACTION_DIM, 1.];
-            }
-            out.push(Draw::Quads {
-                quads: seq.quads(&s.player, [X_ORIGIN + base[0], base[1]], &m),
-                z: 0,
-                sheet,
-            });
-            if let Some(text) = &s.text {
-                // Text RGB from the colour table; alpha from the row's
-                // current animation colour (flags 4 and 8 set).
-                let alpha = seq.current_color(&s.player).map_or(1., |c| c[3]);
-                let mut rgba = color(s.text_colour);
-                rgba[3] = alpha;
-                let origin = [
-                    X_ORIGIN + base[0] + s.context[0] + TEXT_OFFSET[0],
-                    base[1] + s.context[1] + TEXT_OFFSET[1],
-                ];
-                out.push(Draw::Quads {
-                    quads: text_quads(text, origin, rgba, font),
-                    z: 0,
-                    sheet: font_sheet,
-                });
-            }
+        draw_slots(&mut self.slots, seq, font, sheet, font_sheet, &mut out);
+        if let Some(sub) = self.sub.as_mut() {
+            draw_slots(&mut sub.slots, seq, font, sheet, font_sheet, &mut out);
         }
         out
+    }
+}
+
+/// Draws one level's slots in creation order: sprite, then label.
+fn draw_slots(
+    slots: &mut [Slot],
+    seq: &Sequence,
+    font: &Font,
+    sheet: usize,
+    font_sheet: usize,
+    out: &mut Vec<Draw>,
+) {
+    let m = Modifiers::default();
+    for i in 0..slots.len() {
+        let base = match slots[i].parent {
+            Some(p) => {
+                let p = &slots[p];
+                [p.context[0] + p.resolved[0], p.context[1] + p.resolved[1]]
+            }
+            None => slots[i].base,
+        };
+        let s = &mut slots[i];
+        s.resolved = base;
+        s.context = seq.child_context(&s.player, &m).unwrap_or([0.; 2]);
+        if s.disabled {
+            continue;
+        }
+        let mut m = m;
+        if s.dimmed {
+            m.color = [REACTION_DIM, REACTION_DIM, REACTION_DIM, 1.];
+        }
+        out.push(Draw::Quads {
+            quads: seq.quads(&s.player, [X_ORIGIN + base[0], base[1]], &m),
+            z: 0,
+            sheet,
+        });
+        if let Some(text) = &s.text {
+            // Text RGB from the colour table; alpha from the row's current
+            // animation colour (flags 4 and 8 set).
+            let alpha = seq.current_color(&s.player).map_or(1., |c| c[3]);
+            let mut rgba = color(s.text_colour);
+            rgba[3] = alpha;
+            let origin = [
+                X_ORIGIN + base[0] + s.context[0] + TEXT_OFFSET[0],
+                base[1] + s.context[1] + TEXT_OFFSET[1],
+            ];
+            out.push(Draw::Quads {
+                quads: text_quads(text, origin, rgba, font),
+                z: 0,
+                sheet: font_sheet,
+            });
+        }
     }
 }
 
@@ -479,6 +685,8 @@ mod tests {
             cursor: 0,
             last_cursor: None,
             last_count: 0,
+            opens: Vec::new(),
+            sub: None,
         };
         menu.input(true, false, false);
         assert_eq!(menu.cursor, 3);
@@ -486,5 +694,82 @@ mod tests {
         assert_eq!(menu.cursor, 0);
         menu.input(false, true, false);
         assert_eq!(menu.input(false, false, true), Decision::Invalid);
+    }
+
+    #[test]
+    fn a_submenu_opens_executes_and_backs_out() {
+        let items = (0..3)
+            .map(|_| Item {
+                label: vec![0x2e],
+                icon: 2,
+                colour: 0,
+            })
+            .collect();
+        let mut menu = CommandMenu {
+            root: Player {
+                group: 0,
+                time: 0.,
+                state: 1,
+                plays_left: 0,
+            },
+            slots: Vec::new(),
+            counter: 0,
+            items,
+            reaction: None,
+            cursor: 0,
+            last_cursor: None,
+            last_count: 0,
+            opens: vec![None, Some(1), None],
+            sub: None,
+        };
+        // Row 1 opens the submenu and the cursor stays on it.
+        menu.input(false, true, false);
+        assert_eq!(menu.input(false, false, true), Decision::Open(1));
+        assert_eq!(menu.cursor, 1);
+        let sub_items = vec![
+            Item {
+                label: vec![0x2e],
+                icon: 2,
+                colour: 0,
+            },
+            Item {
+                label: vec![0x2e],
+                icon: 2,
+                colour: 5,
+            },
+        ];
+        menu.open_sub(1, sub_items);
+        // Back closes it without leaving the top row.
+        assert_eq!(
+            menu.input_with_back(false, false, false, true),
+            Decision::Closed
+        );
+        assert_eq!(menu.cursor, 1);
+        // Reopen, move to the unusable row (error), back to the usable one,
+        // decide: the sub closes and the top cursor returns to 0.
+        menu.open_sub(
+            1,
+            vec![
+                Item {
+                    label: vec![0x2e],
+                    icon: 2,
+                    colour: 0,
+                },
+                Item {
+                    label: vec![0x2e],
+                    icon: 2,
+                    colour: 5,
+                },
+            ],
+        );
+        menu.input(false, true, false);
+        assert_eq!(menu.input(false, false, true), Decision::Invalid);
+        menu.input(true, false, false);
+        assert_eq!(
+            menu.input(false, false, true),
+            Decision::ExecuteSub { row: 1, index: 0 }
+        );
+        assert!(menu.sub.is_none());
+        assert_eq!(menu.cursor, 0);
     }
 }
