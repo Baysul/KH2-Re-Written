@@ -106,4 +106,7 @@ The verdict column quotes the first sentences of each record's `Verdict` line. G
 | [T098](T098-item-pictures.md) | Item pictures (keyblades, items, equipment) | PROGRESS: the Items, Use and Equip screens show their pictures. Next: the Journal category pages with their pictures, or the key-cap prompts. |
 | [T099](T099-axel-roxas-cutscene.md) | Axel and Roxas cutscene (tt19 event 613) | No verdict recorded; read the record. |
 | [T100](T100-merge-work-branches.md) | Merge every work branch into main | PROGRESS: every branch is on `main` and the workspace builds. md`. |
-| [T101](T101-skate3-board.md) | Skate 3 skateboard on J (disc admission) | PROGRESS: J refuses with a notice until a Skate 3 disc is set in the launcher. Next: riding, blocked on the owner's ISO. |
+| [T101](T101-skate3-board.md) | Skate 3 skateboard on J (disc admission) | PROGRESS: the J key refuses correctly without a disc. Riding is BLOCKED on the owner's ISO. |
+| [T102](T102-rust-rewrite-priorities.md) | Rank essential Rust rewrite work | PASS for the documentation deliverable only; no gameplay or source-qualification gate passes. |
+| [T103](T103-skate3-riding.md) | Skate 3 riding on J | PROGRESS: riding works in the test room from the owner's disc. |
+| [T104](T104-twilight-town-enemy-scripts.md) | Twilight Town enemy inventory and Rust script decoding | PARTIAL. Source-bound inventory and direct script decoding pass their finite checks. |

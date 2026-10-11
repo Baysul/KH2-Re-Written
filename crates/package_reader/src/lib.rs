@@ -8,6 +8,7 @@ use std::{collections::HashSet, io};
 pub mod ard;
 pub mod bar;
 pub mod battle_tables;
+pub mod bdscript;
 pub mod command_table;
 pub mod effect;
 pub mod event;

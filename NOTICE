@@ -1,5 +1,13 @@
 KH2FinalRewrite
 
+The bounded bdscript header/opcode reader in
+crates/package_reader/src/bdscript.rs follows OpenKH BdxHeader.cs and
+BdxInstructionDescs.cs at commit
+7a3b945c538d32c6a285128c98aefba093f52ceb (Apache-2.0), checked against the
+selected native interpreter with Ghidra. Bounds and direct control-flow
+inspection are owned; this is not an implementation of engine traps,
+indirect act callbacks, or installed PC-specific interpreter adjustments.
+
 The package original transform in crates/package_reader/src/original.rs
 is adapted from OpenKH EgsEncryption.cs at commit
 7a3b945c538d32c6a285128c98aefba093f52ceb under Apache-2.0.
