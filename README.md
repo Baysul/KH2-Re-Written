@@ -61,7 +61,7 @@ Source manifests, package records, captures and saves stay outside this reposito
 
 ## Credits
 
-- **Project owner:** burba ([@BurBaGlurbus](https://github.com/BurBaGlurbus)), who maintains the project and made the splash art.
+- **Project owner:** burba ([@BurBaGlurbus](https://github.com/BurBaGlurbus)), who maintains the project.
 - **Code:** written with [Claude](https://claude.com/claude-code), an AI coding assistant, under the owner's direction.
 - **Format research:** [OpenKH](https://git.openkh.dev/) (Apache-2.0) documents the game's file formats, and the project's reader follows it. The attribution list is in [NOTICE](NOTICE).
 - **Other third-party code:** [Bevy](https://bevy.org), the `image` and `png` crates, zlib-rs, Microsoft DirectXTex (MIT), the .NET runtime (MIT), and `bevy_mikktspace` (Morten Mikkelsen). Release licences are in [docs/release/](docs/release/).

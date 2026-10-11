@@ -29,9 +29,8 @@ use windows_shell::layout2d::{self, Menu2ld};
 use windows_shell::newgame::{self, NewGame, Texts};
 use windows_shell::pad::{self, Pad};
 use windows_shell::sound::{self, Banks, Music};
-use windows_shell::splash::{self, Splash};
 use windows_shell::sprite2d::Sheet;
-use windows_shell::title::{Action, Event, SCENE_BOOT, State, Title};
+use windows_shell::title::{Action, Event, State, Title};
 use windows_shell::title_edits;
 use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
 
@@ -110,12 +109,6 @@ mod pad_bits {
 struct Session {
     menu: Menu2ld,
     first_boot: bool,
-    /// The rewrite's own studio splash, inside the boot splash after the
-    /// Square Enix logo (not in the original game); `None` once played,
-    /// without the boot splash, and for unattended runs.
-    studio: Option<Splash>,
-    studio_image: Option<splash::Image>,
-    studio_sheet: usize,
     title: Option<Title>,
     dialog: Option<NewGame>,
     music_rx: Option<sound::MusicSlot>,
@@ -214,9 +207,6 @@ fn setup(
         }
     }
     s.white = frame.add_sheet(&mut images, vec![255; 4], [1, 1], 1.);
-    if let Some(i) = s.studio_image.take() {
-        s.studio_sheet = frame.add_sheet(&mut images, i.rgba, i.size, 1.);
-    }
     s.font_sheet = frame.add_sheet(
         &mut images,
         std::mem::take(&mut s.font.rgba),
@@ -288,17 +278,9 @@ fn tick(
     }
     s.image_sheets[GLYPH_IMAGE] = s.glyph_sheets[s.glyph].expect("glyph sheet");
 
-    // The studio splash holds the boot splash on its bare backdrop after the
-    // Square Enix logo [rebuild addition]: no layout or title-task frames
-    // while it plays.
-    let studio_now = s.studio.is_some()
-        && s.title.as_ref().is_some_and(|t| {
-            t.main.scene == SCENE_BOOT && t.main.player.time >= splash::BOOT_FRAME
-        });
-
     // Sprite and layout tasks (priority ~0x7532) run first, then the 2D
     // draw (103000), then the title task (300000), then the fade (330000).
-    if !studio_now && let Some(t) = s.title.as_mut() {
+    if let Some(t) = s.title.as_mut() {
         t.update_layouts(&s.menu.layout, 1.);
     }
     let dialog_seq = &s.menu.layout.sequences[0];
@@ -325,19 +307,6 @@ fn tick(
                 Sheet::Icon => s.icon_sheet,
             };
             s.snapshot.push((slot, quads));
-        }
-    }
-
-    if studio_now && let Some(mut sp) = s.studio.take() {
-        if sp.frame == 0 {
-            s.event(serde_json::json!({"event":"studio_splash","tick":tick}));
-        }
-        let (backdrop, logo, overlay) = sp.quads();
-        s.snapshot.push((s.white, backdrop));
-        s.snapshot.extend(logo.map(|q| (s.studio_sheet, vec![q])));
-        s.snapshot.extend(overlay.map(|q| (s.white, vec![q])));
-        if !sp.update() {
-            s.studio = Some(sp);
         }
     }
 
@@ -420,7 +389,7 @@ fn tick(
                     }
                 }
             }
-        } else if !studio_now {
+        } else {
             events = t.frame(&s.menu.layout, trig, 1.);
         }
         for e in events {
@@ -728,19 +697,11 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         }
     };
     // Unattended plans press at fixed ticks from the scene-17 start, so they
-    // skip both splashes.
+    // skip the boot splash.
     let first_boot = config.first_boot && autoplay.is_none();
-    let (studio, studio_image) = if first_boot {
-        (Some(Splash::default()), Some(splash::load()?))
-    } else {
-        (None, None)
-    };
     let session = Session {
         menu,
         first_boot,
-        studio,
-        studio_image,
-        studio_sheet: 0,
         title: None,
         dialog: None,
         music_rx,

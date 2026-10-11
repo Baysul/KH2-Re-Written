@@ -37,7 +37,7 @@ Dependencies: `windows_shell` uses all others; `package_reader` uses `source_ide
 - `src/main.rs`: `windows_shell` smoke app (synthetic checker BMP from `assets/development-checker.bmp`).
 - `src/bin/kh2fm/`: **the player launcher**. `main.rs` runs a program (`title`, `room`, `talk`, `play`) with its launch file or arguments, or with no arguments opens the launcher window (`launcher.rs`; `launcher/install.rs` finds and checks the game folder, `launcher/paint.rs` draws without game files). `test_room.rs` is the playable test room. `title.rs` is the title screen presentation; its state machine lives in `src/title.rs`.
 - `src/bin/room_scene.rs`, `model_inspector.rs`, `image_inspector.rs`, `motion_eval_compare.rs`, `motion_ik_probe.rs`: developer research binaries.
-- `assets/`: `development-checker.bmp` (smoke app), `glurbus-splash.png` (boot splash, owner's art, [T086](docs/tasks/T086-boot-splash.md)), `final-rewrite-text.png` (title banner, [T087](docs/tasks/T087-title-edits.md)). All three are allowlisted in `.gitignore`.
+- `assets/`: `development-checker.bmp` (smoke app), `final-rewrite-text.png` (title banner, [T087](docs/tasks/T087-title-edits.md)). Both are allowlisted in `.gitignore`.
 
 ## Where things are
 

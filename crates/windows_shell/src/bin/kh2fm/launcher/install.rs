@@ -300,7 +300,7 @@ pub struct Test {
 pub const TESTS: [Test; 4] = [
     Test {
         name: "Title screen",
-        blurb: "Disney, Square Enix and GLURBUS logos, intro, title menu",
+        blurb: "Disney and Square Enix logos, intro, title menu",
         program: "title",
     },
     Test {
