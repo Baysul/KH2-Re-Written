@@ -61,6 +61,7 @@ struct Locator {
     ordinal: usize,
     name_hash: [u8; 16],
 }
+mod debug_menu;
 mod drive_room;
 mod item_room;
 mod kit;
@@ -754,6 +755,8 @@ struct Game {
     /// Test-room aid (F4): a blow-reaction hit with no damage, to try the
     /// blow, Aerial Recovery and Retaliating Slash without a blowing enemy.
     debug_blow: bool,
+    /// What the debug menu (F3) left switched on.
+    cheats: debug_menu::Cheats,
     /// Sora's magic: owned spells, running casts and their volumes.
     magic: Option<magic_room::MagicRt>,
     /// Donald and Goofy, following Sora.
@@ -4717,6 +4720,7 @@ fn read_pad(
     mouse: Res<ButtonInput<MouseButton>>,
     pads: Query<(&Gamepad, Option<&Name>)>,
     camp: Option<Res<CampRes>>,
+    debug: Res<debug_menu::DebugMenu>,
     mut game: ResMut<Game>,
 ) {
     if game.autoplay.is_some() {
@@ -4731,7 +4735,7 @@ fn read_pad(
     };
     game.pad_data = data;
     game.pad.update_raw(pad::raw(&data), mode, 1.);
-    if menu {
+    if menu || debug.open {
         return;
     }
     let p = game.pad.pressed;
@@ -6113,6 +6117,7 @@ fn hud_present(
     talk: Option<Res<Talk>>,
     area: Option<Res<AreaRes>>,
     skate: Res<crate::skate::Skate>,
+    debug: Res<debug_menu::DebugMenu>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut hud) = hud else { return };
@@ -6221,6 +6226,18 @@ fn hud_present(
             sheet: *sheet,
         });
     }
+    // The debug menu (F3) draws over everything.
+    if debug.open
+        && let Some((sheet, widths)) = menu_font.as_ref()
+    {
+        let white = textures.len();
+        textures.push(Texture {
+            rgba: &debug_menu::WHITE,
+            size: [1, 1],
+            texel_scale: 1.,
+        });
+        draws.extend(debug_menu::draws(&debug.view, white, *sheet, widths));
+    }
     canvas.render(&draws, &textures);
     if let Some(mut target) = images.get_mut(image.id()) {
         target.data = Some(canvas.rgba.clone());
@@ -6275,6 +6292,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
         magic,
         debug_blow,
         drive,
+        cheats,
         ..
     } = game;
     let Some(rt) = enemy.as_mut() else { return };
@@ -6716,7 +6734,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
         }
     }
     // Aerial Recovery's range 27 (obj+0x18c bit 22) takes no damage.
-    if player.range_invulnerable(clips) {
+    if player.range_invulnerable(clips) || cheats.invincible {
         rt.sora_invulnerable = rt.sora_invulnerable.max(1.);
     }
     if let Some((instance, atkp, _)) = sora_hit
@@ -6846,13 +6864,15 @@ fn combat_tick(game: &mut Game, tick: u64) {
         }
     }
     let before = rt.enemy.current_act();
-    rt.enemy.tick(
-        &mut rt.rng,
-        &rt.clips,
-        &RoomFloor(world),
-        player.position,
-        player.position,
-    );
+    if !cheats.enemy_frozen {
+        rt.enemy.tick(
+            &mut rt.rng,
+            &rt.clips,
+            &RoomFloor(world),
+            player.position,
+            player.position,
+        );
+    }
     // The enemy motion's frame-8 sounds reached this tick.
     let e = &rt.enemy;
     let from = match rt.sound_tick {
@@ -7923,8 +7943,8 @@ fn upload_camp_sheets(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asset
     }
 }
 
-fn field_running(camp: Option<Res<CampRes>>) -> bool {
-    camp.is_none_or(|c| !c.menu_up())
+fn field_running(camp: Option<Res<CampRes>>, debug: Res<debug_menu::DebugMenu>) -> bool {
+    camp.is_none_or(|c| !c.menu_up()) && !debug.open
 }
 
 /// START (logical 0x2 in the field's pad mode) opens the camp
@@ -7942,6 +7962,7 @@ fn camp_tick(
     mut frame: ResMut<Ui2dFrame>,
     mut images: ResMut<Assets<Image>>,
     mut settings: ResMut<settings_room::SettingsRes>,
+    debug: Res<debug_menu::DebugMenu>,
 ) {
     let Some(mut c) = camp else { return };
     let c = &mut *c;
@@ -7998,6 +8019,10 @@ fn camp_tick(
         c.pad.update(logical, 1.);
     } else {
         c.pad.update_raw(pad::raw(&data), mode, 1.);
+    }
+    // The debug menu holds the pad while it is open.
+    if debug.open {
+        return;
     }
     let mut sounds = Vec::new();
     let layout = &c.source.menu.layout;
@@ -8855,6 +8880,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         shortcut_queued: 0,
         back_queued: false,
         debug_blow: false,
+        cheats: debug_menu::Cheats::default(),
         shortcuts: ROOM_SHORTCUTS,
         drive: None,
         party: loaded
@@ -9142,7 +9168,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             .collect(),
     };
     eprintln!(
-        "Test room ready (the original PC bindings). WASD moves (Left Alt walks), Space/Backspace jump, Enter/left-click decides (Attack), Up/Down choose a command, right-click/Right Shift guards, F/Right Ctrl reacts (Talk), M opens the menu, the mouse turns the camera, middle-click/Right Alt recentres, Esc exits."
+        "Test room ready (the original PC bindings). WASD moves (Left Alt walks), Space/Backspace jump, Enter/left-click decides (Attack), Up/Down choose a command, right-click/Right Shift guards, F/Right Ctrl reacts (Talk), M opens the menu, the mouse turns the camera, middle-click/Right Alt recentres, F3 opens the debug menu, Esc exits."
     );
     let mut app = App::new();
     if let Some(area) = area_res {
@@ -9247,7 +9273,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .insert_resource(ClearColor(Color::srgb(0.06, 0.07, 0.09)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "KH2FM test room (quarantined source) | WASD move, Space jump, Enter/LMB attack, RMB guard, F talk, M menu, Esc".into(),
+                title: "KH2FM test room (quarantined source) | WASD move, Space jump, Enter/LMB attack, RMB guard, F talk, M menu, F3 debug, Esc".into(),
                 resolution: (1280, 720).into(),
                 ..default()
             }),
@@ -9263,6 +9289,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             overlay: false,
         })
         .init_resource::<crate::skate::Skate>()
+        .init_resource::<debug_menu::DebugMenu>()
         .add_plugins(SkatePlugins)
         .add_systems(Startup, (setup, pause_for_autoplay, camp_setup))
         .add_systems(Update, crate::skate::toggle)
@@ -9291,6 +9318,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .add_systems(
             Update,
             ((
+                debug_menu::tick,
                 area_transition,
                 transition_time,
                 bg_visibility,
