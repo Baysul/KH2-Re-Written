@@ -405,7 +405,7 @@ pub struct Test {
     pub program: &'static str,
 }
 
-pub const TESTS: [Test; 4] = [
+pub const TESTS: [Test; 5] = [
     Test {
         name: "Title screen",
         blurb: "Disney and Square Enix logos, intro, title menu",
@@ -422,6 +422,11 @@ pub const TESTS: [Test; 4] = [
         program: "tt",
     },
     Test {
+        name: "The World That Never Was",
+        blurb: "Alley to Between and the areas past it",
+        program: "eh",
+    },
+    Test {
         name: "Cutscene: Roxas and Axel",
         blurb: "Betwixt and Between, before the fight (event 613)",
         program: "event",
@@ -432,10 +437,64 @@ pub const TESTS: [Test; 4] = [
 /// with the story flags 0x800..=0x895 set (Sora's first visit; area-01 §6).
 const TT_START: (u8, u8) = (8, 0);
 const TT_STORY: [u32; 2] = [0x800, 0x895];
+/// Where The World That Never Was test starts: Alley to Between (eh01)
+/// entrance 0, where Betwixt and Between's exit leads (exit-01 §0).
+const EH_START: (u8, u8) = (1, 0);
 
-/// The Twilight Town config: the arena config's actor, HUD, menu and sound
-/// sources with a field area in place of the arena and its enemy.
-pub fn tt_room_config(arena: &Path) -> Result<PathBuf, String> {
+/// The start rooms chosen in the debug menu, by world code
+/// (`{"tt": [area, entrance], ...}`), in the launcher's data folder.
+const START_FILE: &str = "start-area.json";
+
+/// The field worlds the launcher starts, and their default start rooms.
+pub fn field_start(world: &str) -> Option<(u8, u8)> {
+    match world {
+        "tt" => Some(TT_START),
+        "eh" => Some(EH_START),
+        _ => None,
+    }
+}
+
+/// The start room saved for `world` in `dir`, if any.
+pub fn saved_start(dir: &Path, world: &str) -> Option<(u8, u8)> {
+    let bytes = read_limited(&dir.join(START_FILE), CONFIG_LIMIT).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let pair = v.get(world)?.as_array()?;
+    let n = |i: usize| pair.get(i)?.as_u64().and_then(|n| u8::try_from(n).ok());
+    Some((n(0)?, n(1)?))
+}
+
+/// Saves the room `world`'s test starts in from now on (the other worlds'
+/// choices are kept).
+pub fn save_start(world: &str, area: u8, entrance: u8) -> Result<PathBuf, String> {
+    save_start_in(&data_dir(), world, area, entrance)
+}
+
+fn save_start_in(dir: &Path, world: &str, area: u8, entrance: u8) -> Result<PathBuf, String> {
+    let path = dir.join(START_FILE);
+    let mut v = read_limited(&path, CONFIG_LIMIT)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    v[world] = serde_json::json!([area, entrance]);
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let next = dir.join(format!("{START_FILE}.new"));
+    let bytes = serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?;
+    fs::write(&next, bytes)
+        .and_then(|()| fs::rename(&next, &path))
+        .map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// A field world's config (`tt` or `eh`): the arena config's actor, HUD,
+/// menu and sound sources with a field area in place of the arena and its
+/// enemy. `saved` is the start room chosen in the debug menu.
+pub fn field_room_config(
+    arena: &Path,
+    world: &str,
+    saved: Option<(u8, u8)>,
+) -> Result<PathBuf, String> {
+    let default = field_start(world).ok_or_else(|| format!("no field test for world {world}"))?;
     let bytes =
         read_limited(arena, CONFIG_LIMIT).map_err(|e| format!("{}: {e}", arena.display()))?;
     let mut room: serde_json::Value =
@@ -448,7 +507,7 @@ pub fn tt_room_config(arena: &Path) -> Result<PathBuf, String> {
     }
     // KH2FM_TT_STORY=<last flag, e.g. 0x860> sets tt flags 0x800..=last
     // (default: the whole first-visit range); KH2FM_TT_AREA=<area>[:<entrance>]
-    // picks the starting area.
+    // picks Twilight Town's starting area over the saved one.
     let story = std::env::var("KH2FM_TT_STORY")
         .ok()
         .and_then(|v| {
@@ -462,21 +521,23 @@ pub fn tt_room_config(arena: &Path) -> Result<PathBuf, String> {
         .unwrap_or(TT_STORY);
     let start = std::env::var("KH2FM_TT_AREA")
         .ok()
+        .filter(|_| world == "tt")
         .and_then(|v| {
             let mut p = v.split(':');
             let area = p.next()?.trim().parse::<u8>().ok()?;
             let entrance = p.next().map_or(Some(0), |e| e.trim().parse::<u8>().ok())?;
             Some((area, entrance))
         })
-        .unwrap_or(TT_START);
+        .or(saved)
+        .unwrap_or(default);
     o.insert(
         "area".into(),
-        serde_json::json!({"world":"tt","area":start.0,"entrance":start.1,"story":[story]}),
+        serde_json::json!({"world":world,"area":start.0,"entrance":start.1,"story":[story]}),
     );
     let dir = arena.parent().unwrap_or(Path::new("."));
     let (out, next) = (
-        dir.join("test-room-tt.json"),
-        dir.join("test-room-tt.json.new"),
+        dir.join(format!("test-room-{world}.json")),
+        dir.join(format!("test-room-{world}.json.new")),
     );
     let bytes = serde_json::to_vec_pretty(&room).map_err(|e| e.to_string())?;
     fs::write(&next, bytes)
@@ -637,12 +698,13 @@ pub fn test_args(dir: &Path, program: &str, b: &Bound) -> Result<Vec<String>, St
             };
             ("room", combined_room_config(&arena, &talk)?, options)
         }
-        "tt" => {
+        "tt" | "eh" => {
             let (arena, options) = match own("launch") {
                 Some(own) => own,
                 None => (made("room")?, Vec::new()),
             };
-            ("room", tt_room_config(&arena)?, options)
+            let saved = saved_start(dir, program);
+            ("room", field_room_config(&arena, program, saved)?, options)
         }
         other => return Err(format!("unknown test {other}")),
     };
@@ -661,15 +723,16 @@ pub fn test_args(dir: &Path, program: &str, b: &Bound) -> Result<Vec<String>, St
     Ok(args)
 }
 
-/// `kh2fm tt` without arguments: the Twilight Town config with the arena
-/// launch file's source paths.
-pub fn tt_args() -> Result<Vec<PathBuf>, String> {
+/// `kh2fm tt` or `kh2fm eh` without arguments: the world's field config
+/// with the arena launch file's source paths.
+pub fn field_args(world: &str) -> Result<Vec<PathBuf>, String> {
     let dir = data_dir();
     let arena = launch_file(&dir, "launch")?;
     let (Some(root), Some(manifest)) = (arena.steam_root, arena.manifest) else {
         return Err("launch.json names no steam_root/manifest".into());
     };
-    let config = tt_room_config(&dir.join(arena.config))?;
+    let saved = saved_start(&dir, world);
+    let config = field_room_config(&dir.join(arena.config), world, saved)?;
     let mut args = vec![root, manifest, config];
     args.extend(arena.options.into_iter().map(PathBuf::from));
     Ok(args)
@@ -721,6 +784,33 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, b"synthetic fixture only").unwrap();
         }
+    }
+
+    #[test]
+    fn start_rooms_are_saved_per_world() {
+        let f = Fixture::new();
+        assert_eq!(saved_start(&f.0, "eh"), None);
+        save_start_in(&f.0, "eh", 4, 1).unwrap();
+        save_start_in(&f.0, "tt", 10, 0).unwrap();
+        save_start_in(&f.0, "eh", 5, 0).unwrap();
+        assert_eq!(saved_start(&f.0, "eh"), Some((5, 0)));
+        assert_eq!(saved_start(&f.0, "tt"), Some((10, 0)));
+        // A field config starts in the saved room, else the world's default.
+        let arena = f.0.join("arena.json");
+        fs::write(&arena, br#"{"arena":{},"enemy":{}}"#).unwrap();
+        let read = |p: PathBuf| -> serde_json::Value {
+            serde_json::from_slice(&fs::read(p).unwrap()).unwrap()
+        };
+        let eh = read(field_room_config(&arena, "eh", saved_start(&f.0, "eh")).unwrap());
+        assert_eq!(eh["area"]["world"], "eh");
+        assert_eq!(
+            (eh["area"]["area"].as_u64(), eh["area"]["entrance"].as_u64()),
+            (Some(5), Some(0))
+        );
+        assert!(eh.get("arena").is_none());
+        let eh = read(field_room_config(&arena, "eh", None).unwrap());
+        assert_eq!(eh["area"]["area"].as_u64(), Some(EH_START.0 as u64));
+        assert!(field_room_config(&arena, "al", None).is_err());
     }
 
     #[test]

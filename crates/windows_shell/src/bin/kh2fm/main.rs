@@ -1,8 +1,9 @@
 //! One launcher for the rewrite's programs. Started without arguments (a
 //! double-click) it opens the launcher window: choose the game folder, then
-//! a test. `kh2fm title|room|talk|play|tt [arguments]` runs one directly with
-//! the program's own arguments (none = its launch file; `play` is the room
-//! with both the Shadow and Axel).
+//! a test. `kh2fm title|room|talk|play|tt|eh [arguments]` runs one directly
+//! with the program's own arguments (none = its launch file; `play` is the
+//! room with both the Shadow and Axel, `tt` Twilight Town, `eh` The World
+//! That Never Was).
 //!
 //! A Windows-subsystem program, so no console window opens behind the
 //! launcher; output still reaches a pipe or redirect (the launcher reads
@@ -38,17 +39,17 @@ fn run(program: &str, args: Vec<PathBuf>) -> ExitCode {
             }
         },
         "play" => test_room::main(args, false),
-        "tt" if args.is_empty() => match launcher::tt_args() {
+        "tt" | "eh" if args.is_empty() => match launcher::field_args(program) {
             Ok(args) => test_room::main(args, false),
             Err(e) => {
-                eprintln!("Twilight Town rejected: {e}");
+                eprintln!("Field world {program} rejected: {e}");
                 ExitCode::FAILURE
             }
         },
-        "tt" => test_room::main(args, false),
+        "tt" | "eh" => test_room::main(args, false),
         "event" => cutscene::main(args, false),
         _ => {
-            eprintln!("usage: kh2fm [title|room|talk|play|tt|event] [program arguments]");
+            eprintln!("usage: kh2fm [title|room|talk|play|tt|eh|event] [program arguments]");
             ExitCode::FAILURE
         }
     }
