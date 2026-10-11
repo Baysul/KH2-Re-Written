@@ -300,6 +300,23 @@ impl Shadow {
         self.act.map(|a| a.kind)
     }
 
+    /// Test-room aid (debug menu): HP to 0 and the dead act, as a killing
+    /// hit leaves it.
+    pub fn defeat(&mut self) {
+        if !self.alive() {
+            return;
+        }
+        self.held = None;
+        self.hp = 0;
+        self.act_start(ActKind::Dead);
+    }
+
+    /// Test-room aid (debug menu): a fresh Shadow at its spawn point, as the
+    /// respawn after `RESPAWN_TICKS` makes it.
+    pub fn respawn(&mut self) {
+        *self = Shadow::new(self.spawn, self.yaw, self.stats, self.sstm);
+    }
+
     fn act_start(&mut self, kind: ActKind) {
         if self.act.is_some_and(|a| a.kind.locked()) {
             return;
@@ -1148,6 +1165,21 @@ mod tests {
             acts.iter()
                 .any(|a| matches!(a, ActKind::ClawL | ActKind::MoveShadowRound))
         );
+    }
+
+    #[test]
+    fn defeat_and_respawn() {
+        let mut s = Shadow::new([1., 0., 2.], 0.5, stats(), sstm());
+        s.defeat();
+        assert_eq!(s.hp, 0);
+        assert_eq!(s.current_act(), Some(ActKind::Dead));
+        assert!(!s.alive());
+        s.position = [9., 0., 9.];
+        s.respawn();
+        assert_eq!(s.hp, Shadow::new([1., 0., 2.], 0.5, stats(), sstm()).hp);
+        assert!(s.hp > 0);
+        assert_eq!(s.position, [1., 0., 2.]);
+        assert_eq!(s.current_act(), Some(ActKind::AppearShadow));
     }
 
     #[test]

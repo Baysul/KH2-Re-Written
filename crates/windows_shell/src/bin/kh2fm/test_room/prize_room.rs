@@ -95,42 +95,7 @@ fn kill(
     let low = rt.sora_hp * 2 <= rt.sora_target.max_hp;
     let boost = low.then_some(player.abilities.experience_boost as u32);
     let exp = prize::kill_exp(enemy_exp, level_exp, critical, boost);
-    if exp > 0 {
-        rt.exp_total = (rt.exp_total + exp).min(9_999_999);
-        let before = rt.level;
-        let levels = &rt.sora_levels;
-        let after = prize::level_for(rt.exp_total, before, |l| {
-            levels.get(l as usize - 1).map(|r| r.exp)
-        });
-        for l in before + 1..=after {
-            // Each level's row sets Strength, Magic, Defence and AP; the
-            // room's equipment bonuses stay on top.
-            let (old, new) = (levels[l as usize - 2], levels[l as usize - 1]);
-            rt.sora.strength += new.strength as i32 - old.strength as i32;
-            rt.sora.magic += new.magic as i32 - old.magic as i32;
-            rt.sora_target.defense += new.defense as i32 - old.defense as i32;
-            // [I] the first growth choice's ability.
-            let learned = new.abilities[0];
-            if learned != 0 {
-                rt.learned.push(learned);
-            }
-            log_event(
-                log,
-                serde_json::json!({"event":"level_up","tick":tick,"level":l,
-                    "strength":rt.sora.strength,"magic":rt.sora.magic,
-                    "defense":rt.sora_target.defense,"learned":learned}),
-            );
-        }
-        if after != before {
-            rt.level = after;
-            rt.numbers_dirty = true;
-        }
-        log_event(
-            log,
-            serde_json::json!({"event":"exp","tick":tick,"gain":exp,"total":rt.exp_total,
-                "level":rt.level}),
-        );
-    }
+    grant_exp(rt, exp, log, tick);
     // FUN_1403dc170: counts scaled by Jackpot, munny converted by Drive
     // Converter, three item rolls with Lucky Lucky.
     let ab = &player.abilities;
@@ -160,4 +125,46 @@ fn kill(
             );
         }
     }
+}
+
+/// EXP into Sora's total, then each level gained (FUN_140410af0's level
+/// loop). The debug menu's level-up uses it too.
+pub fn grant_exp(rt: &mut EnemyRuntime, exp: u32, log: &mut Option<std::fs::File>, tick: u64) {
+    if exp == 0 {
+        return;
+    }
+    rt.exp_total = (rt.exp_total + exp).min(9_999_999);
+    let before = rt.level;
+    let levels = &rt.sora_levels;
+    let after = prize::level_for(rt.exp_total, before, |l| {
+        levels.get(l as usize - 1).map(|r| r.exp)
+    });
+    for l in before + 1..=after {
+        // Each level's row sets Strength, Magic, Defence and AP; the
+        // room's equipment bonuses stay on top.
+        let (old, new) = (levels[l as usize - 2], levels[l as usize - 1]);
+        rt.sora.strength += new.strength as i32 - old.strength as i32;
+        rt.sora.magic += new.magic as i32 - old.magic as i32;
+        rt.sora_target.defense += new.defense as i32 - old.defense as i32;
+        // [I] the first growth choice's ability.
+        let learned = new.abilities[0];
+        if learned != 0 {
+            rt.learned.push(learned);
+        }
+        log_event(
+            log,
+            serde_json::json!({"event":"level_up","tick":tick,"level":l,
+                "strength":rt.sora.strength,"magic":rt.sora.magic,
+                "defense":rt.sora_target.defense,"learned":learned}),
+        );
+    }
+    if after != before {
+        rt.level = after;
+        rt.numbers_dirty = true;
+    }
+    log_event(
+        log,
+        serde_json::json!({"event":"exp","tick":tick,"gain":exp,"total":rt.exp_total,
+            "level":rt.level}),
+    );
 }

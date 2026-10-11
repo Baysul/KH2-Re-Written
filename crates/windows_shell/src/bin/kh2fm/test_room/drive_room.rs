@@ -588,7 +588,7 @@ impl DriveRt {
 
 /// FUN_14040ce60: start a change to `form` (0 = revert). A form plays the
 /// drive-start motion; the task swaps the object.
-fn start_change(game: &mut Game, form: u8) {
+pub(super) fn start_change(game: &mut Game, form: u8) {
     let Some(d) = game.drive.as_mut() else { return };
     if form == d.form {
         return;
