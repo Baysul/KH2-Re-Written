@@ -482,6 +482,16 @@ enum RoomWorld {
     Map(MapWorld),
 }
 
+impl RoomWorld {
+    /// The collision triangles in scene coordinates (for the skateboard).
+    pub fn skate_triangles(&self) -> Vec<[Vec3; 3]> {
+        match self {
+            RoomWorld::Triangles(w) => w.triangles().map(|t| t.map(Vec3::from_array)).collect(),
+            RoomWorld::Map(w) => w.triangles(),
+        }
+    }
+}
+
 impl World for RoomWorld {
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         match self {
@@ -4114,7 +4124,7 @@ fn setup(
         ));
     }
     commands.insert_resource(SceneRoot(world));
-    let actor = startup.actor.take().expect("actor retained for setup");
+    let mut actor = startup.actor.take().expect("actor retained for setup");
     let weapon = startup.weapon.take().expect("weapon retained for setup");
     let pose = game.clip_poses[game.poses[&(Action::Idle, false)]].frames[0].clone();
     let root = commands
@@ -4209,6 +4219,24 @@ fn setup(
         clip: walk,
         indices: actor.parts.iter().map(|p| p.indices.clone()).collect(),
     });
+    // Sora's skeleton for the skateboard's rider retarget.
+    let skinning = std::mem::take(&mut actor.skinning);
+    let rig = skinning
+        .bind_pose(package_reader::model_pose::PoseProfile::Legacy)
+        .ok()
+        .and_then(|bind| {
+            let bind = bind
+                .matrix_bits
+                .iter()
+                .map(|m| Mat4::from_cols_array(&m.map(f32::from_bits)))
+                .collect();
+            let parents = skinning.bones.iter().map(|b| b.header_i32[1]).collect();
+            crate::skate_rig::Rig::new(bind, parents)
+        });
+    if rig.is_none() {
+        eprintln!("Sora's skeleton is not the one the skateboard pose expects");
+    }
+    commands.insert_resource(SoraRig { skinning, rig });
     let hand = commands
         .spawn((
             WeaponRoot,
@@ -4617,6 +4645,7 @@ fn simulate(
     mut game: ResMut<Game>,
     hud: Option<ResMut<Hud>>,
     mut area: Option<ResMut<AreaRes>>,
+    skate: Res<crate::skate::Skate>,
 ) {
     let tick = game.tick;
     let (up, down) = if game.autoplay.is_some() {
@@ -4646,7 +4675,9 @@ fn simulate(
     };
     // Field talk locks control (player+0xdc8 → +0x40 bit 0); an area
     // change zeroes the pad while DAT_142a10500 is set (FUN_1403b2340).
-    let talking = game.talking || area.as_deref().is_some_and(|a| a.transition.is_some());
+    // Riding the skateboard hands the pad to the Skate 3 skater.
+    let talking =
+        game.talking || area.as_deref().is_some_and(|a| a.transition.is_some()) || skate.riding();
     let (stick, jump, decide) = if talking {
         (Vec2::ZERO, false, false)
     } else {
@@ -6723,6 +6754,110 @@ fn camera_control(
     }
 }
 
+/// The skateboard's fixed step: start a ride on the room's collision, step
+/// the Skate 3 skater and put Sora where it is. An area change ends the ride.
+fn skate_tick(
+    mut skate: ResMut<crate::skate::Skate>,
+    mut game: ResMut<Game>,
+    area: Option<Res<AreaRes>>,
+) {
+    if area.as_deref().is_some_and(|a| a.transition.is_some()) {
+        if skate.riding() {
+            skate.stop();
+        }
+        return;
+    }
+    if skate.wants_start() {
+        let triangles = game.world.skate_triangles();
+        let position = Vec3::from_array(game.player.position);
+        skate.start(&triangles, position, game.player.yaw);
+    }
+    if let Some(ride) = skate.step() {
+        game.player.position = ride.position.to_array();
+        game.player.yaw = ride.yaw;
+    }
+}
+
+#[derive(Component)]
+struct SkateBoard;
+
+type BoardOnly = (With<SkateBoard>, Without<SoraRoot>);
+
+/// Sora's skinning and the rider retarget built on his bind pose.
+#[derive(Resource)]
+struct SoraRig {
+    skinning: package_reader::model_pose::Skinning,
+    rig: Option<crate::skate_rig::Rig>,
+}
+
+/// Sora stands sideways on the deck, and a plain board follows it.
+// Bevy systems take each resource as a parameter.
+#[allow(clippy::too_many_arguments)]
+fn skate_present(
+    mut commands: Commands,
+    skate: Res<crate::skate::Skate>,
+    game: Res<Game>,
+    sora: Option<Res<SoraRig>>,
+    mut roots: Query<&mut Transform, (With<SoraRoot>, Without<SkateBoard>)>,
+    mut boards: Query<(Entity, &mut Transform), BoardOnly>,
+    parts: Query<(&SoraPart, &Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let Some(deck) = skate.deck() else {
+        for (entity, _) in &boards {
+            commands.entity(entity).despawn();
+        }
+        return;
+    };
+    // With the rider retarget Sora takes the rider's root and pose;
+    // otherwise he stands sideways on the deck in his current pose.
+    let posed = sora.as_deref().and_then(|s| {
+        let (root, bones) = skate.rider()?;
+        let matrices = s.rig.as_ref()?.pose(bones)?;
+        let rows: Vec<[[f32; 4]; 4]> = matrices.iter().map(Mat4::to_cols_array_2d).collect();
+        let positions = s.skinning.positions_with(&rows).ok()?;
+        Some((*root, positions))
+    });
+    if let Ok(mut root) = roots.single_mut() {
+        match &posed {
+            Some((rider, _)) => *root = *rider,
+            None => {
+                root.translation =
+                    deck.translation + deck.rotation * Vec3::Y * crate::skate::DECK_TOP;
+                root.rotation = deck.rotation * Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+            }
+        }
+    }
+    if let Some((_, positions)) = &posed {
+        for (part, handle) in &parts {
+            let part_positions: Vec<[f32; 3]> = game.part_indices[part.0]
+                .iter()
+                .filter_map(|&i| positions.get(i as usize).copied())
+                .collect();
+            if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, part_positions);
+            }
+        }
+    }
+    match boards.single_mut() {
+        Ok((_, mut transform)) => *transform = deck,
+        Err(_) => {
+            let [w, h, l] = crate::skate::DECK_SIZE;
+            commands.spawn((
+                SkateBoard,
+                deck,
+                Mesh3d(meshes.add(Cuboid::new(w, h, l))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.12, 0.12, 0.13),
+                    perceptual_roughness: 0.9,
+                    ..default()
+                })),
+            ));
+        }
+    }
+}
+
 fn present(
     fixed: Res<Time<Fixed>>,
     mut game: ResMut<Game>,
@@ -8450,6 +8585,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 camp_tick,
                 (
                     simulate,
+                    skate_tick,
                     area_tick,
                     field_npc_tick,
                     talk_tick,
@@ -8480,6 +8616,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 .chain(),
             (
                 present,
+                skate_present,
                 present_enemy,
                 present_spells,
                 present_orbs,

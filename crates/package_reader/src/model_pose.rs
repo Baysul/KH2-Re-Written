@@ -287,6 +287,16 @@ impl Skinning {
             runtime_verified: false,
         })
     }
+    /// Vertex positions skinned with caller-supplied model-space bone
+    /// matrices (row-vector layout, one per bone), in assignment order.
+    pub fn positions_with(&self, matrices: &[[[f32; 4]; 4]]) -> io::Result<Vec<[f32; 3]>> {
+        Ok(self
+            .pose(matrices.to_vec(), PoseProfile::Modern, "host_matrices")?
+            .position_bits
+            .into_iter()
+            .map(|p| p.map(f32::from_bits))
+            .collect())
+    }
     pub fn bind_pose(&self, profile: PoseProfile) -> io::Result<ModelPose> {
         self.pose(
             bind_matrices(&self.bones, profile)?,

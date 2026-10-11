@@ -1630,6 +1630,11 @@ pub struct TriangleWorld {
 }
 
 impl TriangleWorld {
+    /// Every floor and wall triangle (scene coordinates).
+    pub fn triangles(&self) -> impl Iterator<Item = &[Vec3; 3]> {
+        self.floors.iter().chain(&self.walls)
+    }
+
     /// Triangles whose upward normal component is at least `min_floor_y`
     /// (after normalizing) are floors when `stand` is set; steeper ones are
     /// walls when `collide` is set. Winding is ignored because the selected

@@ -34,3 +34,16 @@ opt-level = 3
 # title stream took about 16 s.
 [profile.dev.package.lewton]
 opt-level = 3
+
+# The Skate 3 skater runs every tick of a ride; unoptimized it misses 60 Hz.
+[profile.dev.package.skate-sim]
+opt-level = 3
+
+[profile.dev.package.skate-core]
+opt-level = 3
+
+[profile.dev.package.skate-data]
+opt-level = 3
+
+[profile.dev.package.skate-disc]
+opt-level = 3

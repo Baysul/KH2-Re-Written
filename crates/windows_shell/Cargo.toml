@@ -16,6 +16,9 @@ package_reader = { path = "../package_reader" }
 player_sim = { path = "../player_sim" }
 source_identity = { path = "../source_identity" }
 skate_source = { path = "../skate_source" }
+# GPL-3.0-only (SK8-ENGINE/skate-3-rust-engine, local branch kh2fm-sim); see T103.
+skate-disc = { path = "../../../skate-3-rust-engine/crates/skate-disc" }
+skate-sim = { path = "../../../skate-3-rust-engine/crates/skate-sim" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

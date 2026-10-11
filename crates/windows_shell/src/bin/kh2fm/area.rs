@@ -605,6 +605,22 @@ pub struct MapWorld {
 }
 
 impl MapWorld {
+    /// The visible collision polygons as scene-coordinate triangles.
+    pub fn triangles(&self) -> Vec<[Vec3; 3]> {
+        let scene = |v: [f32; 3]| Vec3::from_array(engine(v));
+        self.world
+            .polygons()
+            .into_iter()
+            .filter(|p| p.visible)
+            .flat_map(|p| {
+                let c: Vec<Vec3> = p.corners.iter().map(|&v| scene(v)).collect();
+                (1..c.len().saturating_sub(1))
+                    .map(|i| [c[0], c[i], c[i + 1]])
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     pub fn new(world: field_collision::World) -> Self {
         Self {
             world,

@@ -13,6 +13,7 @@ mod cutscene;
 mod launcher;
 mod npcs;
 mod skate;
+mod skate_rig;
 mod test_room;
 mod title;
 

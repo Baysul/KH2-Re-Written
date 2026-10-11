@@ -1235,6 +1235,11 @@ pub fn skate3_iso() -> Option<std::path::PathBuf> {
     install::load_settings(&install::data_dir()).skate3_iso
 }
 
+/// Where the riding data prepared from the Skate 3 disc is kept.
+pub fn skate3_cache() -> std::path::PathBuf {
+    install::data_dir().join("skate3")
+}
+
 pub fn main() -> std::process::ExitCode {
     let dir = install::data_dir();
     let settings = install::load_settings(&dir);
