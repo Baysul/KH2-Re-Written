@@ -48,7 +48,10 @@ enum Page {
     Main,
     Items,
     Forms,
+    /// The worlds with installed rooms.
     Warp,
+    /// One world's rooms.
+    Rooms(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +67,8 @@ enum Action {
     Item(u16),
     Form(u8),
     Warp(u8, u8),
+    /// The current room becomes its world's launcher start.
+    SaveStart,
     Close,
 }
 
@@ -94,6 +99,8 @@ pub struct DebugMenu {
     main_cursor: usize,
     /// The arrow being held and for how many frames.
     held: Option<(Dir, u32)>,
+    /// The current world's saved launcher start (read on opening Warp).
+    saved: Option<(u8, u8)>,
     notice: Option<(String, u32)>,
     pub view: View,
 }
@@ -240,7 +247,13 @@ fn on_off(on: bool) -> Vec<u8> {
     text(if on { "On" } else { "Off" })
 }
 
-fn rows(page: Page, game: &Game, area: Option<&AreaRes>, camp: Option<&CampRes>) -> Vec<Row> {
+fn rows(
+    page: Page,
+    saved: Option<(u8, u8)>,
+    game: &Game,
+    area: Option<&AreaRes>,
+    camp: Option<&CampRes>,
+) -> Vec<Row> {
     let row = |label: &str, action: Action, enabled: bool| Row {
         label: text(label),
         value: Vec::new(),
@@ -315,32 +328,66 @@ fn rows(page: Page, game: &Game, area: Option<&AreaRes>, camp: Option<&CampRes>)
         }
         Page::Warp => {
             let Some(a) = area else { return Vec::new() };
-            let world = a.current.world;
-            let mut areas: Vec<u8> = a.source.place_names.keys().copied().collect();
-            areas.sort_unstable();
-            areas
-                .into_iter()
-                .map(|n| Row {
-                    label: a.source.place_names[&n].clone(),
-                    value: if n == a.current.area {
+            let (world, here) = (a.current.world, a.current.area);
+            let code = area_sim::progress::WORLDS[world as usize];
+            let saved = crate::launcher::field_start(code).map(|_| {
+                saved.map_or_else(|| text("Default"), |(n, _)| text(&format!("{code}{n:02}")))
+            });
+            let mut v = vec![Row {
+                value: saved.clone().unwrap_or_default(),
+                ..row(
+                    &format!("Start here next launch ({code}{here:02})"),
+                    Action::SaveStart,
+                    saved.is_some(),
+                )
+            }];
+            v.extend(
+                (0..area_sim::progress::WORLDS.len() as u8)
+                    .filter(|&w| !a.source.rooms(w).is_empty())
+                    .map(|w| Row {
+                        value: if w == world {
+                            text("Here")
+                        } else {
+                            text(&format!("{} rooms", a.source.rooms(w).len()))
+                        },
+                        ..row(area::world_name(w), Action::Page(Page::Rooms(w)), true)
+                    }),
+            );
+            v
+        }
+        Page::Rooms(w) => {
+            let Some(a) = area else { return Vec::new() };
+            let code = area_sim::progress::WORLDS[w as usize];
+            let current = (a.current.world, a.current.area);
+            a.source
+                .rooms(w)
+                .iter()
+                .map(|&n| Row {
+                    label: a
+                        .source
+                        .place_name(w, n)
+                        .cloned()
+                        .unwrap_or_else(|| text(&format!("Room {n:02}"))),
+                    value: if (w, n) == current {
                         text("Here")
                     } else {
-                        Vec::new()
+                        text(&format!("{code}{n:02}"))
                     },
-                    action: Action::Warp(world, n),
-                    enabled: n != a.current.area,
+                    action: Action::Warp(w, n),
+                    enabled: (w, n) != current,
                 })
                 .collect()
         }
     }
 }
 
-fn heading(page: Page) -> &'static str {
+fn heading(page: Page) -> String {
     match page {
-        Page::Main => "Debug",
-        Page::Items => "Debug - Items",
-        Page::Forms => "Debug - Drive form",
-        Page::Warp => "Debug - Warp",
+        Page::Main => "Debug".into(),
+        Page::Items => "Debug - Items".into(),
+        Page::Forms => "Debug - Drive form".into(),
+        Page::Warp => "Debug - Warp".into(),
+        Page::Rooms(w) => format!("Debug - {}", area::world_name(w)),
     }
 }
 
@@ -348,6 +395,7 @@ fn footer(page: Page) -> &'static str {
     match page {
         Page::Items => "Left/Right change   Esc back",
         Page::Main => "Enter select   F3 close",
+        Page::Rooms(_) => "Enter warp   Esc back",
         _ => "Enter select   Esc back",
     }
 }
@@ -370,7 +418,31 @@ fn act(
             menu.page = p;
             menu.cursor = 0;
             menu.top = 0;
+            match (p, area.as_deref()) {
+                (Page::Warp, Some(a)) => {
+                    let code = area_sim::progress::WORLDS[a.current.world as usize];
+                    menu.saved = crate::launcher::saved_start(&crate::launcher::data_dir(), code);
+                }
+                // A world's rooms open on the current room.
+                (Page::Rooms(w), Some(a)) if w == a.current.world => {
+                    let rooms = a.source.rooms(w);
+                    menu.cursor = rooms.iter().position(|&n| n == a.current.area).unwrap_or(0);
+                }
+                _ => {}
+            }
             None
+        }
+        Action::SaveStart => {
+            let a = area?;
+            let code = area_sim::progress::WORLDS[a.current.world as usize];
+            let (n, entrance) = (a.current.area, a.current.state.entrance);
+            match crate::launcher::save_start(code, n, entrance) {
+                Ok(_) => {
+                    menu.saved = Some((n, entrance));
+                    Some(format!("{code}{n:02} is this world's start"))
+                }
+                Err(e) => Some(format!("Start not saved: {e}")),
+            }
         }
         Action::Close => {
             menu.open = false;
@@ -510,7 +582,13 @@ pub fn tick(
     } else if input.toggle {
         menu.open = false;
     } else {
-        let list = rows(menu.page, &game, area.as_deref(), camp.as_deref());
+        let list = rows(
+            menu.page,
+            menu.saved,
+            &game,
+            area.as_deref(),
+            camp.as_deref(),
+        );
         let count = list.len();
         menu.cursor = menu.cursor.min(count.saturating_sub(1));
         let selected = list.get(menu.cursor);
@@ -530,12 +608,22 @@ pub fn tick(
         {
             run = Some((r.action, 1));
         } else if input.back {
-            if menu.page == Page::Main {
-                menu.open = false;
-            } else {
-                menu.page = Page::Main;
-                menu.cursor = menu.main_cursor;
-                menu.top = 0;
+            match menu.page {
+                Page::Main => menu.open = false,
+                // Back to the world list, on the world just left.
+                Page::Rooms(w) => {
+                    menu.page = Page::Warp;
+                    menu.cursor = rows(Page::Warp, menu.saved, &game, area.as_deref(), None)
+                        .iter()
+                        .position(|r| r.action == Action::Page(Page::Rooms(w)))
+                        .unwrap_or(0);
+                    menu.top = 0;
+                }
+                _ => {
+                    menu.page = Page::Main;
+                    menu.cursor = menu.main_cursor;
+                    menu.top = 0;
+                }
             }
         }
         if let Some((action, step)) = run {
@@ -579,7 +667,7 @@ fn build_view(
     area: Option<&AreaRes>,
     camp: Option<&CampRes>,
 ) -> View {
-    let list = rows(menu.page, game, area, camp);
+    let list = rows(menu.page, menu.saved, game, area, camp);
     menu.cursor = menu.cursor.min(list.len().saturating_sub(1));
     menu.top = scroll(menu.cursor, menu.top);
     let footer = match &menu.notice {
@@ -590,7 +678,7 @@ fn build_view(
         None => footer(menu.page).to_string(),
     };
     View {
-        heading: text(heading(menu.page)),
+        heading: text(&heading(menu.page)),
         rows: list
             .into_iter()
             .skip(menu.top)
