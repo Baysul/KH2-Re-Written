@@ -66,6 +66,9 @@ pub struct MemberRt {
     pub follower: Follower,
     /// The game tick the current attack started, for hit instance keys.
     pub started: u64,
+    /// Absorbed by a Drive form (FUN_140400b20): out of the field until
+    /// the revert brings it back (drive_room).
+    pub stored: bool,
 }
 
 fn matrix(m: &[u32; 16], root: Vec3) -> Mat4 {
@@ -283,6 +286,9 @@ pub fn tick(game: &mut Game, tick: u64) {
             radius: 40.,
         });
     for (index, m) in party.iter_mut().enumerate() {
+        if m.stored {
+            continue;
+        }
         let kind = m.kind.clone();
         let length = |id: u16| kind.motions.get(&id).map(|d| d.end() + 1);
         let root = |id: u16, t: u32| {

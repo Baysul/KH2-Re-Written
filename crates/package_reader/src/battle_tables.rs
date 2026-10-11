@@ -309,9 +309,93 @@ pub fn player_level(lvup: &[u8], character: usize, level: usize) -> io::Result<P
     })
 }
 
+/// One fmlv row (8 bytes): id = form << 4 | level, the growth step,
+/// the ability granted on reaching the level and the EXP this level needs
+/// to reach the next (FUN_1403e8380; bsearch on the id byte,
+/// comparator FUN_1403e87e0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FormLevel {
+    pub id: u8,
+    pub growth: u8,
+    pub ability: u16,
+    pub exp: u32,
+}
+
+/// The fmlv table (u32 version, u32 count, 8-byte rows).
+pub fn form_levels(fmlv: &[u8]) -> io::Result<Vec<FormLevel>> {
+    let count = u32_at(fmlv, 4)? as usize;
+    if count > 0x100 {
+        return Err(invalid("FMLV count implausible"));
+    }
+    (0..count)
+        .map(|k| {
+            let r = 8 + k * 8;
+            let row = fmlv
+                .get(r..r + 8)
+                .ok_or_else(|| invalid("FMLV truncated"))?;
+            Ok(FormLevel {
+                id: row[0],
+                growth: row[1],
+                ability: u16_at(row, 2)?,
+                exp: u32_at(row, 4)?,
+            })
+        })
+        .collect()
+}
+
+/// The ability lists of the plrp records whose key is `key` and whose
+/// character byte has bit 7 set (a Drive form record: index `byte & 0x7f`),
+/// in table order: FUN_1403e4530 adds each non-zero u16 of the 32 at +0xc
+/// to the form's record with FUN_1403a1680.
+pub fn form_starting_abilities(plrp: &[u8], key: u16) -> io::Result<Vec<(u8, Vec<u16>)>> {
+    let count = u32_at(plrp, 4)? as usize;
+    if count > 0x400 {
+        return Err(invalid("PLRP count implausible"));
+    }
+    let mut out = Vec::new();
+    for k in 0..count {
+        let r = 8 + k * 0x80;
+        let rec = plrp
+            .get(r..r + 0x80)
+            .ok_or_else(|| invalid("PLRP truncated"))?;
+        if u16_at(rec, 0)? != key || rec[2] & 0x80 == 0 {
+            continue;
+        }
+        let mut list = Vec::new();
+        for i in 0..32 {
+            let v = u16_at(rec, 0xc + i * 2)?;
+            if v != 0 {
+                list.push(v);
+            }
+        }
+        out.push((rec[2] & 0x7f, list));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_form_levels_and_form_records() {
+        let mut fmlv = vec![2, 0, 0, 0, 2, 0, 0, 0];
+        fmlv.extend([0x11, 1, 0, 0, 0x50, 0, 0, 0]);
+        fmlv.extend([0x12, 1, 0x81, 0x01, 0xa0, 0, 0, 0]);
+        let rows = form_levels(&fmlv).unwrap();
+        assert_eq!(rows[1].ability, 0x181);
+        assert_eq!((rows[0].id, rows[0].exp), (0x11, 0x50));
+        let mut plrp = vec![1, 0, 0, 0, 2, 0, 0, 0];
+        let mut rec = [0u8; 0x80];
+        rec[2] = 0x81;
+        rec[0xc..0x10].copy_from_slice(&[0x5e, 0x80, 0xa2, 0x80]);
+        plrp.extend(rec);
+        let mut sora = [0u8; 0x80];
+        sora[2] = 1;
+        plrp.extend(sora);
+        let forms = form_starting_abilities(&plrp, 0).unwrap();
+        assert_eq!(forms, vec![(1, vec![0x805e, 0x80a2])]);
+    }
 
     #[test]
     fn reads_synthetic_rows() {

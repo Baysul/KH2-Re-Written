@@ -16,6 +16,11 @@ pub struct ObjectEntry {
     pub model_name: Vec<u8>,
     pub animation_name: Vec<u8>,
     pub neo_moveset: u16,
+    /// +0x4c: character id (FUN_1403b5b20; 1 Sora, 2 Donald, 3 Goofy).
+    pub character: u16,
+    /// +0x57: Drive form index (FUN_1403e0cc0's form record for weapon
+    /// slot 1; 1..=6 Valor..Antiform).
+    pub form: u8,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -51,6 +56,8 @@ pub fn read(bytes: &[u8]) -> io::Result<Vec<ObjectEntry>> {
             model_name: name(&e[8..40]),
             animation_name: name(&e[40..72]),
             neo_moveset: u16::from_le_bytes(e[78..80].try_into().unwrap()),
+            character: u16::from_le_bytes(e[76..78].try_into().unwrap()),
+            form: e[0x57],
         })
         .collect())
 }
@@ -70,6 +77,8 @@ mod tests {
         bytes[second + 8..second + 15].copy_from_slice(b"P_TEST1");
         bytes[second + 40..second + 44].copy_from_slice(b"ANIM");
         bytes[second + 78..second + 80].copy_from_slice(&9u16.to_le_bytes());
+        bytes[second + 76] = 1;
+        bytes[second + 0x57] = 3;
         let entries = read(&bytes).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].object_id, 0x54);
@@ -77,6 +86,7 @@ mod tests {
         assert_eq!(entries[1].model_name, b"P_TEST1");
         assert_eq!(entries[1].animation_name, b"ANIM");
         assert_eq!(entries[1].neo_moveset, 9);
+        assert_eq!((entries[1].character, entries[1].form), (1, 3));
         assert!(entries[0].model_name.is_empty());
     }
 
