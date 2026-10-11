@@ -1236,6 +1236,7 @@ pub fn skate3_iso() -> Option<std::path::PathBuf> {
 }
 
 /// Where the riding data prepared from the Skate 3 disc is kept.
+#[cfg(feature = "skate3")]
 pub fn skate3_cache() -> std::path::PathBuf {
     install::data_dir().join("skate3")
 }

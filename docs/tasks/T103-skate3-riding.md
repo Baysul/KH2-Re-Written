@@ -5,15 +5,16 @@ Owner Claude, 2026-10-11. Gate: none (owner-requested exception, as T101). Prere
 ## Source and build identity
 
 - Disc: the owner's Skate 3 (USA, Europe) Xbox 360 ISO, 7,838,695,424 bytes, admitted by `skate_source` (layout check only; no retail digest established).
-- Skate engine: local clone of SK8-ENGINE/skate-3-rust-engine at `2e16697`, local branch `kh2fm-sim` (not pushed). Two new GPL-3.0-only crates there:
+- Skate engine: SK8-ENGINE/skate-3-rust-engine at `2e16697`. Owner's choice (2026-10-11): inside this repo as an optional feature. Two GPL-3.0-only crates in `crates/skate3/` (README and LICENSE there), built only with the `windows_shell` feature `skate3`; `skate-core`, `skate-data` and `skate-dynamics` are pinned git dependencies:
   - `skate-disc`: the core asset setup (`asset_exports.core`) in Rust: EB BIG v3, chunkref, RefPack, AttribSys VLT to `skater-collections.json`, ABIN physics skeletons.
   - `skate-sim`: skate-game's simulation (physics, graphs, input, gameplay camera numbers) without rendering, UI, replay, modding, networking or SDL3, on Bevy 0.19.1; adds host collision worlds and a `Sim` entry point.
 
 ## Implementation (this repo)
 
-- `windows_shell` depends on both crates by local path (temporary; see Uncertainty).
+- `windows_shell` depends on both crates through the optional `skate3` feature; without it J says skateboarding is not installed.
 - J: admit the disc; prepare the riding data once into `<data dir>/skate3` on a worker thread (keyed by ISO path, size and time); build the sim on the room's collision triangles (scene units / 100, two-sided) at Sora's position and facing; step it at 60 Hz with keyboard or pad as an XInput pad; J again gets off. An area change ends the ride.
-- Sora: control is locked while riding; his position and yaw follow the rider root. `skate_rig` retargets the rider's limb directions and hips frame onto Sora's bind skeleton (bone choices read from P_EX100's bind pose) and he is skinned on the CPU with those matrices (`Skinning::positions_with`).
+- Sora: control is locked while riding; his position and yaw follow the rider root. `skate_rig` gives each mapped Sora bone (legs, feet, spine, neck, arms, hands) the rider bone's rotation change since its rest pose, after a fixed correction from Sora's T-pose bind to the rider's A-pose rest; joints keep Sora's bone lengths and the pelvis sits on the rider's hips. He is skinned on the CPU with those matrices (`Skinning::positions_with`). Bone choices read from P_EX100's bind pose.
+- Camera: while riding, Skate 3's gameplay camera (skate-sim's `CameraRuntime`, its transform and field of view, fed the window's aspect) replaces the KH2 follow camera.
 - Board: a plain stand-in cuboid (8.0 x 31.5 inch deck) on the deck transform. Scale: 100 scene units per metre (Sora's model is 171 units tall).
 
 ## Checks
@@ -21,13 +22,14 @@ Owner Claude, 2026-10-11. Gate: none (owner-requested exception, as T101). Prere
 - skate-disc vs the Python setup on the owner's disc: PASS. 2029 extracted files byte-identical, 6849 collections equal, PHYS_TPOSE skeleton equal (private cross-check script, outside both repos).
 - Headless sim from the prepared data: PASS. Pushing accelerates the skater; a host wall stops and returns it.
 - Test room, scripted J and pushes (temporary code, not committed), arena-07: PASS for riding, wall approach and the notice. Sora's retargeted pose: seen only from the follow camera; close inspection NOT RUN.
-- `cargo clippy --workspace --all-targets -- -D warnings`: PASS. `cargo test --workspace`: PASS. `cargo fmt --all --check`: NOT RUN as written, because `--all` also formats the path-dependency Skate crates; members were formatted with `-p`.
-- Release build of `kh2fm`: PASS.
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked`: PASS, each with and without `--features windows_shell/skate3`. skate-sim's carried code is exempt from clippy style lints (its manifest); unsafe code stays forbidden.
+- Test room with the Skate camera and full-rotation retarget, scripted J (temporary code): PASS by capture; close-up pose review NOT RUN.
+- Release build of `kh2fm` with `skate3`: PASS.
 
 ## Uncertainty
 
-- The local path dependency builds only on this PC; where the GPL crates live is the owner's decision (T103 not merged until then).
-- Retarget ignores bone twist and hand/finger poses; the bone map is inferred from geometry.
+- A build with `skate3` is GPL-3.0; the default build stays Apache-2.0.
+- Fingers and face are not retargeted; the bone map and the rider rest pose (its pose before the first step) are inferred, not named data.
 - The board is not the disc's model yet.
 
 ## Verdict
@@ -36,4 +38,4 @@ PROGRESS: riding works in the test room from the owner's disc.
 
 ## Next
 
-Decode the deck model from `createacharacter.big` (RX2), decide the crates' home, then merge.
+Decode the deck, trucks and wheels from `createacharacter.big` (RX2) and their textures.

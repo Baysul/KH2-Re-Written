@@ -25,6 +25,7 @@ The rule is stated in AGENTS.md. Part of the current code does not yet follow it
 | `effect_vm` | 4 | `lib.rs`, `math.rs`, `programs.rs`, `mega_birth.rs`, `tests.rs` | Particle VM translated from the PC executable. |
 | `player_sim` | 4 | `lib.rs` (locomotion state machine), `camera.rs`, `combat.rs`, `shadow.rs` | Test-room controller. Fixed-tick. Not a measured reproduction of KH2 rules. |
 | `skate_source` | 1-2 | `lib.rs` (Skate 3 disc admission), `xdvdfs.rs` (Xbox ISO reader) | Owner-requested exception ([T101](docs/tasks/T101-skate3-board.md)): reads the user's own Skate 3 ISO in place for the J skateboard. |
+| `skate3/skate-disc`, `skate3/skate-sim` | 2, 4 | Skate 3 disc setup and skater simulation | **GPL-3.0-only**, optional (`windows_shell` feature `skate3`); see `crates/skate3/README.md` and [T103](docs/tasks/T103-skate3-riding.md). |
 | `audio_out` | 5 | `lib.rs` (software mixer), `winmm.rs` (Windows output) | |
 | `windows_shell` | 5, plus launcher and dev tools | See below | Largest crate; holds presentation and some game-state code. |
 

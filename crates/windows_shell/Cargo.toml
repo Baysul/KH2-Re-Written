@@ -16,15 +16,20 @@ package_reader = { path = "../package_reader" }
 player_sim = { path = "../player_sim" }
 source_identity = { path = "../source_identity" }
 skate_source = { path = "../skate_source" }
-# GPL-3.0-only (SK8-ENGINE/skate-3-rust-engine, local branch kh2fm-sim); see T103.
-skate-disc = { path = "../../../skate-3-rust-engine/crates/skate-disc" }
-skate-sim = { path = "../../../skate-3-rust-engine/crates/skate-sim" }
+# The optional Skate 3 skateboard (GPL-3.0-only, crates/skate3); see T103.
+skate-disc = { path = "../skate3/skate-disc", optional = true }
+skate-sim = { path = "../skate3/skate-sim", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 fontdue = { version = "=0.9.4", default-features = false, features = ["std"] }
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 bevy = { version = "=0.19.1", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_log", "bevy_asset", "bevy_window", "bevy_winit", "bevy_render", "bevy_camera", "bevy_image", "bevy_sprite", "bevy_sprite_render", "bevy_core_pipeline", "bevy_pbr", "bmp", "bevy_gilrs"] }
+
+[features]
+# Riding Skate 3 on J (reads the user's own Skate 3 disc). A build with it
+# is a GPL-3.0 combined work.
+skate3 = ["dep:skate-disc", "dep:skate-sim"]
 
 [lints]
 workspace = true

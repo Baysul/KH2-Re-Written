@@ -3718,10 +3718,12 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 [[package]]
 name = "skate-core"
 version = "0.1.0"
+source = "git+https://github.com/SK8-ENGINE/skate-3-rust-engine?rev=2e16697797c8358d16f747a8259354ff2921041a#2e16697797c8358d16f747a8259354ff2921041a"
 
 [[package]]
 name = "skate-data"
 version = "0.1.0"
+source = "git+https://github.com/SK8-ENGINE/skate-3-rust-engine?rev=2e16697797c8358d16f747a8259354ff2921041a#2e16697797c8358d16f747a8259354ff2921041a"
 dependencies = [
  "flate2",
  "serde",
@@ -3743,6 +3745,7 @@ dependencies = [
 [[package]]
 name = "skate-dynamics"
 version = "0.1.0"
+source = "git+https://github.com/SK8-ENGINE/skate-3-rust-engine?rev=2e16697797c8358d16f747a8259354ff2921041a#2e16697797c8358d16f747a8259354ff2921041a"
 dependencies = [
  "rapier3d",
  "serde",

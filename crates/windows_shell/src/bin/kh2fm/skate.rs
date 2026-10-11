@@ -4,14 +4,17 @@
 //! GPL-3.0-only) runs on the room's collision and drives Sora. Without an
 //! admitted disc the key refuses with a notice and nothing changes.
 use bevy::prelude::*;
+#[cfg(feature = "skate3")]
 use skate_sim::{Difficulty, Sim, SimTerrain, XboxState};
 use skate_source::{Disc, Rejection};
+#[cfg(feature = "skate3")]
 use std::thread::JoinHandle;
 
 /// How long a notice stays up (frames at 60 Hz).
 const NOTICE_FRAMES: u32 = 300;
 /// Scene units per Skate metre (test-room choice: Sora's model is 171
 /// units tall, about the Skate 3 rider's height in metres x 100).
+#[cfg(feature = "skate3")]
 pub const UNITS_PER_METRE: f32 = 100.;
 /// The plain stand-in board (scene units): width, thickness, length of a
 /// common 8.0 x 31.5 inch deck, and its top above the deck frame.
@@ -21,9 +24,12 @@ pub const DECK_TOP: f32 = 0.75;
 enum State {
     Off,
     /// The disc is being converted on a worker thread.
+    #[cfg(feature = "skate3")]
     Preparing(JoinHandle<(Disc, Result<(), String>)>),
     /// Prepared; the test room starts the ride on its next tick.
+    #[cfg(feature = "skate3")]
     Starting,
+    #[cfg(feature = "skate3")]
     Riding(Box<Sim>),
 }
 
@@ -34,11 +40,19 @@ pub struct Skate {
     /// The deck after the last step (scene coordinates).
     deck: Option<Transform>,
     /// The rider after the last step: its root (scene coordinates) and
-    /// bone positions relative to it (scene units).
-    rider: Option<(Transform, Vec<Vec3>)>,
+    /// bone matrices relative to it (scene units).
+    rider: Option<(Transform, Vec<Mat4>)>,
+    /// The rider's bones before the first step (its rest pose).
+    rider_rest: Vec<Mat4>,
+    /// Skate 3's gameplay camera after the last step (scene coordinates)
+    /// and its vertical field of view (radians).
+    camera: Option<(Transform, f32)>,
+    /// The window's aspect ratio, fed to the Skate 3 camera.
+    pub aspect: f32,
     /// The notice line (system-font bytes) and its remaining frames.
     pub notice: Option<(Vec<u8>, u32)>,
     /// The latest pad state for the simulation (read every frame).
+    #[cfg(feature = "skate3")]
     pad: XboxState,
 }
 
@@ -49,7 +63,11 @@ impl Default for Skate {
             state: State::Off,
             deck: None,
             rider: None,
+            rider_rest: Vec::new(),
+            camera: None,
+            aspect: 16. / 9.,
             notice: None,
+            #[cfg(feature = "skate3")]
             pad: XboxState::default(),
         }
     }
@@ -67,14 +85,21 @@ impl Skate {
     }
 
     pub fn riding(&self) -> bool {
-        matches!(self.state, State::Riding(_))
+        #[cfg(feature = "skate3")]
+        return matches!(self.state, State::Riding(_));
+        #[cfg(not(feature = "skate3"))]
+        false
     }
 
     pub fn wants_start(&self) -> bool {
-        matches!(self.state, State::Starting)
+        #[cfg(feature = "skate3")]
+        return matches!(self.state, State::Starting);
+        #[cfg(not(feature = "skate3"))]
+        false
     }
 
     /// Starts riding at Sora's position and facing on the room's collision.
+    #[cfg(feature = "skate3")]
     pub fn start(&mut self, triangles: &[[Vec3; 3]], position: Vec3, yaw: f32) {
         let metres = |v: Vec3| (v / UNITS_PER_METRE).to_array();
         let terrain = SimTerrain::Host {
@@ -88,6 +113,7 @@ impl Skate {
             Difficulty::default(),
         ) {
             Ok(sim) => {
+                self.rider_rest = rider_bones(&sim);
                 self.state = State::Riding(Box::new(sim));
                 self.say("Skateboarding. Space pushes, arrows flick tricks, J gets off.");
             }
@@ -99,15 +125,27 @@ impl Skate {
         }
     }
 
+    #[cfg(not(feature = "skate3"))]
+    pub fn start(&mut self, _: &[[Vec3; 3]], _: Vec3, _: f32) {}
+
     pub fn stop(&mut self) {
         self.state = State::Off;
         self.deck = None;
         self.rider = None;
+        self.camera = None;
     }
 
-    /// The rider's root and bone positions while riding.
-    pub fn rider(&self) -> Option<&(Transform, Vec<Vec3>)> {
-        self.rider.as_ref().filter(|_| self.riding())
+    /// Skate 3's camera while riding.
+    pub fn camera(&self) -> Option<(Transform, f32)> {
+        self.camera.filter(|_| self.riding())
+    }
+
+    /// The rider's root, bone matrices and rest bones while riding.
+    pub fn rider(&self) -> Option<(&Transform, &[Mat4], &[Mat4])> {
+        self.rider
+            .as_ref()
+            .filter(|_| self.riding())
+            .map(|(root, bones)| (root, bones.as_slice(), self.rider_rest.as_slice()))
     }
 
     /// Where the board is while riding.
@@ -116,11 +154,13 @@ impl Skate {
     }
 
     /// One 60 Hz simulation step; None when not riding.
+    #[cfg(feature = "skate3")]
     pub fn step(&mut self) -> Option<Ride> {
         let pad = self.pad;
         let State::Riding(sim) = &mut self.state else {
             return None;
         };
+        sim.set_camera_aspect_ratio(self.aspect);
         if let Err(e) = sim.tick(Some(pad), true) {
             eprintln!("Skate 3 simulation stopped: {e}");
             self.stop();
@@ -141,17 +181,34 @@ impl Skate {
             rotation: root.rotation,
             scale: Vec3::ONE,
         };
-        let bones = sim
-            .pose()
-            .iter()
-            .map(|b| b.model.w_axis.truncate() * UNITS_PER_METRE)
-            .collect();
-        self.rider = Some((root, bones));
+        self.rider = Some((root, rider_bones(sim)));
+        self.camera = sim.camera().map(|(mut t, fov)| {
+            t.translation *= UNITS_PER_METRE;
+            (t, fov)
+        });
         Some(Ride {
             position: root.translation,
             yaw: forward.x.atan2(forward.z),
         })
     }
+
+    #[cfg(not(feature = "skate3"))]
+    pub fn step(&mut self) -> Option<Ride> {
+        None
+    }
+}
+
+/// The rider's model-space bones with translations in scene units.
+#[cfg(feature = "skate3")]
+fn rider_bones(sim: &Sim) -> Vec<Mat4> {
+    sim.pose()
+        .iter()
+        .map(|b| {
+            let mut m = b.model;
+            m.w_axis = (m.w_axis.truncate() * UNITS_PER_METRE).extend(1.);
+            m
+        })
+        .collect()
 }
 
 /// ASCII into the system font's international encoding: upper case and
@@ -193,7 +250,45 @@ pub fn toggle(keys: Res<ButtonInput<KeyCode>>, pads: Query<&Gamepad>, mut skate:
             skate.notice = None;
         }
     }
-    skate.pad = read_pad(&keys, &pads);
+    #[cfg(feature = "skate3")]
+    {
+        skate.pad = read_pad(&keys, &pads);
+        poll_preparation(&mut skate);
+    }
+    #[cfg(not(feature = "skate3"))]
+    let _ = pads;
+    if !keys.just_pressed(KeyCode::KeyJ) {
+        return;
+    }
+    #[cfg(feature = "skate3")]
+    match skate.state {
+        State::Off => {}
+        State::Preparing(_) => return,
+        State::Starting | State::Riding(_) => {
+            skate.stop();
+            skate.say("Off the skateboard.");
+            return;
+        }
+    }
+    let iso = crate::launcher::skate3_iso();
+    if skate.disc.is_none() {
+        match skate_source::admit(iso.as_deref()) {
+            Ok(disc) => skate.disc = Some(disc),
+            Err(e) => {
+                eprintln!("Skate 3 disc refused: {e}");
+                return skate.say(refusal(&e));
+            }
+        }
+    }
+    #[cfg(not(feature = "skate3"))]
+    skate.say("Skateboarding is not installed in this build.");
+    #[cfg(feature = "skate3")]
+    prepare_or_start(&mut skate, iso.as_deref());
+}
+
+/// A finished preparation starts the ride or reports why it cannot.
+#[cfg(feature = "skate3")]
+fn poll_preparation(skate: &mut Skate) {
     if matches!(&skate.state, State::Preparing(worker) if worker.is_finished())
         && let State::Preparing(worker) = std::mem::replace(&mut skate.state, State::Off)
     {
@@ -206,35 +301,18 @@ pub fn toggle(keys: Res<ButtonInput<KeyCode>>, pads: Query<&Gamepad>, mut skate:
             Ok(()) => skate.state = State::Starting,
             Err(e) => {
                 eprintln!("Skate 3 data not prepared: {e}");
-                skate.state = State::Off;
                 skate.say("The Skate 3 disc could not be read. See the log.");
             }
         }
     }
-    if !keys.just_pressed(KeyCode::KeyJ) {
-        return;
-    }
-    match skate.state {
-        State::Riding(_) | State::Starting => {
-            skate.stop();
-            skate.say("Off the skateboard.");
-            return;
-        }
-        State::Preparing(_) => return,
-        State::Off => {}
-    }
-    let iso = crate::launcher::skate3_iso();
-    if skate.disc.is_none() {
-        match skate_source::admit(iso.as_deref()) {
-            Ok(disc) => skate.disc = Some(disc),
-            Err(e) => {
-                eprintln!("Skate 3 disc refused: {e}");
-                return skate.say(refusal(&e));
-            }
-        }
-    }
+}
+
+/// Starts riding from prepared data, or prepares it from the disc first
+/// (once per disc, on a worker thread).
+#[cfg(feature = "skate3")]
+fn prepare_or_start(skate: &mut Skate, iso: Option<&std::path::Path>) {
     let cache = crate::launcher::skate3_cache();
-    let identity = disc_identity(iso.as_deref());
+    let identity = disc_identity(iso);
     if skate_disc::is_prepared(&cache, &identity) {
         skate.state = State::Starting;
         return;
@@ -255,6 +333,7 @@ pub fn toggle(keys: Res<ButtonInput<KeyCode>>, pads: Query<&Gamepad>, mut skate:
 
 /// The disc's path, size and modification time: a new or changed ISO is
 /// prepared again.
+#[cfg(feature = "skate3")]
 fn disc_identity(iso: Option<&std::path::Path>) -> String {
     let Some(iso) = iso else {
         return String::new();
@@ -269,13 +348,16 @@ fn disc_identity(iso: Option<&std::path::Path>) -> String {
 }
 
 /// skate-disc's file source over the admitted disc.
+#[cfg(feature = "skate3")]
 struct DiscHost(Disc);
 
+#[cfg(feature = "skate3")]
 struct DiscFile<'a> {
     image: &'a mut skate_source::xdvdfs::Image<std::fs::File>,
     entry: skate_source::xdvdfs::Entry,
 }
 
+#[cfg(feature = "skate3")]
 impl skate_disc::ReadAt for DiscFile<'_> {
     fn len(&self) -> u64 {
         self.entry.size as u64
@@ -287,8 +369,10 @@ impl skate_disc::ReadAt for DiscFile<'_> {
     }
 }
 
+#[cfg(feature = "skate3")]
 struct FolderFile(std::fs::File, u64);
 
+#[cfg(feature = "skate3")]
 impl skate_disc::ReadAt for FolderFile {
     fn len(&self) -> u64 {
         self.1
@@ -302,10 +386,12 @@ impl skate_disc::ReadAt for FolderFile {
     }
 }
 
+#[cfg(feature = "skate3")]
 fn io(e: skate_source::xdvdfs::Error) -> std::io::Error {
     std::io::Error::other(e.to_string())
 }
 
+#[cfg(feature = "skate3")]
 impl skate_disc::DiscFiles for DiscHost {
     fn open(
         &mut self,
@@ -354,6 +440,7 @@ impl skate_disc::DiscFiles for DiscHost {
 /// Keyboard and pad as an XInput pad. Keyboard: WASD the left stick, arrows
 /// the right stick (flicks), Space A (push), Left Shift B, F X, R Y, Z / C
 /// the bumpers, Q / E the triggers.
+#[cfg(feature = "skate3")]
 fn read_pad(keys: &ButtonInput<KeyCode>, pads: &Query<&Gamepad>) -> XboxState {
     let mut s = XboxState::default();
     let axis = |neg: KeyCode, pos: KeyCode| {

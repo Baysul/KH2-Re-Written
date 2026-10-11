@@ -6778,6 +6778,23 @@ fn skate_tick(
     }
 }
 
+/// Riding uses Skate 3's own gameplay camera in place of the follow camera.
+fn skate_camera(
+    mut skate: ResMut<crate::skate::Skate>,
+    mut camera: Query<(&mut Transform, &mut Projection), CameraOnly>,
+) {
+    let Ok((mut transform, mut projection)) = camera.single_mut() else {
+        return;
+    };
+    if let Projection::Perspective(p) = projection.as_mut() {
+        skate.aspect = p.aspect_ratio;
+        if let Some((view, fov)) = skate.camera() {
+            *transform = view;
+            p.fov = fov;
+        }
+    }
+}
+
 #[derive(Component)]
 struct SkateBoard;
 
@@ -6813,8 +6830,8 @@ fn skate_present(
     // With the rider retarget Sora takes the rider's root and pose;
     // otherwise he stands sideways on the deck in his current pose.
     let posed = sora.as_deref().and_then(|s| {
-        let (root, bones) = skate.rider()?;
-        let matrices = s.rig.as_ref()?.pose(bones)?;
+        let (root, bones, rest) = skate.rider()?;
+        let matrices = s.rig.as_ref()?.pose(bones, rest)?;
         let rows: Vec<[[f32; 4]; 4]> = matrices.iter().map(Mat4::to_cols_array_2d).collect();
         let positions = s.skinning.positions_with(&rows).ok()?;
         Some((*root, positions))
@@ -8612,6 +8629,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 field_npc_present,
                 dissolve_present,
                 camera_control,
+                skate_camera,
             )
                 .chain(),
             (
