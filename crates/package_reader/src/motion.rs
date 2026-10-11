@@ -504,6 +504,7 @@ pub fn motion_set_index(
 
 /// One source-bound motion set resolved by motion ID through the public slot
 /// chooser. The chooser is a public lead, not observed installed routing.
+#[derive(Clone)]
 pub struct MotionSetSelection {
     pub index: String,
     pub ordinal: usize,
@@ -545,6 +546,50 @@ pub fn read_motion_ids(
             .get(entry.offset as usize..entry.offset as usize + entry.size as usize)
             .ok_or("motion slot exceeds set")?;
         result.push(read_anb(anb, slot)?);
+    }
+    checked.verify_unchanged()?;
+    Ok(result)
+}
+
+/// Like [`read_motion_ids`], reading the set once; an id with no populated
+/// slot gives `None` instead of failing (any count).
+pub fn read_motion_ids_optional(
+    source: &crate::probe::ProbeSource,
+    selection: &MotionSetSelection,
+    motion_ids: &[u16],
+) -> Result<Vec<Option<SelectedMotion>>, Box<dyn std::error::Error>> {
+    if motion_ids.len() > 1024 {
+        return Err("motion ID selection count invalid".into());
+    }
+    source.verify_full_source()?;
+    let mut checked = source.open_index(&selection.index)?;
+    let entry = checked
+        .inventory
+        .entries
+        .get(selection.ordinal)
+        .filter(|e| e.name_hash == selection.name_hash)
+        .ok_or("motion source entry mismatch")?;
+    let original = crate::original::read_original(&mut checked.reader, entry)?;
+    let table = crate::bar::read_bar(&original.bytes)?;
+    let present = |slot: usize| {
+        table
+            .entries
+            .get(slot)
+            .is_some_and(|e| e.offset > 0 && e.size > 0)
+    };
+    let mut result = Vec::new();
+    for &id in motion_ids {
+        let Some(slot) = motion_set_index(present, id, selection.battle, selection.has_weapon)
+        else {
+            result.push(None);
+            continue;
+        };
+        let entry = &table.entries[slot];
+        let anb = original
+            .bytes
+            .get(entry.offset as usize..entry.offset as usize + entry.size as usize)
+            .ok_or("motion slot exceeds set")?;
+        result.push(Some(read_anb(anb, slot)?));
     }
     checked.verify_unchanged()?;
     Ok(result)

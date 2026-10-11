@@ -28,7 +28,7 @@ use package_reader::{
 };
 use player_sim::shadow::{self, ScriptRandom, Shadow};
 use player_sim::{
-    Action, AttackStep, Clip, Clips, Input, Params, Player, TriangleWorld, World,
+    Action, Clip, Clips, Input, Params, Player, TriangleWorld, World,
     camera::{self, CameraInput, FollowCamera},
 };
 use player_sim::{abilities, combat, magic, physics};
@@ -60,7 +60,9 @@ struct Locator {
     ordinal: usize,
     name_hash: [u8; 16],
 }
+mod drive_room;
 mod item_room;
+mod kit;
 mod magic_room;
 mod prize_room;
 mod settings_room;
@@ -433,16 +435,22 @@ struct ClipPoses {
     frames: Vec<Vec<Vec3>>,
     /// Model-space matrix of the objentry weapon joint for each frame.
     weapon: Vec<Mat4>,
+    /// The same for weapon slot 1's joint (forms with two Keyblades).
+    weapon2: Vec<Mat4>,
     /// Weapon vertices in hand-joint space per frame, from the weapon's own
     /// motion at the same slot and key time (empty when it has none).
     weapon_frames: Vec<Vec<Vec3>>,
+    /// The same for weapon slot 1's Keyblade.
+    weapon2_frames: Vec<Vec<Vec3>>,
     /// Root-position curve translation for each frame (model space).
     root: Vec<Vec3>,
     /// Keyblade bone 2 matrix in hand-joint space per frame (attack spheres).
     blade: Vec<Mat4>,
+    blade2: Vec<Mat4>,
     /// Attack windows from the weapon motion's range trigger 10:
-    /// (start, end, ATKP id, collision group), in clip ticks.
+    /// (start, end, ATKP id, collision group), in clip ticks; then slot 1's.
     hits: Vec<(u32, u32, u16, u8)>,
+    hits2: Vec<(u32, u32, u16, u8)>,
     /// Sora's HIT-bone matrices per frame (model space, root removed).
     body: Vec<HashMap<usize, Mat4>>,
     /// Weapon motion frame trigger 8 ("play SE"): (clip tick, sound id).
@@ -711,6 +719,8 @@ struct Game {
     /// Sora's magic: owned spells, running casts and their volumes.
     magic: Option<magic_room::MagicRt>,
     items: Option<item_room::ItemRt>,
+    /// Drive forms (None when the form tables could not be read).
+    drive: Option<drive_room::DriveRt>,
     menu_up_queued: bool,
     menu_down_queued: bool,
     enemy: Option<EnemyRuntime>,
@@ -1003,6 +1013,11 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
                     clip.face_target.push((frame, deg as f32));
                 }
             }
+            1 => {
+                if let Some(&n) = record.parameters.first() {
+                    clip.effects.push((frame, n));
+                }
+            }
             // Item use (FUN_14040dd70 case 6 → FUN_1403f6790).
             6 => clip.item_use = Some(clip.item_use.map_or(frame, |f: u32| f.min(frame))),
             // Spell release (FUN_14040dd70 case 0x11), filtered by the
@@ -1030,13 +1045,19 @@ impl AbilitySource {
     /// stat-row ability (FUN_1403c1190), then the equipped slots
     /// (FUN_1404014a0).
     fn build(&self, slots: &[u16]) -> abilities::Abilities {
+        self.build_with_form(slots, None)
+    }
+
+    /// The same with an active Drive form's record linked (stats+0x254):
+    /// Sora's growth abilities give way to the form's slots.
+    fn build_with_form(&self, slots: &[u16], form: Option<&[u16]>) -> abilities::Abilities {
         let mut a = abilities::Abilities::default();
         if let Some(&(bit, _)) = self.items.get(&self.weapon) {
             a.add(self.weapon, bit, &self.rates);
         }
         a.equip(
             slots,
-            None,
+            form,
             |id| self.items.get(&id).copied(),
             &abilities::GROWTH,
             &self.rates,
@@ -1052,17 +1073,17 @@ struct Loaded {
     weapon_model: String,
     board_motion: Option<motion::SelectedMotion>,
     arena_mesh: Option<windows_shell::room::ArenaMesh>,
-    actor: model_inspection::InspectionModel,
-    weapon: model_inspection::InspectionModel,
     params: Params,
     /// SSTM battle parameters (blow, hit-back, fall max).
     sstm: physics::Sstm,
     abilities: AbilitySource,
     magic: Option<magic_room::MagicSource>,
     items: Option<item_room::ItemSource>,
-    clips: Clips,
-    actions: Vec<((Action, bool), usize)>,
-    clip_poses: Vec<ClipPoses>,
+    /// Base Sora's kit, and what builds the Drive forms' kits.
+    kit: kit::Kit,
+    forms: Option<drive_room::FormSources>,
+    enemy_character: u16,
+    fmab: player_sim::growth::Fmab,
     spawn: Vec3,
     /// Sora's facing at the spawn (scene yaw).
     yaw: f32,
@@ -1940,6 +1961,52 @@ fn load_camp_source(
     })
 }
 
+/// The movement block (obj+0x128) of the object named `name`:
+/// FUN_14040a440 defaults with SSTM FallMax, then FUN_14040a480 copies the
+/// PRTY record named by its objentry +0x4e (FUN_1403e9590 lookup) when it
+/// is nonzero. Returns the parameters, the PRTY index and its offset.
+fn player_params(
+    objects: &[objentry::ObjectEntry],
+    name: &str,
+    pref: &[u8],
+    sstm: &physics::Sstm,
+) -> Result<(Params, i32, Option<u32>), Box<dyn std::error::Error>> {
+    let mut obj_params = physics::ObjParams::defaults(sstm.fall_max);
+    let player_object = objects
+        .iter()
+        .find(|o| o.model_name == name.as_bytes())
+        .ok_or("player object entry absent")?;
+    let prty_index = player_object.neo_moveset as i16 as i32;
+    let mut prty_offset = None;
+    if prty_index != 0 {
+        let prty = preferences::read_prty(bar_entry(pref, b"prty")?)?;
+        let offset = physics::prty_offset(&prty.offsets, prty_index).ok_or("PRTY record absent")?;
+        let record = prty
+            .records
+            .iter()
+            .find(|r| r.offset == offset && !r.overlaps_table)
+            .ok_or("PRTY record absent or overlaps table")?;
+        obj_params.apply_prty(&record.words);
+        prty_offset = Some(offset);
+    }
+    let params = Params {
+        walk_speed: obj_params.walk,
+        run_speed: obj_params.run,
+        jump_height: obj_params.jump,
+        turn_speed: obj_params.turn,
+        fall_max: obj_params.fall_max,
+        land_inertia: obj_params.word10,
+        land_drag: obj_params.word11,
+        step_height: STEP_HEIGHT,
+        walk_threshold: WALK_THRESHOLD,
+        radius: BODY_RADIUS,
+        height: BODY_HEIGHT,
+        disarm_ticks: DISARM_TICKS,
+    };
+    params.validate()?;
+    Ok((params, prty_index, prty_offset))
+}
+
 fn load(
     source: &Arc<ProbeSource>,
     config_path: &Path,
@@ -2052,39 +2119,13 @@ fn load(
             weapon,
         }
     };
-    let mut obj_params = physics::ObjParams::defaults(sstm.fall_max);
-    let player_object = objects
-        .iter()
-        .find(|o| o.model_name == config.player_object_name.as_bytes())
-        .ok_or("player object entry absent")?;
-    let prty_index = player_object.neo_moveset as i16 as i32;
-    let mut prty_offset = None;
-    if prty_index != 0 {
-        let prty = preferences::read_prty(bar_entry(pref, b"prty")?)?;
-        let offset = physics::prty_offset(&prty.offsets, prty_index).ok_or("PRTY record absent")?;
-        let record = prty
-            .records
-            .iter()
-            .find(|r| r.offset == offset && !r.overlaps_table)
-            .ok_or("PRTY record absent or overlaps table")?;
-        obj_params.apply_prty(&record.words);
-        prty_offset = Some(offset);
-    }
-    let params = Params {
-        walk_speed: obj_params.walk,
-        run_speed: obj_params.run,
-        jump_height: obj_params.jump,
-        turn_speed: obj_params.turn,
-        fall_max: obj_params.fall_max,
-        land_inertia: obj_params.word10,
-        land_drag: obj_params.word11,
-        step_height: STEP_HEIGHT,
-        walk_threshold: WALK_THRESHOLD,
-        radius: BODY_RADIUS,
-        height: BODY_HEIGHT,
-        disarm_ticks: DISARM_TICKS,
-    };
-    params.validate()?;
+    let (params, prty_index, prty_offset) =
+        player_params(&objects, &config.player_object_name, pref, &sstm)?;
+    // The growth abilities' rows (pref `fmab`, FUN_1403e92d0).
+    let fmab = bar_entry(pref, b"fmab")
+        .ok()
+        .and_then(player_sim::growth::Fmab::read)
+        .unwrap_or_default();
 
     // PTYA attack entries chosen by ID for the grounded and aerial combos.
     let battle = read_archive(source, &config.battle)?;
@@ -2160,18 +2201,6 @@ fn load(
         None => None,
     };
     let ptya_bytes = bar_entry(&battle, b"ptya")?;
-    let table = ptya::read_table(ptya_bytes)?;
-    let set = ptya::read_set(ptya_bytes, &table, config.ptya_pointer)?;
-    // Every record of the player's PTYA set: the attack command chooses
-    // among them per press (player_sim::ptya). Each distinct motion loads
-    // once.
-    let records: Vec<player_sim::ptya::Record> = set.iter().map(ptya_record).collect();
-    let mut attack_motions: Vec<u16> = Vec::new();
-    for e in &set {
-        if e.motion_id != 0 && !attack_motions.contains(&e.motion_id) {
-            attack_motions.push(e.motion_id);
-        }
-    }
     // The six spells' tables and cast motions (magc, pref/magi, cmd).
     let magic_src = magic_room::load(&battle, pref, &system, 70.)
         .map_err(|e| format!("magic tables: {e}"))
@@ -2180,16 +2209,6 @@ fn load(
         .as_ref()
         .map(|m| magic_room::motion_ids(&m.records))
         .unwrap_or_default();
-    for &m in &spell_ids {
-        if !attack_motions.contains(&m) {
-            attack_motions.push(m);
-        }
-    }
-    if attack_motions.is_empty() {
-        return Err("PTYA set has no attack motions".into());
-    }
-
-    let mut ids: Vec<u16> = LOCOMOTION.iter().map(|&(_, id)| id).collect();
     let selection = motion::MotionSetSelection {
         index: config.motion_set.index.clone(),
         ordinal: config.motion_set.ordinal,
@@ -2197,360 +2216,98 @@ fn load(
         battle: config.battle_mode,
         has_weapon: config.has_weapon,
     };
-    let mut motions = motion::read_motion_ids(source, &selection, &ids)?;
-    for chunk in attack_motions.chunks(32) {
-        motions.extend(motion::read_motion_ids(source, &selection, chunk)?);
-    }
-    ids.extend(&attack_motions);
-    // Field-mode (weapon put away) idle/walk/run through the same public
-    // chooser with battle=false, has_weapon=false.
-    let field_selection = motion::MotionSetSelection {
-        battle: false,
-        has_weapon: false,
-        ..selection
-    };
-    motions.extend(motion::read_motion_ids(
-        source,
-        &field_selection,
-        &[0, 1, 2],
-    )?);
-    ids.extend([0, 1, 2]);
-    let battle_count = ids.len() - 3;
-    // Damage reactions (motion ids 10..13) when an enemy can hit Sora.
-    let hurt_count = if config.enemy.is_some() {
-        let hurt_selection = motion::MotionSetSelection {
-            index: config.motion_set.index.clone(),
-            ordinal: config.motion_set.ordinal,
-            name_hash: config.motion_set.name_hash,
-            battle: config.battle_mode,
-            has_weapon: config.has_weapon,
-        };
-        motions.extend(motion::read_motion_ids(
-            source,
-            &hurt_selection,
-            &SORA_HURT,
-        )?);
-        ids.extend(SORA_HURT);
-        SORA_HURT.len()
-    } else {
-        0
-    };
-    // Guard (PTYA 0x0b → motion 173) and its success recoil (motion 42).
-    let guard_selection = motion::MotionSetSelection {
-        index: config.motion_set.index.clone(),
-        ordinal: config.motion_set.ordinal,
-        name_hash: config.motion_set.name_hash,
-        battle: config.battle_mode,
-        has_weapon: config.has_weapon,
-    };
-    motions.extend(motion::read_motion_ids(
-        source,
-        &guard_selection,
-        &SORA_GUARD,
-    )?);
-    ids.extend(SORA_GUARD);
-    // Sora's HIT spheres (object collision type 2), for enemy attacks.
-    let mut sora_target_radius = 0f32;
-    let mut sora_target_lift = 70f32;
-    let sora_body: Vec<(usize, Vec3, f32, bool)> = match &config.enemy {
-        Some(e) => {
-            let shapes = object_collision::read(bar_entry_typed(
-                &read_archive(source, &e.actor_model)?,
-                23,
-            )?)?;
-            // FUN_1403d7520 reads the attacker's TARGET shape (kind 3) via
-            // FUN_1403b5650(obj, 3, -1) / FUN_1403c9c00.
-            sora_target_radius = shapes
-                .iter()
-                .find(|c| c.kind == object_collision::TARGET)
-                .map_or(0., |c| c.radius as f32);
-            sora_target_lift = shapes
-                .iter()
-                .find(|c| c.kind == object_collision::TARGET)
-                .map_or(70., |c| c.position_height as f32);
-            shapes
-                .iter()
-                .filter(|c| c.kind == object_collision::HIT && c.group == 0 && c.bone >= 0)
-                .map(|c| {
-                    (
-                        c.bone as usize,
-                        Vec3::new(
-                            c.position[0] as f32,
-                            c.position[1] as f32,
-                            c.position[2] as f32,
-                        ),
-                        c.radius as f32,
-                        matches!(c.argument, 0 | 2 | 3 | 4 | 5),
-                    )
-                })
-                .collect()
-        }
-        None => Vec::new(),
-    };
-    let mut weapon_motions: HashMap<usize, motion::SelectedMotion> = HashMap::new();
-    if let Some(set) = &config.weapon_motion_set {
-        let weapon_selection = motion::MotionSetSelection {
+    let weapon_set = config
+        .weapon_motion_set
+        .as_ref()
+        .map(|set| motion::MotionSetSelection {
             index: set.index.clone(),
             ordinal: set.ordinal,
             name_hash: set.name_hash,
             battle: config.battle_mode,
             has_weapon: config.has_weapon,
-        };
-        let mut found = Vec::new();
-        for chunk in ids[..battle_count].chunks(32) {
-            found.extend(motion::read_motion_ids(source, &weapon_selection, chunk)?);
-        }
-        for (selected, own) in found.into_iter().zip(&motions) {
-            weapon_motions.insert(own.slot, selected);
-        }
-        // The guard volumes (ATKP 161/162) live in the weapon's motions.
-        let found = motion::read_motion_ids(source, &weapon_selection, &SORA_GUARD)?;
-        for (selected, own) in found.into_iter().zip(&motions[motions.len() - 2..]) {
-            weapon_motions.insert(own.slot, selected);
-        }
-    }
-
-    // Precompute every frame of every clip; undefined basic-FK frames reject
-    // the session instead of substituting a pose.
-    let mut clip_poses = Vec::new();
-    let mut eval_totals = [0usize; 4];
-    let mut clip_list = Vec::new();
-    let mut by_slot: HashMap<usize, usize> = HashMap::new();
-    let mut slots = Vec::new();
-    for selected in &motions {
-        let (mut clip, key_start) = clip_for(selected)?;
-        // Range 35 opens the combo window only for its own motion id
-        // (FUN_14040d810 case 0x23).
-        let own_id = ids[clip_list.len()];
-        for record in selected.triggers.iter().flat_map(|t| &t.records.ranges) {
-            if record.trigger == 35 && record.parameters.first().map(|&m| m as u16) == Some(own_id)
-            {
-                let start = record.start_frame.max(0) as u32;
-                let stop = if record.end_frame < 0 {
-                    clip.end
-                } else {
-                    record.end_frame as u32
-                };
-                clip.combo_windows.push((start, stop));
-            }
-        }
-        let index = match by_slot.get(&selected.slot) {
-            Some(&i) => i,
-            None => {
-                let mut frames = Vec::with_capacity(clip.end as usize);
-                let mut hand = Vec::with_capacity(clip.end as usize);
-                let mut root = Vec::with_capacity(clip.end as usize);
-                let mut weapon_frames = Vec::new();
-                let mut blade = Vec::new();
-                let mut body = Vec::new();
-                let hits = weapon_motions
-                    .get(&selected.slot)
-                    .map(|own| {
-                        own.triggers
-                            .iter()
-                            .flat_map(|t| &t.records.ranges)
-                            .filter(|r| r.trigger == 10 && r.parameters.len() >= 2)
-                            .map(|r| {
-                                (
-                                    r.start_frame.max(0) as u32,
-                                    if r.end_frame < 0 {
-                                        clip.end
-                                    } else {
-                                        r.end_frame as u32
-                                    },
-                                    r.parameters[0] as u16,
-                                    r.parameters[1] as u8,
-                                )
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                for offset in 0..=clip.end {
-                    let frame = key_start + offset;
-                    if let Some(own) = weapon_motions.get(&selected.slot) {
-                        let (pose, _) = weapon
-                            .skinning
-                            .sample_evaluated(&own.motion, frame as f32)?;
-                        weapon_frames.push(
-                            pose.position_bits
-                                .iter()
-                                .map(|p| Vec3::from_array(p.map(f32::from_bits)))
-                                .collect(),
-                        );
-                        if let Some(m) = pose.matrix_bits.get(2) {
-                            blade.push(Mat4::from_cols_array(&m.map(f32::from_bits)));
-                        }
+        });
+    // Sora's HIT spheres (object collision type 2), for enemy attacks.
+    let collision_archive = match &config.enemy {
+        Some(e) => Some(read_archive(source, &e.actor_model)?),
+        None => None,
+    };
+    let kit = kit::load_kit(
+        source,
+        kit::KitInputs {
+            form: 0,
+            actor,
+            weapon,
+            weapon_joint,
+            second_joint: None,
+            motion_set: selection.clone(),
+            fallback: None,
+            weapon_motion_set: weapon_set.clone(),
+            second_weapon_motion_set: None,
+            ptya: ptya_bytes,
+            ptya_pointer: config.ptya_pointer,
+            spell_ids: spell_ids.clone(),
+            hurt: config.enemy.is_some(),
+            collision_archive,
+            basic_fk,
+            params,
+        },
+    )?;
+    let sora_body = kit.body.clone();
+    let (sora_target_radius, sora_target_lift) = (kit.target_radius, kit.target_lift);
+    let forms = drive_room::FormSources::new(
+        &system,
+        &battle,
+        &objects,
+        weapon_joint,
+        selection,
+        spell_ids,
+        config.enemy.is_some(),
+        basic_fk,
+        sstm,
+    )
+    .inspect_err(|e| eprintln!("Drive forms unavailable: {e}"))
+    .ok();
+    // The forms' and Revert's names for the command menu.
+    let forms = match (forms, &config.menu) {
+        (Some(mut f), Some(menu)) => {
+            let mut wanted = f.named_commands();
+            wanted.push((0, MENU_MESSAGES[0]));
+            wanted.push((0, MENU_MESSAGES[3]));
+            wanted.push((0, drive_room::REVERT_LABEL));
+            let ids: Vec<u32> = wanted.iter().map(|w| w.1).collect();
+            let texts = hud::load_messages_optional(
+                source,
+                &menu.messages.index,
+                menu.messages.ordinal,
+                menu.messages.name_hash,
+                &ids,
+            )?;
+            for ((cmd, id), text) in wanted.into_iter().zip(texts) {
+                let text = text.unwrap_or_default();
+                match id {
+                    drive_room::REVERT_LABEL => f.revert_label = text,
+                    i if i == MENU_MESSAGES[3] && cmd == 0 => f.drive_label = text,
+                    i if i == MENU_MESSAGES[0] && cmd == 0 => f.attack_label = text,
+                    _ => {
+                        f.names.insert(cmd, text);
                     }
-                    let pose = if basic_fk {
-                        root.push(Vec3::ZERO);
-                        actor.skinning.sample_fk(&selected.motion, frame)?
-                    } else {
-                        let (mut pose, evaluated) = actor
-                            .skinning
-                            .sample_evaluated(&selected.motion, frame as f32)?;
-                        // Root motion moves the player; the rendered pose
-                        // stays at the player origin.
-                        let r = evaluated.root_translation;
-                        root.push(Vec3::from_array(r));
-                        for p in &mut pose.position_bits {
-                            *p = std::array::from_fn(|i| (f32::from_bits(p[i]) - r[i]).to_bits());
-                        }
-                        for m in &mut pose.matrix_bits {
-                            for i in 0..3 {
-                                m[12 + i] = (f32::from_bits(m[12 + i]) - r[i]).to_bits();
-                            }
-                        }
-                        let s = evaluated.stats;
-                        eval_totals[0] += s.constraints_applied;
-                        eval_totals[1] += s.ik_chains_solved;
-                        eval_totals[2] += s.expressions_applied;
-                        eval_totals[3] += s.unsupported_constraints;
-                        pose
-                    };
-                    body.push(
-                        sora_body
-                            .iter()
-                            .filter_map(|&(b, ..)| {
-                                let m = pose.matrix_bits.get(b)?;
-                                Some((b, Mat4::from_cols_array(&m.map(f32::from_bits))))
-                            })
-                            .collect(),
-                    );
-                    // Row-vector matrices: the row-major words are Bevy's
-                    // column-major layout of the same transform.
-                    hand.push(Mat4::from_cols_array(
-                        &pose.matrix_bits[weapon_joint].map(f32::from_bits),
-                    ));
-                    frames.push(
-                        pose.position_bits
-                            .iter()
-                            .map(|p| Vec3::from_array(p.map(f32::from_bits)))
-                            .collect(),
-                    );
                 }
-                clip_poses.push(ClipPoses {
-                    frames,
-                    weapon: hand,
-                    weapon_frames,
-                    root,
-                    blade,
-                    hits,
-                    body,
-                    sounds: weapon_motions
-                        .get(&selected.slot)
-                        .map(|own| sound_triggers(own, WEAPON_BANK))
-                        .unwrap_or_default(),
-                });
-                by_slot.insert(selected.slot, clip_poses.len() - 1);
-                clip_poses.len() - 1
             }
-        };
-        slots.push(serde_json::json!({"motion_id":ids[clip_list.len()],"slot":selected.slot,"sha256":selected.sha256,
-            "end_ticks":clip.end,"loop_start":clip.loop_start,"combo_windows":clip.combo_windows,
-            "blend_to_idle":clip.blend_to_idle,"no_gravity":clip.no_gravity,"actionable":clip.actionable,
-            "inertia":clip.inertia,"turn_to_target":clip.turn_to_target,"face_target":clip.face_target,"takeoff":clip.takeoff,
-            "root_start":clip_poses[index].root.first().map(|r| r.to_array()),
-            "root_end":clip_poses[index].root.last().map(|r| r.to_array())}));
-        clip_list.push((clip, index));
-    }
-    let step = |entry: &ptya::PtyaEntry, (clip, index): &(Clip, usize)| AttackStep {
-        clip: clip.clone(),
-        hop: f32::from_bits(entry.float_bits[0]),
-        hop_speed: f32::from_bits(entry.float_bits[4]),
-        hop_max: f32::from_bits(entry.float_bits[1]),
-        hop_min: f32::from_bits(entry.float_bits[2]),
-        hop_speed_min: f32::from_bits(entry.float_bits[3]),
-        hop_reach: f32::from_bits(entry.float_bits[12]),
-        blend: f32::from_bits(entry.float_bits[11]),
-        root: clip_poses[*index]
-            .root
-            .iter()
-            .map(|r| r.to_array())
-            .collect(),
+            Some(f)
+        }
+        (f, _) => f,
     };
-    let n = LOCOMOTION.len();
-    let field = n + attack_motions.len();
-    let attack_clip = |motion: u16| {
-        &clip_list[n + attack_motions
+    // The enemy's character id (objentry +0x4c) by its model's name hash:
+    // Wisdom and Final Form EXP count defeated Heartless / Nobodies.
+    let enemy_character = config.enemy.as_ref().map_or(0, |e| {
+        objects
             .iter()
-            .position(|&m| m == motion)
-            .unwrap_or(0)]
-    };
-    let spells: Vec<player_sim::SpellClip> = spell_ids
-        .iter()
-        .map(|&m| {
-            let (clip, index) = attack_clip(m);
-            player_sim::SpellClip {
-                motion: m,
-                clip: clip.clone(),
-                root: clip_poses[*index]
-                    .root
-                    .iter()
-                    .map(|r| r.to_array())
-                    .collect(),
-            }
-        })
-        .collect();
-    let clips = Clips {
-        idle: clip_list[0].0.clone(),
-        walk: clip_list[1].0.clone(),
-        run: clip_list[2].0.clone(),
-        field_idle: clip_list[field].0.clone(),
-        field_walk: clip_list[field + 1].0.clone(),
-        field_run: clip_list[field + 2].0.clone(),
-        jump: clip_list[3].0.clone(),
-        fall: clip_list[4].0.clone(),
-        land: clip_list[5].0.clone(),
-        records: records.clone(),
-        spells,
-        attacks: set
-            .iter()
-            .map(|e| step(e, attack_clip(e.motion_id)))
-            .collect(),
-        hurt: clip_list[field + 3..field + 3 + hurt_count.min(HURT_COUNT)]
-            .iter()
-            .map(|c| c.0.clone())
-            .collect(),
-        guard: Some(clip_list[field + 3 + hurt_count].0.clone()),
-        guard_recoil: Some(clip_list[field + 4 + hurt_count].0.clone()),
-        item: (hurt_count > HURT_COUNT).then(|| clip_list[field + 3 + HURT_COUNT].0.clone()),
-    };
-    // Pose clip per (action, weapon drawn).
-    let mut actions = vec![
-        ((Action::Idle, true), clip_list[0].1),
-        ((Action::Walk, true), clip_list[1].1),
-        ((Action::Run, true), clip_list[2].1),
-        ((Action::Idle, false), clip_list[field].1),
-        ((Action::Walk, false), clip_list[field + 1].1),
-        ((Action::Run, false), clip_list[field + 2].1),
-    ];
-    let mut both = vec![
-        (Action::Jump, clip_list[3].1),
-        (Action::Fall, clip_list[4].1),
-        (Action::Land, clip_list[5].1),
-    ];
-    for (i, e) in set.iter().enumerate() {
-        let pose = attack_clip(e.motion_id).1;
-        both.push((Action::Attack(i), pose));
-        both.push((Action::AirAttack(i), pose));
-    }
-    for (i, &m) in spell_ids.iter().enumerate() {
-        let pose = attack_clip(m).1;
-        both.push((Action::Cast(i), pose));
-        both.push((Action::AirCast(i), pose));
-    }
-    for i in 0..hurt_count.min(HURT_COUNT) {
-        both.push((Action::Hurt(i), clip_list[field + 3 + i].1));
-    }
-    if hurt_count > HURT_COUNT {
-        both.push((Action::Item, clip_list[field + 3 + HURT_COUNT].1));
-    }
-    both.push((Action::Guard, clip_list[field + 3 + hurt_count].1));
-    both.push((Action::GuardRecoil, clip_list[field + 4 + hurt_count].1));
-    for (action, clip) in both {
-        actions.push(((action, true), clip));
-        actions.push(((action, false), clip));
-    }
+            .find(|o| {
+                let name = format!("obj/{}.mdlx", String::from_utf8_lossy(&o.model_name));
+                package_reader::named::md5(name.as_bytes()) == e.model.name_hash
+            })
+            .map_or(0, |o| o.character)
+    });
 
     // Floors must carry partyStand and walls partyCollide (public labels).
     let triangles = TriangleWorld::new(
@@ -2588,7 +2345,7 @@ fn load(
         .iter()
         .fold(Vec3::splat(f32::MIN), |a, &b| a.max(b));
     let levels = floor_levels(&room.collision_triangles);
-    let weapon_points: Vec<Vec3> = weapon.poses[0]
+    let weapon_points: Vec<Vec3> = kit.weapon.poses[0]
         .position_bits
         .iter()
         .map(|p| Vec3::from_array(p.map(f32::from_bits)))
@@ -2603,8 +2360,13 @@ fn load(
             .fold(Vec3::splat(f32::MIN), |a, &b| a.max(b))
             .to_array(),
     ];
-    let idle_hand = clip_poses[clip_list[0].1].weapon[0].to_cols_array();
-    let weapon_root = weapon.poses[0].matrix_bits[0].map(f32::from_bits);
+    let idle_clip = kit
+        .actions
+        .iter()
+        .find(|(a, _)| *a == (Action::Idle, true))
+        .map_or(0, |a| a.1);
+    let idle_hand = kit.clip_poses[idle_clip].weapon[0].to_cols_array();
+    let weapon_root = kit.weapon.poses[0].matrix_bits[0].map(f32::from_bits);
     let [sx, sy, sz] = match (config.spawn, &area_load) {
         (placed, Some((_, a))) => placed.unwrap_or(a.player.0.to_array()),
         (Some(spawn), None) => spawn,
@@ -2632,12 +2394,12 @@ fn load(
         "test_room_choices":{"step_height":STEP_HEIGHT,
             "body_radius":BODY_RADIUS,"body_height":BODY_HEIGHT,"floor_min_normal_y":FLOOR_MIN_NORMAL_Y,
             "blend_ticks":"per action (player_sim::blend_for, PTYA +0x38 after attacks)","clock":"fixed 60 Hz, one motion tick per update"},
-        "ptya":{"records":set.iter().map(|e| serde_json::json!({"id":e.id,"kind":e.kind,"alternate":e.sub,"combo_offset":e.combo_offset,"flag":e.flag,"motion_id":e.motion_id,"ability":e.ability,"floats":e.float_bits.map(f32::from_bits)})).collect::<Vec<_>>(),
+        "ptya":{"records":kit.set.iter().map(|e| serde_json::json!({"id":e.id,"kind":e.kind,"alternate":e.sub,"combo_offset":e.combo_offset,"flag":e.flag,"motion_id":e.motion_id,"ability":e.ability,"floats":e.float_bits.map(f32::from_bits)})).collect::<Vec<_>>(),
             "legacy_combo_ids":[&config.ground_combo_ids,&config.air_combo_ids]},
-        "motions":slots,"collision":{"floors":floors,"walls":walls,"surface_flags":flag_counts,"bounds":[low.to_array(),high.to_array()],
+        "motions":kit.summary["motions"],"collision":{"floors":floors,"walls":walls,"surface_flags":flag_counts,"bounds":[low.to_array(),high.to_array()],
             "largest_levels":levels.iter().take(8).map(|(area,p)| serde_json::json!({"area":area,"point":p})).collect::<Vec<_>>()},
         "spawn":spawn.to_array(),"pose_evaluator":if basic_fk {"basic public FK (T053)"} else {"motion_eval IK/constraints (T057)"},
-        "evaluation_totals":{"constraints":eval_totals[0],"ik_chains":eval_totals[1],"expressions":eval_totals[2],"unsupported_constraints":eval_totals[3]},"weapon_joint":weapon_joint,"objentry_joint":objentry_joint,"weapon_bounds":weapon_bounds,"idle_hand_matrix":idle_hand,"weapon_root_matrix":weapon_root,"weapon_bones":weapon.skinning.bones.len(),"object_candidates":object_candidates,
+        "evaluation_totals":kit.summary["evaluation_totals"],"weapon_joint":weapon_joint,"objentry_joint":objentry_joint,"weapon_bounds":weapon_bounds,"idle_hand_matrix":idle_hand,"weapon_root_matrix":weapon_root,"weapon_bones":kit.weapon.skinning.bones.len(),"object_candidates":object_candidates,
         "object_count":objects.len(),
         "missing":["scale channels","up-vector/path/camera constraint types","limiter damping","root rotation","weapon constraint motion","hit detection","enemies","measured installed timing"],
         "inferred_rules":["direction constraints aim local +X","two-joint IK bends the middle joint about local Z","expression list/condition semantics","Hermite tangents scaled by key span","field/battle mode switch with 6 s disarm timeout"],
@@ -2739,7 +2501,7 @@ fn load(
             base,
             e,
             &battle,
-            &clip_poses,
+            &kit.clip_poses,
             sora_body,
             sora_target_radius,
         )?),
@@ -2826,16 +2588,15 @@ fn load(
         arena_mesh,
         area_talk,
         stay: config.area.as_ref().is_some_and(|a| a.stay),
-        actor,
-        weapon,
         params,
         sstm,
         abilities: ability_source,
         magic: magic_src,
         items: item_room::load(&system).ok(),
-        clips,
-        actions,
-        clip_poses,
+        forms,
+        enemy_character,
+        fmab,
+        kit,
         spawn,
         yaw,
         world,
@@ -4045,6 +3806,9 @@ fn setup(
             drive_level: 3,
             drive_max: 3,
             mp_charge: None,
+            form_bars: 0,
+            form_time: 0.,
+            form_max_time: 0.,
         };
         let canvas = Canvas::new(sheets[0].texel_scale as f32);
         let mut image = Image::new(
@@ -4426,6 +4190,10 @@ fn setup(
     game.weapon_display = weapon_pose;
     game.part_indices = part_indices;
     game.display = pose;
+    // Base Sora's model and Keyblade, respawned on a revert.
+    if let Some(d) = game.drive.as_mut() {
+        d.models.insert(0, (actor, weapon));
+    }
     // Effect quads: one mesh per blend (GS ALPHA 0x44 blend, 0x48 add).
     if let Some(atlas) = startup.effect_atlas.take() {
         let image = rgba_image(atlas.size[0], atlas.size[1], atlas.rgba, &mut images);
@@ -4533,6 +4301,11 @@ fn menu_model_present(
         }
     }
     let Some(t) = time else { return };
+    // The member model is base Sora's walk; in a Drive form the room's
+    // clips are the form's.
+    if game.drive.as_ref().is_some_and(|d| d.shown != 0) {
+        return;
+    }
     let c = &game.clip_poses[model.clip];
     let f = (t as usize).min(c.frames.len() - 1);
     let root = c.root[f.min(c.root.len() - 1)];
@@ -4597,10 +4370,16 @@ fn compose_2d(
     camp: Option<Res<CampRes>>,
     mut frame: ResMut<Ui2dFrame>,
     settings: Res<settings_room::SettingsRes>,
+    game: Res<Game>,
 ) {
     let Some(c) = compose else { return };
-    // Brightness tints the scene; the HUD setting hides the field HUD.
-    let b = settings.current.brightness_factor();
+    // Brightness tints the scene; the HUD setting hides the field HUD. A
+    // Drive change darkens the scene's light (drive_room::scene_light).
+    let b = settings.current.brightness_factor()
+        * game
+            .drive
+            .as_ref()
+            .map_or(1., drive_room::DriveRt::scene_light);
     frame.full_screen(c.scene_sheet, [b, b, b, 1.]);
     if let (Some(s), Some(t)) = (c.snapshot_sheet, &talk)
         && t.dissolve > 0
@@ -4674,7 +4453,27 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     // (1520: Aerial Recovery out of the blow struck at 1500.)
     let jump = matches!(tick, 300 | 560 | 1520);
     // (spell slots are scripted in `simulate`)
-    let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
+    // (7700.., 8030.. and 8300..: combos in Limit, Valor and Wisdom Form.)
+    let attack = matches!(
+        tick,
+        400 | 410
+            | 440
+            | 470
+            | 500
+            | 575
+            | 590
+            | 610
+            | 630
+            | 7700
+            | 7710
+            | 7720
+            | 8030
+            | 8040
+            | 8050
+            | 8300
+            | 8310
+            | 8320
+    );
     (stick, jump, attack)
 }
 const AUTOPLAY_CAPTURES: &[u64] = &[
@@ -4685,8 +4484,9 @@ const AUTOPLAY_CAPTURES: &[u64] = &[
     3830, 3860, 3900, 3930, 4060, 4090, 4150, 4180, 4420, 4450, 4480, 4800, 4830, 4880, 4910, 5000,
     5030, 5100, 5130, 5500, 5560, 5590, 5650, 5690, 5740, 5780, 5800, 5840, 5890, 5930, 5940, 6000,
     6030, 6090, 6210, 6270, 6300, 6330, 6390, 6430, 6460, 6475, 6530, 6560, 6600, 6670, 6705, 6725,
-    6760, 6790, 6900, 7000, 7160, 7200, 7240, 7330, 7560, 7640, 7720, 7800, 7880, 7960, 8060, 8160,
-    8650, 8900, 9100, 9170,
+    6760, 6790, 6900, 7000, 7160, 7200, 7240, 7330, 7505, 7531, 7546, 7560, 7561, 7600, 7640, 7705,
+    7720, 7800, 7810, 7855, 7880, 7890, 7960, 8020, 8035, 8060, 8130, 8160, 8185, 8290, 8305, 8325,
+    8395, 8650, 8900, 9100, 9170,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -4712,10 +4512,12 @@ fn simulate(
     hud: Option<ResMut<Hud>>,
     mut area: Option<ResMut<AreaRes>>,
     skate: Res<crate::skate::Skate>,
+    mut camp: Option<ResMut<CampRes>>,
 ) {
     let tick = game.tick;
     let (up, down) = if game.autoplay.is_some() {
-        (false, tick == 980)
+        // (7690: back to Attack for the Drive forms' combos.)
+        (tick == 7690, tick == 980)
     } else {
         let queued = (game.menu_up_queued, game.menu_down_queued);
         game.menu_up_queued = false;
@@ -4818,6 +4620,39 @@ fn simulate(
                 };
             }
         }
+        // A Drive form greys the commands its mask disables (FUN_1403b6cb0:
+        // Magic in Valor, Limit and Antiform, Items in Antiform), and
+        // Wisdom's Attack row is "Shoot" (0x16d).
+        if let Some(d) = game.drive.as_ref() {
+            for (row, cmd) in [(1usize, 2u16), (2, 3)] {
+                if d.masked(cmd)
+                    && let Some(r) = m.menu.items.get_mut(row)
+                {
+                    r.colour = 5;
+                }
+            }
+            if let (Some(r), Some(label)) = (m.menu.items.get_mut(0), d.attack_label()) {
+                r.label = label;
+            }
+        }
+        // The Drive row: "Drive" opening the forms (submenu 3), or "Revert"
+        // in a form (FUN_1403f36c0), and the open submenu's colours.
+        if let Some((label, colour, opens)) = drive_room::menu_row(&game) {
+            if let Some(row) = m.menu.items.get_mut(3) {
+                row.label = label;
+                row.colour = colour;
+            }
+            if let Some(o) = m.menu.opens.get_mut(3) {
+                *o = opens.then_some(3);
+            }
+            if let (Some(sub), Some(d)) = (m.menu.sub.as_mut(), game.drive.as_ref())
+                && sub.kind == 3
+            {
+                for (item, (_, _, c)) in sub.items.iter_mut().zip(d.menu(&game.player.drive)) {
+                    item.colour = c;
+                }
+            }
+        }
         sub_was_open = m.menu.sub.is_some();
         let before = (m.menu.cursor, m.menu.sub.as_ref().map(|s| s.cursor));
         let decision = m.menu.input_with_back(up, down, decide, back);
@@ -4879,6 +4714,34 @@ fn simulate(
                     .as_ref()
                     .and_then(|mg| mg.menu_types.get(index).copied());
             }
+            Decision::Open(3) => {
+                let gauge = game.player.drive;
+                if let Some(d) = game.drive.as_mut() {
+                    let list = d.menu(&gauge);
+                    let items = list
+                        .iter()
+                        .map(|&(_, cmd, colour)| Item {
+                            label: d.src.names.get(&cmd).cloned().unwrap_or_default(),
+                            icon: d.src.commands.get(&cmd).map_or(4, |c| c.icon),
+                            colour,
+                        })
+                        .collect();
+                    d.menu_forms = list.iter().map(|l| l.0).collect();
+                    m.menu.open_sub(3, items);
+                    cursor_moved = true;
+                }
+            }
+            Decision::ExecuteSub { row: 3, index } => {
+                if let Some(d) = game.drive.as_mut() {
+                    d.request = d.menu_forms.get(index).copied();
+                }
+            }
+            // Revert (Execute 5, FUN_140405440).
+            Decision::Execute(3) => {
+                if let Some(d) = game.drive.as_mut() {
+                    d.request = Some(0);
+                }
+            }
             Decision::Invalid => denied = true,
             _ => {}
         }
@@ -4935,6 +4798,8 @@ fn simulate(
         jump_up,
         attack,
         guard,
+        // Square held (logical 0x200).
+        guard_held: game.autoplay.is_none() && game.pad.held & 0x200 != 0,
         target: target.map(|t| [t[0], t[2]]),
         target_rise: target.map_or(0., |t| t[1]),
         target_reach: target.map_or(0., |t| t[3]),
@@ -4982,6 +4847,14 @@ fn simulate(
         };
     }
     let cast = cast.or(menu_cast);
+    // Spells and items a form disables are refused (FUN_1403b6cb0).
+    let (cast, menu_item) = match game.drive.as_ref() {
+        Some(d) => (
+            cast.filter(|_| !d.masked(2)),
+            menu_item.filter(|_| !d.masked(3)),
+        ),
+        None => (cast, menu_item),
+    };
     if let Some(t) = cast
         && !talking
     {
@@ -5001,6 +4874,8 @@ fn simulate(
     } = &mut *game;
     let step = player.tick(&input, params, clips, world);
     magic_room::tick(&mut game, tick);
+    // Wisdom's shots join the spell volumes before the hits are tested.
+    drive_room::shots(&mut game);
     item_room::tick(&mut game, tick);
     // The area's zone task (FUN_1403a4f90, priority 12000) runs after the
     // objects: exits are tested against Sora's new position.
@@ -5070,6 +4945,17 @@ fn simulate(
     }
     combat_tick(&mut game, tick);
     prize_room::tick(&mut game, tick);
+    // Drive: requests, the form change, the form gauge (after the player
+    // tick, like FUN_1403a92c0 / FUN_140404a40).
+    {
+        let mut slots = camp.as_deref_mut().map(|c| &mut c.ability_slots);
+        let exp = game
+            .drive
+            .as_mut()
+            .map_or(0, |d| std::mem::take(&mut d.pending_exp));
+        drive_room::add_form_exp(&mut game, exp, slots.as_deref_mut());
+        drive_room::tick(&mut game, slots.as_deref().map(|s| s.as_slice()));
+    }
     // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
     // recenters (test-room bindings for the original's camera buttons).
     let mut turn = 0f32;
@@ -5833,6 +5719,22 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
     if keys.just_pressed(KeyCode::F4) && game.autoplay.is_none() {
         game.debug_blow = true;
     }
+    // Test-room aids for Drive forms: F11 refills the gauge
+    // (FUN_1403c2020), F12 lets the missing party count as present.
+    if game.autoplay.is_none() && game.drive.is_some() {
+        if keys.just_pressed(KeyCode::F11) {
+            game.player.drive.refill();
+        }
+        if keys.just_pressed(KeyCode::F12)
+            && let Some(d) = game.drive.as_mut()
+        {
+            d.party = !d.party;
+            eprintln!(
+                "Drive: stand-in party {}",
+                if d.party { "on" } else { "off" }
+            );
+        }
+    }
     let Some(mut hud) = hud else { return };
     let mut s = hud.stats;
     if let Some(rt) = game.enemy.as_mut() {
@@ -5874,6 +5776,8 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
     // The Drive gauge is Sora's (hits, damage and orbs fill it).
     let drive = game.player.drive;
     (s.drive, s.drive_level, s.drive_max) = (drive.partial, drive.level, drive.max);
+    s.drive_mode = drive.mode;
+    (s.form_bars, s.form_time, s.form_max_time) = (drive.bars, drive.time, drive.max_time);
     hud.stats = s;
     let Hud {
         sheets,
@@ -6093,6 +5997,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
         effect_queue,
         magic,
         debug_blow,
+        drive,
         ..
     } = game;
     let Some(rt) = enemy.as_mut() else { return };
@@ -6128,14 +6033,24 @@ fn combat_tick(game: &mut Game, tick: u64) {
     let mut hit = None;
     // Live guard (ATKP Type 2/3) spheres: centre, radius, ATKP.
     let mut guards: Vec<(Vec3, f32, u16, Option<u64>)> = Vec::new();
-    if !cp.blade.is_empty() {
-        let f = frame.min(cp.blade.len() - 1);
-        let to_model = cp.weapon[f.min(cp.weapon.len() - 1)] * cp.blade[f];
-        for (w, &(start, end, atkp, group)) in cp.hits.iter().enumerate() {
+    // Slot 0's Keyblade, then slot 1's (Valor, Master and Final).
+    for (hand, (blade, weapon, hits)) in [
+        (&cp.blade, &cp.weapon, &cp.hits),
+        (&cp.blade2, &cp.weapon2, &cp.hits2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if blade.is_empty() || weapon.is_empty() {
+            continue;
+        }
+        let f = frame.min(blade.len() - 1);
+        let to_model = weapon[f.min(weapon.len() - 1)] * blade[f];
+        for (w, &(start, end, atkp, group)) in hits.iter().enumerate() {
             if (frame as u32) < start || frame as u32 > end {
                 continue;
             }
-            let instance = (*action_started << 4) | w as u64;
+            let instance = (*action_started << 6) | (hand as u64) << 5 | w as u64;
             // Guard types never test bodies (FUN_1403cff40).
             let guard = rt.rows.get(&atkp).is_some_and(|r| matches!(r.kind, 2 | 3));
             // FUN_1403cf400 / FUN_1403cf490: the attack's id and combo
@@ -6289,6 +6204,13 @@ fn combat_tick(game: &mut Game, tick: u64) {
             // FUN_1403a8800: the row's DriveDrain fills the gauge (the
             // Shadow is a ZAKO).
             let (mp_charging, boost) = (player.mp_charging, player.abilities.drive_boost);
+            // FUN_1403e86b0: each hit Sora lands is Valor Form EXP.
+            if let Some(d) = drive.as_mut()
+                && d.active
+                && d.form == player_sim::forms::VALOR
+            {
+                d.pending_exp += 1;
+            }
             player
                 .drive
                 .hit(rows[row].drive_drain, true, mp_charging, boost);
@@ -7985,7 +7907,9 @@ fn camp_tick(
             }
             // The battle ability record follows the equipped slots;
             // Guard's ability bit gates PTYA 0x0b (FUN_140402750).
-            game.player.abilities = game.ability_source.build(&c.ability_slots);
+            // In a Drive form the form's own slots are linked as well.
+            let slots = c.ability_slots.clone();
+            drive_room::rebuild_abilities(&mut game, Some(&slots));
             // Owned spell levels (the element items), the shortcut slots
             // and the MP-charge toggles follow the camp.
             game.shortcuts = c.shortcuts;
@@ -8589,7 +8513,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         None => None,
     };
     let mut poses = HashMap::new();
-    for (action, clip) in &loaded.actions {
+    for (action, clip) in &loaded.kit.actions {
         poses.insert(*action, *clip);
     }
     let stay = loaded.stay;
@@ -8616,6 +8540,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let talk_room = loaded.npc.is_some();
     let mut player = Player::new(loaded.spawn.to_array(), loaded.yaw);
     player.abilities = loaded.abilities.build(&ROOM_ABILITIES);
+    player.fmab = std::mem::take(&mut loaded.fmab);
     if autoplay.is_some() {
         // The unattended run strikes Sora with blows and recovers with
         // Retaliating Slash (ability bit 101), which is unequipped by
@@ -8628,11 +8553,11 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut game = Game {
         ability_source: loaded.abilities,
         params: loaded.params,
-        clips: loaded.clips,
+        clips: loaded.kit.clips,
         world: loaded.world,
         player,
         poses,
-        clip_poses: loaded.clip_poses,
+        clip_poses: loaded.kit.clip_poses,
         part_indices: Vec::new(),
         tick: 0,
         log,
@@ -8649,6 +8574,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         back_queued: false,
         debug_blow: false,
         shortcuts: ROOM_SHORTCUTS,
+        drive: None,
         items: loaded.items.map(|src| {
             item_room::ItemRt::new(
                 src,
@@ -8699,6 +8625,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         },
     };
     game.event(loaded.summary);
+    if let Some(src) = loaded.forms.take() {
+        let d = drive_room::DriveRt::new(src, Arc::clone(&source), loaded.enemy_character);
+        game.player.drive.max = drive_room::ROOM_DRIVE_MAX;
+        game.event(serde_json::json!({"event":"drive_forms","form_objects":d.src.form_objects,
+            "commands":d.src.form_command,"owned":d.forms.owned,
+            "records":d.forms.records.iter().map(|r| serde_json::json!({"level":r.level,"keyblade":r.keyblade,
+                "abilities":r.abilities})).collect::<Vec<_>>(),"enemy_character":loaded.enemy_character}));
+        game.drive = Some(d);
+    }
     let output = if loaded.banks.numbers().is_empty() {
         None
     } else {
@@ -8984,8 +8919,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .insert_resource(Startup {
             room: Some(loaded.room),
             arena_mesh: loaded.arena_mesh,
-            actor: Some(loaded.actor),
-            weapon: Some(loaded.weapon),
+            actor: Some(loaded.kit.actor),
+            weapon: Some(loaded.kit.weapon),
             hud: loaded.hud,
             enemy_model,
             effect_atlas,
@@ -9065,6 +9000,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             )
                 .chain(),
             (
+                drive_room::present,
                 present,
                 skate_present,
                 present_enemy,

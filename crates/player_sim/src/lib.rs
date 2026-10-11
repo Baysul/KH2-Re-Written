@@ -12,12 +12,15 @@ pub mod abilities;
 pub mod camera;
 pub mod combat;
 pub mod drive;
+pub mod forms;
+pub mod growth;
 pub mod magic;
 pub mod physics;
 pub mod prize;
 pub mod ptya;
 pub mod shadow;
 pub mod targeting;
+pub mod wisdom;
 
 pub type Vec3 = [f32; 3];
 
@@ -109,6 +112,9 @@ pub struct Clip {
     pub invulnerable: Vec<(u32, u32)>,
     /// Frame trigger 6: the item is used (FUN_14040dd70 → FUN_1403f6790).
     pub item_use: Option<u32>,
+    /// Frame trigger 1: an object effect starts (tick, effect number);
+    /// Wisdom's shots ride on it (FUN_14040dd70 case 1).
+    pub effects: Vec<(u32, i16)>,
 }
 
 impl Clip {
@@ -196,6 +202,19 @@ pub struct Clips {
     pub guard_recoil: Option<Clip>,
     /// The item-use motion (9), when loaded.
     pub item: Option<Clip>,
+    /// The drive-start (0x34) and drive-in (0x35) motions, when the set
+    /// holds them.
+    pub drive: Option<Clip>,
+    pub drive_in: Option<Clip>,
+    /// The growth abilities' motions (`growth::MOTIONS`) with their root
+    /// motion, when the set holds them.
+    pub growth: Vec<(u16, Clip, Vec<Vec3>)>,
+}
+
+impl Clips {
+    pub fn growth_clip(&self, motion: u16) -> Option<&(u16, Clip, Vec<Vec3>)> {
+        self.growth.iter().find(|g| g.0 == motion)
+    }
 }
 
 /// Sora's damage-reaction motions in `Clips::hurt` order (P_EX100 slots
@@ -254,14 +273,29 @@ pub enum Action {
     GuardRecoil,
     /// Using an item (motion 9): actionable again from its range-2 tick.
     Item,
+    /// The Drive command's start (motion 0x34, FUN_14040ce60): physics
+    /// mode 0 with no velocity, held until the form change swaps the
+    /// player object.
+    Drive,
+    /// A Drive form's arrival (motion 0x35, FUN_140405630): locked until
+    /// its range-2 tick, like an item.
+    DriveIn,
+    /// The High Jump's jump (motion 201, FUN_1403b59b0): JUMP with the
+    /// growth row's height.
+    HighJump,
+    /// A growth ability's motion (`growth::motion`): Aerial Dodge (202),
+    /// Quick Run (203, 204), Glide (205..208) or Dodge Roll (209).
+    Growth(u16),
 }
 
 impl Action {
     pub fn airborne(self) -> bool {
         matches!(
             self,
-            Self::Jump | Self::Fall | Self::AirAttack(_) | Self::AirCast(_)
-        ) || matches!(self, Self::Hurt(i) if hurt::AIR.contains(&i)
+            Self::Jump | Self::HighJump | Self::Fall | Self::AirAttack(_) | Self::AirCast(_)
+        ) || matches!(self, Self::Growth(m) if m == growth::motion::AERIAL_DODGE
+            || (growth::motion::GLIDE..=growth::motion::GLIDE_STAND).contains(&m))
+            || matches!(self, Self::Hurt(i) if hurt::AIR.contains(&i)
             || hurt::BLOW.contains(&i)
             || i == hurt::RECOVERY)
     }
@@ -280,6 +314,9 @@ pub struct Input {
     /// The Square button (request byte +4 bit 3): Retaliating Slash, the
     /// Square combo abilities, then Guard (FUN_1403d6d50, FUN_1403a81f0).
     pub guard: bool,
+    /// Square is held (request byte +4 bit 2 [I]): Quick Run and Glide
+    /// last while it is.
+    pub guard_held: bool,
     /// XZ direction toward the current target, if any (Guard turns to it
     /// at its first tick: frame trigger 21, up to 360°).
     pub target: Option<[f32; 2]>,
@@ -433,6 +470,25 @@ pub struct Player {
     dead_air: bool,
     /// The item-use trigger fired this tick (frame trigger 6).
     item_fired: bool,
+    /// 03system `pref/fmab`: the growth abilities' rows.
+    pub fmab: growth::Fmab,
+    /// obj+0x124 bit 1: an Aerial Dodge is available (set on leaving the
+    /// ground, cleared by the dodge, a command or a hit).
+    dodge_ready: bool,
+    /// obj+0x124 bit 2: Square still held since Quick Run or Glide began.
+    square_held: bool,
+    /// obj+0xd70: invulnerability frames left (FUN_1403d7e40).
+    pub invulnerable: f32,
+    /// Quick Run's mode 0x10 state.
+    quick_run: Option<growth::QuickRun>,
+    /// Gliding (modes 0x11 / 0x12): the row in use (obj+0x108).
+    glide: Option<growth::Row>,
+    /// obj+0xe0 with +0xec set: the take-off velocity of the last arc
+    /// started by FUN_1403cbb00 (a glide restarts from it).
+    launch_velocity: Option<[f32; 2]>,
+    /// Wisdom Form's Attack is "Shoot" (0x16d): FUN_1403d6fc0 always
+    /// allows its combo count.
+    pub shoot: bool,
 }
 
 /// A blow in flight: mode 4's velocity with the SSTM brakes it runs on, and
@@ -555,6 +611,26 @@ impl Player {
             flight: None,
             dead_air: false,
             item_fired: false,
+            fmab: growth::Fmab::default(),
+            dodge_ready: false,
+            square_held: false,
+            invulnerable: 0.,
+            quick_run: None,
+            glide: None,
+            launch_velocity: None,
+            shoot: false,
+        }
+    }
+
+    /// FUN_140401680: a growth family's level (0 = none).
+    pub fn growth_level(&self, family: usize) -> u8 {
+        self.abilities.growth[family]
+    }
+
+    fn growth_row(&self, family: usize) -> Option<growth::Row> {
+        match self.growth_level(family) {
+            0 => None,
+            l => self.fmab.row(l).copied(),
         }
     }
 
@@ -570,6 +646,9 @@ impl Player {
         clips: &Clips,
     ) -> Option<Action> {
         self.knock = physics::Knock::new([direction[0], 0., direction[1]], strength, 0.);
+        // A hit (vt+0xc0) removes the Aerial Dodge and ends a dash.
+        self.dodge_ready = false;
+        self.quick_run = None;
         if self.in_air() || index >= clips.hurt.len() {
             return None;
         }
@@ -707,6 +786,54 @@ impl Player {
         Some(self.action)
     }
 
+    /// The Drive command (FUN_14040ce60 for a form): physics mode 0, motion
+    /// 0x34 with no blend, the velocity (obj+0x20..+0x2f) cleared. Any
+    /// cast, knock-slide, blow or pending jump ends.
+    pub fn start_drive(&mut self) -> Action {
+        self.pending_jump = None;
+        self.cast = None;
+        self.knock = None;
+        self.flight = None;
+        self.air_velocity = [0.; 2];
+        self.sampler = physics::Sampler::default();
+        self.jump_cut = JumpCut::default();
+        self.vertical_speed = 0.;
+        self.connected = false;
+        self.combo = ptya::Combo::default();
+        self.action = Action::Drive;
+        self.frame = 0;
+        self.blend = 0.;
+        self.arm();
+        self.action
+    }
+
+    /// Whether the drive-start motion has played to its end
+    /// (FUN_1403c7e70 on motion 0x34).
+    pub fn drive_done(&self, clips: &Clips) -> bool {
+        self.action != Action::Drive || self.frame >= self.clip(clips).end
+    }
+
+    /// The new player object's first frame (FUN_140405630): on the ground
+    /// a form plays its drive-in motion (0x35); in the air, and after a
+    /// revert, it falls (motion 4) or idles (motion 0).
+    pub fn arrive(&mut self, form: u8, airborne: bool, clips: &Clips) -> Action {
+        self.combo = ptya::Combo::default();
+        self.frame = 0;
+        self.blend = 0.;
+        if airborne {
+            self.arc = physics::Arc::fall(self.position[1], 0.);
+            self.air_velocity = [0.; 2];
+            self.sampler = physics::Sampler::default();
+            self.action = Action::Fall;
+        } else if form != 0 && clips.drive_in.is_some() {
+            self.action = Action::DriveIn;
+        } else {
+            self.action = Action::Idle;
+        }
+        self.arm();
+        self.action
+    }
+
     /// Whether the item-use trigger fired since the last call.
     pub fn take_item(&mut self) -> bool {
         std::mem::take(&mut self.item_fired)
@@ -752,7 +879,7 @@ impl Player {
 
     /// An ANB range 27 is active (obj+0x18c bit 22): no damage.
     pub fn range_invulnerable(&self, clips: &Clips) -> bool {
-        Clip::within(&self.clip(clips).invulnerable, self.frame)
+        self.invulnerable > 0. || Clip::within(&self.clip(clips).invulnerable, self.frame)
     }
 
     /// FUN_1403d6d50, a blow's recovery: Jump with Aerial Recovery plays
@@ -893,6 +1020,12 @@ impl Player {
             (Action::Guard, _) => clips.guard.as_ref().unwrap_or(&clips.idle),
             (Action::GuardRecoil, _) => clips.guard_recoil.as_ref().unwrap_or(&clips.idle),
             (Action::Item, _) => clips.item.as_ref().unwrap_or(&clips.idle),
+            (Action::Drive, _) => clips.drive.as_ref().unwrap_or(&clips.idle),
+            (Action::DriveIn, _) => clips.drive_in.as_ref().unwrap_or(&clips.idle),
+            (Action::HighJump, _) => clips
+                .growth_clip(growth::motion::HIGH_JUMP)
+                .map_or(&clips.jump, |g| &g.1),
+            (Action::Growth(m), _) => clips.growth_clip(m).map_or(&clips.idle, |g| &g.1),
         }
     }
 
@@ -901,6 +1034,12 @@ impl Player {
         let root = match self.action {
             Action::Attack(i) | Action::AirAttack(i) => &clips.attacks[i].root,
             Action::Cast(i) | Action::AirCast(i) => &clips.spells[i].root,
+            Action::Growth(growth::motion::DODGE_ROLL) => {
+                match clips.growth_clip(growth::motion::DODGE_ROLL) {
+                    Some(g) => &g.2,
+                    None => return [0.; 3],
+                }
+            }
             _ => return [0.; 3],
         };
         root.get(self.motion_frame(clips) as usize)
@@ -932,6 +1071,11 @@ impl Player {
         let clip = self.clip(clips);
         match self.action {
             Action::Idle | Action::Walk | Action::Run | Action::Jump | Action::Fall => {
+                clip.looped_frame(self.frame)
+            }
+            Action::Growth(m)
+                if (growth::motion::GLIDE..=growth::motion::GLIDE_STAND).contains(&m) =>
+            {
                 clip.looped_frame(self.frame)
             }
             // The blow and DEAD motions hold their loop span until the
@@ -998,19 +1142,162 @@ impl Player {
     /// (obj+0xe0); the jump mode starts at JUMP's take-off trigger. The
     /// Jump button's jump is variable (obj+0x120 bit 16).
     fn jump(&mut self, p: &Params, velocity: [f32; 2], step: &mut Step) {
-        self.pending_jump = Some((p.jump_height, velocity));
+        let (height, action) = self.jump_height(p);
+        self.pending_jump = Some((height, velocity));
         self.jump_cut = JumpCut {
             variable: true,
             ..JumpCut::default()
         };
         self.vertical_speed = 0.;
-        self.start(Action::Jump, step);
+        self.quick_run = None;
+        self.start(action, step);
+    }
+
+    /// FUN_1403b59b0: High Jump's row height and motion 201, else the PRTY
+    /// height and JUMP.
+    fn jump_height(&self, p: &Params) -> (f32, Action) {
+        match self.growth_row(growth::HIGH_JUMP) {
+            Some(r) => (r.high_jump, Action::HighJump),
+            None => (p.jump_height, Action::Jump),
+        }
+    }
+
+    /// FUN_1403cb9f0 (an airborne mode's jump slot): Aerial Dodge, once per
+    /// airtime (obj+0x124 bit 1) below level 5: a new arc of the row's
+    /// height from here, at the row's speed along the stick (0 without
+    /// one), motion 202. The arc cannot be cut.
+    fn aerial_dodge(&mut self, moving: bool, direction: [f32; 2], step: &mut Step) -> bool {
+        let level = self.growth_level(growth::AERIAL_DODGE);
+        if !(level > 4 || (level != 0 && self.dodge_ready)) {
+            return false;
+        }
+        let Some(row) = self.fmab.row(level).copied() else {
+            return false;
+        };
+        let (dir, speed) = if moving {
+            (direction, row.dodge_speed)
+        } else {
+            ([self.yaw.sin(), self.yaw.cos()], 0.)
+        };
+        if moving {
+            self.yaw = direction[0].atan2(direction[1]);
+        }
+        self.arc = physics::Arc::launch(self.position[1], row.dodge_height);
+        self.air_velocity = [dir[0] * speed, dir[1] * speed];
+        self.launch_velocity = Some(self.air_velocity);
+        self.sampler.reset();
+        self.jump_cut = JumpCut::default();
+        self.glide = None;
+        self.dodge_ready = false;
+        self.vertical_speed = 0.;
+        self.start(Action::Growth(growth::motion::AERIAL_DODGE), step);
+        true
+    }
+
+    /// FUN_1403a81f0's growth branches and Square attacks, in its order:
+    /// Glide (airborne, above the row's start height), the Square combo
+    /// abilities, Guard with the stick idle, Dodge Roll, Quick Run, Guard.
+    /// All growth branches need an active ANB range 0–2. `guard` allows
+    /// the Guard branches (the test room's existing gate).
+    #[allow(clippy::too_many_arguments)]
+    fn square(
+        &mut self,
+        input: &Input,
+        clips: &Clips,
+        height: f32,
+        moving: bool,
+        direction: [f32; 2],
+        guard: bool,
+        step: &mut Step,
+    ) -> bool {
+        let actionable = self.actionable(clips);
+        let air = self.in_air();
+        if air
+            && actionable
+            && let Some(row) = self.growth_row(growth::GLIDE)
+            && height > row.glide_start
+        {
+            self.start_glide(row, moving, step);
+            return true;
+        }
+        if self.try_square(input, clips, step) {
+            return true;
+        }
+        if guard && !moving && self.can_guard(clips) {
+            self.start_guard(input, step);
+            return true;
+        }
+        if !air && actionable {
+            let dir = if moving {
+                direction
+            } else {
+                [self.yaw.sin(), self.yaw.cos()]
+            };
+            if let Some(row) = self.growth_row(growth::DODGE_ROLL)
+                && clips.growth_clip(growth::motion::DODGE_ROLL).is_some()
+            {
+                self.yaw = dir[0].atan2(dir[1]);
+                self.invulnerable = row.roll_invulnerable;
+                self.arm();
+                self.start(Action::Growth(growth::motion::DODGE_ROLL), step);
+                return true;
+            }
+            if self.start_quick_run(dir, clips, step) {
+                return true;
+            }
+        }
+        if guard && self.can_guard(clips) {
+            self.start_guard(input, step);
+            return true;
+        }
+        false
+    }
+
+    /// FUN_1403a9830: Quick Run along `dir` (mode 0x10, motion 203).
+    fn start_quick_run(&mut self, dir: [f32; 2], clips: &Clips, step: &mut Step) -> bool {
+        let Some(row) = self.growth_row(growth::QUICK_RUN) else {
+            return false;
+        };
+        if clips.growth_clip(growth::motion::QUICK_RUN).is_none() {
+            return false;
+        }
+        self.quick_run = Some(growth::QuickRun::start(dir, &row));
+        self.yaw = dir[0].atan2(dir[1]);
+        self.square_held = true;
+        self.invulnerable = row.run_invulnerable;
+        self.sampler.reset();
+        self.arm();
+        self.start(Action::Growth(growth::motion::QUICK_RUN), step);
+        true
+    }
+
+    /// Square in the air: modes 0x11 (stick idle) / 0x12. The shared
+    /// mode-1 enter (FUN_1403cbd30) restarts the velocity from the last
+    /// arc's take-off velocity.
+    fn start_glide(&mut self, row: growth::Row, moving: bool, step: &mut Step) {
+        if let Some(v) = self.launch_velocity {
+            self.air_velocity = v;
+        }
+        self.glide = Some(row);
+        self.square_held = true;
+        self.jump_cut = JumpCut::default();
+        self.pending_jump = None;
+        let m = if moving {
+            growth::motion::GLIDE
+        } else {
+            growth::motion::GLIDE_STAND
+        };
+        self.start(Action::Growth(m), step);
+        self.blend = growth::GLIDE_BLEND;
     }
 
     /// Leaving the ground without jumping (FUN_1403b4780 / FUN_1403b8150),
     /// keeping the ground velocity (obj+0xa38 → +0x20 [I: +0xa38 is the
     /// last ground velocity]).
     fn drop_off(&mut self, velocity: [f32; 2], step: &mut Step) {
+        self.dodge_ready = true;
+        self.launch_velocity = None;
+        self.quick_run = None;
         self.arc = physics::Arc::fall(self.position[1], 0.);
         self.pending_jump = None;
         self.jump_cut = JumpCut::default();
@@ -1074,6 +1361,17 @@ impl Player {
             [0., 0.]
         };
         let stick = Self::stick_velocity(direction, magnitude, p);
+        // FUN_1403d6fc0: Square released clears obj+0x124 bit 2; the
+        // invulnerability timer runs down (FUN_1403d68b0).
+        if self.square_held && !input.guard_held {
+            self.square_held = false;
+        }
+        self.invulnerable = (self.invulnerable - 1.).max(0.);
+        // Height above the ground under the player (FUN_1403b87e0; no
+        // floor reads as 0).
+        let height = world
+            .floor(self.position[0], self.position[2], self.position[1] + 1.)
+            .map_or(0., |f| (self.position[1] - f).max(0.));
         if matches!(self.action, Action::Hurt(i) if hurt::BLOW.contains(&i)) {
             // Aerial Recovery or Retaliating Slash may take over this tick.
             self.recover(input, clips, direction, &mut step);
@@ -1084,11 +1382,12 @@ impl Player {
                 // 0x1c, FUN_1401b15f0): always during locomotion, from
                 // LAND's range-2 start (tick 12 installed) after a landing.
                 let ready = self.actionable(clips);
-                if ready && input.guard && !input.attack && self.can_guard(clips) {
-                    self.start_guard(input, &mut step);
-                } else if ready
-                    && input.attack
-                    && self.try_attack(input, p, clips, ready, moving, direction, &mut step)
+                if (input.guard
+                    && !input.attack
+                    && self.square(input, clips, height, moving, direction, ready, &mut step))
+                    || (ready
+                        && input.attack
+                        && self.try_attack(input, p, clips, ready, moving, direction, &mut step))
                 {
                 } else if ready && input.jump {
                     self.jump(p, stick, &mut step);
@@ -1136,7 +1435,7 @@ impl Player {
                     }
                 }
             }
-            Action::Jump if self.pending_jump.is_some() => {
+            Action::Jump | Action::HighJump if self.pending_jump.is_some() => {
                 // The jump mode is pending (obj+0x648 = 1) until the JUMP
                 // motion's frame trigger 0 (tick 4 installed) switches to it
                 // (FUN_14040dd70); until then mode 0 keeps going, with JUMP's
@@ -1144,9 +1443,13 @@ impl Player {
                 if self.actionable(clips) {
                     ground_request = stick;
                 }
-                if self.frame >= clips.jump.takeoff.unwrap_or(0)
+                if self.frame >= self.clip(clips).takeoff.unwrap_or(0)
                     && let Some((height, velocity)) = self.pending_jump.take()
                 {
+                    // Entering mode 1 from the ground readies the Aerial
+                    // Dodge (FUN_1403cbd30, obj+0x124 bit 1).
+                    self.dodge_ready = true;
+                    self.launch_velocity = Some(velocity);
                     // FUN_1403cbd30 (mode 1 enter): the arc's base is the
                     // take-off height; the stored +0xe0 velocity applies;
                     // a variable jump becomes cuttable (bit 16 → bit 17).
@@ -1157,7 +1460,9 @@ impl Player {
                     };
                     self.air_velocity = velocity;
                     self.sampler.reset();
-                    disp = self.airborne(input, moving, magnitude, direction, p, clips, &mut step);
+                    disp = self.airborne(
+                        input, moving, magnitude, direction, height, p, clips, &mut step,
+                    );
                 }
             }
             Action::Attack(i) => {
@@ -1176,7 +1481,8 @@ impl Player {
                 let ready = self.actionable(clips);
                 // FUN_1403d6fc0 takes Square (FUN_1403a81f0) before the
                 // attack command.
-                if (input.guard && self.try_square(input, clips, &mut step))
+                if (input.guard
+                    && self.square(input, clips, height, moving, direction, false, &mut step))
                     || (input.attack
                         && self.try_attack(input, p, clips, ready, moving, direction, &mut step))
                 {
@@ -1196,7 +1502,8 @@ impl Player {
                 // A spell is a combo hit: the next press may chain from the
                 // cast's combo window (range 11 / 35, finisher range 50).
                 let ready = self.actionable(clips);
-                if (input.guard && self.try_square(input, clips, &mut step))
+                if (input.guard
+                    && self.square(input, clips, height, moving, direction, false, &mut step))
                     || (input.attack
                         && self.try_attack(input, p, clips, ready, moving, direction, &mut step))
                 {
@@ -1205,21 +1512,90 @@ impl Player {
                     self.start(Action::Idle, &mut step);
                 }
             }
+            Action::Growth(growth::motion::DODGE_ROLL) => {
+                // Motion 209 moves by its root curve (mode 0, no request).
+                let empty = Vec::new();
+                let (clip, root) = match clips.growth_clip(growth::motion::DODGE_ROLL) {
+                    Some(g) => (&g.1, &g.2),
+                    None => (&clips.idle, &empty),
+                };
+                let at = |f: u32| root.get(clip.held_frame(f) as usize).copied();
+                if let (Some(now), Some(before)) = (at(self.frame), at(self.frame - 1)) {
+                    let (s, c) = self.yaw.sin_cos();
+                    let (dx, dz) = (now[0] - before[0], now[2] - before[2]);
+                    disp[0] += dx * c + dz * s;
+                    disp[2] += -dx * s + dz * c;
+                }
+                let ready = self.actionable(clips);
+                let end = clip.end;
+                if self.frame == growth::ROLL_CHAIN_TICK && input.guard_held {
+                    // Frame trigger 34: Square still held → Quick Run.
+                    let facing = [self.yaw.sin(), self.yaw.cos()];
+                    self.start_quick_run(facing, clips, &mut step);
+                } else if ready
+                    && input.attack
+                    && self.try_attack(input, p, clips, ready, moving, direction, &mut step)
+                {
+                } else if ready && input.jump {
+                    self.jump(p, stick, &mut step);
+                } else if ready
+                    && input.guard
+                    && self.square(input, clips, height, moving, direction, true, &mut step)
+                {
+                } else if (ready && moving) || self.frame >= end {
+                    self.start(Action::Idle, &mut step);
+                }
+            }
+            Action::Growth(m @ (growth::motion::QUICK_RUN | growth::motion::QUICK_RUN_END)) => {
+                // FUN_140423500: the hold runs down while Square is held;
+                // then motion 204 and the after-decay.
+                let held = self.square_held;
+                if let Some(q) = self.quick_run.as_mut()
+                    && q.frame(held, 1.)
+                {
+                    self.start(Action::Growth(growth::motion::QUICK_RUN_END), &mut step);
+                } else if m == growth::motion::QUICK_RUN_END && self.frame >= self.clip(clips).end {
+                    // The queued FALL (blend 8); on flat ground it lands at
+                    // once [I: the hand-back to mode 0 is not traced].
+                    self.quick_run = None;
+                    self.arc = physics::Arc::fall(self.position[1], 0.);
+                    self.launch_velocity = None;
+                    self.air_velocity = [0.; 2];
+                    self.sampler.reset();
+                    self.start(Action::Fall, &mut step);
+                }
+            }
             Action::Hurt(i) if hurt::BLOW.contains(&i) => {
                 disp = self.blow_flight(p);
             }
+            // Mode 0 with the velocity cleared; motion 0x34's range 3 holds
+            // gravity off (an airborne start hovers) until the swap.
+            Action::Drive => {}
             Action::Hurt(hurt::DEAD) => {
                 if self.dead_air {
                     disp = self.dead_fall(p);
                 }
             }
-            Action::Jump | Action::Fall | Action::AirAttack(_) | Action::AirCast(_) => {
-                disp = self.airborne(input, moving, magnitude, direction, p, clips, &mut step);
+            Action::Jump
+            | Action::HighJump
+            | Action::Fall
+            | Action::AirAttack(_)
+            | Action::AirCast(_)
+            | Action::Growth(_) => {
+                disp = self.airborne(
+                    input, moving, magnitude, direction, height, p, clips, &mut step,
+                );
             }
             Action::Hurt(_) if self.in_air() => {
-                disp = self.airborne(input, moving, magnitude, direction, p, clips, &mut step);
+                disp = self.airborne(
+                    input, moving, magnitude, direction, height, p, clips, &mut step,
+                );
             }
-            Action::Hurt(_) | Action::Guard | Action::GuardRecoil | Action::Item => {
+            Action::Hurt(_)
+            | Action::Guard
+            | Action::GuardRecoil
+            | Action::Item
+            | Action::DriveIn => {
                 // Locked until the clip's range-2 tick (hurt 50, guard 52,
                 // recoil 40 installed), then input is taken again
                 // (FUN_1401b15f0 actionable bits).
@@ -1247,7 +1623,14 @@ impl Player {
             // with PRTY words 10/11 as inertia and drag; otherwise it is the
             // request itself.
             let speed = ground_request[0].hypot(ground_request[1]);
-            if self.sampler.due(speed) {
+            if let Some(q) = self.quick_run.as_mut() {
+                // Mode 0x10 (FUN_140423480): no gravity, the decaying dash.
+                let v = q.velocity[0].hypot(q.velocity[1]);
+                if self.sampler.due(v) {
+                    let d = q.step(physics::PHYSICS_STEP);
+                    self.sampler.store(d);
+                }
+            } else if self.sampler.due(speed) {
                 let dt = physics::PHYSICS_STEP;
                 let clip = self.clip(clips);
                 if Clip::within(&clip.inertia, self.frame) {
@@ -1295,6 +1678,9 @@ impl Player {
                 self.vertical_speed = 0.;
                 self.sampler = physics::Sampler::default();
                 self.jump_cut = JumpCut::default();
+                self.glide = None;
+                self.quick_run = None;
+                self.launch_velocity = None;
                 step.landed = true;
                 match self.action {
                     Action::Hurt(i) if hurt::BLOW.contains(&i) => {
@@ -1338,6 +1724,10 @@ impl Player {
             Action::Guard => 173,
             Action::GuardRecoil => 42,
             Action::Item => 9,
+            Action::Drive => 0x34,
+            Action::DriveIn => 0x35,
+            Action::HighJump => growth::motion::HIGH_JUMP,
+            Action::Growth(m) => m,
         }
     }
 
@@ -1373,7 +1763,8 @@ impl Player {
             finisher_window: Clip::within(&clip.finisher_windows, frame),
             actionable,
         };
-        let chain = self.connected || self.abilities.has(abilities::bit::COMBO_MASTER);
+        let chain =
+            self.shoot || self.connected || self.abilities.has(abilities::bit::COMBO_MASTER);
         let mut combo = self.combo;
         if !ptya::advance(&mut combo, &state, chain) {
             return false;
@@ -1398,7 +1789,7 @@ impl Player {
             facing: [facing_yaw.sin(), facing_yaw.cos()],
             target: input.target_shape,
             others: &nearby,
-            jump_height: p.jump_height,
+            jump_height: self.jump_height(p).0,
             current_motion: current,
         };
         let Some(i) = counter
@@ -1423,6 +1814,9 @@ impl Player {
         let airborne = self.in_air();
         self.combo = combo;
         self.connected = false;
+        // FUN_1403a89a0: an executed command uses up the Aerial Dodge.
+        self.dodge_ready = false;
+        self.glide = None;
         let record = clips.records[i];
         // FUN_1403d78d0: a hop from the ground starts a fresh count.
         if record.jump > 0. && !airborne {
@@ -1488,9 +1882,19 @@ impl Player {
 
     /// Whether commands are taken now: an ANB range 0–2, or the unlocked
     /// tail of a reaction (FUN_1401b15f0).
+    /// Whether a command could run now (FUN_1403ba070's motion gate: an
+    /// active ANB range 0–2, or a reaction's unlocked tail).
+    pub fn can_command(&self, clips: &Clips) -> bool {
+        !self.dead() && self.action != Action::Drive && self.command_ready(clips)
+    }
+
     fn command_ready(&self, clips: &Clips) -> bool {
         match self.action {
-            Action::Hurt(_) | Action::Guard | Action::GuardRecoil | Action::Item => {
+            Action::Hurt(_)
+            | Action::Guard
+            | Action::GuardRecoil
+            | Action::Item
+            | Action::DriveIn => {
                 let clip = self.clip(clips);
                 self.frame >= clip.blend_to_idle.unwrap_or(clip.end)
             }
@@ -1649,6 +2053,86 @@ impl Player {
         }
     }
 
+    /// Modes 0x11 / 0x12 each frame (FUN_140423840 / FUN_140423a70): the
+    /// standing glide becomes the moving one once the stick moves; the
+    /// moving glide banks (206 / 207) when the facing and the stick differ;
+    /// releasing Square or nearing the ground ends it with a fall from zero
+    /// vertical speed (FUN_1404235b0, FUN_1403cbc30).
+    fn glide_frame(&mut self, height: f32, moving: bool, direction: [f32; 2], step: &mut Step) {
+        let Some(row) = self.glide else { return };
+        if !self.square_held || height < row.glide_end {
+            self.glide = None;
+            self.arc = physics::Arc::fall(self.position[1], 0.);
+            self.launch_velocity = None;
+            self.sampler.reset();
+            self.start(Action::Fall, step);
+            self.blend = growth::GLIDE_BLEND;
+            return;
+        }
+        let Action::Growth(current) = self.action else {
+            return;
+        };
+        let want = if current == growth::motion::GLIDE_STAND && !moving {
+            growth::motion::GLIDE_STAND
+        } else if !moving {
+            growth::motion::GLIDE
+        } else {
+            let f = [self.yaw.sin(), self.yaw.cos()];
+            let dot = f[0] * direction[0] + f[1] * direction[1];
+            if dot >= growth::GLIDE_STRAIGHT {
+                growth::motion::GLIDE
+            } else {
+                // The cross product's y in the game's Y-down space (scene
+                // z is negated there).
+                let cy = -(f[1] * direction[0] - f[0] * direction[1]);
+                if cy <= 0. {
+                    growth::motion::GLIDE_LEFT
+                } else {
+                    growth::motion::GLIDE_RIGHT
+                }
+            }
+        };
+        if want != current {
+            // motion_keep: the new glide motion blends over 16.
+            self.start(Action::Growth(want), step);
+            self.blend = growth::GLIDE_BLEND;
+        }
+        if moving {
+            let rate = if want == growth::motion::GLIDE_STAND {
+                0.
+            } else {
+                row.glide_turn
+            };
+            self.turn_toward(direction, rate);
+        }
+    }
+
+    /// The glide's two-frame velocity (FUN_140423650 / FUN_140423920):
+    /// standing, the velocity keeps 0.9 a step; moving, the speed eases
+    /// toward the row's along the facing. Either sinks by the row.
+    fn glide_velocity(&mut self, row: &growth::Row, height: f32) -> [f32; 3] {
+        if self.sampler.due(1.) {
+            let dt = physics::PHYSICS_STEP;
+            if self.action == Action::Growth(growth::motion::GLIDE_STAND) {
+                self.air_velocity = [
+                    self.air_velocity[0] * growth::GLIDE_STAND_KEEP,
+                    self.air_velocity[1] * growth::GLIDE_STAND_KEEP,
+                ];
+            } else {
+                let a = row.glide_keep;
+                let speed = (1. - a) * row.glide_speed
+                    + self.air_velocity[0].hypot(self.air_velocity[1]) * a;
+                self.air_velocity = [self.yaw.sin() * speed, self.yaw.cos() * speed];
+            }
+            let dy = -row.glide_sink(height) * dt;
+            self.sampler
+                .store([self.air_velocity[0] * dt, dy, self.air_velocity[1] * dt]);
+        }
+        let d = self.sampler.displacement();
+        self.vertical_speed = d[1];
+        d
+    }
+
     /// Mode 1 for one tick: action changes in the air, then this tick's
     /// displacement (collided by `tick`).
     #[allow(clippy::too_many_arguments)]
@@ -1658,11 +2142,25 @@ impl Player {
         moving: bool,
         magnitude: f32,
         direction: [f32; 2],
+        height: f32,
         p: &Params,
         clips: &Clips,
         step: &mut Step,
     ) -> [f32; 3] {
-        if let Action::Hurt(_) = self.action {
+        let glide_motion =
+            |m: u16| (growth::motion::GLIDE..=growth::motion::GLIDE_STAND).contains(&m);
+        // The dispatcher hands a Jump press to the airborne mode's jump
+        // slot while actionable (FUN_1403d6fc0 → FUN_1403cb9f0).
+        if input.jump
+            && self.actionable(clips)
+            && !matches!(self.action, Action::Hurt(_))
+            && self.aerial_dodge(moving, direction, step)
+        {
+        } else if let Action::Growth(m) = self.action
+            && glide_motion(m)
+        {
+            self.glide_frame(height, moving, direction, step);
+        } else if let Action::Hurt(_) = self.action {
             // The air flinch and Aerial Recovery play out, then fall;
             // Aerial Recovery takes commands from its range-1 tick.
             let ready = self.actionable(clips);
@@ -1678,7 +2176,7 @@ impl Player {
             self.face_target(clip, input);
             self.release_if_due(clips, i);
             let ready = self.actionable(clips);
-            if (input.guard && self.try_square(input, clips, step))
+            if (input.guard && self.square(input, clips, height, moving, direction, false, step))
                 || (input.attack
                     && self.try_attack(input, p, clips, ready, moving, direction, step))
             {
@@ -1690,7 +2188,7 @@ impl Player {
             let clip = &clips.attacks[i].clip;
             self.face_target(clip, input);
             let ready = self.actionable(clips);
-            if (input.guard && self.try_square(input, clips, step))
+            if (input.guard && self.square(input, clips, height, moving, direction, false, step))
                 || (input.attack
                     && self.try_attack(input, p, clips, ready, moving, direction, step))
             {
@@ -1704,7 +2202,12 @@ impl Player {
         {
             // Air attacks need an active ANB range 0–2 too: JUMP from its
             // range-1 start (tick 8 installed), FALL throughout.
-        } else if self.action == Action::Jump && self.arc.falling_motion() {
+        } else if input.guard && self.square(input, clips, height, moving, direction, false, step) {
+        } else if matches!(
+            self.action,
+            Action::Jump | Action::HighJump | Action::Growth(growth::motion::AERIAL_DODGE)
+        ) && self.arc.falling_motion()
+        {
             // FUN_1403cb680 → FUN_1403cb610: FALL (motion 4) blended over 8
             // once the apex is within 5 ticks.
             self.start(Action::Fall, step);
@@ -1715,7 +2218,7 @@ impl Player {
         // the mode re-entry clears the flags); within 5 ticks of the apex
         // the jump stops being cuttable.
         if self.jump_cut.released && self.arc.cuttable() {
-            if self.action == Action::Jump {
+            if matches!(self.action, Action::Jump | Action::HighJump) {
                 self.start(Action::Fall, step);
             }
             self.arc = physics::Arc::launch(self.position[1], physics::JUMP_CUT_HOP);
@@ -1727,6 +2230,9 @@ impl Player {
         // ANB "No gravity" ranges (range 3 → obj+0x18c bit 5, FUN_14040d810)
         // hold the height while the curve's time keeps running
         // (FUN_1403cb500).
+        if let Some(row) = self.glide {
+            return self.glide_velocity(&row, height);
+        }
         let floating = Clip::within(&self.clip(clips).no_gravity, self.frame);
         // Mode 1 horizontal (FUN_1403cb360 → FUN_1403b7ad0 with 0.9, 0.95):
         // the velocity keeps 90% of itself and takes 10% of the stick
@@ -1974,6 +2480,9 @@ mod tests {
             jump: open(30),
             fall: open(30),
             land: Clip::looping(12, 0),
+            drive: Some(Clip::looping(40, 40)),
+            drive_in: None,
+            growth: Vec::new(),
             records: records(),
             spells: vec![
                 SpellClip {
@@ -2840,6 +3349,159 @@ mod tests {
             with.tick(&Input::default(), &p, &c, &w);
         }
         assert!(!with.range_invulnerable(&c));
+    }
+
+    /// A growth table whose one row is LV1's installed values.
+    fn fmab() -> growth::Fmab {
+        let mut t = vec![1u8, 0, 0, 0, 8, 0, 0, 0];
+        for v in [
+            235f32, 145., 18., 14., 30., 0.94, 0.93, 0., 16., 0.015, 0., 3., 0.91, 60., 10.,
+            0.05236, 10.,
+        ] {
+            t.extend(v.to_le_bytes());
+        }
+        growth::Fmab::read(&t).unwrap()
+    }
+
+    fn growth_clips() -> Clips {
+        let mut c = clips();
+        let roll = Clip {
+            end: 40,
+            actionable: vec![(36, 40)],
+            ..Clip::default()
+        };
+        c.growth = vec![
+            (201, open(30), Vec::new()),
+            (202, open(30), Vec::new()),
+            (203, Clip::looping(40, 40), Vec::new()),
+            (204, Clip::looping(30, 30), Vec::new()),
+            (205, open(60), Vec::new()),
+            (206, open(60), Vec::new()),
+            (207, open(60), Vec::new()),
+            (208, open(60), Vec::new()),
+            (209, roll, Vec::new()),
+        ];
+        c
+    }
+
+    fn grown(family: usize) -> Player {
+        let mut player = Player::new([0.; 3], 0.);
+        player.fmab = fmab();
+        player.abilities.growth[family] = 1;
+        player
+    }
+
+    #[test]
+    fn high_jump_uses_the_row_height_and_motion_201() {
+        let (p, c, w) = (params(), growth_clips(), room());
+        let mut player = grown(growth::HIGH_JUMP);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        assert_eq!(
+            player.tick(&jump, &p, &c, &w).started,
+            Some(Action::HighJump)
+        );
+        let mut apex: f32 = 0.;
+        for _ in 0..200 {
+            player.tick(&Input::default(), &p, &c, &w);
+            apex = apex.max(player.position[1]);
+        }
+        assert!((apex - 235.).abs() < 0.5, "apex {apex}");
+    }
+
+    #[test]
+    fn aerial_dodge_relaunches_once_per_airtime() {
+        let (p, c, w) = (params(), growth_clips(), room());
+        let mut player = grown(growth::AERIAL_DODGE);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&jump, &p, &c, &w);
+        for _ in 0..20 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        let before = player.position[1];
+        assert!(before > 50.);
+        player.tick(&jump, &p, &c, &w);
+        assert_eq!(player.action, Action::Growth(growth::motion::AERIAL_DODGE));
+        let mut apex: f32 = 0.;
+        for t in 0..30 {
+            let input = if t == 10 { jump } else { Input::default() };
+            player.tick(&input, &p, &c, &w);
+            apex = apex.max(player.position[1]);
+            if t == 10 {
+                // A second press in the same airtime does nothing.
+                assert_eq!(player.action, Action::Growth(growth::motion::AERIAL_DODGE));
+                assert!(player.frame > 10);
+            }
+        }
+        assert!(apex > before + 140., "{apex} from {before}");
+    }
+
+    #[test]
+    fn glide_holds_above_the_floor_until_square_is_released() {
+        let (p, c, w) = (params(), growth_clips(), room());
+        let mut player = grown(growth::GLIDE);
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        player.tick(&jump, &p, &c, &w);
+        for _ in 0..30 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        let square = Input {
+            guard: true,
+            guard_held: true,
+            ..Input::default()
+        };
+        player.tick(&square, &p, &c, &w);
+        assert_eq!(player.action, Action::Growth(growth::motion::GLIDE_STAND));
+        let held = Input {
+            guard_held: true,
+            direction: [0., 1.],
+            ..Input::default()
+        };
+        let start = player.position;
+        for _ in 0..40 {
+            player.tick(&held, &p, &c, &w);
+        }
+        assert_eq!(player.action, Action::Growth(growth::motion::GLIDE));
+        assert!(player.position[2] > start[2] + 100.);
+        assert!(player.position[1] > 60.);
+        player.tick(&Input::default(), &p, &c, &w);
+        assert_eq!(player.action, Action::Fall);
+    }
+
+    #[test]
+    fn dodge_roll_and_quick_run_start_from_square_on_the_ground() {
+        let (p, c, w) = (params(), growth_clips(), room());
+        let mut roll = grown(growth::DODGE_ROLL);
+        let square = Input {
+            guard: true,
+            guard_held: true,
+            direction: [1., 0.],
+            ..Input::default()
+        };
+        roll.tick(&square, &p, &c, &w);
+        assert_eq!(roll.action, Action::Growth(growth::motion::DODGE_ROLL));
+        assert!(roll.range_invulnerable(&c));
+        let mut run = grown(growth::QUICK_RUN);
+        run.tick(&square, &p, &c, &w);
+        assert_eq!(run.action, Action::Growth(growth::motion::QUICK_RUN));
+        let held = Input {
+            guard_held: true,
+            ..Input::default()
+        };
+        for _ in 0..10 {
+            run.tick(&held, &p, &c, &w);
+        }
+        assert!(run.position[0] > 200., "{:?}", run.position);
+        run.tick(&Input::default(), &p, &c, &w);
+        assert_eq!(run.action, Action::Growth(growth::motion::QUICK_RUN_END));
     }
 
     fn jump_peak(release_at: Option<u32>) -> f32 {

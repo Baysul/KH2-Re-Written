@@ -19,8 +19,11 @@ pub fn tick(game: &mut Game, tick: u64) {
         world,
         log,
         autoplay,
+        drive,
         ..
     } = game;
+    // The Drive form Sora is in (0 without one).
+    let form = drive.as_ref().filter(|d| d.active).map_or(0, |d| d.form);
     let Some(rt) = enemy.as_mut() else { return };
     if autoplay.is_some() && tick == 1 {
         // The unattended run starts two EXP short of level 2.
@@ -29,6 +32,10 @@ pub fn tick(game: &mut Game, tick: u64) {
     let dead = rt.enemy.current_act() == Some(shadow::ActKind::Dead);
     if dead && !rt.was_dead {
         kill(player, rt, world, log, tick);
+        // FUN_1403e8780: Wisdom counts Heartless, Final Nobodies.
+        if let Some(d) = drive.as_mut() {
+            d.pending_exp += player_sim::forms::kill_exp(form, d.enemy_character);
+        }
     }
     rt.was_dead = dead;
     // The prizes fall and wait to be collected.
@@ -48,7 +55,8 @@ pub fn tick(game: &mut Game, tick: u64) {
     for i in collected.into_iter().rev() {
         let orb = rt.orbs.remove(i);
         let e = prize::effect(orb.kind);
-        if e.hp > 0 {
+        // Antiform's pickup skips HP orbs (formcmd-01 §5).
+        if e.hp > 0 && form != player_sim::forms::ANTI {
             rt.sora_hp = (rt.sora_hp + e.hp).min(rt.sora_target.max_hp);
         }
         if e.mp > 0 {
@@ -57,6 +65,12 @@ pub fn tick(game: &mut Game, tick: u64) {
         if e.drive > 0 {
             let (charging, boost) = (player.mp_charging, player.abilities.drive_boost);
             player.drive.gain(e.drive as f32, charging, boost, 1.);
+            // FUN_1403e8760: Master Form EXP is the orb's drive value.
+            if form == player_sim::forms::MASTER
+                && let Some(d) = drive.as_mut()
+            {
+                d.pending_exp += e.drive as i32;
+            }
         }
         rt.munny += e.munny as u32;
         log_event(

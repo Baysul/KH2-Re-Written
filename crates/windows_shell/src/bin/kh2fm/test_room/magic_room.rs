@@ -12,7 +12,7 @@ use player_sim::magic::{self, Feedback, Spell};
 /// world 0 or its own; Pride Lands' 0x0a variants are not used here).
 const WORLD: u8 = 2;
 /// Attack-instance keys of spell volumes live above the weapon windows'
-/// `(action_started << 4) | window` ids.
+/// `(action_started << 6) | hand << 5 | window` ids.
 pub const KEY_BASE: u64 = 1 << 62;
 /// Sound id of the "cannot" cue (system bank 5, command-01 §6.3).
 const SE_ERROR: u32 = 5;
@@ -111,6 +111,8 @@ pub struct MagicRt {
     pub reflected: HashMap<u64, u32>,
     /// This tick's volumes, for `combat_tick`.
     pub volumes: Vec<magic::Volume>,
+    /// The volume keys that hit last tick (Wisdom's shots read them).
+    pub last_hits: Vec<u64>,
     /// The open Magic submenu's rows, by magic type.
     pub menu_types: Vec<u8>,
 }
@@ -126,6 +128,7 @@ impl MagicRt {
             feedback: Feedback::default(),
             reflected: HashMap::new(),
             volumes: Vec::new(),
+            last_hits: Vec::new(),
             menu_types: Vec::new(),
         }
     }
@@ -313,6 +316,7 @@ pub fn tick(game: &mut Game, tick: u64) {
         let mut recoil = None;
         let mut invulnerable: Option<f32> = None;
         let fb = std::mem::take(&mut m.feedback);
+        m.last_hits = fb.hit.clone();
         let airborne = matches!(action, Action::AirCast(_) | Action::AirAttack(_));
         let casting = matches!(action, Action::Cast(_) | Action::AirCast(_));
         for s in m.spells.iter_mut() {

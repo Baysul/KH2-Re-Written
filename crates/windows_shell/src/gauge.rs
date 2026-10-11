@@ -38,6 +38,12 @@ const MAX_BAR: [usize; 3] = [124, 125, 124];
 const FACE: [usize; 3] = [3, 0, 2];
 /// Drive level digits (0x14071b108).
 const DRIVE_DIGITS: [usize; 10] = [28, 29, 30, 31, 32, 33, 34, 35, 36, 37];
+/// Form mode (hud-01 §6.1): frame intro 50, loop 51, fill 49, digits
+/// 54–63.
+const FORM_DIGITS: [usize; 10] = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63];
+/// Form-mode wiper: 23° per bar's share of time (0x1405b2664, π/180 at
+/// 0x1405b15b4).
+const FORM_DEGREES: f32 = 23.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Id {
@@ -122,6 +128,11 @@ pub struct GaugeStats {
     /// MP Charge: remaining and total (slot +0x1bc / +0x1c0); None when MP
     /// is not charging.
     pub mp_charge: Option<(f32, f32)>,
+    /// Form (or summon) bars, time and maximum time (slot +0x1b3, +0x1b4,
+    /// +0x1b8).
+    pub form_bars: u8,
+    pub form_time: f32,
+    pub form_max_time: f32,
 }
 
 pub struct Gauge {
@@ -132,6 +143,9 @@ pub struct Gauge {
     last_hp: i32,
     shadow_hp: i32,
     last_level: u8,
+    /// The drive mode last shown (+0x45d0) and the form digit.
+    last_mode: u8,
+    last_form_digit: Option<usize>,
     max_shown: bool,
     /// MP Charge is showing (the byte at +0x29 of FUN_140181af0).
     charging: bool,
@@ -164,6 +178,8 @@ impl Gauge {
             last_hp: stats.hp,
             shadow_hp: stats.hp,
             last_level: stats.drive_level,
+            last_mode: stats.drive_mode,
+            last_form_digit: None,
             max_shown: false,
             charging: false,
         };
@@ -387,24 +403,62 @@ impl Gauge {
                 self.elements[end].offset = [-(((stats.max_mp as f32 + 0.1) as i32) as f32), 0.];
             }
         }
-        // Drive, normal mode: a full gauge (100) uses 200 (0x140585efc).
-        let d = if stats.drive == 100 {
-            200.
-        } else {
-            stats.drive as f32
-        };
+        // Mode changes (vs +0x45d0): entering a form swaps the frame to
+        // 50 (looping 51) and the fill to 49; leaving it returns to the
+        // Drive groups (FUN_140180b00).
+        let form = matches!(stats.drive_mode, 2 | 3);
+        if stats.drive_mode != self.last_mode {
+            let was_form = matches!(self.last_mode, 2 | 3);
+            self.last_mode = stats.drive_mode;
+            if form && !was_form {
+                // FUN_140180900: the FORM frame (0x33) and bar (0x31).
+                self.set_group(seq, Id::DriveFrame, 51);
+                self.set_group(seq, Id::DriveFill, 49);
+                self.last_form_digit = None;
+            } else if !form && was_form {
+                self.set_group(seq, Id::DriveFrame, 21);
+                let i = self.find(Id::DriveFrame);
+                self.elements[i].queued = Some(if self.charging { 26 } else { 23 });
+                self.set_group(seq, Id::DriveFill, 25);
+                let digit = DRIVE_DIGITS[stats.drive_level.min(9) as usize];
+                self.set_group(seq, Id::DriveDigit, digit);
+                self.last_level = stats.drive_level;
+            }
+        }
         let sector = (0..self.masks.len())
             .find(|&i| self.masks[i].kind == MaskKind::Sector)
             .unwrap();
-        self.masks[sector].angle = wrap(d * DRIVE_RADIANS_PER_POINT);
         self.masks[sector].hidden = stats.drive_mode == 0;
-        if stats.drive_level != self.last_level {
-            self.last_level = stats.drive_level;
-            let digit = DRIVE_DIGITS[stats.drive_level.min(9) as usize];
-            self.set_group(seq, Id::DriveDigit, digit);
+        if form {
+            // Form mode (hud-01 §6.3): the wiper shows the current bar's
+            // share of time; the digit is the bar, MAX is hidden.
+            let bars = stats.form_bars.max(1) as i32;
+            let per = ((stats.form_max_time / bars as f32) as i32).max(1);
+            let t = stats.form_time as i32;
+            let rem = if t / per == bars { per } else { t % per };
+            self.masks[sector].angle =
+                wrap(FORM_DEGREES / per as f32 * std::f32::consts::PI / 180. * rem as f32);
+            let digit = FORM_DIGITS[(t / per).min(bars - 1).clamp(0, 9) as usize];
+            if self.last_form_digit != Some(digit) {
+                self.last_form_digit = Some(digit);
+                self.set_group(seq, Id::DriveDigit, digit);
+            }
+        } else {
+            // Drive, normal mode: a full gauge (100) uses 200 (0x140585efc).
+            let d = if stats.drive == 100 {
+                200.
+            } else {
+                stats.drive as f32
+            };
+            self.masks[sector].angle = wrap(d * DRIVE_RADIANS_PER_POINT);
+            if stats.drive_level != self.last_level {
+                self.last_level = stats.drive_level;
+                let digit = DRIVE_DIGITS[stats.drive_level.min(9) as usize];
+                self.set_group(seq, Id::DriveDigit, digit);
+            }
         }
         let max = self.find(Id::Max);
-        if stats.drive_level < stats.drive_max {
+        if form || stats.drive_level < stats.drive_max {
             self.elements[max].hidden = true;
             self.max_shown = false;
         } else if !self.max_shown {
@@ -766,6 +820,9 @@ mod tests {
             drive_level: 0,
             drive_max: 3,
             mp_charge: None,
+            form_bars: 0,
+            form_time: 0.,
+            form_max_time: 0.,
         };
         assert_eq!(Gauge::state_of(&stats(5)), 1);
         assert_eq!(Gauge::state_of(&stats(6)), 0);
