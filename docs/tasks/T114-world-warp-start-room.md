@@ -16,7 +16,7 @@ Owner Claude, 2026-10-11. Gate: development tooling for the field test (no gamep
 
 ## Checks
 
-PASS `cargo fmt --all --check`; PASS `cargo clippy --workspace --all-targets --locked -- -D warnings`; PASS `cargo test --workspace --locked` (new: `start_rooms_are_saved_per_world`). PASS `cargo build --release --features skate3` in the main folder after the merge.
+PASS `cargo fmt --all --check`; PASS `cargo clippy --workspace --all-targets --locked -- -D warnings`; PASS `cargo test --workspace --locked` (new: `start_rooms_are_saved_per_world`). PASS `cargo build --release --features skate3 --locked` (in the worktree; the main folder held another thread's uncommitted edits to the same files, so it was not updated).
 PASS sweep: a debug `kh2fm room` started each of eh00–eh29 at entrance 0 for 20 frames with a field config (exit 0, first frame drawn). eh30 is correctly rejected as not installed. Script and logs are private, in the session scratchpad.
 NOT RUN: opening F3 by hand and warping between worlds, saving a start and relaunching from the launcher, and starting rooms in worlds other than tt and eh (the owner may be using the PC; no keys were sent).
 
