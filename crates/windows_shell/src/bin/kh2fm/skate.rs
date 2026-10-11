@@ -50,6 +50,9 @@ pub struct Skate {
     camera: Option<(Transform, f32)>,
     /// The window's aspect ratio, fed to the Skate 3 camera.
     pub aspect: f32,
+    /// Skate 3's score HUD, when its data was prepared from the disc.
+    #[cfg(feature = "skate3")]
+    hud: Option<skate_sim::host_hud::ScoreHud>,
     /// The notice line (system-font bytes) and its remaining frames.
     pub notice: Option<(Vec<u8>, u32)>,
     /// The latest pad state for the simulation (read every frame).
@@ -67,6 +70,8 @@ impl Default for Skate {
             rider_rest: Vec::new(),
             camera: None,
             aspect: 16. / 9.,
+            #[cfg(feature = "skate3")]
+            hud: None,
             notice: None,
             #[cfg(feature = "skate3")]
             pad: XboxState::default(),
@@ -115,6 +120,13 @@ impl Skate {
         ) {
             Ok(sim) => {
                 self.rider_rest = rider_bones(&sim);
+                self.hud = match skate_sim::host_hud::ScoreHud::load(&hud_root(), &sim) {
+                    Ok(hud) => Some(hud),
+                    Err(e) => {
+                        eprintln!("Skate 3 score HUD not loaded: {e}");
+                        None
+                    }
+                };
                 self.state = State::Riding(Box::new(sim));
                 self.say("Skateboarding. Space pushes, arrows flick tricks, J gets off.");
             }
@@ -134,6 +146,25 @@ impl Skate {
         self.deck = None;
         self.rider = None;
         self.camera = None;
+    }
+
+    /// Skate 3's score HUD and the folder its textures are in, while riding.
+    #[cfg(feature = "skate3")]
+    pub fn score_hud(
+        &mut self,
+    ) -> Option<(&mut skate_sim::host_hud::ScoreHud, std::path::PathBuf)> {
+        if !self.riding() {
+            return None;
+        }
+        self.hud.as_mut().map(|hud| (hud, hud_root()))
+    }
+
+    /// Whether Skate 3's score HUD is shown in place of the KH2 HUD.
+    pub fn replaces_hud(&self) -> bool {
+        #[cfg(feature = "skate3")]
+        return self.riding() && self.hud.is_some();
+        #[cfg(not(feature = "skate3"))]
+        false
     }
 
     /// Skate 3's camera while riding.
@@ -183,6 +214,11 @@ impl Skate {
             scale: Vec3::ONE,
         };
         self.rider = Some((root, rider_bones(sim)));
+        if let Some(hud) = &mut self.hud
+            && let Err(e) = hud.update(sim)
+        {
+            eprintln!("Skate 3 score HUD stopped: {e}");
+        }
         self.camera = sim.camera().map(|(mut t, fov)| {
             t.translation *= UNITS_PER_METRE;
             (t, fov)
@@ -197,6 +233,12 @@ impl Skate {
     pub fn step(&mut self) -> Option<Ride> {
         None
     }
+}
+
+/// Where the score HUD's prepared data is.
+#[cfg(feature = "skate3")]
+fn hud_root() -> std::path::PathBuf {
+    crate::launcher::skate3_cache().join("private/hud")
 }
 
 /// The rider's model-space bones with translations in scene units.
@@ -326,6 +368,19 @@ fn prepare_or_start(skate: &mut Skate, iso: Option<&std::path::Path>) {
         let result =
             skate_disc::prepare(&mut host, &cache, &identity, |m| eprintln!("Skate 3: {m}"))
                 .map_err(|e| e.to_string());
+        // The score HUD is optional: riding works without it.
+        if result.is_ok() {
+            eprintln!("Skate 3: Preparing the score HUD");
+            let hud = std::fs::read(cache.join("private/stock/skater-collections.json"))
+                .map_err(|e| e.to_string())
+                .and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string()))
+                .and_then(|c| {
+                    skate_disc::prepare_hud(&mut host, &c, &cache).map_err(|e| e.to_string())
+                });
+            if let Err(e) = hud {
+                eprintln!("Skate 3 score HUD not prepared: {e}");
+            }
+        }
         (host.0, result)
     });
     skate.state = State::Preparing(worker);

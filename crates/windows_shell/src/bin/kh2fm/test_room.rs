@@ -5864,17 +5864,25 @@ fn hud_present(
             size: m.font.size.map(|v| v as usize),
             texel_scale: m.font.texel_scale as f32,
         });
-        draws = m.menu.draw(
-            &m.sheet.sequence,
-            &command::Font {
-                widths: &m.font.widths,
-                pad: 1,
-            },
-            first,
-            first + 1,
-        );
+        // While riding, Skate 3's score HUD replaces the command menu and
+        // the gauge.
+        draws = if skate.replaces_hud() {
+            Vec::new()
+        } else {
+            m.menu.draw(
+                &m.sheet.sequence,
+                &command::Font {
+                    widths: &m.font.widths,
+                    pad: 1,
+                },
+                first,
+                first + 1,
+            )
+        };
     }
-    draws.extend(gauge.draw(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>()));
+    if !skate.replaces_hud() {
+        draws.extend(gauge.draw(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>()));
+    }
     // Message windows (task priority 25000) draw above the HUD.
     if let Some(t) = &talk {
         let first = textures.len();
@@ -6797,6 +6805,16 @@ fn skate_camera(
 
 #[derive(Component)]
 struct SkateBoard;
+
+/// The optional skateboard's presentation (the Skate 3 score HUD).
+struct SkatePlugins;
+
+impl Plugin for SkatePlugins {
+    fn build(&self, _app: &mut App) {
+        #[cfg(feature = "skate3")]
+        _app.add_plugins(crate::skate_hud::SkateHudPlugin);
+    }
+}
 
 type BoardOnly = (With<SkateBoard>, Without<SoraRoot>);
 
@@ -8648,6 +8666,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             overlay: false,
         })
         .init_resource::<crate::skate::Skate>()
+        .add_plugins(SkatePlugins)
         .add_systems(Startup, (setup, pause_for_autoplay, camp_setup))
         .add_systems(Update, crate::skate::toggle)
         .add_systems(

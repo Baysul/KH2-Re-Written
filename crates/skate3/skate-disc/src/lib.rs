@@ -14,11 +14,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub mod big;
+pub mod hud;
 pub mod skeleton;
 pub mod vlt;
 
+pub use hud::prepare_hud;
+
 /// Bumped whenever the prepared output changes.
-pub const PREPARED_VERSION: u32 = 1;
+pub const PREPARED_VERSION: u32 = 2;
 const MARKER: &str = "private/stock/prepared.json";
 
 #[derive(Debug)]

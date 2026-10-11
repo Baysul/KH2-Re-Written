@@ -4,6 +4,12 @@
 #![allow(dead_code)]
 pub mod animation;
 mod animation_pose;
+mod apt_display;
+mod apt_imports;
+mod apt_movie;
+pub mod apt_scene;
+mod apt_text;
+mod apt_vm;
 mod camera;
 mod custom_difficulty;
 pub mod difficulty;
@@ -11,6 +17,8 @@ mod graph_host;
 mod graph_runtime;
 mod grind_world;
 pub mod host;
+pub mod host_hud;
+pub mod hud_runtime;
 pub mod input;
 mod physics;
 pub mod presentation;

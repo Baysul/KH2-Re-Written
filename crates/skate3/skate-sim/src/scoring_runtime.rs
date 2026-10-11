@@ -187,7 +187,28 @@ impl Runtime {
     pub(crate) fn stance(&self) -> [bool; 4] {
         self.stance
     }
-    // skate-game's `hud_input` (APT HUD publication) is removed: no HUD here.
+    pub fn hud_input(&self) -> crate::hud_runtime::Input {
+        crate::hud_runtime::Input {
+            sequence_score: self.sequence_score as i32,
+            line_score: self.session.holder.snapshot.line as i32,
+            sequence_timer: (self.session.line.points / self.data.line_drain) as i32,
+            line_time: self.session.line.points / self.data.line_drain,
+            line_capacity: self.data.line_capacity,
+            multiplier: self.session.combo.multiplier,
+            clean: self.clean,
+            sketchy: self.sketchy,
+            stance: self.stance,
+            trick_name: self.trick_name.clone(),
+            trick_metrics: [
+                crate::apt_vm::Value::Text(self.trick_name.clone()),
+                crate::apt_vm::Value::Bool(self.stance[0]),
+                crate::apt_vm::Value::Bool(self.stance[1]),
+                crate::apt_vm::Value::Bool(self.was_bailing),
+                crate::apt_vm::Value::Bool(self.new_trick),
+            ],
+            context_tricks: Vec::new(),
+        }
+    }
     fn penalty(&self, id: usize) -> f32 {
         let Some(d) = self.data.by_id(id) else {
             return 1.;

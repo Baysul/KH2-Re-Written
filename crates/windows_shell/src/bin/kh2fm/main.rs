@@ -13,6 +13,8 @@ mod cutscene;
 mod launcher;
 mod npcs;
 mod skate;
+#[cfg(feature = "skate3")]
+mod skate_hud;
 mod skate_rig;
 mod test_room;
 mod title;
