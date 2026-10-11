@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
 
-pub use install::play_args;
+pub use install::{play_args, tt_args};
 
 // Palette.
 const TEXT: u32 = 0xf2f5fb;

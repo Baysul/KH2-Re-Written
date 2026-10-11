@@ -143,6 +143,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "area_sim"
+version = "0.1.0"
+dependencies = [
+ "package_reader",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1877,6 +1884,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
+]
+
+[[package]]
+name = "field_collision"
+version = "0.1.0"
+dependencies = [
+ "package_reader",
 ]
 
 [[package]]
@@ -4269,9 +4283,11 @@ checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 name = "windows_shell"
 version = "0.1.0"
 dependencies = [
+ "area_sim",
  "audio_out",
  "bevy",
  "effect_vm",
+ "field_collision",
  "fontdue",
  "image",
  "package_reader",

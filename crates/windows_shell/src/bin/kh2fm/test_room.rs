@@ -7,6 +7,7 @@
 //! controller (`player_sim`) is a test-room profile: data-backed where a
 //! public lead exists, explicit choices elsewhere. It is not a measured
 //! reproduction of the installed game's movement or combat rules.
+use crate::area::{self, AreaSource, LoadedArea, MapWorld};
 use bevy::{
     app::AppExit,
     asset::RenderAssetUsages,
@@ -23,7 +24,7 @@ use bevy::{
 };
 use package_reader::{
     bar, effect, model_inspection, model_inspection_textures::TextureMode, motion,
-    object_collision, objentry, original, preferences, probe::ProbeSource, ptya, sklt,
+    object_collision, objentry, original, preferences, probe::ProbeSource, ptya, sequence, sklt,
 };
 use player_sim::shadow::{self, ScriptRandom, Shadow};
 use player_sim::{
@@ -42,12 +43,14 @@ use std::{
 use windows_shell::camp::journal::{self, Curtain, Journal};
 use windows_shell::camp::{self, Camp};
 use windows_shell::command::{self, CommandMenu, Decision, Item};
-use windows_shell::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
+use windows_shell::fade::{self, Fade};
+use windows_shell::fog::{AddFogged, FogMaterial, FogPlugin};
+use windows_shell::gauge::{self, Canvas, Draw, Gauge, GaugeStats, Texture};
 use windows_shell::hud::{self, Sheet, SystemFont};
 use windows_shell::input;
 use windows_shell::layout2d::{self, Menu2ld};
 use windows_shell::pad::{self, Pad};
-use windows_shell::room::{CollisionTriangle, LoadedRoom, load_rooms, mesh, rgba_image, upload};
+use windows_shell::room::{CollisionTriangle, LoadedRoom, load_rooms, mesh, rgba_image};
 use windows_shell::sound::{self, Banks};
 use windows_shell::ui2d::{Ui2dFrame, Ui2dPlugin};
 
@@ -76,6 +79,9 @@ struct Config {
     /// A generated test arena instead of a game room.
     #[serde(default)]
     arena: Option<ArenaConfig>,
+    /// A field area loaded by name the way the game loads it.
+    #[serde(default)]
+    area: Option<AreaConfig>,
     actor_selection: PathBuf,
     motion_set: Locator,
     battle_mode: bool,
@@ -125,6 +131,9 @@ struct Config {
     /// Optional spawn (x, probe height, z) in scene coordinates.
     #[serde(default)]
     spawn: Option<[f32; 3]>,
+    /// Facing at that spawn (scene yaw); areas default to the entrance's.
+    #[serde(default)]
+    spawn_yaw: Option<f32>,
     /// Sound banks: `se/seNNN.win32.scd` entries, or object archives with
     /// the name of their `se/obj/seNNN` replacement asset.
     #[serde(default)]
@@ -161,6 +170,27 @@ struct JournalConfig {
     worlds: Locator,
     tops: std::collections::BTreeMap<String, Locator>,
     curtain: Locator,
+}
+
+/// The area to start in and the story point that fixes its programs.
+#[derive(Deserialize)]
+struct AreaConfig {
+    /// World code (`tt`).
+    world: String,
+    area: u8,
+    entrance: u8,
+    /// Progress flag ranges set in ascending order before loading.
+    story: Vec<[u32; 2]>,
+    /// Unattended runs stand still instead of walking to an exit.
+    #[serde(default)]
+    stay: bool,
+    /// Program overrides [map, btl, evt] for the first load (−1 = story).
+    #[serde(default = "no_programs")]
+    programs: [i16; 3],
+}
+
+fn no_programs() -> [i16; 3] {
+    [-1; 3]
 }
 
 #[derive(Deserialize)]
@@ -327,6 +357,8 @@ struct MenuSources {
 /// HUD sources loaded with the session.
 struct HudSource {
     sheets: Vec<Sheet>,
+    /// The field 2D archive's 'mapj' area-change iris (areas only).
+    iris: Option<Sheet>,
     stats: (i32, i32),
     menu: Option<(Sheet, SystemFont, Vec<Vec<u8>>)>,
 }
@@ -433,13 +465,202 @@ const WEAPON_BANK: i16 = 500;
 const SE_CURSOR: u32 = 1;
 const SE_LOW_HP: u32 = 9;
 
+/// The room collision the controller and the enemy read: the generated
+/// arena's triangles, or a game map's COCT through the exe's routines.
+enum RoomWorld {
+    Triangles(TriangleWorld),
+    Map(MapWorld),
+}
+
+impl World for RoomWorld {
+    fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        match self {
+            RoomWorld::Triangles(w) => w.floor(x, z, top),
+            RoomWorld::Map(w) => w.floor(x, z, top),
+        }
+    }
+    fn resolve_walls(&self, position: [f32; 2], radius: f32, low: f32, high: f32) -> [f32; 2] {
+        match self {
+            RoomWorld::Triangles(w) => w.resolve_walls(position, radius, low, high),
+            RoomWorld::Map(w) => w.resolve_walls(position, radius, low, high),
+        }
+    }
+    fn collide(
+        &self,
+        start: player_sim::Vec3,
+        displacement: player_sim::Vec3,
+        airborne: bool,
+        body: &player_sim::Body,
+    ) -> player_sim::Collided {
+        match self {
+            RoomWorld::Triangles(w) => w.collide(start, displacement, airborne, body),
+            RoomWorld::Map(w) => w.collide(start, displacement, airborne, body),
+        }
+    }
+}
+
+/// Window art, font, text colour and the Talk label for field talks.
+struct AreaTalk {
+    sheet: Sheet,
+    font: SystemFont,
+    colour: u32,
+    label: Vec<u8>,
+}
+
+/// The current area and the files to load the next one.
+#[derive(Resource)]
+struct AreaRes {
+    source: AreaSource,
+    current: LoadedArea,
+    /// The area before this one (unattended runs avoid going back).
+    previous: Option<u8>,
+    /// A jump requested by an exit: world, area, entrance.
+    pending: Option<(u8, u8, u8)>,
+    /// The area-change presentation in progress.
+    transition: Option<Transition>,
+    /// Unattended runs walk toward an exit (false = stand still).
+    explore: bool,
+    /// NPC slots that already have meshes.
+    rendered: usize,
+    /// The live background group mask (ARD scripts plus zone switches).
+    bg_mask: u64,
+    /// Music to switch at the next tick (taken by `area_music`).
+    music: Option<area::MusicChange>,
+    /// The place name banner (text, frames left) shown on entering an
+    /// area (BILLBOARD_PLACE_M: 120 frames).
+    banner: Option<(Vec<u8>, u32)>,
+    /// The exit's destination name while facing a guide zone.
+    guide: Option<Vec<u8>>,
+    /// Ticks left of a story-block disable reason.
+    guide_hold: u32,
+    /// Areas Sora has stood in (their names show instead of "???").
+    visited: std::collections::HashSet<u8>,
+    /// The townsperson the talk resource currently points at.
+    talk_npc: Option<usize>,
+    was_talking: bool,
+}
+
+/// Same-world area change (FUN_140156520 mode 0 / FUN_1401561b0): the
+/// 'mapj' iris closes (group 1, 71 frames), a 2-frame fade to black
+/// (FUN_140156ce0(fade, 1)), the next area loads, then a fade in
+/// (128, 128, 64, 0) while the iris opens (group 0) [exit-01 §4].
+struct Transition {
+    stage: Stage,
+    iris: Option<sequence::Player>,
+    fade: Fade,
+    target: (u8, u8, u8),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Stage {
+    Closing,
+    Black,
+    Loading,
+    Opening,
+}
+
+/// The scene root every room part hangs under.
+#[derive(Resource)]
+struct SceneRoot(Entity);
+
+#[derive(Component)]
+struct RoomPart;
+
+/// A scrolling chunk's UV animation (UVSC record, draw-01 §7).
+#[derive(Component)]
+struct UvScroll {
+    material: Handle<FogMaterial>,
+    speed: [f32; 2],
+    ratio: [f32; 2],
+    scale: [f32; 2],
+}
+
+/// TEXA workers of the current area (draw-02 section 1): frame scripts
+/// that swap sprites into an environment's texture.
+#[derive(Resource)]
+struct TexaWorkers {
+    list: Vec<TexaWorker>,
+    last_tick: u64,
+}
+
+struct TexaWorker {
+    image: Handle<Image>,
+    texa: windows_shell::room::Texa,
+    /// Crop origin of the environment's cropped copy.
+    origin: [u32; 2],
+    player: windows_shell::room::TexaPlayer,
+    shown: Option<usize>,
+}
+
+fn texa_tick(
+    game: Res<Game>,
+    workers: Option<ResMut<TexaWorkers>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(mut workers) = workers else { return };
+    let ticks = if workers.last_tick == u64::MAX {
+        1
+    } else {
+        game.tick.saturating_sub(workers.last_tick).min(4)
+    };
+    workers.last_tick = game.tick;
+    for w in &mut workers.list {
+        let mut sprite = None;
+        for _ in 0..ticks {
+            sprite = w.player.tick(&w.texa);
+        }
+        if ticks == 0 || sprite.is_none() || sprite == w.shown {
+            continue;
+        }
+        if let Some(mut image) = images.get_mut(&w.image) {
+            let (width, height) = (image.width(), image.height());
+            if let Some(data) = image.data.as_mut() {
+                windows_shell::room::texa_upload(
+                    &w.texa,
+                    sprite.unwrap_or(0),
+                    w.origin,
+                    width,
+                    height,
+                    data,
+                );
+            }
+            w.shown = sprite;
+        }
+    }
+}
+
+/// UV scroll of the map's chunks: counts accumulate per tick as
+/// `(int)speed`, the offset is `((ratio * acc) >> 16 & 0xfff) / 4096`.
+fn uv_scroll_tick(
+    game: Res<Game>,
+    scrolls: Query<&UvScroll>,
+    mut materials: ResMut<Assets<FogMaterial>>,
+) {
+    let tick = game.tick as i64;
+    for s in &scrolls {
+        let off = |speed: f32, ratio: f32| -> f32 {
+            let acc = tick * (speed as i32 as i64);
+            ((((ratio * acc as f32) as i64) >> 16) & 0xfff) as f32 / 4096.
+        };
+        let (u, v) = (off(s.speed[0], s.ratio[0]), off(s.speed[1], s.ratio[1]));
+        if let Some(mut m) = materials.get_mut(&s.material) {
+            m.base.uv_transform =
+                bevy::math::Affine2::from_translation(Vec2::new(u * s.scale[0], v * s.scale[1]));
+        }
+    }
+}
+
+/// A map chunk's background group bit (`NO_GROUP` = always drawn).
+#[derive(Component)]
+struct BgChunk(u8);
+
 #[derive(Resource)]
 struct Game {
     params: Params,
     /// Builds the player's ability record from equipped slots.
     ability_source: AbilitySource,
     clips: Clips,
-    world: TriangleWorld,
+    world: RoomWorld,
     player: Player,
     poses: HashMap<(Action, bool), usize>,
     clip_poses: Vec<ClipPoses>,
@@ -521,6 +742,8 @@ struct MenuState {
 struct Hud {
     /// Gauge sheet, then the face sheet when configured.
     sheets: Vec<Sheet>,
+    /// The area-change iris layout.
+    iris: Option<Sheet>,
     menu: Option<MenuState>,
     gauge: Gauge,
     stats: GaugeStats,
@@ -797,7 +1020,14 @@ struct Loaded {
     actions: Vec<((Action, bool), usize)>,
     clip_poses: Vec<ClipPoses>,
     spawn: Vec3,
-    world: TriangleWorld,
+    /// Sora's facing at the spawn (scene yaw).
+    yaw: f32,
+    world: RoomWorld,
+    /// The field area, when the room is a game area.
+    area: Option<(AreaSource, LoadedArea)>,
+    /// Message window art, font and labels for townspeople talk.
+    area_talk: Option<AreaTalk>,
+    stay: bool,
     summary: serde_json::Value,
     hud: Option<HudSource>,
     enemy: Option<EnemySource>,
@@ -1187,7 +1417,7 @@ impl shadow::Clips for EnemyClips {
     }
 }
 
-struct RoomFloor<'a>(&'a TriangleWorld);
+struct RoomFloor<'a>(&'a RoomWorld);
 impl shadow::Env for RoomFloor<'_> {
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         self.0.floor(x, z, top)
@@ -1357,7 +1587,7 @@ fn floor_levels(triangles: &[CollisionTriangle]) -> Vec<(f32, [f32; 3])> {
 }
 
 fn load(
-    source: &ProbeSource,
+    source: &Arc<ProbeSource>,
     config_path: &Path,
     basic_fk: bool,
 ) -> Result<Loaded, Box<dyn std::error::Error>> {
@@ -1409,13 +1639,27 @@ fn load(
     if weapon_joint >= actor.skinning.bones.len() {
         return Err("weapon joint outside the actor skeleton".into());
     }
+    let mut area_load: Option<(AreaSource, LoadedArea)> = None;
     let (room, arena_mesh) = match (&config.arena, &config.room_selection) {
         (Some(a), _) => {
             let (room, mesh) = windows_shell::room::arena(a.half_size, a.wall_height, a.tile);
             (room, Some(mesh))
         }
         (None, Some(path)) => (load_rooms(source, &base.join(path))?, None),
-        (None, None) => return Err("configuration needs a room selection or an arena".into()),
+        (None, None) => match &config.area {
+            Some(a) => {
+                let world =
+                    area_sim::progress::world_index(&a.world).ok_or("unknown world code")?;
+                let story: Vec<(u32, u32)> = a.story.iter().map(|r| (r[0], r[1])).collect();
+                let mut src = AreaSource::open(Arc::clone(source), &story)?;
+                let (room, loaded) = src.load(world, a.area, a.entrance, a.programs)?;
+                area_load = Some((src, loaded));
+                (room, None)
+            }
+            None => {
+                return Err("configuration needs a room selection, an area or an arena".into());
+            }
+        },
     };
 
     // Movement block (obj+0x128): FUN_14040a440 defaults with SSTM
@@ -1540,8 +1784,21 @@ fn load(
                 )),
                 None => None,
             };
+            // The same field2d archive (<world>0field.2dd) holds 'mapj', the
+            // area-change iris (FUN_140153e50 table entry 2) [exit-01 §4.2].
+            let iris = match config.area {
+                Some(_) => Some(hud::load(
+                    source,
+                    &l.index,
+                    l.ordinal,
+                    l.name_hash,
+                    b"mapj",
+                )?),
+                None => None,
+            };
             Some(HudSource {
                 sheets,
+                iris,
                 stats: hud::starting_stats(bar_entry(&battle, b"plrp")?)?,
                 menu,
             })
@@ -1942,7 +2199,7 @@ fn load(
     }
 
     // Floors must carry partyStand and walls partyCollide (public labels).
-    let world = TriangleWorld::new(
+    let triangles = TriangleWorld::new(
         room.collision_triangles
             .iter()
             .filter(|t| t.surface_flags & (PARTY_STAND | PARTY_COLLIDE) != 0)
@@ -1955,6 +2212,11 @@ fn load(
             }),
         FLOOR_MIN_NORMAL_Y,
     );
+    let (floors, walls) = triangles.counts();
+    let world = match &mut area_load {
+        Some((_, a)) => RoomWorld::Map(MapWorld::new(a.take_collision())),
+        None => RoomWorld::Triangles(triangles),
+    };
     let mut flag_counts: HashMap<u32, usize> = HashMap::new();
     for t in &room.collision_triangles {
         *flag_counts.entry(t.surface_flags).or_default() += 1;
@@ -1989,16 +2251,26 @@ fn load(
     ];
     let idle_hand = clip_poses[clip_list[0].1].weapon[0].to_cols_array();
     let weapon_root = weapon.poses[0].matrix_bits[0].map(f32::from_bits);
-    let [sx, sy, sz] = match config.spawn {
-        Some(spawn) => spawn,
+    let [sx, sy, sz] = match (config.spawn, &area_load) {
+        (placed, Some((_, a))) => placed.unwrap_or(a.player.0.to_array()),
+        (Some(spawn), None) => spawn,
         // Default: the walkable level with the most floor area.
-        None => levels.first().map(|l| l.1).ok_or("no walkable floor")?,
+        (None, None) => levels.first().map(|l| l.1).ok_or("no walkable floor")?,
     };
-    let ground_height = world
-        .floor(sx, sz, sy)
-        .ok_or("no walkable collision floor below the spawn point")?;
-    let spawn = Vec3::new(sx, ground_height, sz);
-    let (floors, walls) = world.counts();
+    // An area places Sora at the entrance's authored point without a
+    // ground snap (FUN_1403b3200); the first physics frames settle him.
+    let (spawn, yaw) = match &area_load {
+        Some((_, a)) => (
+            config.spawn.map_or(a.player.0, Vec3::from_array),
+            config.spawn_yaw.unwrap_or(a.player.1),
+        ),
+        None => {
+            let ground_height = world
+                .floor(sx, sz, sy)
+                .ok_or("no walkable collision floor below the spawn point")?;
+            (Vec3::new(sx, ground_height, sz), 0.)
+        }
+    };
     let summary = serde_json::json!({"event":"admission","source_qualification":"quarantined_unqualified",
         "params":{"walk_speed":params.walk_speed,"run_speed":params.run_speed,"jump_height":params.jump_height,
             "turn_speed":params.turn_speed,"fall_max":params.fall_max,"gravity":physics::G,"run_magnitude":WALK_THRESHOLD,
@@ -2327,9 +2599,50 @@ fn load(
         )?),
         None => None,
     };
+    let area_talk = match (&area_load, &config.menu) {
+        (Some((src, area)), Some(menu)) => {
+            let loc = |name: &str| src.locate(name).ok_or(format!("{name} is not installed"));
+            let (fi, fm) = (loc("msg/us/fontinfo.bar")?, loc("msg/us/fontimage.bar")?);
+            let code = area_sim::progress::WORLDS[area.world as usize];
+            let wm = loc(&format!("msg/us/{code}.bar"))?;
+            let sheet = hud::load_window_sheet(
+                source,
+                (fi.0.as_str(), fi.1, fi.2),
+                (wm.0.as_str(), wm.1, wm.2),
+            )?;
+            let font = hud::load_font(
+                source,
+                (fm.0.as_str(), fm.1, fm.2),
+                (fi.0.as_str(), fi.1, fi.2),
+                b"evt ",
+            )?;
+            let colour = hud::ftst_colour(
+                &read_archive(source, &config.system)?,
+                5,
+                area.world as usize,
+            )?;
+            let label = hud::load_messages(
+                source,
+                &menu.messages.index,
+                menu.messages.ordinal,
+                menu.messages.name_hash,
+                &[TALK_LABEL],
+            )?
+            .remove(0);
+            Some(AreaTalk {
+                sheet,
+                font,
+                colour,
+                label,
+            })
+        }
+        _ => None,
+    };
     Ok(Loaded {
         room,
         arena_mesh,
+        area_talk,
+        stay: config.area.as_ref().is_some_and(|a| a.stay),
         actor,
         weapon,
         params,
@@ -2341,7 +2654,9 @@ fn load(
         actions,
         clip_poses,
         spawn,
+        yaw,
         world,
+        area: area_load,
         summary,
         hud,
         enemy,
@@ -2659,7 +2974,7 @@ fn spawn_model(
     pose: &[Vec3],
     parent: Entity,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    materials: &mut Assets<FogMaterial>,
     images: &mut Assets<Image>,
 ) -> Vec<(usize, Option<Entity>)> {
     let mut spawned = Vec::new();
@@ -2699,7 +3014,7 @@ fn spawn_model(
             .spawn((
                 ChildOf(parent),
                 Mesh3d(meshes.add(mesh(positions, uvs, vec![[1.; 4]; part.indices.len()]))),
-                MeshMaterial3d(materials.add(StandardMaterial {
+                MeshMaterial3d(materials.add_fogged(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: texture,
                     unlit: true,
@@ -2717,16 +3032,797 @@ fn spawn_model(
 
 // Bevy systems take each resource as a parameter.
 #[allow(clippy::too_many_arguments)]
+/// Advances the area-change presentation one tick (FUN_14015f690 /
+/// FUN_14015f5f0 with the fade task FUN_140156f10).
+fn area_tick(area: Option<ResMut<AreaRes>>, hud: Option<ResMut<Hud>>) {
+    let Some(mut area) = area else { return };
+    // The place name banner lives 120 frames (BILLBOARD_PLACE_M).
+    if area.transition.is_none()
+        && let Some(b) = area.banner.as_mut()
+    {
+        b.1 = b.1.saturating_sub(1);
+        if b.1 == 0 {
+            area.banner = None;
+        }
+    }
+    let AreaRes {
+        transition,
+        pending,
+        ..
+    } = &mut *area;
+    let Some(t) = transition.as_mut() else { return };
+    let seq = hud
+        .as_ref()
+        .and_then(|h| h.iris.as_ref())
+        .map(|s| &s.sequence);
+    match t.stage {
+        Stage::Closing => match seq {
+            Some(seq) => {
+                let p = t.iris.get_or_insert_with(|| sequence::Player::new(seq, 1));
+                p.update(seq, 1.0);
+                if p.finished() {
+                    t.fade.fade_out(1, false);
+                    t.stage = Stage::Black;
+                }
+            }
+            None => {
+                t.fade.fade_out(1, false);
+                t.stage = Stage::Black;
+            }
+        },
+        Stage::Black => {
+            t.fade.update(1.0);
+            if t.fade.state == fade::State::Held {
+                t.stage = Stage::Loading;
+                *pending = Some(t.target);
+            }
+        }
+        Stage::Loading => {}
+        Stage::Opening => {
+            t.fade.update(1.0);
+            let iris_done = match (seq, t.iris.as_mut()) {
+                (Some(seq), Some(p)) => {
+                    p.update(seq, 1.0);
+                    p.finished()
+                }
+                _ => true,
+            };
+            if iris_done && t.fade.state == fade::State::Idle {
+                *transition = None;
+            }
+        }
+    }
+    if let Some(mut h) = hud {
+        h.updated = true;
+    }
+}
+
+/// Loads the area an exit asked for and swaps the room, the collision, the
+/// camera collision and Sora's placement (FUN_140152a90 → FUN_140152be0 →
+/// FUN_140152680; the iris presentation is not drawn yet).
+#[allow(clippy::too_many_arguments)]
+fn area_transition(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<FogMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut game: ResMut<Game>,
+    mut rig: ResMut<CameraRig>,
+    area: Option<ResMut<AreaRes>>,
+    root: Option<Res<SceneRoot>>,
+    parts: Query<Entity, With<RoomPart>>,
+    hud: Option<Res<Hud>>,
+) {
+    let (Some(mut area), Some(root)) = (area, root) else {
+        return;
+    };
+    let Some((world, number, entrance)) = area.pending.take() else {
+        return;
+    };
+    let (room, mut next) = match area.source.load(world, number, entrance, [-1; 3]) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            area.transition = None;
+            eprintln!("Area {world}/{number} entrance {entrance} failed to load: {e}");
+            game.event(
+                serde_json::json!({"event":"area_error","world":world,"area":number,
+                "entrance":entrance,"error":e.to_string()}),
+            );
+            return;
+        }
+    };
+    for part in &parts {
+        commands.entity(part).despawn();
+    }
+    let show = game.show_collision;
+    spawn_room(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &room,
+        root.0,
+        show,
+        next.state.setup.bg_mask,
+    );
+    spawn_bobs(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &next,
+        root.0,
+        next.state.setup.bg_mask,
+    );
+    spawn_field_npcs(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &area.source,
+        &next,
+        root.0,
+        0,
+    );
+    area.rendered = next.npcs.len();
+    game.world = RoomWorld::Map(MapWorld::new(next.take_collision()));
+    let (position, yaw) = next.player;
+    game.player = Player::new(position.to_array(), yaw);
+    rig.collision = room
+        .camera_triangles
+        .iter()
+        .map(|t| t.map(|p| to_world(p.to_array())))
+        .collect();
+    rig.camera = FollowCamera::new(
+        camera::OUTDOOR,
+        &camera_input(&game.player, game.player.position, game.params.run_speed),
+    );
+    rig.previous_position = game.player.position;
+    game.event(serde_json::json!({"event":"area_enter","world":world,"area":number,
+        "entrance":entrance,"programs":next.programs,"bg_mask":format!("{:#x}", next.state.setup.bg_mask),
+        "spawn":position.to_array(),"yaw":yaw}));
+    area.previous = Some(area.current.area);
+    area.visited.insert(next.area);
+    area.music = Some(std::mem::take(&mut next.music));
+    area.banner = area
+        .source
+        .place_names
+        .get(&next.area)
+        .map(|t| (t.clone(), 120));
+    area.bg_mask = next.state.setup.bg_mask;
+    area.current = next;
+    if let Some(t) = area.transition.as_mut() {
+        t.stage = Stage::Opening;
+        t.iris = hud
+            .as_ref()
+            .and_then(|h| h.iris.as_ref())
+            .map(|s| sequence::Player::new(&s.sequence, 0));
+        t.fade.fade_in(1, false);
+    }
+}
+
+/// A placed map object and its mesh parts.
+#[derive(Component)]
+struct BobRoot;
+#[derive(Component)]
+struct BobPart {
+    placement: usize,
+    ordinal: usize,
+}
+
+/// Creates the meshes of an area's map objects (those whose group bit is
+/// set draw; the others are hidden and switch with the mask).
+fn spawn_bobs(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<FogMaterial>,
+    images: &mut Assets<Image>,
+    area: &LoadedArea,
+    parent: Entity,
+    mask: u64,
+) {
+    for (i, p) in area.bobs.placements.iter().enumerate() {
+        let Some(Some(bob)) = area.bobs.models.get(p.model) else {
+            continue;
+        };
+        let bit = p.group;
+        let visible = windows_shell::room::chunk_visible(bit, mask);
+        let root = commands
+            .spawn((
+                RoomPart,
+                BobRoot,
+                BgChunk(bit),
+                ChildOf(parent),
+                p.transform(),
+                if visible {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                },
+            ))
+            .id();
+        let pose: Vec<Vec3> = bob.model.poses[0]
+            .position_bits
+            .iter()
+            .map(|v| Vec3::from_array(v.map(f32::from_bits)))
+            .collect();
+        for (ordinal, entity) in
+            spawn_model(commands, &bob.model, &pose, root, meshes, materials, images)
+        {
+            if let Some(entity) = entity {
+                commands.entity(entity).insert((
+                    RoomPart,
+                    BobPart {
+                        placement: i,
+                        ordinal,
+                    },
+                ));
+            }
+        }
+    }
+}
+
+/// Plays the map objects' looping motions (one tick per tick, start offset
+/// from the record).
+fn bob_present(
+    game: Res<Game>,
+    area: Option<Res<AreaRes>>,
+    parts: Query<(&BobPart, &Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let Some(area) = area else { return };
+    for (part, handle) in &parts {
+        let p = &area.current.bobs.placements[part.placement];
+        if p.motion < 0 {
+            continue;
+        }
+        let Some(Some(bob)) = area.current.bobs.models.get(p.model) else {
+            continue;
+        };
+        let Some(anim) = bob.anims.get(p.motion as usize) else {
+            continue;
+        };
+        let tick = (game.tick as f32 + p.start) as usize % anim.frames.len();
+        let frame = &anim.frames[tick];
+        let positions: Vec<[f32; 3]> = bob.model.parts[part.ordinal]
+            .indices
+            .iter()
+            .map(|&i| frame[i as usize].to_array())
+            .collect();
+        if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        }
+    }
+}
+
+/// Component marking a townsperson's root and its mesh parts.
+#[derive(Component)]
+struct FieldNpcRoot(usize);
+#[derive(Component)]
+struct FieldNpcPart {
+    npc: usize,
+    ordinal: usize,
+}
+
+/// Creates the meshes of an area's townspeople under `parent` (tagged
+/// `RoomPart` so an area change removes them).
+#[allow(clippy::too_many_arguments)]
+fn spawn_field_npcs(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<FogMaterial>,
+    images: &mut Assets<Image>,
+    source: &AreaSource,
+    area: &LoadedArea,
+    parent: Entity,
+    from: usize,
+) {
+    for (i, npc) in area.npcs.iter().enumerate().skip(from) {
+        let kind = &source.kinds[npc.kind];
+        let root = commands
+            .spawn((
+                RoomPart,
+                FieldNpcRoot(i),
+                ChildOf(parent),
+                Transform::from_translation(npc.position)
+                    .with_rotation(Quat::from_rotation_y(npc.yaw)),
+                Visibility::default(),
+            ))
+            .id();
+        for (ordinal, entity) in spawn_model(
+            commands,
+            &kind.model,
+            npc.frame_positions(&kind.anims),
+            root,
+            meshes,
+            materials,
+            images,
+        ) {
+            if let Some(entity) = entity {
+                commands
+                    .entity(entity)
+                    .insert((RoomPart, FieldNpcPart { npc: i, ordinal }));
+            }
+        }
+    }
+}
+
+/// One tick of every townsperson, and the choice of whom Talk addresses:
+/// the nearest with a script whose reaction sphere holds Sora
+/// (FUN_140407de0). Talking NPCs stand still; after a talk they face Sora
+/// and wait 60 ticks (rtn after_talk, npc-01 §2.4).
+fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<ResMut<Talk>>) {
+    let (Some(mut area), Some(mut talk)) = (area, talk) else {
+        return;
+    };
+    let AreaRes {
+        source,
+        current,
+        talk_npc,
+        was_talking,
+        ..
+    } = &mut *area;
+    let sora = Vec3::from_array(game.player.position);
+    let talking = talk.active.is_some();
+    if *was_talking
+        && !talking
+        && let Some(i) = *talk_npc
+    {
+        current.npcs[i].after_talk(sora);
+    }
+    *was_talking = talking;
+    if !talking {
+        let mut best: Option<(f32, usize)> = None;
+        for (i, n) in current.npcs.iter().enumerate() {
+            if !n.alive
+                || n.talk == 0
+                || n.reaction != 0x1f
+                || !current.scripts.contains_key(&n.talk)
+            {
+                continue;
+            }
+            if source.kinds[n.kind].target.is_none() {
+                continue;
+            }
+            let d = (n.position + Vec3::Y * REACTION_SPHERE[2]) - (sora + Vec3::Y * SORA_OBJ[2]);
+            let (r, h) = (
+                REACTION_SPHERE[0] + SORA_OBJ[0],
+                REACTION_SPHERE[1] + SORA_OBJ[1],
+            );
+            if (d.x * d.x + d.z * d.z) / (r * r) + d.y * d.y / (h * h) < 1. {
+                let dist = d.x.hypot(d.z);
+                if best.is_none_or(|(b, _)| dist < b) {
+                    best = Some((dist, i));
+                }
+            }
+        }
+        match best {
+            Some((_, i)) => {
+                let n = &current.npcs[i];
+                let kind = &source.kinds[n.kind];
+                let t = kind.target.as_ref().expect("candidate has a target shape");
+                talk.position = n.position;
+                talk.yaw = n.yaw;
+                talk.home_yaw = n.yaw;
+                talk.target = Shape {
+                    bone: t.bone,
+                    offset: t.offset,
+                    pos_h: t.pos_h,
+                    radius: t.radius,
+                    height: t.height,
+                };
+                talk.bones = vec![
+                    n.bone(&kind.anims)
+                        .map(|m| (t.bone, m))
+                        .into_iter()
+                        .collect(),
+                ];
+                if *talk_npc != Some(i) {
+                    talk.script = current.scripts[&n.talk].clone();
+                    talk.lines = current.lines.clone();
+                    *talk_npc = Some(i);
+                }
+            }
+            None => {
+                talk.position = Vec3::splat(1.0e9);
+                *talk_npc = None;
+            }
+        }
+    }
+    // Zone pop-in / pop-out (FUN_1403ff000 / FUN_1403fe320 case 5 and
+    // FUN_140416270): an spawn-type-2 NPC appears when Sora is inside a
+    // kind-1 zone of its spawn point and leaves 5 ticks after he is not.
+    let engine_sora = [sora.x, -sora.y, -sora.z];
+    let mut random = crate::npcs::Lcg(0x9e37 ^ game.tick as u32);
+    for d in &mut current.deferred {
+        let inside = current.state.objects[d.spawn.point].zones.iter().any(|z| {
+            let raw = &current.state.objects[d.spawn.point].point.activators[z.activator].raw;
+            u16::from_le_bytes([raw[0x2c], raw[0x2d]]) == 1 && z.contains(engine_sora)
+        });
+        if inside {
+            d.away = 0;
+            match d.npc {
+                None => {
+                    let n = crate::area::build_npc(
+                        &current.state,
+                        d.kind,
+                        &d.spawn,
+                        d.spawn.point,
+                        &mut random,
+                    );
+                    current.npcs.push(n);
+                    d.npc = Some(current.npcs.len() - 1);
+                }
+                Some(i) if !current.npcs[i].alive => {
+                    current.npcs[i] = crate::area::build_npc(
+                        &current.state,
+                        d.kind,
+                        &d.spawn,
+                        d.spawn.point,
+                        &mut random,
+                    );
+                }
+                _ => {}
+            }
+        } else if let Some(i) = d.npc {
+            d.away += 1;
+            if d.away > 4 && !(talking && *talk_npc == Some(i)) {
+                current.npcs[i].alive = false;
+            }
+        }
+    }
+    if !talking {
+        crate::npcs::update_meets(
+            &mut current.npcs,
+            |k| source.kinds[k].body,
+            sora,
+            &mut random,
+        );
+    }
+    for (i, n) in current.npcs.iter_mut().enumerate() {
+        if !n.alive {
+            continue;
+        }
+        let is_target = talking && *talk_npc == Some(i);
+        if is_target {
+            n.yaw = talk.yaw;
+        }
+        let kind = &source.kinds[n.kind];
+        n.tick(&kind.anims, sora, is_target, &mut random);
+        n.update_look(kind, sora);
+    }
+}
+
+/// Applies an area's music change: slots whose track changed fade out over
+/// one second and the new track decodes in the background.
+fn area_music(area: Option<ResMut<AreaRes>>, music: Option<ResMut<MusicRes>>, audio: Res<Audio>) {
+    let (Some(mut area), Some(mut m)) = (area, music) else {
+        return;
+    };
+    let Some(change) = area.music.take() else {
+        return;
+    };
+    for (k, slot) in change.slots.into_iter().enumerate() {
+        let Some(slot) = slot else { continue };
+        if let Some(output) = &audio.output
+            && let Ok(mut mixer) = output.mixer.lock()
+        {
+            mixer.fade(MUSIC_KEYS[k], 0., 1., audio_out::FadeEnd::Stop);
+        }
+        m.clips[k] = None;
+        m.pending[k] = slot.map(sound::decode_music_in_background);
+        if k == 0 {
+            m.started = false;
+        }
+    }
+}
+
+/// Shows and hides map chunks when the background group mask changes.
+fn bg_visibility(
+    area: Option<Res<AreaRes>>,
+    mut last: Local<Option<u64>>,
+    mut chunks: Query<(&BgChunk, &mut Visibility)>,
+    added: Query<(), Added<BgChunk>>,
+) {
+    let Some(area) = area else { return };
+    if *last == Some(area.bg_mask) && added.is_empty() {
+        return;
+    }
+    *last = Some(area.bg_mask);
+    for (chunk, mut v) in &mut chunks {
+        *v = if windows_shell::room::chunk_visible(chunk.0, area.bg_mask) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
+/// Creates meshes for townspeople that appeared since the last frame.
+fn field_npc_spawn_new(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<FogMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    area: Option<ResMut<AreaRes>>,
+    root: Option<Res<SceneRoot>>,
+) {
+    let (Some(mut area), Some(root)) = (area, root) else {
+        return;
+    };
+    if area.transition.is_some() || area.rendered >= area.current.npcs.len() {
+        return;
+    }
+    spawn_field_npcs(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &area.source,
+        &area.current,
+        root.0,
+        area.rendered,
+    );
+    area.rendered = area.current.npcs.len();
+}
+
+/// Places and poses the townspeople.
+fn field_npc_present(
+    area: Option<Res<AreaRes>>,
+    mut roots: Query<(&FieldNpcRoot, &mut Transform, &mut Visibility)>,
+    parts: Query<(&FieldNpcPart, &Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let Some(area) = area else { return };
+    let (kinds, npcs) = (&area.source.kinds, &area.current.npcs);
+    for (root, mut t, mut v) in &mut roots {
+        if let Some(n) = npcs.get(root.0) {
+            t.translation = n.position;
+            t.rotation = Quat::from_rotation_y(n.yaw);
+            *v = if n.alive {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+        }
+    }
+    for (part, handle) in &parts {
+        let Some(n) = npcs.get(part.npc) else {
+            continue;
+        };
+        let kind = &kinds[n.kind];
+        let frame = n
+            .look_positions
+            .as_deref()
+            .unwrap_or_else(|| n.frame_positions(&kind.anims));
+        let positions: Vec<[f32; 3]> = kind.model.parts[part.ordinal]
+            .indices
+            .iter()
+            .map(|&i| frame[i as usize].to_array())
+            .collect();
+        if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        }
+    }
+}
+
+/// Spawns a room's map models and its collision overlay under `parent`,
+/// tagged so an area change can remove them.
+#[allow(clippy::too_many_arguments)]
+fn spawn_room(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<FogMaterial>,
+    images: &mut Assets<Image>,
+    room: &LoadedRoom,
+    parent: Entity,
+    show_collision: bool,
+    bg_mask: u64,
+) {
+    let mut texa_workers = Vec::new();
+    // The area's type-14 record: screen clear colour and fog (draw-01 §8.1).
+    windows_shell::fog::set_current(room.environment.map(|e| e.fog));
+    if let Some(e) = &room.environment {
+        commands.insert_resource(ClearColor(Color::srgb_u8(
+            e.clear[0], e.clear[1], e.clear[2],
+        )));
+    }
+    for part in &room.rooms {
+        // Each environment's CLAMP region is baked into a cropped copy with
+        // the exe's address modes and linear filter (draw-01 §4.6).
+        let regions: Vec<windows_shell::room::EnvRegion> = part
+            .textures
+            .iter()
+            .map(|t| {
+                part.regions.get(&t.environment_ordinal).copied().unwrap_or(
+                    windows_shell::room::EnvRegion::new(0, 0, [0; 4], [t.width, t.height]),
+                )
+            })
+            .collect();
+        let handles: Vec<_> = part
+            .textures
+            .iter()
+            .zip(&regions)
+            .map(|(t, r)| {
+                let (w, h, px) = r.crop_rgba(t);
+                windows_shell::room::region_image(w, h, px, r.wrap, images)
+            })
+            .collect();
+        for t in &part.texa {
+            if let Some(i) = part
+                .textures
+                .iter()
+                .position(|x| x.environment_ordinal == t.env)
+            {
+                texa_workers.push(TexaWorker {
+                    image: handles[i].clone(),
+                    texa: t.clone(),
+                    origin: [regions[i].crop[0], regions[i].crop[1]],
+                    player: windows_shell::room::TexaPlayer::default(),
+                    shown: None,
+                });
+            }
+        }
+        for (chunk_index, chunk) in part.model.chunks.iter().enumerate() {
+            if chunk.indices.is_empty() {
+                continue;
+            }
+            let bit = part
+                .chunk_bits
+                .get(chunk_index)
+                .copied()
+                .unwrap_or(windows_shell::room::NO_GROUP);
+            let vertex = |i: &u32| &chunk.vertices[*i as usize];
+            let positions = chunk
+                .indices
+                .iter()
+                .map(|i| vertex(i).position_bits.map(f32::from_bits))
+                .collect();
+            let texture_slot = part
+                .textures
+                .iter()
+                .position(|t| t.environment_ordinal as i16 == chunk.texture_index);
+            let (scale, offset) = texture_slot.map_or(([1.; 2], [0.; 2]), |i| {
+                (regions[i].scale, regions[i].offset)
+            });
+            let uvs = chunk
+                .indices
+                .iter()
+                .map(|i| {
+                    let uv = vertex(i).uv_bits.map(f32::from_bits);
+                    [uv[0] * scale[0] + offset[0], uv[1] * scale[1] + offset[1]]
+                })
+                .collect();
+            let colors = chunk
+                .indices
+                .iter()
+                .map(|i| vertex(i).color_bits.map(f32::from_bits))
+                .collect();
+            let texture = texture_slot.map(|i| handles[i].clone());
+            // UVSC: fc bits 1..5 hold the record index + 1; repeat modes only.
+            let scroll_id = (chunk.header_words[3] >> 1) & 0x1f;
+            let scroll = (scroll_id != 0)
+                .then(|| part.uv_scroll.iter().find(|r| r.0 + 1 == scroll_id))
+                .flatten()
+                .zip(texture_slot);
+            // Sky layer 0 is never fogged (draw-01 §4.5).
+            let sky0 = part.name == *b"SK0";
+            let base = StandardMaterial {
+                base_color: if texture.is_some() {
+                    Color::WHITE
+                } else {
+                    Color::srgb(1., 0., 1.)
+                },
+                base_color_texture: texture,
+                unlit: true,
+                cull_mode: None,
+                // GS TEST: opaque pass keeps alpha > 31.5/255
+                // (AREF 0x10); the alpha pass blends, additive when
+                // the descriptor's fc bit 6 is set (draw-01 §3-4).
+                alpha_mode: if chunk.transparency_flag == 0 {
+                    AlphaMode::Mask(31.5 / 255.)
+                } else if chunk.header_words[3] & 0x40 != 0 {
+                    AlphaMode::Add
+                } else {
+                    AlphaMode::Blend
+                },
+                ..default()
+            };
+            let material = if sky0 {
+                materials.add_plain(base)
+            } else {
+                materials.add_fogged(base)
+            };
+            let mut entity = commands.spawn((
+                ChildOf(parent),
+                RoomPart,
+                BgChunk(bit),
+                if windows_shell::room::chunk_visible(bit, bg_mask) {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                },
+                Mesh3d(meshes.add(mesh(positions, uvs, colors))),
+                MeshMaterial3d(material.clone()),
+                Transform::default(),
+            ));
+            if let Some((record, slot)) = scroll {
+                let r = &regions[slot];
+                entity.insert(UvScroll {
+                    material,
+                    speed: [record.1, record.2],
+                    ratio: [
+                        if r.wrap[0] { r.scroll_ratio[0] } else { 0. },
+                        if r.wrap[1] { r.scroll_ratio[1] } else { 0. },
+                    ],
+                    scale: r.scale,
+                });
+            }
+        }
+    }
+    // Collision overlay (F1): walkable floors green, walls red.
+    let mut positions = Vec::new();
+    let mut colors = Vec::new();
+    for triangle in &room.collision_triangles {
+        let t = &triangle.corners;
+        let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+        let stand = triangle.surface_flags & PARTY_STAND != 0;
+        let collide = triangle.surface_flags & PARTY_COLLIDE != 0;
+        let color = if normal.y.abs() >= FLOOR_MIN_NORMAL_Y && stand {
+            [0.1, 1., 0.2, 0.35]
+        } else if collide {
+            [1., 0.15, 0.1, 0.35]
+        } else {
+            // Not used by the player controller.
+            [0.2, 0.4, 1., 0.15]
+        };
+        for v in t {
+            positions.push((*v + Vec3::Y * 2.).to_array());
+            colors.push(color);
+        }
+    }
+    if !texa_workers.is_empty() {
+        eprintln!("{} TEXA texture animation(s) running", texa_workers.len());
+    }
+    commands.insert_resource(TexaWorkers {
+        list: texa_workers,
+        last_tick: u64::MAX,
+    });
+    let corners = positions.len();
+    commands.spawn((
+        CollisionOverlay,
+        RoomPart,
+        ChildOf(parent),
+        Mesh3d(meshes.add(mesh(positions, vec![[0., 0.]; corners], colors))),
+        MeshMaterial3d(materials.add_fogged(StandardMaterial {
+            base_color: Color::WHITE,
+            unlit: true,
+            cull_mode: None,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        })),
+        Transform::default(),
+        if show_collision {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        },
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
 fn setup(
     mut commands: Commands,
     mut startup: ResMut<Startup>,
     mut game: ResMut<Game>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<FogMaterial>>,
+    mut plain_materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     talk: Option<ResMut<Talk>>,
     mut frame: ResMut<Ui2dFrame>,
     windows: Query<&Window>,
+    area: Option<Res<AreaRes>>,
 ) {
     let room = startup.room.take().expect("room retained for setup");
     let mut compose = Compose {
@@ -2739,6 +3835,7 @@ fn setup(
     let enemy_model = startup.enemy_model.take();
     if let Some(HudSource {
         sheets,
+        iris,
         stats: (hp, mp),
         menu,
     }) = startup.hud.take()
@@ -2783,6 +3880,7 @@ fn setup(
                 &stats,
             ),
             sheets,
+            iris,
             menu: menu.map(|(sheet, font, labels)| {
                 // Test-room choices for the opening state: Magic and Drive
                 // have no entries yet (colour 5), Items is usable.
@@ -2818,7 +3916,7 @@ fn setup(
         commands.spawn((
             ChildOf(world),
             Mesh3d(meshes.add(mesh(arena.positions, arena.uvs, arena.colors))),
-            MeshMaterial3d(materials.add(StandardMaterial {
+            MeshMaterial3d(materials.add_fogged(StandardMaterial {
                 base_color: Color::WHITE,
                 base_color_texture: Some(texture),
                 unlit: true,
@@ -2828,100 +3926,37 @@ fn setup(
             Transform::default(),
         ));
     }
-    for room in &room.rooms {
-        let handles: Vec<_> = room
-            .textures
-            .iter()
-            .map(|t| upload(t, &mut images))
-            .collect();
-        for chunk in &room.model.chunks {
-            if chunk.indices.is_empty() {
-                continue;
-            }
-            let vertex = |i: &u32| &chunk.vertices[*i as usize];
-            let positions = chunk
-                .indices
-                .iter()
-                .map(|i| vertex(i).position_bits.map(f32::from_bits))
-                .collect();
-            let uvs = chunk
-                .indices
-                .iter()
-                .map(|i| vertex(i).uv_bits.map(f32::from_bits))
-                .collect();
-            let colors = chunk
-                .indices
-                .iter()
-                .map(|i| vertex(i).color_bits.map(f32::from_bits))
-                .collect();
-            let texture = room
-                .textures
-                .iter()
-                .position(|t| t.environment_ordinal as i16 == chunk.texture_index)
-                .map(|i| handles[i].clone());
-            commands.spawn((
-                ChildOf(world),
-                Mesh3d(meshes.add(mesh(positions, uvs, colors))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: if texture.is_some() {
-                        Color::WHITE
-                    } else {
-                        Color::srgb(1., 0., 1.)
-                    },
-                    base_color_texture: texture,
-                    unlit: true,
-                    cull_mode: None,
-                    alpha_mode: if chunk.transparency_flag == 0 {
-                        AlphaMode::Opaque
-                    } else {
-                        AlphaMode::Blend
-                    },
-                    ..default()
-                })),
-                Transform::default(),
-            ));
-        }
+    spawn_room(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &room,
+        world,
+        game.show_collision,
+        area.as_ref().map_or(!0, |a| a.current.state.setup.bg_mask),
+    );
+    if let Some(a) = &area {
+        spawn_bobs(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+            &a.current,
+            world,
+            a.current.state.setup.bg_mask,
+        );
+        spawn_field_npcs(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+            &a.source,
+            &a.current,
+            world,
+            0,
+        );
     }
-    // Collision overlay (F1): walkable floors green, walls red.
-    let mut positions = Vec::new();
-    let mut colors = Vec::new();
-    for triangle in &room.collision_triangles {
-        let t = &triangle.corners;
-        let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
-        let stand = triangle.surface_flags & PARTY_STAND != 0;
-        let collide = triangle.surface_flags & PARTY_COLLIDE != 0;
-        let color = if normal.y.abs() >= FLOOR_MIN_NORMAL_Y && stand {
-            [0.1, 1., 0.2, 0.35]
-        } else if collide {
-            [1., 0.15, 0.1, 0.35]
-        } else {
-            // Not used by the player controller.
-            [0.2, 0.4, 1., 0.15]
-        };
-        for v in t {
-            positions.push((*v + Vec3::Y * 2.).to_array());
-            colors.push(color);
-        }
-    }
-    let corners = positions.len();
-    commands.spawn((
-        CollisionOverlay,
-        ChildOf(world),
-        Mesh3d(meshes.add(mesh(positions, vec![[0., 0.]; corners], colors))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            unlit: true,
-            cull_mode: None,
-            alpha_mode: AlphaMode::Blend,
-            ..default()
-        })),
-        Transform::default(),
-        if game.show_collision {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        },
-    ));
     // A pool of spell-volume placeholders (the most volumes live at once).
     let unit = meshes.add(Sphere::new(1.).mesh().ico(3).unwrap());
     for i in 0..16 {
@@ -2929,7 +3964,7 @@ fn setup(
             SpellVolume(i),
             ChildOf(world),
             Mesh3d(unit.clone()),
-            MeshMaterial3d(materials.add(StandardMaterial {
+            MeshMaterial3d(plain_materials.add(StandardMaterial {
                 base_color: Color::srgba(1., 1., 1., 0.3),
                 unlit: true,
                 alpha_mode: AlphaMode::Blend,
@@ -2947,7 +3982,7 @@ fn setup(
             OrbMarker(i),
             ChildOf(world),
             Mesh3d(orb_mesh.clone()),
-            MeshMaterial3d(materials.add(StandardMaterial {
+            MeshMaterial3d(plain_materials.add(StandardMaterial {
                 base_color: Color::srgb(1., 1., 1.),
                 unlit: true,
                 ..default()
@@ -2956,6 +3991,7 @@ fn setup(
             Visibility::Hidden,
         ));
     }
+    commands.insert_resource(SceneRoot(world));
     let actor = startup.actor.take().expect("actor retained for setup");
     let weapon = startup.weapon.take().expect("weapon retained for setup");
     let pose = game.clip_poses[game.poses[&(Action::Idle, false)]].frames[0].clone();
@@ -3190,7 +4226,7 @@ fn setup(
                 EffectMesh { additive },
                 ChildOf(world),
                 Mesh3d(meshes.add(mesh(vec![[0.; 3]; 3], vec![[0.; 2]; 3], vec![[0.; 4]; 3]))),
-                MeshMaterial3d(materials.add(StandardMaterial {
+                MeshMaterial3d(materials.add_fogged(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: Some(image.clone()),
                     unlit: true,
@@ -3449,7 +4485,12 @@ const AUTOPLAY_GUARDS: [u64; 2] = [1170, 1340];
 const AUTOPLAY_END: u64 = 6860;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
-fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
+fn simulate(
+    mut rig: ResMut<CameraRig>,
+    mut game: ResMut<Game>,
+    hud: Option<ResMut<Hud>>,
+    mut area: Option<ResMut<AreaRes>>,
+) {
     let tick = game.tick;
     let (up, down) = if game.autoplay.is_some() {
         (false, tick == 980)
@@ -3476,8 +4517,9 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
         game.attack_queued = false;
         (stick, queued.0, queued.1)
     };
-    // Field talk locks control (player+0xdc8 → +0x40 bit 0).
-    let talking = game.talking;
+    // Field talk locks control (player+0xdc8 → +0x40 bit 0); an area
+    // change zeroes the pad while DAT_142a10500 is set (FUN_1403b2340).
+    let talking = game.talking || area.as_deref().is_some_and(|a| a.transition.is_some());
     let (stick, jump, decide) = if talking {
         (Vec2::ZERO, false, false)
     } else {
@@ -3491,6 +4533,21 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
     let forward = (look_at - eye).xz().normalize_or(Vec2::NEG_Y);
     let right = Vec2::new(-forward.y, forward.x);
     let direction = forward * stick.y + right * stick.x;
+    // Unattended area runs head for an exit that does not lead back to the
+    // previous area, so each run walks a chain of areas.
+    let (direction, stick) = match area
+        .as_deref()
+        .filter(|a| a.explore && game.autoplay.is_some())
+    {
+        Some(a) if a.pending.is_none() && a.transition.is_none() => {
+            let p = game.player.position;
+            match area::exit_target(&a.current.state, a.previous, [p[0], p[2]]) {
+                Some(d) => (Vec2::from_array(d), Vec2::Y),
+                None => (direction, stick),
+            }
+        }
+        _ => (direction, stick),
+    };
     // The decide button executes the command under the cursor; Attack
     // (icon 1) is the only command this room implements.
     let mut cursor_moved = false;
@@ -3718,6 +4775,72 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
     let step = player.tick(&input, params, clips, world);
     magic_room::tick(&mut game, tick);
     item_room::tick(&mut game, tick);
+    // The area's zone task (FUN_1403a4f90, priority 12000) runs after the
+    // objects: exits are tested against Sora's new position.
+    if let Some(a) = area.as_deref_mut()
+        && a.pending.is_none()
+        && a.transition.is_none()
+    {
+        let moving = (direction.length() > 0.).then(|| direction.normalize().to_array());
+        let running = stick.length() >= WALK_THRESHOLD;
+        let probe = area::probe(
+            Vec3::from_array(game.player.position),
+            game.player.yaw,
+            moving,
+            running,
+        );
+        // A disable reason stays for 6 s (FUN_140167ef0 param 6.0).
+        if a.guide_hold > 0 {
+            a.guide_hold -= 1;
+        } else {
+            a.guide = None;
+        }
+        let blocked = a.source.blocked_destinations();
+        let is_blocked = |w: u8, d: u8| blocked.contains(&(w, d));
+        for request in area::requests(&mut a.current.state, &probe, is_blocked) {
+            if let area_sim::Request::Blocked { world, area: dest } = &request {
+                a.guide = a.source.blocked_text(*world, *dest);
+                a.guide_hold = 360;
+            }
+            if let area_sim::Request::Guide { area: dest, .. } = &request {
+                let known = a.visited.contains(dest);
+                a.guide = if known {
+                    a.source.place_names.get(dest).cloned()
+                } else {
+                    Some(a.source.unknown_place.clone())
+                };
+            }
+            if let area_sim::Request::Jump {
+                world,
+                area,
+                entrance,
+                ..
+            } = request
+            {
+                game.event(serde_json::json!({"event":"exit","tick":tick,"world":world,
+                    "area":area,"entrance":entrance}));
+                a.transition = Some(Transition {
+                    stage: Stage::Closing,
+                    iris: None,
+                    fade: Fade::default(),
+                    target: (world, area, entrance),
+                });
+            } else if let area_sim::Request::BgGroups { on, off } = request {
+                for (bit, state) in [(on, true), (off, false)] {
+                    if let Some(bit) = bit {
+                        if state {
+                            a.bg_mask |= 1 << bit;
+                        } else {
+                            a.bg_mask &= !(1u64 << bit);
+                        }
+                        if let RoomWorld::Map(w) = &mut game.world {
+                            w.set_group(bit, state);
+                        }
+                    }
+                }
+            }
+        }
+    }
     combat_tick(&mut game, tick);
     prize_room::tick(&mut game, tick);
     // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
@@ -3797,7 +4920,13 @@ fn simulate(mut rig: ResMut<CameraRig>, mut game: ResMut<Game>, hud: Option<ResM
             serde_json::json!({"event":"state","tick":tick,"position":position,"yaw":yaw,
             "action":format!("{action:?}"),"camera_eye":rig.camera.eye,"camera_yaw":rig.camera.yaw,
             "camera_collision_triangles":rig.collision.len(),"camera_collision_hits":rig.collision_hits,
-            "enemy":enemy}),
+            "enemy":enemy,
+            "npcs":area.as_deref().map(|a| a.current.npcs.iter().map(|n| serde_json::json!({
+                "kind":a.source.kinds[n.kind].name,"position":n.position.to_array(),"yaw":n.yaw,
+                "pose":format!("{:?}", n.pose),"talk":n.talk,"reaction":n.reaction,"alive":n.alive,
+                "serial":n.serial,"point":n.entity,"act":n.act_name(),
+                "script":a.current.scripts.contains_key(&n.talk),
+                "target":a.source.kinds[n.kind].target.is_some()})).collect::<Vec<_>>())}),
         );
     }
 }
@@ -4535,6 +5664,7 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
 fn hud_present(
     hud: Option<ResMut<Hud>>,
     talk: Option<Res<Talk>>,
+    area: Option<Res<AreaRes>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut hud) = hud else { return };
@@ -4543,6 +5673,7 @@ fn hud_present(
     }
     let Hud {
         sheets,
+        iris,
         gauge,
         canvas,
         image,
@@ -4560,8 +5691,10 @@ fn hud_present(
     // The command menu (priorities 0x14b5..0x14b7) draws before the gauge
     // (7000).
     let mut draws: Vec<Draw> = Vec::new();
+    let mut menu_font = None;
     if let Some(m) = menu {
         let first = textures.len();
+        menu_font = Some((first + 1, m.font.widths.clone()));
         textures.push(Texture {
             rgba: &m.sheet.texture_rgba,
             size: m.sheet.texture_size.map(|v| v as usize),
@@ -4598,6 +5731,65 @@ fn hud_present(
         });
         for w in t.closing.iter().chain(&t.current) {
             draws.extend(w.draw(first, first + 1));
+        }
+    }
+    // The area-change iris (task priority 120000) and the fade (330000)
+    // draw over the HUD.
+    let white = [255u8; 16];
+    // Place name banner and the exit guide (system font, white).
+    if let (Some(a), Some((sheet, widths))) = (area.as_ref(), menu_font.as_ref())
+        && a.transition.is_none()
+    {
+        let sheet = *sheet;
+        let font = command::Font { widths, pad: 1 };
+        for (text, y) in [a.banner.as_ref().map(|b| &b.0), a.guide.as_ref()]
+            .into_iter()
+            .zip([192., 384.])
+            .filter_map(|(t, y)| t.map(|t| (t, y)))
+        {
+            let size = 20.;
+            let width = command::text_width(text, &font, size);
+            let origin = [256. - width / 2., y - 24. * size / 18.];
+            draws.push(Draw::Quads {
+                quads: command::text_quads_sized(text, origin, [1.; 4], &font, size),
+                z: 0,
+                sheet,
+            });
+        }
+    }
+    if let Some(t) = area.as_ref().and_then(|a| a.transition.as_ref()) {
+        if let (Some(sheet), Some(player)) = (iris.as_ref(), t.iris.as_ref()) {
+            textures.push(Texture {
+                rgba: &sheet.texture_rgba,
+                size: sheet.texture_size.map(|v| v as usize),
+                texel_scale: sheet.texel_scale as f32,
+            });
+            draws.push(Draw::Quads {
+                quads: sheet
+                    .sequence
+                    .quads(player, [0., 0.], &sequence::Modifiers::default()),
+                z: 0,
+                sheet: textures.len() - 1,
+            });
+        }
+        if t.fade.state != fade::State::Idle {
+            textures.push(Texture {
+                rgba: &white,
+                size: [2, 2],
+                texel_scale: 1.,
+            });
+            let a = t.fade.alpha as f32 / 128.;
+            let (x0, x1) = (-gauge::CANVAS_PAD, 512. + gauge::CANVAS_PAD);
+            draws.push(Draw::Quads {
+                quads: vec![sequence::Quad {
+                    corners: [[x0, 0.], [x1, 0.], [x0, 416.], [x1, 416.]],
+                    uv: [0, 0, 2, 2],
+                    colors: [[0., 0., 0., a]; 4],
+                    blend: 0,
+                }],
+                z: 0,
+                sheet: textures.len() - 1,
+            });
         }
     }
     canvas.render(&draws, &textures);
@@ -6399,7 +7591,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             _ => return Err("unknown/duplicate test room option".into()),
         }
     }
-    let source = ProbeSource::bind_session(&args[0], &args[1])?;
+    let source = Arc::new(ProbeSource::bind_session(&args[0], &args[1])?);
     // Validate the log path now; the file is created only after admission.
     let log_path = match log_path {
         Some(path) => {
@@ -6432,8 +7624,29 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     for (action, clip) in &loaded.actions {
         poses.insert(*action, *clip);
     }
+    let stay = loaded.stay;
+    let area_res = loaded.area.map(|(source, mut current)| AreaRes {
+        music: Some(std::mem::take(&mut current.music)),
+        rendered: current.npcs.len(),
+        bg_mask: current.state.setup.bg_mask,
+        banner: source
+            .place_names
+            .get(&current.area)
+            .map(|t| (t.clone(), 120)),
+        guide: None,
+        guide_hold: 0,
+        visited: std::iter::once(current.area).collect(),
+        source,
+        current,
+        previous: None,
+        pending: None,
+        transition: None,
+        explore: !stay,
+        talk_npc: None,
+        was_talking: false,
+    });
     let talk_room = loaded.npc.is_some();
-    let mut player = Player::new(loaded.spawn.to_array(), 0.);
+    let mut player = Player::new(loaded.spawn.to_array(), loaded.yaw);
     player.abilities = loaded.abilities.build(&ROOM_ABILITIES);
     if autoplay.is_some() {
         // The unattended run strikes Sora with blows and recovers with
@@ -6577,7 +7790,42 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 Some(n.model),
             )
         }
-        None => (None, None),
+        None => (
+            loaded.area_talk.map(|t| Talk {
+                // Pointed at the nearest townsperson by field_npc_tick; far
+                // away until then so no reaction shows.
+                position: Vec3::splat(1.0e9),
+                yaw: 0.,
+                home_yaw: 0.,
+                tick: 0,
+                frames: vec![Vec::new()],
+                bones: vec![HashMap::new()],
+                loop_start: 0,
+                target: Shape {
+                    bone: 0,
+                    offset: Vec3::ZERO,
+                    pos_h: 0.,
+                    radius: 0.,
+                    height: 0.,
+                },
+                indices: Vec::new(),
+                sheet: t.sheet,
+                font: t.font,
+                lines: HashMap::new(),
+                colour: t.colour,
+                label: t.label,
+                script: Vec::new(),
+                active: None,
+                current: None,
+                closing: Vec::new(),
+                wait: 0.,
+                camera: None,
+                dissolve: 0,
+                snapshot: false,
+                reaction: None,
+            }),
+            None,
+        ),
     };
     let (effects, effect_atlas) = match loaded.effects {
         Some(e) => {
@@ -6699,6 +7947,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         "Test room ready (the original PC bindings). WASD moves (Left Alt walks), Space/Backspace jump, Enter/left-click decides (Attack), Up/Down choose a command, right-click/Right Shift guards, F/Right Ctrl reacts (Talk), M opens the menu, the mouse turns the camera, middle-click/Right Alt recentres, Esc exits."
     );
     let mut app = App::new();
+    if let Some(area) = area_res {
+        app.insert_resource(area);
+    }
     if let Some(talk) = talk {
         app.insert_resource(talk);
     }
@@ -6784,6 +8035,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             close_when_requested: false,
             ..default()
         }))
+        .add_plugins(FogPlugin)
         .add_plugins(Ui2dPlugin {
             order: 0,
             overlay: false,
@@ -6794,7 +8046,16 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             (
                 read_pad,
                 camp_tick,
-                (simulate, talk_tick, effects_tick, hud_tick, play_sounds, music_tick)
+                (
+                    simulate,
+                    area_tick,
+                    field_npc_tick,
+                    talk_tick,
+                    effects_tick,
+                    hud_tick,
+                    play_sounds,
+                    music_tick,
+                )
                     .chain()
                     .run_if(field_running),
             )
@@ -6802,9 +8063,20 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         )
         .add_systems(
             Update,
-            (
+            ((
+                area_transition,
+                bg_visibility,
+                area_music,
+                uv_scroll_tick,
+                texa_tick,
+                bob_present,
+                field_npc_spawn_new,
+                field_npc_present,
                 dissolve_present,
                 camera_control,
+            )
+                .chain(),
+            (
                 present,
                 present_enemy,
                 present_spells,
@@ -6819,6 +8091,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 finish,
             )
                 .chain(),
+        )
+            .chain(),
         )
         .run())
 }

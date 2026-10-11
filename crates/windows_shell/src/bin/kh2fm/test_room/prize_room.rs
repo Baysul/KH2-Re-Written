@@ -72,7 +72,7 @@ pub fn tick(game: &mut Game, tick: u64) {
 fn kill(
     player: &mut Player,
     rt: &mut EnemyRuntime,
-    world: &TriangleWorld,
+    world: &RoomWorld,
     log: &mut Option<std::fs::File>,
     tick: u64,
 ) {

@@ -143,6 +143,41 @@ pub fn read_selected_models(
         return Err("model selection exceeds 1 MiB".into());
     }
     let selection: SelectionFile = serde_json::from_slice(&bytes)?;
+    read_models(source, selection)
+}
+
+/// One installed model by its HED identity, with the explicit profiles the
+/// viewers and the test room use (legacy bind, original indexed textures,
+/// integer-truncated UVs). Used for models named at run time.
+pub fn read_model_at(
+    source: &ProbeSource,
+    index: &str,
+    ordinal: usize,
+    name_hash: [u8; 16],
+) -> Result<Vec<InspectionModel>, Box<dyn std::error::Error>> {
+    read_models(
+        source,
+        SelectionFile {
+            schema_version: 1,
+            source_content_identity: source.content_identity().to_owned(),
+            selections: vec![Selection {
+                index: index.to_owned(),
+                ordinal,
+                name_hash,
+            }],
+            inspect_model_geometry: true,
+            model_pose_profiles: vec![PoseProfile::Legacy],
+            inspect_model_textures: true,
+            model_texture_modes: vec![TextureMode::OriginalIndexed],
+            model_uv_profiles: vec![UvProfile::Kkdf2IntegerTruncated],
+        },
+    )
+}
+
+fn read_models(
+    source: &ProbeSource,
+    selection: SelectionFile,
+) -> Result<Vec<InspectionModel>, Box<dyn std::error::Error>> {
     if selection.schema_version != 1
         || selection.source_content_identity != source.content_identity()
         || !selection.inspect_model_geometry
@@ -343,6 +378,53 @@ pub fn read_selected_models(
         return Err("no admitted inspection models".into());
     }
     Ok(models)
+}
+
+/// A model from its BAR payloads (type 4 and the same-name type 7 bank),
+/// as used for map objects that live inside the map archive. Original
+/// indexed textures only; the legacy bind pose and integer-truncated UVs
+/// are the same explicit profiles as the named loader.
+pub fn model_from_payload(
+    model: &[u8],
+    textures: Option<(&[u8], usize, usize)>,
+) -> io::Result<InspectionModel> {
+    let geometry = crate::model_geometry::read_geometry(model)?;
+    let skinning = crate::model_pose::Skinning::read(model)?;
+    let poses = vec![skinning.bind_pose(PoseProfile::Legacy)?];
+    let mesh_parts = parts(&geometry, &poses)?;
+    let (textures, texture_routes) = match textures {
+        Some((bank, offset, ordinal)) => {
+            let mut budget = 0usize;
+            let set = crate::model_inspection_textures::read_textures(
+                bank,
+                offset,
+                ordinal,
+                &[],
+                &[TextureMode::OriginalIndexed],
+                &mut budget,
+            )?;
+            let environments = set.images.len();
+            let routes = crate::model_inspection_textures::read_uv_routes(
+                model,
+                &geometry,
+                environments,
+                &[UvProfile::Kkdf2IntegerTruncated],
+            )?;
+            (Some(Arc::new(set)), routes)
+        }
+        None => (None, Vec::new()),
+    };
+    Ok(InspectionModel {
+        index: String::new(),
+        ordinal: 0,
+        bar_ordinal: 0,
+        excluded_linked_groups: geometry.excluded_linked_groups,
+        parts: mesh_parts,
+        poses,
+        skinning,
+        textures,
+        texture_routes,
+    })
 }
 
 #[cfg(test)]

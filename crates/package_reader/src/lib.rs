@@ -5,6 +5,7 @@
 use serde::Serialize;
 use std::{collections::HashSet, io};
 
+pub mod ard;
 pub mod bar;
 pub mod battle_tables;
 pub mod command_table;
@@ -32,6 +33,7 @@ pub mod model_texture_routing;
 pub mod motion;
 pub mod motion_eval;
 pub mod motion_trigger;
+pub mod named;
 pub mod object_collision;
 pub mod objentry;
 pub mod ogg;
