@@ -149,3 +149,9 @@ helper, joint order, constraint, limiter, expression and root-position tables
 using the layouts in OpenKH docs/kh2/file/anb/motion.md (pin above) and
 kenjiuno's msetDoc README (gitlab.com/kenjiuno/msetDoc). No code was copied;
 the solver rules are this project's own and are recorded as inferences in T057.
+
+The combat rules in the player controller were checked against the KH2 Combat
+Kit by steferro78 (https://github.com/steferro78-HIV/kh2-combat-kit, MIT).
+No code or data from that project is copied. It was reviewed and used only as a
+cross-check for the variable-height jump and the Square-button moves (T105).
+The ported behaviour follows the decompiled exe routines cited in the code.
