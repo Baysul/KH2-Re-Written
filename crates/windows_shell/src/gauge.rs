@@ -569,6 +569,8 @@ pub struct Canvas {
     color: Vec<[f32; 4]>,
     depth: Vec<i32>,
     dirty: Option<[usize; 4]>,
+    /// Threads for a large frame.
+    threads: usize,
 }
 
 pub struct Texture<'a> {
@@ -617,6 +619,7 @@ impl Canvas {
             color: vec![[0.; 4]; width * height],
             depth: vec![0; width * height],
             dirty: None,
+            threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(8)),
         }
     }
 
@@ -631,35 +634,185 @@ impl Canvas {
         }
     }
 
-    /// Pixel bounds of a triangle clipped to the canvas, marked dirty.
-    fn bounds(&mut self, p: &[[f32; 2]; 3]) -> Option<[usize; 4]> {
-        let min = |k: usize| p.iter().map(|v| v[k]).fold(f32::MAX, f32::min);
-        let max = |k: usize| p.iter().map(|v| v[k]).fold(f32::MIN, f32::max);
-        let x0 = min(0).floor().max(0.) as usize;
-        let y0 = min(1).floor().max(0.) as usize;
-        let x1 = (max(0).ceil().max(0.) as usize).min(self.width);
-        let y1 = (max(1).ceil().max(0.) as usize).min(self.height);
-        if x1 <= x0 || y1 <= y0 {
-            return None;
+    /// Clears last frame's area and draws this frame; `rgba` then holds
+    /// straight-alpha pixels. Large frames (the full-screen iris and fade)
+    /// draw in horizontal bands on several threads; every pixel still sees
+    /// the draws in order, so the result does not depend on the split.
+    pub fn render(&mut self, draws: &[Draw], textures: &[Texture]) {
+        self.clear();
+        let k = self.scale;
+        let mut tris = Vec::new();
+        for draw in draws {
+            match draw {
+                Draw::Mask { polygons, z } => {
+                    for q in polygons {
+                        let q = q.map(|[x, y]| [(x + CANVAS_PAD) * k, y * k]);
+                        for p in [[q[0], q[1], q[2]], [q[1], q[3], q[2]]] {
+                            tris.extend(Tri::new(p, Fill::Mask(*z)));
+                        }
+                    }
+                }
+                Draw::Quads { quads, z, sheet } => {
+                    let texture = &textures[*sheet];
+                    for quad in quads {
+                        let q = quad.corners.map(|[x, y]| [(x + CANVAS_PAD) * k, y * k]);
+                        let [u0, v0, u1, v1] = quad.uv.map(|v| v as f32 * texture.texel_scale);
+                        let uv = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
+                        for t in [[0usize, 1, 2], [1, 3, 2]] {
+                            let fill = Fill::Sprite {
+                                quad,
+                                t,
+                                uv,
+                                z: *z,
+                                texture,
+                            };
+                            tris.extend(Tri::new(t.map(|i| q[i]), fill));
+                        }
+                    }
+                }
+            }
         }
-        let b = [x0, y0, x1, y1];
-        self.dirty = Some(match self.dirty {
-            None => b,
-            Some(d) => [d[0].min(x0), d[1].min(y0), d[2].max(x1), d[3].max(y1)],
+        // Pixel bounds clipped to the canvas; their union is this frame's
+        // dirty area.
+        let (width, height) = (self.width, self.height);
+        tris.retain_mut(|tri| match bounds(&tri.p, width, height) {
+            Some(b) => {
+                tri.b = b;
+                true
+            }
+            None => false,
         });
-        Some(b)
+        for tri in &tris {
+            let b = tri.b;
+            self.dirty = Some(match self.dirty {
+                None => b,
+                Some(d) => [
+                    d[0].min(b[0]),
+                    d[1].min(b[1]),
+                    d[2].max(b[2]),
+                    d[3].max(b[3]),
+                ],
+            });
+        }
+        let Some(dirty) = self.dirty else { return };
+        let pixels = (dirty[2] - dirty[0]) * (dirty[3] - dirty[1]);
+        let threads = if pixels >= 1 << 18 { self.threads } else { 1 };
+        let rows = (dirty[3] - dirty[1]).div_ceil(threads);
+        let first = dirty[1] * width;
+        let bands = self.color[first..]
+            .chunks_mut(rows * width)
+            .zip(self.depth[first..].chunks_mut(rows * width))
+            .zip(self.rgba[first * 4..].chunks_mut(rows * width * 4))
+            .enumerate()
+            .take(threads)
+            .map(|(n, ((color, depth), rgba))| Band {
+                y0: dirty[1] + n * rows,
+                y1: (dirty[1] + (n + 1) * rows).min(dirty[3]),
+                width,
+                color,
+                depth,
+                rgba,
+            });
+        let tris = &tris;
+        if threads == 1 {
+            for mut band in bands {
+                band.draw(tris, dirty);
+            }
+        } else {
+            std::thread::scope(|s| {
+                for mut band in bands {
+                    s.spawn(move || band.draw(tris, dirty));
+                }
+            });
+        }
     }
+}
 
-    /// Calls `f(canvas, pixel index, barycentric weights)` for each pixel
-    /// centre inside the triangle.
-    fn raster(&mut self, p: [[f32; 2]; 3], mut f: impl FnMut(&mut Self, usize, [f32; 3])) {
+/// Pixel bounds of a triangle clipped to the canvas.
+fn bounds(p: &[[f32; 2]; 3], width: usize, height: usize) -> Option<[usize; 4]> {
+    let min = |k: usize| p.iter().map(|v| v[k]).fold(f32::MAX, f32::min);
+    let max = |k: usize| p.iter().map(|v| v[k]).fold(f32::MIN, f32::max);
+    let x0 = min(0).floor().max(0.) as usize;
+    let y0 = min(1).floor().max(0.) as usize;
+    let x1 = (max(0).ceil().max(0.) as usize).min(width);
+    let y1 = (max(1).ceil().max(0.) as usize).min(height);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some([x0, y0, x1, y1])
+}
+
+/// What a triangle writes: depth only (a mask) or a textured sprite.
+enum Fill<'a> {
+    Mask(i32),
+    Sprite {
+        quad: &'a Quad,
+        /// The quad corners of this triangle.
+        t: [usize; 3],
+        uv: [[f32; 2]; 4],
+        z: i32,
+        texture: &'a Texture<'a>,
+    },
+}
+
+struct Tri<'a> {
+    p: [[f32; 2]; 3],
+    area: f32,
+    /// Pixel bounds (set once clipped).
+    b: [usize; 4],
+    fill: Fill<'a>,
+}
+
+impl<'a> Tri<'a> {
+    /// None for a degenerate triangle.
+    fn new(p: [[f32; 2]; 3], fill: Fill<'a>) -> Option<Self> {
         let area =
             (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
-        if area.abs() < 1e-6 {
-            return;
+        (area.abs() >= 1e-6).then_some(Self {
+            p,
+            area,
+            b: [0; 4],
+            fill,
+        })
+    }
+}
+
+/// Canvas rows `y0..y1`; the slices start at row `y0`.
+struct Band<'a> {
+    y0: usize,
+    y1: usize,
+    width: usize,
+    color: &'a mut [[f32; 4]],
+    depth: &'a mut [i32],
+    rgba: &'a mut [u8],
+}
+
+impl Band<'_> {
+    fn draw(&mut self, tris: &[Tri], dirty: [usize; 4]) {
+        for tri in tris {
+            self.raster(tri);
         }
-        let Some(b) = self.bounds(&p) else { return };
-        for y in b[1]..b[3] {
+        for y in self.y0..self.y1 {
+            for x in dirty[0]..dirty[2] {
+                let i = (y - self.y0) * self.width + x;
+                let c = self.color[i];
+                let o = i * 4;
+                if c[3] > 0. {
+                    for k in 0..3 {
+                        self.rgba[o + k] = ((c[k] / c[3]).min(1.) * 255. + 0.5) as u8;
+                    }
+                    self.rgba[o + 3] = (c[3].min(1.) * 255. + 0.5) as u8;
+                } else {
+                    self.rgba[o..o + 4].fill(0);
+                }
+            }
+        }
+    }
+
+    /// Each pixel centre of this band inside the triangle.
+    fn raster(&mut self, tri: &Tri) {
+        let (p, b, area) = (&tri.p, tri.b, tri.area);
+        for y in b[1].max(self.y0)..b[3].min(self.y1) {
             for x in b[0]..b[2] {
                 let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
                 let edge = |a: [f32; 2], c: [f32; 2]| {
@@ -671,93 +824,57 @@ impl Canvas {
                     edge(p[0], p[1]) / area,
                 ];
                 if w.iter().all(|&v| v >= 0.) {
-                    f(self, y * self.width + x, w);
+                    self.pixel(&tri.fill, (y - self.y0) * self.width + x, w);
                 }
             }
         }
     }
 
-    /// Clears last frame's area and draws this frame; `rgba` then holds
-    /// straight-alpha pixels.
-    pub fn render(&mut self, draws: &[Draw], textures: &[Texture]) {
-        self.clear();
-        let k = self.scale;
-        for draw in draws {
-            match draw {
-                Draw::Mask { polygons, z } => {
-                    for q in polygons {
-                        let q = q.map(|[x, y]| [(x + CANVAS_PAD) * k, y * k]);
-                        for tri in [[q[0], q[1], q[2]], [q[1], q[3], q[2]]] {
-                            self.raster(tri, |c, i, _| c.depth[i] = *z);
-                        }
-                    }
+    fn pixel(&mut self, fill: &Fill, i: usize, w: [f32; 3]) {
+        let Fill::Sprite {
+            quad,
+            t,
+            uv,
+            z,
+            texture,
+        } = fill
+        else {
+            if let Fill::Mask(z) = fill {
+                self.depth[i] = *z;
+            }
+            return;
+        };
+        if *z != 0 && *z <= self.depth[i] {
+            return;
+        }
+        // Barycentric interpolation (same operation order as one sum).
+        let mix = |v: [f32; 4]| v[t[0]] * w[0] + v[t[1]] * w[1] + v[t[2]] * w[2];
+        let tex = texture.sample(mix(uv.map(|c| c[0])), mix(uv.map(|c| c[1])));
+        let vc: [f32; 4] = std::array::from_fn(|ch| mix(quad.colors.map(|c| c[ch])));
+        let a = (tex[3] * vc[3]).clamp(0., 1.);
+        if a <= 0. {
+            return;
+        }
+        let src: [f32; 3] = std::array::from_fn(|ch| (tex[ch] * vc[ch]).min(1.));
+        let dst = &mut self.color[i];
+        match quad.blend {
+            1 => {
+                for ch in 0..3 {
+                    dst[ch] = (dst[ch] + src[ch] * a).min(1.);
                 }
-                Draw::Quads { quads, z, sheet } => {
-                    for quad in quads {
-                        self.quad(quad, *z, &textures[*sheet]);
-                    }
+                dst[3] = dst[3].max(a);
+            }
+            2 => {
+                for ch in 0..3 {
+                    dst[ch] = (dst[ch] - src[ch] * a).max(0.);
                 }
             }
-        }
-        if let Some([x0, y0, x1, y1]) = self.dirty {
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let i = y * self.width + x;
-                    let c = self.color[i];
-                    let o = i * 4;
-                    if c[3] > 0. {
-                        for k in 0..3 {
-                            self.rgba[o + k] = ((c[k] / c[3]).min(1.) * 255. + 0.5) as u8;
-                        }
-                        self.rgba[o + 3] = (c[3].min(1.) * 255. + 0.5) as u8;
-                    } else {
-                        self.rgba[o..o + 4].fill(0);
-                    }
+            _ => {
+                for ch in 0..3 {
+                    dst[ch] = src[ch] * a + dst[ch] * (1. - a);
                 }
+                dst[3] = a + dst[3] * (1. - a);
             }
-        }
-    }
-
-    fn quad(&mut self, quad: &Quad, z: i32, texture: &Texture) {
-        let k = self.scale;
-        let q = quad.corners.map(|[x, y]| [(x + CANVAS_PAD) * k, y * k]);
-        let [u0, v0, u1, v1] = quad.uv.map(|v| v as f32 * texture.texel_scale);
-        let uv = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
-        for t in [[0usize, 1, 2], [1, 3, 2]] {
-            self.raster(t.map(|i| q[i]), |c, i, w| {
-                if z != 0 && z <= c.depth[i] {
-                    return;
-                }
-                let mix =
-                    |f: &dyn Fn(usize) -> f32| f(t[0]) * w[0] + f(t[1]) * w[1] + f(t[2]) * w[2];
-                let tex = texture.sample(mix(&|j| uv[j][0]), mix(&|j| uv[j][1]));
-                let vc: [f32; 4] = std::array::from_fn(|ch| mix(&|j| quad.colors[j][ch]));
-                let a = (tex[3] * vc[3]).clamp(0., 1.);
-                if a <= 0. {
-                    return;
-                }
-                let src: [f32; 3] = std::array::from_fn(|ch| (tex[ch] * vc[ch]).min(1.));
-                let dst = &mut c.color[i];
-                match quad.blend {
-                    1 => {
-                        for ch in 0..3 {
-                            dst[ch] = (dst[ch] + src[ch] * a).min(1.);
-                        }
-                        dst[3] = dst[3].max(a);
-                    }
-                    2 => {
-                        for ch in 0..3 {
-                            dst[ch] = (dst[ch] - src[ch] * a).max(0.);
-                        }
-                    }
-                    _ => {
-                        for ch in 0..3 {
-                            dst[ch] = src[ch] * a + dst[ch] * (1. - a);
-                        }
-                        dst[3] = a + dst[3] * (1. - a);
-                    }
-                }
-            });
         }
     }
 }
@@ -806,6 +923,54 @@ mod tests {
         canvas.render(&draws[..2], std::slice::from_ref(&texture));
         assert_eq!(alpha(&canvas, 1, 1), 0);
         assert_eq!(alpha(&canvas, 9, 1), 255);
+    }
+
+    #[test]
+    fn banded_frames_match_one_thread() {
+        let texture = Texture {
+            rgba: &[
+                255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 255, 255, 255, 255, 0,
+            ],
+            size: [2, 2],
+            texel_scale: 1.,
+        };
+        let full = |blend, alpha| Quad {
+            corners: [[-90., 0.], [600., 0.], [-90., 416.], [600., 416.]],
+            uv: [0, 0, 2, 2],
+            colors: [
+                [1., 1., 1., alpha],
+                [0.5, 1., 1., 1.],
+                [1., 0.2, 1., 1.],
+                [1.; 4],
+            ],
+            blend,
+        };
+        let draws = [
+            Draw::Quads {
+                quads: vec![full(0, 1.), full(1, 0.5)],
+                z: 0,
+                sheet: 0,
+            },
+            Draw::Mask {
+                polygons: vec![[[10., 10.], [300., 40.], [20., 380.], [400., 300.]]],
+                z: 200,
+            },
+            Draw::Quads {
+                quads: vec![full(0, 0.7), full(2, 0.3)],
+                z: 100,
+                sheet: 0,
+            },
+        ];
+        let mut one = Canvas::new(1.);
+        one.threads = 1;
+        let mut many = Canvas::new(1.);
+        many.threads = 5;
+        for _ in 0..2 {
+            one.render(&draws, std::slice::from_ref(&texture));
+            many.render(&draws, std::slice::from_ref(&texture));
+            assert!(one.rgba == many.rgba);
+        }
+        assert!(one.rgba.iter().any(|&b| b != 0));
     }
 
     #[test]

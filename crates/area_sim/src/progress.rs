@@ -29,6 +29,7 @@ const FLAG_WORDS: usize = 0x40 * 8 + 32;
 /// mission and journal lists): `(op, words)`.
 pub type Skipped = Vec<(u8, Vec<u16>)>;
 
+#[derive(Clone)]
 pub struct Progress {
     flags: Vec<u32>,
     /// `{map, btl, evt}` per `world * 0x40 + area` (`DAT_1409a98c0`).
