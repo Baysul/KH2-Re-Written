@@ -15,7 +15,6 @@ pub mod pad;
 pub mod room;
 pub mod settings;
 pub mod sound;
-pub mod splash;
 pub mod sprite2d;
 pub mod title;
 pub mod title_edits;
