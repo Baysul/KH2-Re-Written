@@ -1,7 +1,8 @@
 //! The launcher window `kh2fm` opens without arguments: pick the game
 //! folder (found in Steam's libraries, browsed, or dropped on the window),
 //! check it against the supported build, then choose a test. The choice is
-//! remembered, so later launches open on the test list.
+//! remembered, so later launches open on the test list. The first launch
+//! opens on a short quick start guide (F1 brings it back).
 //!
 //! Before a folder is chosen there are no game files, so the launcher is
 //! drawn from plain shapes and a Windows font: a dark screen and one list
@@ -41,6 +42,7 @@ const MARGIN: f32 = 96.;
 const LIST_TOP: f32 = 196.;
 const LIST_BOTTOM: f32 = 630.;
 const LIST_WIDTH: f32 = 620.;
+const GUIDE_LIST_TOP: f32 = 572.;
 
 #[derive(Clone, Debug, PartialEq)]
 enum Action {
@@ -55,6 +57,10 @@ enum Action {
     Run(usize),
     /// A developer viewer (index into `Launcher::viewers`).
     View(usize),
+    /// Open the quick start guide.
+    Guide,
+    /// Leave the guide.
+    CloseGuide,
     Quit,
 }
 
@@ -111,6 +117,8 @@ struct Running {
 
 enum Screen {
     Boot,
+    /// The quick start guide; the tests screen to return to, if any.
+    Guide(Option<Bound>),
     Pick,
     Browse(Option<PathBuf>),
     /// Browsing for the Skate 3 disc; the tests screen to return to.
@@ -191,6 +199,7 @@ impl Launcher {
                             .detail(plain(remembered)),
                     );
                 }
+                items.push(Item::new("Quick start guide", Action::Guide));
                 items.push(Item::new("Quit", Action::Quit));
                 items
             }
@@ -212,9 +221,11 @@ impl Launcher {
                         .detail(iso.map_or("Not set: needed for the J skateboard".into(), plain)),
                 );
                 items.push(Item::new("Change game folder", Action::Pick));
+                items.push(Item::new("Quick start guide", Action::Guide));
                 items.push(Item::new("Quit", Action::Quit));
                 items
             }
+            Screen::Guide(_) => vec![Item::new("Continue", Action::CloseGuide)],
             Screen::Problem { retry, .. } => {
                 let mut items = Vec::new();
                 if let Some(b) = retry {
@@ -479,6 +490,7 @@ struct Pressed {
     accept: bool,
     back: bool,
     change: bool,
+    guide: bool,
 }
 
 fn read_input(
@@ -491,6 +503,7 @@ fn read_input(
         accept: keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter, KeyCode::Space]),
         back: keys.any_just_pressed([KeyCode::Escape, KeyCode::Backspace]),
         change: keys.just_pressed(KeyCode::F2),
+        guide: keys.just_pressed(KeyCode::F1),
         page: keys.just_pressed(KeyCode::PageDown) as i32
             - keys.just_pressed(KeyCode::PageUp) as i32,
         ..default()
@@ -501,6 +514,7 @@ fn read_input(
         p.accept |= g.just_pressed(GamepadButton::South);
         p.back |= g.just_pressed(GamepadButton::East);
         p.change |= g.just_pressed(GamepadButton::North);
+        p.guide |= g.just_pressed(GamepadButton::Select);
         let stick = g.left_stick().y;
         let dir = g.pressed(GamepadButton::DPadDown) as i32
             - g.pressed(GamepadButton::DPadUp) as i32
@@ -598,6 +612,27 @@ fn act(l: &mut Launcher, action: Action, exit: &mut MessageWriter<AppExit>) {
             exit.write(AppExit::Success);
         }
         Action::Pick => l.go(Screen::Pick),
+        Action::Guide => {
+            let tests = match &l.screen {
+                Screen::Tests(b) => Some(b.clone()),
+                _ => None,
+            };
+            l.go(Screen::Guide(tests));
+        }
+        Action::CloseGuide => {
+            let Screen::Guide(tests) = &l.screen else {
+                return;
+            };
+            // The fewest steps on: back to the tests, the remembered
+            // folder, the one Steam install found, or the folder list.
+            let next = match (tests, &l.settings.game_folder, l.detected.as_slice()) {
+                (Some(b), ..) => return l.go(Screen::Tests(b.clone())),
+                (None, Some(folder), _) => Action::UseFolder(folder.clone()),
+                (None, None, [only]) => Action::UseFolder(only.clone()),
+                _ => Action::Pick,
+            };
+            act(l, next, exit);
+        }
         Action::Browse(path) => {
             let from = match &l.screen {
                 Screen::Browse(Some(p)) => Some(p.clone()),
@@ -643,6 +678,13 @@ fn act(l: &mut Launcher, action: Action, exit: &mut MessageWriter<AppExit>) {
             }
         }
         Action::UseFolder(folder) => {
+            // A library or `common` folder picked by mistake: use the game
+            // folder inside it.
+            let folder = if install::has_executable(&folder) {
+                folder
+            } else {
+                install::find_game_below(&folder).unwrap_or(folder)
+            };
             let hint = (l.settings.game_folder.as_deref() == Some(folder.as_path()))
                 .then(|| l.settings.manifest.clone())
                 .flatten();
@@ -687,6 +729,7 @@ fn back(l: &mut Launcher, exit: &mut MessageWriter<AppExit>) {
         Screen::Pick => l.settings.game_folder.clone().map(Action::UseFolder),
         Screen::Problem { retry: Some(b), .. } => Some(Action::UseFolder(b.folder.clone())),
         Screen::Tests(_) => Some(Action::Quit),
+        Screen::Guide(_) => Some(Action::CloseGuide),
         _ => None,
     };
     if let Some(a) = to {
@@ -722,11 +765,8 @@ fn checked(l: &mut Launcher, result: Result<Bound, String>, folder: &Path) {
             retry: None,
         });
     }
-    l.settings = Settings {
-        game_folder: Some(b.folder.clone()),
-        manifest: Some(b.manifest.clone()),
-        skate3_iso: l.settings.skate3_iso.take(),
-    };
+    l.settings.game_folder = Some(b.folder.clone());
+    l.settings.manifest = Some(b.manifest.clone());
     if let Err(e) = install::save_settings(&l.dir, &l.settings) {
         eprintln!("Launcher settings not saved: {e}");
     }
@@ -756,9 +796,17 @@ fn update(
         l.supported = install::supported_identity(&l.dir);
         l.detected = install::detect_installs();
         l.viewers = install::viewers(&l.dir);
-        match l.settings.game_folder.clone() {
-            Some(folder) => act(l, Action::UseFolder(folder), &mut exit),
-            None => l.go(Screen::Pick),
+        if !l.settings.guide_seen {
+            l.settings.guide_seen = true;
+            if let Err(e) = install::save_settings(&l.dir, &l.settings) {
+                eprintln!("Launcher settings not saved: {e}");
+            }
+            l.go(Screen::Guide(None));
+        } else {
+            match l.settings.game_folder.clone() {
+                Some(folder) => act(l, Action::UseFolder(folder), &mut exit),
+                None => l.go(Screen::Pick),
+            }
         }
     }
     let mut lines = 0.;
@@ -791,7 +839,11 @@ fn update(
                 };
                 if matches!(
                     l.screen,
-                    Screen::Pick | Screen::Browse(_) | Screen::Problem { .. } | Screen::Tests(_)
+                    Screen::Pick
+                        | Screen::Browse(_)
+                        | Screen::Problem { .. }
+                        | Screen::Tests(_)
+                        | Screen::Guide(_)
                 ) {
                     act(l, Action::UseFolder(folder), &mut exit);
                 }
@@ -918,6 +970,8 @@ fn update(
         back(l, &mut exit);
     } else if p.change && matches!(l.screen, Screen::Tests(_)) {
         act(l, Action::Pick, &mut exit);
+    } else if p.guide && matches!(l.screen, Screen::Tests(_) | Screen::Pick) {
+        act(l, Action::Guide, &mut exit);
     }
 }
 
@@ -964,6 +1018,7 @@ fn draw(
     );
     let heading = match &l.screen {
         Screen::Boot => String::new(),
+        Screen::Guide(_) => "Quick start".into(),
         Screen::Pick => "Select the game folder".into(),
         Screen::Browse(path) => path
             .as_deref()
@@ -1004,6 +1059,9 @@ fn draw(
         }
         Screen::Boot => {}
         _ => {
+            if let Screen::Guide(_) = &l.screen {
+                guide(p, f);
+            }
             if let Screen::Problem { lines, .. } = &l.screen {
                 let mut y = 152.;
                 for para in lines {
@@ -1059,6 +1117,7 @@ fn draw(
 fn list_top(l: &Launcher) -> f32 {
     match &l.screen {
         Screen::Problem { lines, .. } => LIST_TOP + 26. * lines.len() as f32 + 24.,
+        Screen::Guide(_) => GUIDE_LIST_TOP,
         _ => LIST_TOP,
     }
 }
@@ -1144,7 +1203,11 @@ fn triangle(f: &mut Ui2dFrame, p: &Paint, pts: [[f32; 2]; 3], c: Rgba) {
 fn footer(l: &Launcher, p: &mut Paint, f: &mut Ui2dFrame) {
     let y = 668.;
     let hints = match l.screen {
-        Screen::Tests(_) => "Enter / A  start      F2 / Y  change folder      Esc / B  quit",
+        Screen::Tests(_) => {
+            "Enter / A  start      F2 / Y  change folder      F1 / Back  guide      Esc / B  quit"
+        }
+        Screen::Pick => "Enter / A  select      F1 / Back  guide      Esc / B  back",
+        Screen::Guide(_) => "Enter / A  continue      F1 / Back  open this guide again later",
         _ => "Enter / A  select      Esc / B  back",
     };
     p.text(
@@ -1166,7 +1229,7 @@ fn footer(l: &Launcher, p: &mut Paint, f: &mut Ui2dFrame) {
             Face::Body,
             16.,
             &format!("{}{build}", plain(&b.folder)),
-            520.,
+            320.,
         );
         p.text(
             f,
@@ -1178,6 +1241,86 @@ fn footer(l: &Launcher, p: &mut Paint, f: &mut Ui2dFrame) {
             [rgba(FAINT, 1.); 2],
             0.,
         );
+    }
+}
+
+/// The quick start steps [launcher text, not the original's].
+const GUIDE_STEPS: [&str; 4] = [
+    "You need your own Steam copy of KINGDOM HEARTS -HD 1.5+2.5 ReMIX-, installed. Only Kingdom Hearts II Final Mix is used.",
+    "Choose the game folder. A Steam install is found for you. If it is not, browse to it or drop the folder on this window.",
+    "Optional: on the test list, set your Skate 3 disc (an Xbox 360 ISO) to ride a skateboard with J.",
+    "Choose Title screen and pick New Game, or Test room to start playing straight away.",
+];
+
+/// Action, keyboard, controller (the room's bindings, `input::read_devices`).
+const GUIDE_CONTROLS: [[&str; 3]; 10] = [
+    ["Move", "WASD", "Left stick"],
+    ["Walk", "Hold Left Alt", "Tilt slightly"],
+    ["Camera", "Mouse", "Right stick"],
+    ["Attack", "Enter, left click", "A"],
+    ["Jump", "Space", "B"],
+    ["Guard", "Right Shift, right click", "X"],
+    ["Talk", "F", "Y"],
+    ["Shortcuts", "Hold Left Shift", "LB"],
+    ["Skateboard", "J", ""],
+    ["Leave the test", "Esc", ""],
+];
+
+fn guide(p: &mut Paint, f: &mut Ui2dFrame) {
+    let mut y = 152.;
+    for (i, step) in GUIDE_STEPS.iter().enumerate() {
+        p.text(
+            f,
+            Face::Body,
+            18.,
+            [MARGIN, y],
+            0.,
+            &format!("{}.", i + 1),
+            [rgba(TEXT, 1.); 2],
+            0.,
+        );
+        for line in wrap(p, Face::Body, 18., step, 470.) {
+            p.text(
+                f,
+                Face::Body,
+                18.,
+                [MARGIN + 28., y],
+                0.,
+                &line,
+                [rgba(MUTED, 1.); 2],
+                0.,
+            );
+            y += 26.;
+        }
+        y += 16.;
+    }
+    let columns = [680., 870., 1080.];
+    for (x, head) in columns.iter().zip(["Controls", "Keyboard", "Controller"]) {
+        p.text(
+            f,
+            Face::Body,
+            16.,
+            [*x, 152.],
+            0.,
+            head,
+            [rgba(FAINT, 1.); 2],
+            0.,
+        );
+    }
+    for (row, cells) in GUIDE_CONTROLS.iter().enumerate() {
+        let y = 184. + row as f32 * 32.;
+        for ((x, cell), ink) in columns.iter().zip(cells).zip([TEXT, MUTED, MUTED]) {
+            p.text(
+                f,
+                Face::Body,
+                17.,
+                [*x, y],
+                0.,
+                cell,
+                [rgba(ink, 1.); 2],
+                0.,
+            );
+        }
     }
 }
 

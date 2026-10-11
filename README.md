@@ -21,7 +21,7 @@ cargo build --release -p windows_shell --bin kh2fm --locked
 target\release\kh2fm.exe
 ```
 
-The launcher finds your Steam install (or lets you browse to it), checks that it is a supported build, and offers the title screen and test room. Each launch re-checks your files.
+The first launch opens a short quick start guide (F1 in the launcher brings it back). The launcher then finds your Steam install (or lets you browse to it), checks that it is a supported build, and offers the title screen and test room. Each launch re-checks your files.
 
 Command-line runs also work:
 
@@ -33,17 +33,19 @@ cargo run -p windows_shell --bin kh2fm --locked -- room '<selected-install-root>
 
 ## Controls
 
-| Action | Keys | Gamepad |
+| Action | Keyboard | Controller |
 |---|---|---|
-| Move (hold Shift to walk) | WASD / arrows | Left stick |
+| Move | WASD | Left stick |
+| Walk | Hold Left Alt | Tilt the stick slightly |
+| Camera | Mouse | Right stick |
+| Attack | Enter, left click | A |
 | Jump | Space | B |
-| Attack (press again to combo) | Enter, K, left mouse | A |
-| Camera | Q/E or right-mouse drag | Right stick |
-| Zoom | +/- | |
+| Guard | Right Shift, right click | X |
+| Talk | F | Y |
+| Shortcuts | Hold Left Shift | LB |
+| Skateboard (needs the Skate 3 ISO) | J | |
 | Collision overlay | F1 | |
-| Exit | Esc | |
-
-Use `--gamepad` to enable the gamepad mapping.
+| Leave the test | Esc | |
 
 ## Build and check
 

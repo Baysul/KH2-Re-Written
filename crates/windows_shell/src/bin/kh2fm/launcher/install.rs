@@ -57,6 +57,9 @@ pub struct Settings {
     /// The user's Skate 3 Xbox 360 ISO (or extracted `default.xex`).
     #[serde(default)]
     pub skate3_iso: Option<PathBuf>,
+    /// The quick start guide has been shown once.
+    #[serde(default)]
+    pub guide_seen: bool,
 }
 
 pub fn load_settings(dir: &Path) -> Settings {
@@ -76,6 +79,34 @@ pub fn save_settings(dir: &Path, settings: &Settings) -> io::Result<()> {
 
 pub fn has_executable(folder: &Path) -> bool {
     folder.join(KH2_EXECUTABLE).is_file()
+}
+
+/// The game folder at most three levels below `folder` (a Steam library,
+/// `steamapps` or `common` picked by mistake), when exactly one is there.
+pub fn find_game_below(folder: &Path) -> Option<PathBuf> {
+    let mut found = Vec::new();
+    let mut level = vec![folder.to_path_buf()];
+    for _ in 0..3 {
+        let mut next = Vec::new();
+        for dir in &level {
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten().take(400) {
+                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    continue;
+                }
+                let path = entry.path();
+                if has_executable(&path) {
+                    found.push(path);
+                } else {
+                    next.push(path);
+                }
+            }
+        }
+        if !found.is_empty() || next.len() > 2000 {
+            break;
+        }
+        level = next;
+    }
+    (found.len() == 1).then(|| found.remove(0))
 }
 
 /// Every `"key" "value"` pair named `key` in a Steam VDF text.
@@ -225,10 +256,11 @@ fn manifests_in(dir: &Path) -> Vec<PathBuf> {
 /// Binds `folder` to an existing manifest (`hint` first, then the data
 /// folder's) without hashing.
 pub fn quick_check(dir: &Path, folder: &Path, hint: Option<&Path>) -> Result<Bound, CheckError> {
-    let folder = fs::canonicalize(folder).map_err(|e| CheckError::Rejected(e.to_string()))?;
+    let folder = fs::canonicalize(folder)
+        .map_err(|e| CheckError::Rejected(format!("This folder can't be opened ({e}).")))?;
     if !has_executable(&folder) {
         return Err(CheckError::Rejected(format!(
-            "There is no \"{KH2_EXECUTABLE}\" in this folder. Pick the folder Steam installed the collection in."
+            "There is no \"{KH2_EXECUTABLE}\" in this folder. Choose the \"KINGDOM HEARTS -HD 1.5+2.5 ReMIX-\" folder Steam installed. To find it, right-click the game in Steam and choose Manage > Browse local files."
         )));
     }
     hint.map(Path::to_path_buf)
@@ -626,6 +658,22 @@ mod tests {
     }
 
     #[test]
+    fn game_found_below_a_library_folder() {
+        let f = Fixture::new();
+        let game = f.0.join("steamapps").join("common").join("KH");
+        fs::create_dir_all(&game).unwrap();
+        fs::create_dir_all(f.0.join("steamapps").join("common").join("Other")).unwrap();
+        assert_eq!(find_game_below(&f.0), None);
+        fs::write(game.join(KH2_EXECUTABLE), b"synthetic").unwrap();
+        assert_eq!(find_game_below(&f.0), Some(game.clone()));
+        assert_eq!(find_game_below(&f.0.join("steamapps")), Some(game.clone()));
+        // Two copies: the player has to choose.
+        let second = f.0.join("steamapps").join("common").join("Other");
+        fs::write(second.join(KH2_EXECUTABLE), b"synthetic").unwrap();
+        assert_eq!(find_game_below(&f.0), None);
+    }
+
+    #[test]
     fn folder_without_executable_is_rejected() {
         let f = Fixture::new();
         assert!(matches!(
@@ -642,6 +690,7 @@ mod tests {
             game_folder: Some(f.0.join("game")),
             manifest: Some(f.0.join("m.json")),
             skate3_iso: Some(f.0.join("skate.iso")),
+            guide_seen: true,
         };
         save_settings(&f.0, &s).unwrap();
         assert_eq!(load_settings(&f.0), s);
