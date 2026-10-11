@@ -109,4 +109,6 @@ The verdict column quotes the first sentences of each record's `Verdict` line. G
 | [T101](T101-skate3-board.md) | Skate 3 skateboard on J (disc admission) | PROGRESS: the J key refuses correctly without a disc. Riding is BLOCKED on the owner's ISO. |
 | [T102](T102-rust-rewrite-priorities.md) | Rank essential Rust rewrite work | PASS for the documentation deliverable only; no gameplay or source-qualification gate passes. |
 | [T103](T103-skate3-riding.md) | Skate 3 riding on J | PROGRESS: riding works in the test room from the owner's disc. |
-| [T104](T104-twilight-town-enemy-scripts.md) | Twilight Town enemy inventory and Rust script decoding | PARTIAL. Source-bound inventory and direct script decoding pass their finite checks. |
+| [T104](T104-config-settings-pages.md) | Settings pages in the camp's Config (graphics, sound, other) | PROGRESS: Config has Graphics, Sound and Other pages that apply as they change, and the menus swap text language in place. Next: the owner's review in the room. |
+| [T105](T105-variable-jump-square-abilities.md) | Variable-height jump and the Square button's combo abilities | PROGRESS: the jump is variable and the Square abilities follow the exe's gates. Next: an interactive check of short hops and Upper Slash in the room. |
+| [T106](T106-twilight-town-enemy-scripts.md) | Twilight Town enemy inventory and Rust script decoding | PARTIAL. Source-bound inventory and direct script decoding pass their finite checks. |

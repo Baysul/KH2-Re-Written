@@ -16,9 +16,9 @@ const GROUND: f32 = -8.7;
 /// Clearance kept between the board's lowest point and the ground.
 const CLEARANCE: f32 = 0.5;
 
-/// Board length in scene units (test-room choice: a 1.4 m longboard, so
-/// the rider's feet fit; the Kingdom Key is 116 units long as modelled).
-const BOARD_LENGTH: f32 = 140.;
+/// Board length in scene units (test-room choice: 1.15 m, about the
+/// Kingdom Key's own 116-unit length; the owner found 1.4 m a little big).
+const BOARD_LENGTH: f32 = 115.;
 
 /// Item category of a Keyblade.
 const KEYBLADE: u8 = 2;
