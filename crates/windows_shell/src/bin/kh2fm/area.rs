@@ -37,6 +37,33 @@ pub const SORA_BODY: Body = Body {
     class: 0,
 };
 
+/// Debug-menu names of the worlds in `progress::WORLDS` order (rewrite
+/// labels, not game text); the code where none is known.
+pub fn world_name(world: u8) -> &'static str {
+    const NAMES: [&str; 19] = [
+        "zz",
+        "es",
+        "Twilight Town",
+        "Destiny Islands",
+        "Hollow Bastion",
+        "Beast's Castle",
+        "Olympus Coliseum",
+        "Agrabah",
+        "The Land of Dragons",
+        "100 Acre Wood",
+        "Pride Lands",
+        "Atlantica",
+        "Disney Castle",
+        "Timeless River",
+        "Halloween Town",
+        "World Map",
+        "Port Royal",
+        "Space Paranoids",
+        "The World That Never Was",
+    ];
+    NAMES.get(world as usize).copied().unwrap_or("?")
+}
+
 /// The installed files an area needs, opened once per session.
 pub struct AreaSource {
     source: Arc<ProbeSource>,
@@ -52,9 +79,12 @@ pub struct AreaSource {
     /// ones its parent already holds).
     kind_base: usize,
     rng: ScriptRandom,
-    /// Place names by area of the story world (msg/us/place.bin → sys.bar)
-    /// and the "???" shown for places not visited yet (sys 0x82b8).
-    pub place_names: HashMap<u8, Vec<u8>>,
+    /// Place names by (world, area) (msg/us/place.bin → sys.bar) and the
+    /// "???" shown for places not visited yet (sys 0x82b8).
+    place_names: HashMap<(u8, u8), Vec<u8>>,
+    /// Per world (index as in `progress::WORLDS`), the areas whose map is
+    /// installed.
+    rooms: Vec<Vec<u8>>,
     /// 03system 'arif' (per-room table) and the BGM pair last started.
     arif: Vec<u8>,
     last_pair: Option<[u16; 2]>,
@@ -156,38 +186,53 @@ impl AreaSource {
             .enumerate()
             .map(|(i, o)| (o.object_id, i))
             .collect();
-        // place.bin: per world a table of {u16 message, u16 offset}, one
-        // record per area; the text is a sys.bar message.
+        // place.bin: per world (type-2 entry named by the world code) a
+        // table of {u16 message, u16 offset}, one record per area; the text
+        // is a sys.bar message.
         let mut place_names = HashMap::new();
         let mut unknown_place = Vec::new();
         if let Ok(place) = library.read("msg/us/place.bin")
             && let Ok(table) = bar::read_bar(&place)
-            && let Some(e) = table
-                .entries
-                .iter()
-                .find(|e| e.entry_type == 2 && e.name_bytes[..2] == *b"tt")
-            && let Some(rows) = place.get(e.offset as usize..e.offset as usize + e.size as usize)
             && let Some(sys) = library.find("msg/us/sys.bar")
         {
-            let ids: Vec<u32> = rows
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|r| u16::from_le_bytes([r[0], r[1]]) as u32)
-                .collect();
-            let mut all = ids.clone();
-            all.push(0x82b8);
+            let mut keys = Vec::new();
+            let mut ids = Vec::new();
+            for (world, code) in progress::WORLDS.iter().enumerate() {
+                let Some(rows) = table
+                    .entries
+                    .iter()
+                    .find(|e| e.entry_type == 2 && e.name_bytes[..2] == *code.as_bytes())
+                    .and_then(|e| {
+                        place.get(e.offset as usize..e.offset as usize + e.size as usize)
+                    })
+                else {
+                    continue;
+                };
+                for (area, r) in rows.as_chunks::<4>().0.iter().enumerate() {
+                    keys.push((world as u8, area as u8));
+                    ids.push(u16::from_le_bytes([r[0], r[1]]) as u32);
+                }
+            }
+            ids.push(0x82b8);
             if let Ok(texts) =
-                hud::load_messages_optional(&source, sys.index, sys.ordinal, sys.name_hash, &all)
+                hud::load_messages_optional(&source, sys.index, sys.ordinal, sys.name_hash, &ids)
             {
-                for (area, t) in texts.iter().take(ids.len()).enumerate() {
+                for (&key, t) in keys.iter().zip(&texts) {
                     if let Some(t) = t {
-                        place_names.insert(area as u8, t.clone());
+                        place_names.insert(key, t.clone());
                     }
                 }
                 unknown_place = texts.last().cloned().flatten().unwrap_or_default();
             }
         }
+        let rooms = progress::WORLDS
+            .iter()
+            .map(|code| {
+                (0..progress::AREAS_PER_WORLD as u8)
+                    .filter(|n| library.find(&format!("map/{code}{n:02}.map")).is_some())
+                    .collect()
+            })
+            .collect();
         let arif = library
             .read("03system.bin")
             .ok()
@@ -205,6 +250,7 @@ impl AreaSource {
             arif,
             last_pair: None,
             place_names,
+            rooms,
             unknown_place,
             reasons: HashMap::new(),
             objects,
@@ -232,6 +278,7 @@ impl AreaSource {
             kind_base: self.kind_base + self.kinds.len(),
             rng: self.rng,
             place_names: HashMap::new(),
+            rooms: Vec::new(),
             arif: self.arif.clone(),
             last_pair: self.last_pair,
             unknown_place: Vec::new(),
@@ -411,6 +458,16 @@ impl AreaSource {
         }
         self.last_pair = Some(pair);
         change
+    }
+
+    /// The place name of an area (place.bin of its world).
+    pub fn place_name(&self, world: u8, area: u8) -> Option<&Vec<u8>> {
+        self.place_names.get(&(world, area))
+    }
+
+    /// The installed areas of a world, in area order.
+    pub fn rooms(&self, world: u8) -> &[u8] {
+        self.rooms.get(world as usize).map_or(&[], Vec::as_slice)
     }
 
     /// FUN_1403f0560: destinations currently story-blocked ('dsa').

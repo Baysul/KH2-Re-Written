@@ -569,8 +569,9 @@ struct AreaRes {
     guide: Option<Vec<u8>>,
     /// Ticks left of a story-block disable reason.
     guide_hold: u32,
-    /// Areas Sora has stood in (their names show instead of "???").
-    visited: std::collections::HashSet<u8>,
+    /// Areas (world, area) Sora has stood in (their names show instead
+    /// of "???").
+    visited: std::collections::HashSet<(u8, u8)>,
     /// The townsperson the talk resource currently points at.
     talk_npc: Option<usize>,
     was_talking: bool,
@@ -3432,12 +3433,11 @@ fn area_transition(
         "entrance":entrance,"programs":next.programs,"bg_mask":format!("{:#x}", next.state.setup.bg_mask),
         "spawn":position.to_array(),"yaw":yaw}));
     area.previous = Some(area.current.area);
-    area.visited.insert(next.area);
+    area.visited.insert((next.world, next.area));
     area.music = Some(std::mem::take(&mut next.music));
     area.banner = area
         .source
-        .place_names
-        .get(&next.area)
+        .place_name(next.world, next.area)
         .map(|t| (t.clone(), 120));
     area.bg_mask = next.state.setup.bg_mask;
     area.current = next;
@@ -5412,10 +5412,13 @@ fn simulate(
                 a.guide = a.source.blocked_text(*world, *dest);
                 a.guide_hold = 360;
             }
-            if let area_sim::Request::Guide { area: dest, .. } = &request {
-                let known = a.visited.contains(dest);
+            if let area_sim::Request::Guide {
+                world, area: dest, ..
+            } = &request
+            {
+                let known = a.visited.contains(&(*world, *dest));
                 a.guide = if known {
-                    a.source.place_names.get(dest).cloned()
+                    a.source.place_name(*world, *dest).cloned()
                 } else {
                     Some(a.source.unknown_place.clone())
                 };
@@ -9111,12 +9114,11 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         rendered: current.npcs.len(),
         bg_mask: current.state.setup.bg_mask,
         banner: source
-            .place_names
-            .get(&current.area)
+            .place_name(current.world, current.area)
             .map(|t| (t.clone(), 120)),
         guide: None,
         guide_hold: 0,
-        visited: std::iter::once(current.area).collect(),
+        visited: std::iter::once((current.world, current.area)).collect(),
         source,
         current,
         previous: None,
