@@ -13,6 +13,7 @@ pub mod camera;
 pub mod combat;
 pub mod drive;
 pub mod magic;
+pub mod party;
 pub mod physics;
 pub mod prize;
 pub mod ptya;

@@ -62,6 +62,7 @@ struct Locator {
 }
 mod item_room;
 mod magic_room;
+mod party_room;
 mod prize_room;
 mod settings_room;
 
@@ -710,6 +711,8 @@ struct Game {
     debug_blow: bool,
     /// Sora's magic: owned spells, running casts and their volumes.
     magic: Option<magic_room::MagicRt>,
+    /// Donald and Goofy, following Sora.
+    party: Vec<party_room::MemberRt>,
     items: Option<item_room::ItemRt>,
     menu_up_queued: bool,
     menu_down_queued: bool,
@@ -1060,6 +1063,8 @@ struct Loaded {
     abilities: AbilitySource,
     magic: Option<magic_room::MagicSource>,
     items: Option<item_room::ItemSource>,
+    /// Donald and Goofy's models and motions (empty when not installed).
+    party: Vec<std::sync::Arc<party_room::PartyKind>>,
     clips: Clips,
     actions: Vec<((Action, bool), usize)>,
     clip_poses: Vec<ClipPoses>,
@@ -2833,6 +2838,25 @@ fn load(
         abilities: ability_source,
         magic: magic_src,
         items: item_room::load(&system).ok(),
+        party: match config.enemy {
+            // The party stands in rooms with a fight to join.
+            Some(_) => {
+                let mut kinds = Vec::new();
+                if let Ok(mut library) = package_reader::named::Library::open(source) {
+                    for name in ["P_EX020", "P_EX030"] {
+                        match party_room::load(source, &mut library, name) {
+                            Ok(k) => {
+                                eprintln!("party member {} loaded", k.name);
+                                kinds.push(std::sync::Arc::new(k));
+                            }
+                            Err(e) => eprintln!("party member {name}: {e}"),
+                        }
+                    }
+                }
+                kinds
+            }
+            None => Vec::new(),
+        },
         clips,
         actions,
         clip_poses,
@@ -4372,6 +4396,36 @@ fn setup(
         }
         rt.indices = indices;
     }
+    // Donald and Goofy: one root per member with a mesh per model part.
+    for (i, member) in game.party.iter().enumerate() {
+        let kind = &member.kind;
+        let Some(idle) = kind.anims.get(&0) else {
+            continue;
+        };
+        let root = commands
+            .spawn((
+                party_room::PartyRoot(i),
+                ChildOf(world),
+                Transform::from_translation(Vec3::from_array(member.follower.position)),
+                Visibility::default(),
+            ))
+            .id();
+        for (ordinal, entity) in spawn_model(
+            &mut commands,
+            &kind.model,
+            &idle.frames[0],
+            root,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+        ) {
+            if let Some(entity) = entity {
+                commands
+                    .entity(entity)
+                    .insert(party_room::PartyPart { member: i, ordinal });
+            }
+        }
+    }
     if let (Some(model), Some(mut talk)) = (startup.npc_model.take(), talk) {
         let root = commands
             .spawn((
@@ -5070,6 +5124,7 @@ fn simulate(
     }
     combat_tick(&mut game, tick);
     prize_room::tick(&mut game, tick);
+    party_room::tick(&mut game);
     // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
     // recenters (test-room bindings for the original's camera buttons).
     let mut turn = 0f32;
@@ -8649,6 +8704,19 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         back_queued: false,
         debug_blow: false,
         shortcuts: ROOM_SHORTCUTS,
+        party: loaded
+            .party
+            .into_iter()
+            .enumerate()
+            .map(|(i, kind)| party_room::MemberRt {
+                kind,
+                follower: player_sim::party::Follower::spawn(
+                    loaded.spawn.to_array(),
+                    loaded.yaw,
+                    i as u8,
+                ),
+            })
+            .collect(),
         items: loaded.items.map(|src| {
             item_room::ItemRt::new(
                 src,
@@ -9070,6 +9138,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 present_enemy,
                 present_spells,
                 present_orbs,
+                party_room::present,
                 present_npc,
                 present_effects,
                 hud_present,
