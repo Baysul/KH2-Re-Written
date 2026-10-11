@@ -48,6 +48,9 @@ pub struct AreaSource {
     /// Loaded townsperson models (kept across area changes) by objentry id.
     pub kinds: Vec<NpcKind>,
     kind_index: HashMap<u32, usize>,
+    /// Index of `kinds[0]` (nonzero in a fork, whose new kinds follow the
+    /// ones its parent already holds).
+    kind_base: usize,
     rng: ScriptRandom,
     /// Place names by area of the story world (msg/us/place.bin → sys.bar)
     /// and the "???" shown for places not visited yet (sys 0x82b8).
@@ -208,9 +211,43 @@ impl AreaSource {
             object_index,
             kinds: Vec::new(),
             kind_index: HashMap::new(),
+            kind_base: 0,
             rng: ScriptRandom::default(),
             language: "us",
         })
+    }
+
+    /// A copy that loads the next area off the main thread: its own open
+    /// indexes and the same story, random and music state. `adopt` takes
+    /// the copy's state back once its load is done.
+    pub fn fork(&self) -> Result<Self> {
+        Ok(Self {
+            source: Arc::clone(&self.source),
+            library: Library::open(&self.source)?,
+            progress: self.progress.clone(),
+            objects: self.objects.clone(),
+            object_index: self.object_index.clone(),
+            kinds: Vec::new(),
+            kind_index: self.kind_index.clone(),
+            kind_base: self.kind_base + self.kinds.len(),
+            rng: self.rng,
+            place_names: HashMap::new(),
+            arif: self.arif.clone(),
+            last_pair: self.last_pair,
+            unknown_place: Vec::new(),
+            reasons: HashMap::new(),
+            language: self.language,
+        })
+    }
+
+    /// Takes back a fork's state after it loaded an area: the townsperson
+    /// models it added, the script random state and the music pair.
+    pub fn adopt(&mut self, fork: Self) {
+        debug_assert_eq!(fork.kind_base, self.kind_base + self.kinds.len());
+        self.kinds.extend(fork.kinds);
+        self.kind_index = fork.kind_index;
+        self.rng = fork.rng;
+        self.last_pair = fork.last_pair;
     }
 
     /// FUN_140152be0 (programs from the save table) then the area loader.
@@ -437,9 +474,9 @@ impl AreaSource {
                 None => match NpcKind::load(&self.source, &mut self.library, &self.objects[oi]) {
                     Ok(kind) => {
                         self.kinds.push(kind);
-                        self.kind_index
-                            .insert(s.entity.object, self.kinds.len() - 1);
-                        self.kinds.len() - 1
+                        let k = self.kind_base + self.kinds.len() - 1;
+                        self.kind_index.insert(s.entity.object, k);
+                        k
                     }
                     Err(e) => {
                         eprintln!("NPC {} not loaded: {e}", s.entity.object);
@@ -462,9 +499,9 @@ impl AreaSource {
                 None => match NpcKind::load(&self.source, &mut self.library, &self.objects[oi]) {
                     Ok(kind) => {
                         self.kinds.push(kind);
-                        self.kind_index
-                            .insert(s.entity.object, self.kinds.len() - 1);
-                        self.kinds.len() - 1
+                        let k = self.kind_base + self.kinds.len() - 1;
+                        self.kind_index.insert(s.entity.object, k);
+                        k
                     }
                     Err(e) => {
                         eprintln!("NPC {} not loaded: {e}", s.entity.object);
