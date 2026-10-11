@@ -1,5 +1,9 @@
 # Kingdom Hearts II Final Re:WRITE
 
+<p align="center">
+  <img src="crates/windows_shell/assets/kingdom-hearts-final-rewrite-logo.png" alt="Kingdom Hearts Final Re:WRITE logo" width="480">
+</p>
+
 A native Windows rewrite of **Kingdom Hearts II Final Mix** in Rust, using [Bevy](https://bevy.org). It reads your own Steam installation at runtime. No game assets are distributed.
 
 > **Status: early.** A playable test room runs. The rest of the game does not work yet.
