@@ -43,6 +43,8 @@ fn sub_groups(kind: usize) -> Option<[usize; 4]> {
         2 => Some([51, 48, 50, 49]),
         3 => Some([77, 74, 76, 75]),
         4 | 11 => Some([64, 61, 63, 62]),
+        // The Limit Form's limits (T_EF0[12]).
+        12 => Some([52, 53, 55, 54]),
         _ => None,
     }
 }

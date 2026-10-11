@@ -13,6 +13,7 @@ mod mega_model;
 mod models;
 mod programs;
 mod ribbon;
+mod tail;
 
 use math::{IDENTITY, Mat, Vec4};
 use package_reader::effect::{Dpd, Program, i32_at, u32_at};
@@ -103,6 +104,12 @@ pub(crate) struct Part {
     pub serial: u64,
     /// Work +4: the part that birthed this one, if it is still alive.
     pub parent: Option<(usize, u64)>,
+    /// Work +0x9d: set when a loop range restarted the part (never
+    /// cleared; programs skip their frame-0 set-up after it).
+    pub restarted: bool,
+    /// Work +0x9e: a loop restart with loop start 0 asks the next even
+    /// update to restart the part once more (FUN_1404b0fd0/FUN_1404b09e0).
+    pub restart_pending: bool,
 }
 
 impl Part {
@@ -181,6 +188,9 @@ pub(crate) struct Ctx<'a> {
     pub model_draws: &'a mut Vec<ModelDraw>,
     pub births: Vec<programs::Birth>,
     pub unsupported: &'a mut Vec<u32>,
+    /// `DAT_142b0efe4`: set while a loop restart catches the part up to the
+    /// loop start (some programs skip their effects then).
+    pub catch_up: bool,
     /// Instance flag bytes set by pppRyjMngFlag: draw layer (+0xc0),
     /// pause (+0xc1), camera offset (+0xc2).
     pub flags: &'a mut [u8; 3],
@@ -360,6 +370,7 @@ impl Instance {
             model_draws: &mut model_draws,
             births: Vec::new(),
             unsupported: &mut unsupported,
+            catch_up: false,
             flags: &mut flags,
         };
         self.update_pass(&mut ctx);
@@ -367,7 +378,8 @@ impl Instance {
         self.unsupported = unsupported;
         self.model_draws = model_draws;
         self.flags = flags;
-        if !skip {
+        // FUN_1404b08e0: time stands still while the instance is paused.
+        if !skip && flags[1] == 0 {
             self.time += 0x1000;
             let drained = self.released && self.looping && self.parts.iter().all(Option::is_none);
             if (!self.looping && self.end <= self.time) || drained {
@@ -411,6 +423,8 @@ impl Instance {
             ribbons: Default::default(),
             serial,
             parent,
+            restarted: false,
+            restart_pending: false,
         };
         for p in &entry.programs {
             programs::create(p, &mut part, ctx);
@@ -503,6 +517,9 @@ impl Instance {
                     if part.just_created {
                         continue;
                     }
+                    if ctx.flags[1] == 0 && part.frame & 1 == 0 && part.restart_pending {
+                        Self::restart(part, &programs, ctx);
+                    }
                     Self::advance(ctx.dpd, part, j, p);
                     let cursor = part.cursors[j];
                     ctx.parent_cur = parent_cur;
@@ -535,10 +552,14 @@ impl Instance {
                     if part.just_created {
                         continue;
                     }
+                    let update = programs::has_update(p.kind);
+                    if update && ctx.flags[1] == 0 && part.frame & 1 == 0 && part.restart_pending {
+                        Self::restart(part, &programs, ctx);
+                    }
                     Self::advance(ctx.dpd, part, j, p);
                     let cursor = part.cursors[j];
                     ctx.parent_cur = parent_cur;
-                    if programs::has_update(p.kind) && ctx.flags[1] == 0 {
+                    if update && ctx.flags[1] == 0 {
                         programs::update(p, cursor, part, ctx);
                     }
                     if draw {
@@ -546,41 +567,70 @@ impl Instance {
                     }
                 }
             }
+            let paused = ctx.flags[1] != 0;
             for id in self.groups[g].parts.clone() {
                 let Some(part) = self.parts[id].as_mut() else {
                     continue;
                 };
-                if !ctx.skip {
+                if !ctx.skip && !paused {
                     if part.just_created {
                         part.just_created = false;
                     } else {
-                        part.frame = (part.frame + 0x1000) & 0xffff_f000;
-                        part.frame = part.frame.min(FRAME_CAP);
+                        part.frame = next_frame(part.frame);
                     }
-                } else if !part.just_created {
+                } else if ctx.skip && !paused && !part.just_created {
                     part.frame |= 1;
                 }
             }
         }
-        if ctx.skip {
+        if ctx.skip || ctx.flags[1] != 0 {
             return;
         }
-        // Lifetime: parts at or past the entry's total frame are destroyed
-        // (loop ranges are not used by the effects translated here).
+        self.lifetime(ctx);
+    }
+
+    /// The tail of FUN_1404b09e0: a part at its entry's loop end restarts
+    /// (and is caught up to the loop start); any other part at or past the
+    /// entry's total frame is destroyed. A released looping instance whose
+    /// parts all live forever loses them at once.
+    fn lifetime(&mut self, ctx: &mut Ctx) {
+        let mut totals = 0u32;
         for g in 0..self.groups.len() {
             let entry = &ctx.dpd.pdata[self.pdata].entries[self.groups[g].entry];
-            if entry.loop_start < NO_LOOP && entry.loop_end < NO_LOOP {
-                ctx.unsupported.push(0x1000_0000);
-                continue;
-            }
             let total = entry.total_frame as u32;
+            let (loop_start, loop_end) = (entry.loop_start, entry.loop_end);
+            let looped = loop_start < NO_LOOP && loop_end < NO_LOOP;
             let programs = entry.programs.clone();
             let mut keep = Vec::new();
             for id in self.groups[g].parts.clone() {
-                let done = self.parts[id]
-                    .as_ref()
-                    .is_some_and(|p| total <= p.frame && !p.just_created);
-                if done {
+                let Some(part) = self.parts[id].as_mut() else {
+                    continue;
+                };
+                if !self.released && looped && loop_end <= part.frame as i32 {
+                    Self::restart(part, &programs, ctx);
+                    ctx.catch_up = true;
+                    if loop_start == 0 {
+                        // FUN_1404b0550: one update at frame 0, then the
+                        // next even update restarts the part again.
+                        self.catch_up_tick(id, &programs, ctx);
+                        ctx.catch_up = false;
+                        if let Some(part) = self.parts[id].as_mut() {
+                            part.restart_pending = true;
+                        }
+                    } else {
+                        while self.parts[id]
+                            .as_ref()
+                            .is_some_and(|p| (p.frame as i32) < loop_start)
+                        {
+                            self.catch_up_tick(id, &programs, ctx);
+                        }
+                        ctx.catch_up = false;
+                    }
+                    keep.push(id);
+                    continue;
+                }
+                totals |= total;
+                if total <= part.frame && !part.just_created {
                     if let Some(mut part) = self.parts[id].take() {
                         for p in &programs {
                             programs::destroy(p, &mut part, ctx);
@@ -592,7 +642,59 @@ impl Instance {
             }
             self.groups[g].parts = keep;
         }
+        if self.looping && self.released && totals == NO_LOOP as u32 {
+            for g in 0..self.groups.len() {
+                let entry = &ctx.dpd.pdata[self.pdata].entries[self.groups[g].entry];
+                let programs = entry.programs.clone();
+                for id in std::mem::take(&mut self.groups[g].parts) {
+                    if let Some(mut part) = self.parts[id].take() {
+                        for p in &programs {
+                            programs::destroy(p, &mut part, ctx);
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    /// FUN_1404b0120: frame 0, cursors back on the first keyframes, the
+    /// programs' restart hooks (table +0x40) run.
+    fn restart(part: &mut Part, programs: &[Program], ctx: &mut Ctx) {
+        part.frame = 0;
+        part.restarted = true;
+        part.restart_pending = false;
+        for (j, p) in programs.iter().enumerate() {
+            part.cursors[j] = p.params;
+            programs::restart(p, part, ctx);
+        }
+    }
+
+    /// FUN_1404b0550 (and the catch-up loop of FUN_1404b09e0): every
+    /// program's update once (except those listed at PTR_FUN_140779990),
+    /// then the frame advance.
+    fn catch_up_tick(&mut self, id: usize, programs: &[Program], ctx: &mut Ctx) {
+        let parent_cur = self.parent_matrix(id);
+        for (j, p) in programs.iter().enumerate() {
+            let Some(part) = self.parts[id].as_mut() else {
+                return;
+            };
+            Self::advance(ctx.dpd, part, j, p);
+            if programs::has_update(p.kind) && !programs::skips_catch_up(p.kind) {
+                let cursor = part.cursors[j];
+                ctx.parent_cur = parent_cur;
+                programs::update(p, cursor, part, ctx);
+                self.births(ctx, id);
+            }
+        }
+        if let Some(part) = self.parts[id].as_mut() {
+            part.frame = next_frame(part.frame);
+        }
+    }
+}
+
+/// A part frame one tick on, saturating at [`FRAME_CAP`].
+fn next_frame(frame: u32) -> u32 {
+    ((frame + 0x1000) & 0xffff_f000).min(FRAME_CAP)
 }
 
 /// ec20 composed with the PDATA local transform (FUN_1404b1280 order).

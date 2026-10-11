@@ -44,6 +44,11 @@ pub(super) struct KitInputs<'a> {
     pub collision_archive: Option<Vec<u8>>,
     pub basic_fk: bool,
     pub params: Params,
+    /// The object's own effects (its `.a.us` PAX), if installed.
+    pub pax: Option<package_reader::effect::Pax>,
+    /// Motions its script starts by id (Limit Form's limits), loaded when
+    /// the set holds them.
+    pub scripted: Vec<u16>,
 }
 
 /// A built kit.
@@ -57,10 +62,13 @@ pub(super) struct Kit {
     /// HIT spheres (bone, offset, radius, high) and the TARGET shape's
     /// radius and height.
     pub body: Vec<(usize, Vec3, f32, bool)>,
+    /// ATTACK shapes (kind 1) by collision group: bone, offset, radius.
+    pub attack: HashMap<u8, Vec<(usize, Vec3, f32)>>,
     pub target_radius: f32,
     pub target_lift: f32,
     pub summary: serde_json::Value,
     pub set: Vec<ptya::PtyaEntry>,
+    pub pax: Option<package_reader::effect::Pax>,
     /// Weapon slots with a motion set (0 leaves the Keyblade unattached).
     pub weapon_motions: u8,
 }
@@ -115,7 +123,18 @@ pub(super) fn load_kit(
         collision_archive,
         basic_fk,
         params,
+        pax,
+        scripted,
     } = k;
+    // Bones the object's bound effects follow (element flag 1, bone below
+    // 0x4000), kept per frame with the HIT bones.
+    let effect_bones: Vec<usize> = pax
+        .iter()
+        .flat_map(|p| &p.elements)
+        .filter(|e| e.flags & 1 != 0 && (0..0x4000).contains(&e.bone))
+        .map(|e| e.bone as usize)
+        .filter(|&b| b < actor.skinning.bones.len())
+        .collect();
     if weapon_joint >= actor.skinning.bones.len()
         || second_joint.is_some_and(|j| j >= actor.skinning.bones.len())
     {
@@ -142,6 +161,18 @@ pub(super) fn load_kit(
         .map(|(&id, _)| id)
         .collect();
     for &m in &spell_ids {
+        if !attack_motions.contains(&m) {
+            attack_motions.push(m);
+        }
+    }
+    let present = motion::read_motion_ids_optional(source, &motion_set, &scripted)?;
+    let scripted: Vec<u16> = scripted
+        .iter()
+        .zip(&present)
+        .filter(|(_, m)| m.is_some())
+        .map(|(&id, _)| id)
+        .collect();
+    for &m in &scripted {
         if !attack_motions.contains(&m) {
             attack_motions.push(m);
         }
@@ -252,6 +283,29 @@ pub(super) fn load_kit(
     };
     // The Keyblades' motion controllers are children of the player's
     // (FUN_1403c8e90): each plays the player's motion slot.
+    let mut attack: HashMap<u8, Vec<(usize, Vec3, f32)>> = HashMap::new();
+    if let Some(archive) = &collision_archive {
+        for c in object_collision::read(super::bar_entry_typed(archive, 23)?)?
+            .iter()
+            .filter(|c| c.kind == object_collision::ATTACK && c.bone >= 0)
+        {
+            attack.entry(c.group).or_default().push((
+                c.bone as usize,
+                Vec3::new(
+                    c.position[0] as f32,
+                    c.position[1] as f32,
+                    c.position[2] as f32,
+                ),
+                c.radius as f32,
+            ));
+        }
+    }
+    let attack_bones: Vec<usize> = attack
+        .values()
+        .flatten()
+        .map(|a| a.0)
+        .filter(|&b| b < actor.skinning.bones.len())
+        .collect();
     let mut weapon_motions: [HashMap<usize, motion::SelectedMotion>; 2] = Default::default();
     for (k, set) in [&weapon_motion_set, &second_weapon_motion_set]
         .into_iter()
@@ -390,7 +444,10 @@ pub(super) fn load_kit(
                     };
                     body_frames.push(
                         body.iter()
-                            .filter_map(|&(b, ..)| {
+                            .map(|&(b, ..)| b)
+                            .chain(effect_bones.iter().copied())
+                            .chain(attack_bones.iter().copied())
+                            .filter_map(|b| {
                                 let m = pose.matrix_bits.get(b)?;
                                 Some((b, Mat4::from_cols_array(&m.map(f32::from_bits))))
                             })
@@ -424,6 +481,7 @@ pub(super) fn load_kit(
                     blade2,
                     hits,
                     hits2,
+                    actor_hits: own_hits(selected),
                     body: body_frames,
                     sounds: weapon_motions[0]
                         .get(&selected.slot)
@@ -516,6 +574,18 @@ pub(super) fn load_kit(
         item: (hurt_count > HURT_COUNT).then(|| clip_list[field + 3 + HURT_COUNT].0.clone()),
         drive: drive_clips[0].map(|i| clip_list[i].0.clone()),
         drive_in: drive_clips[1].map(|i| clip_list[i].0.clone()),
+        scripted: scripted
+            .iter()
+            .map(|&m| {
+                let (clip, index) = attack_clip(m);
+                let root = clip_poses[*index]
+                    .root
+                    .iter()
+                    .map(|r| r.to_array())
+                    .collect();
+                (m, clip.clone(), root)
+            })
+            .collect(),
         growth: growth_ids
             .iter()
             .enumerate()
@@ -568,6 +638,9 @@ pub(super) fn load_kit(
     if let Some(i) = drive_clips[1] {
         both.push((Action::DriveIn, clip_list[i].1));
     }
+    for &m in &scripted {
+        both.push((Action::Scripted(m), attack_clip(m).1));
+    }
     for (k, &m) in growth_ids.iter().enumerate() {
         let pose = clip_list[growth_at + k].1;
         both.push((Action::Growth(m), pose));
@@ -591,10 +664,12 @@ pub(super) fn load_kit(
         actor,
         weapon,
         body,
+        attack,
         target_radius,
         target_lift,
         summary,
         set,
+        pax,
         weapon_motions: weapon_motion_set.is_some() as u8
             + second_weapon_motion_set.is_some() as u8,
     })

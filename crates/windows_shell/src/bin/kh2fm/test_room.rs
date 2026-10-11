@@ -62,6 +62,7 @@ struct Locator {
     name_hash: [u8; 16],
 }
 mod debug_menu;
+mod drive_fx;
 mod drive_room;
 mod item_room;
 mod kit;
@@ -454,6 +455,9 @@ struct ClipPoses {
     /// (start, end, ATKP id, collision group), in clip ticks; then slot 1's.
     hits: Vec<(u32, u32, u16, u8)>,
     hits2: Vec<(u32, u32, u16, u8)>,
+    /// The actor motion's own range-10 windows (the drive motions' ATKP
+    /// 124 / 125), on the object's attack shapes.
+    actor_hits: Vec<(u32, u32, u16, u8)>,
     /// Sora's HIT-bone matrices per frame (model space, root removed).
     body: Vec<HashMap<usize, Mat4>>,
     /// Weapon motion frame trigger 8 ("play SE"): (clip tick, sound id).
@@ -764,6 +768,9 @@ struct Game {
     items: Option<item_room::ItemRt>,
     /// Drive forms (None when the form tables could not be read).
     drive: Option<drive_room::DriveRt>,
+    /// The shown kit's attack shapes by collision group (bone, offset,
+    /// radius).
+    sora_attack: HashMap<u8, Vec<(usize, Vec3, f32)>>,
     menu_up_queued: bool,
     menu_down_queued: bool,
     enemy: Option<EnemyRuntime>,
@@ -1005,7 +1012,8 @@ fn ptya_record(e: &ptya::PtyaEntry) -> player_sim::ptya::Record {
 
 fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn std::error::Error>> {
     let (frame_start, frame_end, fps, frame_return) = selected.motion.frame_window()?;
-    if !(1. ..=60.).contains(&fps)
+    // Final Form's motions run at 120 frames a second.
+    if !(1. ..=120.).contains(&fps)
         || !(0. ..frame_end).contains(&frame_start)
         || !(frame_start..=frame_end).contains(&frame_return)
     {
@@ -1034,6 +1042,11 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
                 clip.actionable.push((start, stop));
             }
             0 | 1 => clip.actionable.push((start, stop)),
+            // Script windows (16, 17), reaction offers (20) and 26.
+            16 | 17 | 20 | 26 => {
+                let p = record.parameters.first().copied().unwrap_or(0);
+                clip.windows.push((start, stop, record.trigger, p));
+            }
             3 => clip.no_gravity.push((start, stop)),
             27 => clip.invulnerable.push((start, stop)),
             42 => clip.inertia.push((start, stop)),
@@ -1061,6 +1074,13 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
                     clip.effects.push((frame, n));
                 }
             }
+            // A script event (TR17) and a script mark.
+            7 => clip.events.push((
+                frame,
+                record.parameters.first().copied().unwrap_or(0),
+                record.parameters.get(1).copied().unwrap_or(0),
+            )),
+            9 => clip.marks.push(frame),
             // Item use (FUN_14040dd70 case 6 → FUN_1403f6790).
             6 => clip.item_use = Some(clip.item_use.map_or(frame, |f: u32| f.min(frame))),
             // Spell release (FUN_14040dd70 case 0x11), filtered by the
@@ -2287,6 +2307,25 @@ fn load(
         Some(e) => Some(read_archive(source, &e.actor_model)?),
         None => None,
     };
+    // Sora's object effects (obj/P_EX100.a.us), 00effect's and the
+    // resident common effect textures.
+    let (base_pax, texcommon) = match package_reader::named::Library::open(source) {
+        Ok(mut library) => (
+            drive_room::object_pax(&mut library, &config.player_object_name),
+            library
+                .read("effect/texcommon.dpd")
+                .ok()
+                .and_then(|b| effect::read_dpd(&b).ok()),
+        ),
+        Err(_) => (None, None),
+    };
+    let system_pax = config
+        .effects
+        .as_ref()
+        .and_then(|e| e.system.as_ref())
+        .and_then(|l| {
+            windows_shell::effects::load_pax(source, &l.index, l.ordinal, l.name_hash).ok()
+        });
     let kit = kit::load_kit(
         source,
         kit::KitInputs {
@@ -2306,6 +2345,8 @@ fn load(
             collision_archive,
             basic_fk,
             params,
+            pax: base_pax,
+            scripted: Vec::new(),
         },
     )?;
     let sora_body = kit.body.clone();
@@ -2322,12 +2363,18 @@ fn load(
         sstm,
     )
     .inspect_err(|e| eprintln!("Drive forms unavailable: {e}"))
-    .ok();
+    .ok()
+    .map(|mut f| {
+        f.system_pax = system_pax.map(Arc::new);
+        f.texcommon = texcommon;
+        f
+    });
     // The forms' and Revert's names for the command menu.
     let forms = match (forms, &config.menu) {
         (Some(mut f), Some(menu)) => {
             let mut wanted = f.named_commands();
             wanted.push((0, MENU_MESSAGES[0]));
+            wanted.push((0, MENU_MESSAGES[1]));
             wanted.push((0, MENU_MESSAGES[3]));
             wanted.push((0, drive_room::REVERT_LABEL));
             let ids: Vec<u32> = wanted.iter().map(|w| w.1).collect();
@@ -2344,6 +2391,7 @@ fn load(
                     drive_room::REVERT_LABEL => f.revert_label = text,
                     i if i == MENU_MESSAGES[3] && cmd == 0 => f.drive_label = text,
                     i if i == MENU_MESSAGES[0] && cmd == 0 => f.attack_label = text,
+                    i if i == MENU_MESSAGES[1] && cmd == 0 => f.magic_label = text,
                     _ => {
                         f.names.insert(cmd, text);
                     }
@@ -4676,7 +4724,11 @@ fn compose_2d(
             .drive
             .as_ref()
             .map_or(1., drive_room::DriveRt::scene_light);
-    frame.full_screen(c.scene_sheet, [b, b, b, 1.]);
+    let t = game
+        .drive
+        .as_ref()
+        .map_or([1.; 3], drive_room::DriveRt::scene_tint);
+    frame.full_screen(c.scene_sheet, [b * t[0], b * t[1], b * t[2], 1.]);
     if let (Some(s), Some(t)) = (c.snapshot_sheet, &talk)
         && t.dissolve > 0
     {
@@ -4769,27 +4821,7 @@ fn autoplay_input(tick: u64) -> (Vec2, bool, bool) {
     // (1520: Aerial Recovery out of the blow struck at 1500.)
     let jump = matches!(tick, 300 | 560 | 1520);
     // (spell slots are scripted in `simulate`)
-    // (7700.., 8030.. and 8300..: combos in Limit, Valor and Wisdom Form.)
-    let attack = matches!(
-        tick,
-        400 | 410
-            | 440
-            | 470
-            | 500
-            | 575
-            | 590
-            | 610
-            | 630
-            | 7700
-            | 7710
-            | 7720
-            | 8030
-            | 8040
-            | 8050
-            | 8300
-            | 8310
-            | 8320
-    );
+    let attack = matches!(tick, 400 | 410 | 440 | 470 | 500 | 575 | 590 | 610 | 630);
     (stick, jump, attack)
 }
 const AUTOPLAY_CAPTURES: &[u64] = &[
@@ -4800,9 +4832,9 @@ const AUTOPLAY_CAPTURES: &[u64] = &[
     3830, 3860, 3900, 3930, 4060, 4090, 4150, 4180, 4420, 4450, 4480, 4800, 4830, 4880, 4910, 5000,
     5030, 5100, 5130, 5500, 5560, 5590, 5650, 5690, 5740, 5780, 5800, 5840, 5890, 5930, 5940, 6000,
     6030, 6090, 6210, 6270, 6300, 6330, 6390, 6430, 6460, 6475, 6530, 6560, 6600, 6670, 6705, 6725,
-    6760, 6790, 6900, 7000, 7160, 7200, 7240, 7330, 7505, 7531, 7546, 7560, 7561, 7600, 7640, 7705,
-    7720, 7800, 7810, 7855, 7880, 7890, 7960, 8020, 8035, 8060, 8130, 8160, 8185, 8290, 8305, 8325,
-    8395, 8650, 8900, 9100, 9170,
+    6760, 6790, 6900, 7000, 7160, 7200, 7240, 7330, 7600, 7680, 7710, 7740, 7770, 7800, 7840, 7905,
+    7930, 7960, 8000, 8040, 8105, 8150, 8180, 8200, 8230, 8265, 8300, 8330, 8360, 8390, 8650, 8900,
+    9100, 9170,
 ];
 /// The talk room: Talk at tick 60, one advance once the text is up, and
 /// captures through the prompt, dissolve, window, close and return.
@@ -4950,6 +4982,20 @@ fn simulate(
             if let (Some(r), Some(label)) = (m.menu.items.get_mut(0), d.attack_label()) {
                 r.label = label;
             }
+            // Limit Form's Magic slot is "Limit" (FUN_1403f36c0).
+            if let Some(r) = m.menu.items.get_mut(1) {
+                if d.limit_form() {
+                    r.label = d.src.names.get(&0x2c3).cloned().unwrap_or_default();
+                    r.colour = if d.limit.is_some() { 5 } else { 0 };
+                } else if !d.src.magic_label.is_empty() {
+                    r.label = d.src.magic_label.clone();
+                }
+            }
+            // A limit's follow-up is the reaction command (slot 1).
+            m.menu.reaction = d.offer.map(|cmd| command::Reaction {
+                label: d.src.names.get(&cmd).cloned().unwrap_or_default(),
+                dimmed: false,
+            });
         }
         // The Drive row: "Drive" opening the forms (submenu 3), or "Revert"
         // in a form (FUN_1403f36c0), and the open submenu's colours.
@@ -4976,6 +5022,30 @@ fn simulate(
         attack =
             decision == Decision::Execute(0) && m.menu.items.first().is_some_and(|i| i.icon == 1);
         match decision {
+            // Limit Form: the Magic slot is "Limit" (0x2c3, submenu 12).
+            Decision::Open(1) if game.drive.as_ref().is_some_and(|d| d.limit_form()) => {
+                let (mp, charging) = (game.player.mp.cur, game.player.mp_charging);
+                if let Some(d) = game.drive.as_ref() {
+                    let items = d
+                        .limit_rows(mp, charging)
+                        .into_iter()
+                        .map(|(cmd, colour)| Item {
+                            label: d.src.names.get(&cmd).cloned().unwrap_or_default(),
+                            icon: d.src.commands.get(&cmd).map_or(7, |c| c.icon),
+                            colour,
+                        })
+                        .collect();
+                    m.menu.open_sub(12, items);
+                    cursor_moved = true;
+                }
+            }
+            Decision::ExecuteSub { row: 1, index }
+                if game.drive.as_ref().is_some_and(|d| d.limit_form()) =>
+            {
+                if let Some(d) = game.drive.as_mut() {
+                    d.limit_request = player_sim::limitform::LIMITS.get(index).copied();
+                }
+            }
             Decision::Open(1) => {
                 let mp = game.player.mp;
                 if let Some(mg) = game.magic.as_mut() {
@@ -5131,6 +5201,23 @@ fn simulate(
     if slot != 0 && !talking {
         let k = slot.trailing_zeros() as usize;
         let cmd = game.shortcuts[k];
+        // FUN_1403f29e0: in Limit Form every non-item slot is a limit.
+        let item = game
+            .magic
+            .as_ref()
+            .and_then(|m| m.src.commands.get(&cmd))
+            .is_some_and(|c| c.execute == 3);
+        if !item
+            && let Some(d) = game.drive.as_mut()
+            && d.limit_form()
+        {
+            d.limit_request = player_sim::limitform::LIMITS.get(k).copied();
+        }
+        let cmd = if game.drive.as_ref().is_some_and(|d| d.limit_form()) && !item {
+            0
+        } else {
+            cmd
+        };
         cast = game
             .magic
             .as_ref()
@@ -5275,6 +5362,10 @@ fn simulate(
             .map_or(0, |d| std::mem::take(&mut d.pending_exp));
         drive_room::add_form_exp(&mut game, exp, slots.as_deref_mut());
         drive_room::tick(&mut game, slots.as_deref().map(|s| s.as_slice()));
+        let rc = game.drive.as_ref().is_some_and(|d| d.offer.is_some())
+            && (std::mem::take(&mut game.rc_queued) || game.autoplay.is_some());
+        drive_room::limit_tick(&mut game, rc, None);
+        drive_room::motion_effects(&mut game);
     }
     // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
     // recenters (test-room bindings for the original's camera buttons).
@@ -5913,7 +6004,9 @@ fn talk_tick(mut game: ResMut<Game>, talk: Option<ResMut<Talk>>, hud: Option<Res
         && let Some(m) = hud.menu.as_mut()
     {
         let label = talk.label.clone();
-        m.menu.reaction = if game.talking {
+        m.menu.reaction = if game.drive.as_ref().is_some_and(|d| d.offer.is_some()) {
+            m.menu.reaction.take()
+        } else if game.talking {
             None
         } else {
             talk.reaction
@@ -6293,6 +6386,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
         debug_blow,
         drive,
         cheats,
+        sora_attack,
         ..
     } = game;
     let Some(rt) = enemy.as_mut() else { return };
@@ -6328,7 +6422,10 @@ fn combat_tick(game: &mut Game, tick: u64) {
     let mut hit = None;
     // Live guard (ATKP Type 2/3) spheres: centre, radius, ATKP.
     let mut guards: Vec<(Vec3, f32, u16, Option<u64>)> = Vec::new();
-    // Slot 0's Keyblade, then slot 1's (Valor, Master and Final).
+    // The attack windows this frame: slot 0's Keyblade, slot 1's (Valor,
+    // Master and Final), then Sora's own (the drive motions' ATKP 124 /
+    // 125 on his object's attack shapes), each with its spheres.
+    let mut active: Vec<(u64, u16, Vec<(Vec3, f32)>)> = Vec::new();
     for (hand, (blade, weapon, hits)) in [
         (&cp.blade, &cp.weapon, &cp.hits),
         (&cp.blade2, &cp.weapon2, &cp.hits2),
@@ -6345,47 +6442,82 @@ fn combat_tick(game: &mut Game, tick: u64) {
             if (frame as u32) < start || frame as u32 > end {
                 continue;
             }
-            let instance = (*action_started << 6) | (hand as u64) << 5 | w as u64;
-            // Guard types never test bodies (FUN_1403cff40).
-            let guard = rt.rows.get(&atkp).is_some_and(|r| matches!(r.kind, 2 | 3));
-            // FUN_1403cf400 / FUN_1403cf490: the attack's id and combo
-            // group (ATKP ComboGroup, else a fresh one per attack).
-            let (aid, _) = *rt.instance_ids.entry(instance).or_insert_with(|| {
-                let combo = rt
-                    .steps
-                    .get(&(atkp, 0))
-                    .map_or(0, |r| r[0].combo_group as i32);
-                let group = if combo != 0 {
-                    combo
-                } else {
-                    rt.next_group += 1;
-                    rt.next_group
-                };
-                (rt.ids.allocate(), group)
-            });
-            // FUN_1403d2060: an attack hits a target once per record bit.
-            if !guard && rt.enemy.record.has(aid) {
+            let spheres = rt
+                .blade
+                .get(&group)
+                .into_iter()
+                .flatten()
+                .map(|&(offset, radius)| {
+                    (
+                        sora_at + sora_turn * to_model.transform_point3(offset),
+                        radius,
+                    )
+                })
+                .collect();
+            active.push((
+                (*action_started << 7) | (hand as u64) << 5 | w as u64,
+                atkp,
+                spheres,
+            ));
+        }
+    }
+    if let Some(bones) = cp.body.get(frame.min(cp.body.len().saturating_sub(1))) {
+        for (w, &(start, end, atkp, group)) in cp.actor_hits.iter().enumerate() {
+            if (frame as u32) < start || frame as u32 > end {
                 continue;
             }
-            for (i, &(offset, radius)) in rt.blade.get(&group).into_iter().flatten().enumerate() {
-                let centre = sora_at + sora_turn * to_model.transform_point3(offset);
-                let previous = rt.previous.insert((instance, i), centre);
-                if guard {
-                    guards.push((centre, radius, atkp, None));
-                    continue;
-                }
-                if !targetable {
-                    continue;
-                }
-                for c in combat::swept(centre.to_array(), previous.map(|p| p.to_array()), radius) {
-                    if hit.is_none()
-                        && let Some(&(target, target_radius, high)) = body
-                            .iter()
-                            .find(|(b, r, _)| combat::spheres_overlap(c, radius, b.to_array(), *r))
-                    {
-                        let at = (Vec3::from_array(c), target, target_radius);
-                        hit = Some((instance, atkp, 0u8, high, at, None::<Vec3>, None::<u64>));
-                    }
+            let spheres = sora_attack
+                .get(&group)
+                .into_iter()
+                .flatten()
+                .filter_map(|&(bone, offset, radius)| {
+                    let m = bones.get(&bone)?;
+                    Some((sora_at + sora_turn * m.transform_point3(offset), radius))
+                })
+                .collect();
+            active.push(((*action_started << 7) | 2 << 5 | w as u64, atkp, spheres));
+        }
+    }
+    for (instance, atkp, spheres) in active {
+        ensure_attack_rows(rt, atkp, 0);
+        // Guard types never test bodies (FUN_1403cff40).
+        let guard = rt.rows.get(&atkp).is_some_and(|r| matches!(r.kind, 2 | 3));
+        // FUN_1403cf400 / FUN_1403cf490: the attack's id and combo group
+        // (ATKP ComboGroup, else a fresh one per attack).
+        let (aid, _) = *rt.instance_ids.entry(instance).or_insert_with(|| {
+            let combo = rt
+                .steps
+                .get(&(atkp, 0))
+                .map_or(0, |r| r[0].combo_group as i32);
+            let group = if combo != 0 {
+                combo
+            } else {
+                rt.next_group += 1;
+                rt.next_group
+            };
+            (rt.ids.allocate(), group)
+        });
+        // FUN_1403d2060: an attack hits a target once per record bit.
+        if !guard && rt.enemy.record.has(aid) {
+            continue;
+        }
+        for (i, (centre, radius)) in spheres.into_iter().enumerate() {
+            let previous = rt.previous.insert((instance, i), centre);
+            if guard {
+                guards.push((centre, radius, atkp, None));
+                continue;
+            }
+            if !targetable {
+                continue;
+            }
+            for c in combat::swept(centre.to_array(), previous.map(|p| p.to_array()), radius) {
+                if hit.is_none()
+                    && let Some(&(target, target_radius, high)) = body
+                        .iter()
+                        .find(|(b, r, _)| combat::spheres_overlap(c, radius, b.to_array(), *r))
+                {
+                    let at = (Vec3::from_array(c), target, target_radius);
+                    hit = Some((instance, atkp, 0u8, high, at, None::<Vec3>, None::<u64>));
                 }
             }
         }
@@ -8883,6 +9015,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         cheats: debug_menu::Cheats::default(),
         shortcuts: ROOM_SHORTCUTS,
         drive: None,
+        sora_attack: std::mem::take(&mut loaded.kit.attack),
         party: loaded
             .party
             .into_iter()
@@ -8948,9 +9081,19 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         },
     };
     game.event(loaded.summary);
-    if let Some(src) = loaded.forms.take() {
-        let d = drive_room::DriveRt::new(src, Arc::clone(&source), loaded.enemy_character);
+    let mut drive_fx = drive_fx::DriveFx::default();
+    if let Some(mut src) = loaded.forms.take() {
+        drive_fx = drive_fx::DriveFx::new(src.texcommon.take());
+        let mut d = drive_room::DriveRt::new(src, Arc::clone(&source), loaded.enemy_character);
+        if let Some(p) = loaded.kit.pax.take() {
+            d.paxes.insert(0, Arc::new(p));
+        }
         game.player.drive.max = drive_room::ROOM_DRIVE_MAX;
+        // Test-room choice: the gauge starts full (FUN_1403c2020), so every
+        // owned form can be tried at once; unattended runs keep it empty.
+        if game.autoplay.is_none() {
+            game.player.drive.refill();
+        }
         game.event(serde_json::json!({"event":"drive_forms","form_objects":d.src.form_objects,
             "commands":d.src.form_command,"owned":d.forms.owned,
             "records":d.forms.records.iter().map(|r| serde_json::json!({"level":r.level,"keyblade":r.keyblade,
@@ -9269,6 +9412,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .insert_resource(audio)
         .insert_resource(settings)
         .insert_resource(effects)
+        .insert_resource(drive_fx)
         .insert_resource(Time::<Fixed>::from_hz(60.))
         .insert_resource(ClearColor(Color::srgb(0.06, 0.07, 0.09)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -9306,6 +9450,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                     field_npc_tick,
                     talk_tick,
                     effects_tick,
+                    drive_fx::tick,
                     hud_tick,
                     play_sounds,
                     music_tick,
@@ -9344,6 +9489,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 drive_room::party_visibility,
                 present_npc,
                 present_effects,
+                drive_fx::present,
                 hud_present,
                 resize_scene,
                 compose_2d,

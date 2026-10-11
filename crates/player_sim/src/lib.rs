@@ -14,6 +14,7 @@ pub mod combat;
 pub mod drive;
 pub mod forms;
 pub mod growth;
+pub mod limitform;
 pub mod magic;
 pub mod party;
 pub mod physics;
@@ -116,6 +117,15 @@ pub struct Clip {
     /// Frame trigger 1: an object effect starts (tick, effect number);
     /// Wisdom's shots ride on it (FUN_14040dd70 case 1).
     pub effects: Vec<(u32, i16)>,
+    /// Range triggers 16, 17 (script window bits, ctl+0x154), 20 (offer
+    /// a reaction command every tick) and 26: (start, end, id, first
+    /// parameter) (FUN_14040d810).
+    pub windows: Vec<(u32, u32, u8, i16)>,
+    /// Frame trigger 9: a one-frame script mark (ctl+0x155 bit 0).
+    pub marks: Vec<u32>,
+    /// Frame trigger 7: a script event (0x11 → TR17) with its two
+    /// parameters.
+    pub events: Vec<(u32, i16, i16)>,
 }
 
 impl Clip {
@@ -210,11 +220,18 @@ pub struct Clips {
     /// The growth abilities' motions (`growth::MOTIONS`) with their root
     /// motion, when the set holds them.
     pub growth: Vec<(u16, Clip, Vec<Vec3>)>,
+    /// Motions scripts start by id (the Limit Form limits), with root
+    /// motion.
+    pub scripted: Vec<(u16, Clip, Vec<Vec3>)>,
 }
 
 impl Clips {
     pub fn growth_clip(&self, motion: u16) -> Option<&(u16, Clip, Vec<Vec3>)> {
         self.growth.iter().find(|g| g.0 == motion)
+    }
+
+    pub fn scripted_clip(&self, motion: u16) -> Option<&(u16, Clip, Vec<Vec3>)> {
+        self.scripted.iter().find(|g| g.0 == motion)
     }
 }
 
@@ -287,6 +304,10 @@ pub enum Action {
     /// A growth ability's motion (`growth::motion`): Aerial Dodge (202),
     /// Quick Run (203, 204), Glide (205..208) or Dodge Roll (209).
     Growth(u16),
+    /// A motion a script started by id (the Limit Form limits, BDX trap
+    /// 1,11 motion_start): no commands unless its ranges allow them; it
+    /// plays its queued motions when it ends (trap 1,13 motion_queue).
+    Scripted(u16),
 }
 
 impl Action {
@@ -490,6 +511,10 @@ pub struct Player {
     /// Wisdom Form's Attack is "Shoot" (0x16d): FUN_1403d6fc0 always
     /// allows its combo count.
     pub shoot: bool,
+    /// Motions queued after the current one (FUN_1403c8310): id and blend.
+    pub queued: Vec<(u16, f32)>,
+    /// A scripted motion started in the air keeps the airborne physics.
+    scripted_air: bool,
 }
 
 /// A blow in flight: mode 4's velocity with the SSTM brakes it runs on, and
@@ -620,7 +645,71 @@ impl Player {
             glide: None,
             launch_velocity: None,
             shoot: false,
+            queued: Vec::new(),
+            scripted_air: false,
         }
+    }
+
+    /// BDX trap 1,11 (FUN_1403c86a0): play `motion` now with `blend`;
+    /// clears the queue. Motion 0 is the idle and 4 the fall.
+    pub fn play_motion(&mut self, motion: u16, blend: f32, clips: &Clips) -> bool {
+        self.queued.clear();
+        self.start_motion_id(motion, blend, clips)
+    }
+
+    fn start_motion_id(&mut self, motion: u16, blend: f32, clips: &Clips) -> bool {
+        let air = self.in_air();
+        let action = match motion {
+            0 if !air => Action::Idle,
+            0 | 4 => Action::Fall,
+            m if clips.scripted_clip(m).is_some() => Action::Scripted(m),
+            _ => return false,
+        };
+        if action == Action::Fall && !matches!(self.action, Action::Fall) {
+            self.arc = physics::Arc::fall(self.position[1], 0.);
+            self.sampler.reset();
+        }
+        self.scripted_air = air;
+        self.pending_jump = None;
+        self.cast = None;
+        self.action = action;
+        self.frame = 0;
+        self.blend = blend;
+        self.arm();
+        true
+    }
+
+    /// BDX trap 1,13 (FUN_1403c8310): play `motion` after the current one.
+    pub fn queue_motion(&mut self, motion: u16, blend: f32) {
+        self.queued.push((motion, blend));
+    }
+
+    /// BDX trap 6,67 (FUN_14053ef20 → FUN_1403d78d0): PTYA record `id` of
+    /// the set at once, with its hop toward the target.
+    pub fn ptya_attack(&mut self, id: u8, input: &Input, clips: &Clips) -> bool {
+        let Some(i) = ptya::find(&clips.records, id) else {
+            return false;
+        };
+        if clips.attacks.len() <= i {
+            return false;
+        }
+        let mut step = Step::default();
+        let combo = self.combo;
+        self.execute(i, combo, input, clips, &mut step);
+        true
+    }
+
+    /// BDX trap 1,4 (FUN_1403b65c0) with the facing reversed: turn round.
+    pub fn turn_round(&mut self) {
+        self.yaw = wrap_angle(self.yaw + std::f32::consts::PI);
+    }
+
+    /// BDX trap 1,111 with speed 0 and trap 1,146 (FUN_1403d4960): the
+    /// move request cleared and a knock-slide backwards.
+    pub fn recoil_back(&mut self, strength: f32) {
+        self.air_velocity = [0.; 2];
+        let back = [-self.yaw.sin(), -self.yaw.cos()];
+        self.recoil(back, strength);
     }
 
     /// FUN_140401680: a growth family's level (0 = none).
@@ -1027,6 +1116,7 @@ impl Player {
                 .growth_clip(growth::motion::HIGH_JUMP)
                 .map_or(&clips.jump, |g| &g.1),
             (Action::Growth(m), _) => clips.growth_clip(m).map_or(&clips.idle, |g| &g.1),
+            (Action::Scripted(m), _) => clips.scripted_clip(m).map_or(&clips.idle, |g| &g.1),
         }
     }
 
@@ -1041,6 +1131,10 @@ impl Player {
                     None => return [0.; 3],
                 }
             }
+            Action::Scripted(m) => match clips.scripted_clip(m) {
+                Some(g) => &g.2,
+                None => return [0.; 3],
+            },
             _ => return [0.; 3],
         };
         root.get(self.motion_frame(clips) as usize)
@@ -1058,6 +1152,7 @@ impl Player {
     pub fn in_air(&self) -> bool {
         match self.action {
             Action::Hurt(hurt::DEAD) => self.dead_air,
+            Action::Scripted(_) => self.scripted_air,
             a => a.airborne() && self.pending_jump.is_none(),
         }
     }
@@ -1079,6 +1174,9 @@ impl Player {
             {
                 clip.looped_frame(self.frame)
             }
+            // With nothing queued a script's motion keeps looping from its
+            // return frame [I: the ANB loop field].
+            Action::Scripted(_) if self.queued.is_empty() => clip.looped_frame(self.frame),
             // The blow and DEAD motions hold their loop span until the
             // flight or the revive ends them.
             Action::Hurt(i) if hurt::BLOW.contains(&i) || i == hurt::DEAD => {
@@ -1513,6 +1611,30 @@ impl Player {
                     self.start(Action::Idle, &mut step);
                 }
             }
+            Action::Scripted(m) if !self.scripted_air => {
+                // A script's motion: root motion along the facing, range-28
+                // turns toward the target, then the queued motions.
+                let empty = Vec::new();
+                let (clip, root) = match clips.scripted_clip(m) {
+                    Some(g) => (&g.1, &g.2),
+                    None => (&clips.idle, &empty),
+                };
+                self.face_target(clip, input);
+                let at = |f: u32| root.get(clip.held_frame(f) as usize).copied();
+                if let (Some(now), Some(before)) = (at(self.frame), at(self.frame - 1)) {
+                    let (s, c) = self.yaw.sin_cos();
+                    let (dx, dz) = (now[0] - before[0], now[2] - before[2]);
+                    disp[0] += dx * c + dz * s;
+                    disp[2] += -dx * s + dz * c;
+                }
+                if self.frame >= clip.end && !self.queued.is_empty() {
+                    let (next, blend) = self.queued.remove(0);
+                    if !self.start_motion_id(next, blend, clips) {
+                        self.start(Action::Idle, &mut step);
+                    }
+                    step.started = Some(self.action);
+                }
+            }
             Action::Growth(growth::motion::DODGE_ROLL) => {
                 // Motion 209 moves by its root curve (mode 0, no request).
                 let empty = Vec::new();
@@ -1582,7 +1704,8 @@ impl Player {
             | Action::Fall
             | Action::AirAttack(_)
             | Action::AirCast(_)
-            | Action::Growth(_) => {
+            | Action::Growth(_)
+            | Action::Scripted(_) => {
                 disp = self.airborne(
                     input, moving, magnitude, direction, height, p, clips, &mut step,
                 );
@@ -1728,7 +1851,7 @@ impl Player {
             Action::Drive => 0x34,
             Action::DriveIn => 0x35,
             Action::HighJump => growth::motion::HIGH_JUMP,
-            Action::Growth(m) => m,
+            Action::Growth(m) | Action::Scripted(m) => m,
         }
     }
 
@@ -2161,6 +2284,15 @@ impl Player {
             && glide_motion(m)
         {
             self.glide_frame(height, moving, direction, step);
+        } else if let Action::Scripted(m) = self.action {
+            let clip = clips.scripted_clip(m).map_or(&clips.idle, |g| &g.1);
+            self.face_target(clip, input);
+            if self.frame >= clip.end && !self.queued.is_empty() {
+                let (next, blend) = self.queued.remove(0);
+                if !self.start_motion_id(next, blend, clips) {
+                    self.start(Action::Fall, step);
+                }
+            }
         } else if let Action::Hurt(_) = self.action {
             // The air flinch and Aerial Recovery play out, then fall;
             // Aerial Recovery takes commands from its range-1 tick.
@@ -2484,6 +2616,7 @@ mod tests {
             drive: Some(Clip::looping(40, 40)),
             drive_in: None,
             growth: Vec::new(),
+            scripted: Vec::new(),
             records: records(),
             spells: vec![
                 SpellClip {
