@@ -48,8 +48,14 @@ fn run(program: &str, args: Vec<PathBuf>) -> ExitCode {
         },
         "tt" | "eh" => test_room::main(args, false),
         "event" => cutscene::main(args, false),
+        "--version" => {
+            println!("kh2fm {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
         _ => {
-            eprintln!("usage: kh2fm [title|room|talk|play|tt|eh|event] [program arguments]");
+            eprintln!(
+                "usage: kh2fm [title|room|talk|play|tt|eh|event|--version] [program arguments]"
+            );
             ExitCode::FAILURE
         }
     }
