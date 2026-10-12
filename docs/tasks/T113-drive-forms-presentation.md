@@ -37,3 +37,12 @@ PASS `cargo fmt --all --check`; PASS `cargo clippy --workspace --all-targets --l
 ## Verdict / next
 
 PROGRESS: the room starts with a full Drive gauge, every form enters from the command deck with its change effects, afterimage, gauge burst and level-up panels, Limit Form's four limits and follow-ups run from its Limit menu, and Sora speaks in battle. Next: the owner's interactive check of Master, Final and Antiform; draw 238's refraction; the remaining non-drive effect kinds with the attack effects.
+
+## Addendum: remaining attack and limit effect kinds
+
+PASS `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked` (effect_vm 35, 11 new synthetic), `cargo build --release --features skate3 --locked -p windows_shell`; PASS release autoplay `drive-03/autoplay-09` (exit 0, no `drive_effect_unsupported` events; Limit Form, Infinity and Strike Raid start; form change at 7650).
+
+Translated from decompilations (`combatfx-01`, `effect-03`): 47, 51, 65, 85, 89, 96, 120, 121, 123, 211, 212, 234 (FUN_1404c15f0 to FUN_1404c6d90).
+
+Still unsupported (NOT RUN in a game, decisions pending): 99 (integer versus float angles in the exe), 155 and 160 (sprite emission paths not mapped), 178 (child allocator), 188/189/191 (line-chain draws), 200 (ribbon-bone draw), 218 (draw mode bits differ from 219). Known inexact: 121/123 ignore the camera-offset flag, 85 runs only on even part frames.
+
