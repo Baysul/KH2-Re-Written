@@ -31,22 +31,22 @@ Status key: **PLAYS** the rewrite requests the id on the original's trigger (not
 | Shadow claws and jump | bank 201 (201020 claw, 201021 jump) | `test_room.rs` | PLAYS (combat thread) |
 | Guard and deflect | 108 (PAX element sound), 500010 | `test_room.rs` (T069) | PLAYS (combat thread) |
 | Cutscene events | 0x2B PlaySound with bank and number from 0x2A | `cutscene.rs` | PLAYS (cutscene only) |
-| **Walking footsteps** | trigger 2 → bank from the room's 12soundinfo row, id = bank·1000 + p0 + material·16, p0 alternates by a counter (§2.5) | none | **MISSING**: the floor-material value (an actor field set from collision attributes) is unresolved, so no id can be chosen 1:1 |
+| Walking footsteps | trigger 2 → bank from the room's 12soundinfo row, id = bank·1000 + p0 + material·16 (sound-01 §2.5, footstep-01) | `footstep.rs`, `test_room.rs` (T116) | PLAYS (not heard) |
 | Sora battle voice | motion trigger 14, voice banks `voice/us/battle/...` | `test_room.rs` plays voices from the battle voice bank (on main at 3b7c738) | PLAYS (drive thread, not reworked) |
 | Shadow appear and sink | effect-driven 201016, 201017, 201019 (PAX type 18) | only through the PAX element path above, if the Shadow's effects use them; not traced | UNRESEARCHED (combat and effects thread) |
 | PAX effect sounds in general | the effect's sound field (`package_reader/src/effect.rs`) | `test_room.rs` plays `element.sound` as a plain request id (marked inferred in code) | PARTIAL (combat and effects thread): the id rule is not confirmed against the original |
 | Field talk message window | per-character talk sounds (T070) | `test_room.rs` talk queue | PLAYS (not heard) |
-| **Doors and field effects** | field event PlaySound 0x2B, which needs the field's event scripts to run | field event playback does not run outside cutscenes | **MISSING**: no field script executes in the rewrite; which events hold door and field sounds is not enumerated |
-| **Magic casting** | the cast motion's trigger and the spell's cast sound | cast motion runs (`magic_room.rs`), no sound | **UNRESEARCHED**: the sound source is not traced |
-| **Item use** | camp decide sound only (T079); item-use effect sound not traced | camp decide only | UNRESEARCHED |
+| Doors and field effects | none: the original has no door or room-transition sound (fieldsfx-01) | nothing to add | N/A |
+| Magic casting and release | effect-element sounds of the spell's script, cast at motion start and release at the release frame (magicsfx-01) | `spell_sound.rs`, `magic_room.rs` (T117) | PARTIAL: cast and release; hit sounds, Magnet's hold and end, Cure on others, Thunder's extra bolts and Final-form Blizzard volleys missing |
+| Item use | motion 9 frame 10 plays se000 #305; the item effect adds #100 at the consume trigger and #101–104 after 30 ticks (magicsfx-01) | #305 plays from Sora's motion trigger 8 (T116); #100–104 need the item effect run | PARTIAL |
 | Menu decide and back in the camp item and stock lists | se000 #2 and #4 | camp pick sounds | PLAYS |
 
 ## Gaps to close, in order
 
 1. **Done (0a3f828):** command-menu decide and close. Open-submenu sound #3 is not played yet; its trigger is inferred, not confirmed.
-2. **Footsteps:** the timing and bank formula are known; the floor-material mapping (an actor field set from collision attributes) is not. Needs its own research task before any id can match the original.
-3. **Field event sounds (doors and field effects):** enumerate every 0x2B and 0x2A command across the installed field event scripts, then decide which play in the rewrite's rooms. This requires a field event player, which is a separate gate.
-4. **Magic casting and item-use sounds:** trace the cast and item-use sound sources (the cast motion trigger and the spell or item effect records).
+2. **Done (T116):** footsteps. Material is polygon byte 0 of the floor under Sora.
+3. **Done as far as the research goes (T117):** the room ambient bed. Doors have no sound. Chests, save points, prize orbs and event fades are not in the rewrite yet.
+4. **Partly done (T117):** spell cast and release sounds. Hit sounds and the item effect's #100–104 remain.
 5. **Combat list for routing** (not implemented here; Sora battle voice and Drive sounds already on main): Shadow appear and sink (201016/17/19), and general PAX effect sounds.
 
 ## Checks
@@ -61,4 +61,4 @@ NOT RUN for code: this change is documentation only, so no code checks changed. 
 
 ## Verdict / next
 
-PROGRESS: audit complete for the sources in sound-01. Command-menu decide and close now play (0a3f828). Still missing: footsteps (floor material unresolved), field event sounds, magic-cast and item-use sounds, and the combat items routed to the combat thread.
+PROGRESS: audit complete for the sources in sound-01. Command-menu decide and close (0a3f828), footsteps and Sora's own motion sounds (T116), the room ambient bed and spell cast and release sounds (T117) now play. Still missing: spell hit sounds, the item effect's sounds, the combat items routed to the combat thread, and listening verification.

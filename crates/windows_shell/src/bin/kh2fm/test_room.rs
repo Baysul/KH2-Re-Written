@@ -497,8 +497,25 @@ fn step_room_bank(
         .and_then(|(_, i)| i.sora_bank(area))
 }
 
+/// The room's ambient bed (a looped sound) from the same row.
+fn room_ambient(
+    info: &Option<(u8, windows_shell::footstep::WorldInfo)>,
+    world: u8,
+    area: u8,
+) -> Option<u32> {
+    info.as_ref()
+        .filter(|(w, _)| *w == world)
+        .and_then(|(_, i)| i.ambient(area))
+}
+
 /// Kingdom Key sound bank (its SEB stub's bank number, sound-01 §1.1).
 const WEAPON_BANK: i16 = 500;
+/// Largest sound bank read whole (the ambient banks exceed the 32 MiB
+/// default).
+const SOUND_BANK_LIMIT: u32 = 256 * 1024 * 1024;
+/// Mixer key flag of the room's ambient bed, so that its stop and fade never
+/// reach a sound request that has the same id.
+const AMBIENT_KEY: u32 = 0x4000_0000;
 /// System bank (se000, engine slot 2) sounds: cursor move, decide, close,
 /// low-HP alarm (sound-01 §2.2).
 const SE_CURSOR: u32 = 1;
@@ -790,6 +807,8 @@ struct Game {
     /// room's Sora bank, the step counter and the clip scan.
     step_info: Option<(u8, windows_shell::footstep::WorldInfo)>,
     step_bank: Option<i16>,
+    /// The room's ambient bed request id (12soundinfo bank and number).
+    ambient: Option<u32>,
     steps: windows_shell::footstep::Steps,
     step_scan: Option<(u64, Action, u32)>,
     /// The scan of the actor's own frame-8 sounds.
@@ -833,6 +852,8 @@ struct Audio {
     output: Option<audio_out::Output>,
     banks: Banks,
     alarm: bool,
+    /// The ambient bed that is playing (its request id).
+    ambient: Option<u32>,
 }
 
 struct MenuState {
@@ -2642,9 +2663,15 @@ fn load(
         let info = windows_shell::footstep::WorldInfo::read(
             bytes.get(start..start.checked_add(entry.size as usize)?)?,
         )?;
-        for bank in info.sora_banks() {
-            if let Ok(bank_bytes) = library.read(&format!("se/se{bank:03}.win32.scd")) {
-                let _ = banks.insert(bank_bytes);
+        for bank in info.sora_banks().into_iter().chain(info.ambient_banks()) {
+            // An ambient bank is a long stream bank, past the 32 MiB default.
+            match library.read_limited(&format!("se/se{bank:03}.win32.scd"), SOUND_BANK_LIMIT) {
+                Ok(bank_bytes) => {
+                    if let Err(error) = banks.insert(bank_bytes) {
+                        eprintln!("Sound bank {bank} not registered: {error}");
+                    }
+                }
+                Err(error) => eprintln!("Sound bank {bank} not read: {error}"),
             }
         }
         Some((a.world, info))
@@ -3481,6 +3508,7 @@ fn area_transition(
     area.rendered = next.npcs.len();
     game.world = RoomWorld::Map(MapWorld::new(next.take_collision()));
     game.step_bank = step_room_bank(&game.step_info, next.world, next.area);
+    game.ambient = room_ambient(&game.step_info, next.world, next.area);
     let (position, yaw) = next.player;
     game.player = Player::new(position.to_array(), yaw);
     rig.collision = room
@@ -6348,16 +6376,38 @@ fn play_sounds(mut game: ResMut<Game>, mut audio: ResMut<Audio>, hud: Option<Res
         }
         audio.alarm = low;
     }
+    // The room's ambient bed (FUN_140154fd0 / FUN_140155380): a bed that
+    // is unchanged continues; a changed one fades out over two seconds
+    // while the new one starts at once.
+    if game.ambient != audio.ambient {
+        if let Some(old) = audio.ambient
+            && let Some(output) = &audio.output
+            && let Ok(mut mixer) = output.mixer.lock()
+        {
+            mixer.fade(AMBIENT_KEY | old, 0., 2., audio_out::FadeEnd::Stop);
+            game.event(serde_json::json!({"event":"sound_fade","tick":tick,"id":old}));
+        }
+        audio.ambient = game.ambient;
+        if let Some(id) = game.ambient {
+            requests.push((id | AMBIENT_KEY, "ambient"));
+        }
+    }
     for (id, cause) in requests {
         let Audio { output, banks, .. } = &mut *audio;
-        let resolved = match banks.request(id) {
+        // The ambient bed's mixer key carries a flag; its request id does not.
+        let request_id = if cause == "ambient" {
+            id & !AMBIENT_KEY
+        } else {
+            id
+        };
+        let resolved = match banks.request(request_id) {
             Ok(r) => r,
             Err(error) => {
-                eprintln!("Sound {id} failed to decode: {error}");
+                eprintln!("Sound {request_id} failed to decode: {error}");
                 None
             }
         };
-        game.event(serde_json::json!({"event":"sound","tick":tick,"id":id,"cause":cause,
+        game.event(serde_json::json!({"event":"sound","tick":tick,"id":request_id,"cause":cause,
             "layers":resolved.as_ref().map(|r| r.layers.len()),
             "volume":resolved.as_ref().map(|r| r.volume),"looped":resolved.as_ref().map(|r| r.looped)}));
         if let (Some(output), Some(r)) = (output.as_ref(), resolved)
@@ -9223,6 +9273,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .area
         .as_ref()
         .and_then(|(_, a)| step_room_bank(&loaded.step_info, a.world, a.area));
+    let ambient = loaded
+        .area
+        .as_ref()
+        .and_then(|(_, a)| room_ambient(&loaded.step_info, a.world, a.area));
     let area_res = loaded.area.map(|(source, mut current)| AreaRes {
         music: Some(std::mem::take(&mut current.music)),
         rendered: current.npcs.len(),
@@ -9283,6 +9337,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         drive: None,
         voices: loaded.voices.take(),
         step_bank,
+        ambient,
         step_info: loaded.step_info.take(),
         steps: windows_shell::footstep::Steps::default(),
         step_scan: None,
@@ -9391,6 +9446,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         output,
         banks: loaded.banks,
         alarm: false,
+        ambient: None,
     };
     let (talk, npc_model) = match loaded.npc {
         Some(n) => {

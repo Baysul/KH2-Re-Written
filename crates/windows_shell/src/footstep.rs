@@ -17,6 +17,10 @@
 /// other footstep banks (`i16` each).
 const ROW: usize = 24;
 const SORA_BANK: usize = 0x0e;
+/// The room's ambient bed: its bank (+0x06) and sound number (+0x08, -1
+/// for none).
+const AMBIENT_BANK: usize = 0x06;
+const AMBIENT_NUMBER: usize = 0x08;
 
 /// One world's 12soundinfo rows.
 pub struct WorldInfo {
@@ -43,6 +47,31 @@ impl WorldInfo {
     pub fn sora_bank(&self, room: u8) -> Option<i16> {
         let row = self.rows.get(room as usize)?;
         Some(i16::from_le_bytes([row[SORA_BANK], row[SORA_BANK + 1]]))
+    }
+
+    fn word(&self, room: u8, at: usize) -> Option<i16> {
+        let row = self.rows.get(room as usize)?;
+        Some(i16::from_le_bytes([row[at], row[at + 1]]))
+    }
+
+    /// The ambient bed's request id (`bank * 1000 + number`) in `room`;
+    /// None without a row or with no bed (number -1, or no bank).
+    pub fn ambient(&self, room: u8) -> Option<u32> {
+        let bank = self.word(room, AMBIENT_BANK)?;
+        let number = self.word(room, AMBIENT_NUMBER)?;
+        (bank > 0 && number >= 0).then(|| bank as u32 * 1000 + number as u32)
+    }
+
+    /// Every distinct bank of an ambient bed in the world.
+    pub fn ambient_banks(&self) -> Vec<u16> {
+        let mut banks: Vec<u16> = (0..self.rows.len())
+            .filter_map(|r| self.word(r as u8, AMBIENT_BANK))
+            .filter(|&b| b > 0)
+            .map(|b| b as u16)
+            .collect();
+        banks.sort_unstable();
+        banks.dedup();
+        banks
     }
 
     /// Every distinct positive Sora bank in the world.
@@ -111,6 +140,25 @@ mod tests {
         assert_eq!(info.sora_bank(2), Some(-1));
         assert_eq!(info.sora_bank(3), None);
         assert_eq!(info.sora_banks(), vec![688, 691]);
+    }
+
+    #[test]
+    fn reads_the_ambient_bed_by_room() {
+        let mut bytes = world(&[688, 688, 688]);
+        let put = |bytes: &mut Vec<u8>, room: usize, at: usize, v: i16| {
+            let o = 4 + room * ROW + at;
+            bytes[o..o + 2].copy_from_slice(&v.to_le_bytes());
+        };
+        put(&mut bytes, 0, AMBIENT_BANK, 3);
+        put(&mut bytes, 0, AMBIENT_NUMBER, 12);
+        put(&mut bytes, 1, AMBIENT_BANK, 3);
+        put(&mut bytes, 1, AMBIENT_NUMBER, -1);
+        let info = WorldInfo::read(&bytes).unwrap();
+        assert_eq!(info.ambient(0), Some(3012));
+        assert_eq!(info.ambient(1), None);
+        assert_eq!(info.ambient(2), None);
+        assert_eq!(info.ambient(3), None);
+        assert_eq!(info.ambient_banks(), vec![3]);
     }
 
     #[test]

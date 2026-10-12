@@ -118,7 +118,20 @@ impl Library {
         self.read_found(&found)
     }
 
+    /// `read` for an entry that may exceed the 32 MiB inspection limit, up
+    /// to `limit` bytes.
+    pub fn read_limited(&mut self, name: &str, limit: u32) -> Result<Vec<u8>> {
+        let found = self
+            .find(name)
+            .ok_or_else(|| format!("{name} is not in the installed packages"))?;
+        self.read_found_limited(&found, limit)
+    }
+
     pub fn read_found(&mut self, found: &Found) -> Result<Vec<u8>> {
+        self.read_found_limited(found, crate::original::MAX_ORIGINAL_BYTES)
+    }
+
+    pub fn read_found_limited(&mut self, found: &Found, limit: u32) -> Result<Vec<u8>> {
         let (_, checked) = self
             .indexes
             .iter_mut()
@@ -132,7 +145,7 @@ impl Library {
         if entry.name_hash != found.name_hash {
             return Err("entry identity mismatch".into());
         }
-        Ok(original::read_original(&mut checked.reader, entry)?.bytes)
+        Ok(original::read_original_limited(&mut checked.reader, entry, limit)?.bytes)
     }
 }
 

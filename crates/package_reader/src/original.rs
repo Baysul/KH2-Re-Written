@@ -67,6 +67,16 @@ pub fn read_original<R: Read + Seek>(
     reader: &mut R,
     entry: &HedEntry,
 ) -> io::Result<DecodedOriginal> {
+    read_original_limited(reader, entry, MAX_ORIGINAL_BYTES)
+}
+
+/// `read_original` with an explicit payload cap, for entries that are
+/// legitimately larger than the inspection limit (the ambient sound banks).
+pub fn read_original_limited<R: Read + Seek>(
+    reader: &mut R,
+    entry: &HedEntry,
+    limit: u32,
+) -> io::Result<DecodedOriginal> {
     let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
     let package_end = reader.seek(SeekFrom::End(0))?;
     if entry.stored_length < 16
@@ -86,9 +96,9 @@ pub fn read_original<R: Read + Seek>(
     } else {
         header.decompressed_length
     };
-    if stored > MAX_ORIGINAL_BYTES || header.decompressed_length > MAX_ORIGINAL_BYTES {
+    if stored > limit || header.decompressed_length > limit {
         return Err(invalid(
-            "original stored/output size exceeds 32 MiB inspection limit",
+            "original stored/output size exceeds the read limit",
         ));
     }
     reader.seek(SeekFrom::Start(
@@ -96,11 +106,12 @@ pub fn read_original<R: Read + Seek>(
     ))?;
     let mut bytes = vec![0; stored as usize];
     reader.read_exact(&mut bytes)?;
-    let (bytes, compressed_bytes_consumed) = decode_payload(
+    let (bytes, compressed_bytes_consumed) = decode_payload_limited(
         &seed,
         header.compression_tag,
         header.decompressed_length,
         bytes,
+        limit,
     )?;
     Ok(DecodedOriginal {
         header,
@@ -113,10 +124,20 @@ pub(crate) fn decode_payload(
     seed: &[u8; 16],
     tag: i32,
     expected: u32,
+    bytes: Vec<u8>,
+) -> io::Result<(Vec<u8>, Option<u64>)> {
+    decode_payload_limited(seed, tag, expected, bytes, MAX_ORIGINAL_BYTES)
+}
+
+fn decode_payload_limited(
+    seed: &[u8; 16],
+    tag: i32,
+    expected: u32,
     mut bytes: Vec<u8>,
+    limit: u32,
 ) -> io::Result<(Vec<u8>, Option<u64>)> {
     let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
-    if tag < -2 || expected > MAX_ORIGINAL_BYTES || bytes.len() > MAX_ORIGINAL_BYTES as usize {
+    if tag < -2 || expected > limit || bytes.len() > limit as usize {
         return Err(invalid("payload tag or size exceeds inspection bounds"));
     }
     if tag > -2 {

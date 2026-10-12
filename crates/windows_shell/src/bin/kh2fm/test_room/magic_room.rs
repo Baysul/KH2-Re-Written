@@ -199,6 +199,10 @@ pub fn request(game: &mut Game, magic_type: u8, tick: u64) -> bool {
     let Some((action, start)) = player.cast(&rec, cmd.cost, 0, target_is_self, clips) else {
         return false;
     };
+    // The cast sound plays at the motion's start (script trigger 20).
+    if let Some(id) = windows_shell::spell_sound::cast_sound(magic_type, 0) {
+        sound_queue.push((id, "spell_cast"));
+    }
     // Leaf Bracer (ability 114): Cure on oneself gives 60 ticks of
     // invulnerability and a super guard from the cast's start.
     let leaf = magic_type == magic::CURE && player.abilities.has(114);
@@ -246,6 +250,7 @@ pub fn tick(game: &mut Game, tick: u64) {
             player,
             enemy,
             world,
+            sound_queue,
             ..
         } = game;
         let Some(m) = magic.as_mut() else { return };
@@ -306,6 +311,16 @@ pub fn tick(game: &mut Game, tick: u64) {
                 r.form,
                 &c,
             ));
+            // The release sounds (script trigger 21).
+            for id in windows_shell::spell_sound::release_sounds(
+                r.magic_type,
+                r.level,
+                r.finisher,
+                r.airborne,
+                r.form,
+            ) {
+                sound_queue.push((id, "spell_release"));
+            }
             events.push(serde_json::json!({"event":"spell_release","tick":tick,
                 "magic":r.magic_type,"level":r.level,"row":r.row,"finisher":r.finisher,
                 "mp":player.mp.cur,"charging":player.mp.charging(),
