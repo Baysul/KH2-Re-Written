@@ -75,6 +75,10 @@ struct Running {
     dpd: Arc<Dpd>,
     bind: Option<Bind>,
     owner: u8,
+    /// The element's sound (sound > 0) and the ticks until it plays: it
+    /// starts with the element, after its start wait.
+    sound: Option<u32>,
+    sound_wait: f32,
 }
 
 /// Odd layers behind everything, even layers in front, 0 by depth
@@ -157,6 +161,19 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
     let mut sounds = Vec::new();
     let mut log = Vec::new();
     let tick = game.tick;
+    // Waiting effect sounds count down one tick at a time, as the instance's
+    // start wait does, and play when their element starts.
+    for r in fx.running.iter_mut() {
+        if let Some(id) = r.sound
+            && r.sound_wait > 0.
+        {
+            r.sound_wait -= 1.;
+            if r.sound_wait <= 0. {
+                sounds.push(id);
+                r.sound = None;
+            }
+        }
+    }
     // An object's effects fade with it when it is replaced (the swap
     // re-points only elements with flag 0x200, FUN_1402c4480).
     if let Some(old) = swapped {
@@ -184,8 +201,13 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
         // A bound element waits one extra tick (DAT_1406239f8, 0.1).
         let wait = element.start_wait + if bind.is_some() { 0.1 } else { 0. };
         let dpd = req.pax.dpds[dpx.dpd].clone();
-        if element.sound >= 0 {
-            sounds.push(element.sound as u32);
+        // A sound plays only for sound > 0 (the element's SE id), at the
+        // element's start: now when it has no wait.
+        let sound = (element.sound > 0).then_some(element.sound as u32);
+        if let Some(id) = sound
+            && wait <= 0.
+        {
+            sounds.push(id);
         }
         log.push(serde_json::json!({"event":"drive_effect","tick":tick,"element":req.id,
             "owner":req.owner,"bone":element.bone,"flags":element.flags,"dpd":dpx.dpd,"pdata":dpx.pdata}));
@@ -198,6 +220,8 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
                 dpd,
                 bind,
                 owner: req.owner,
+                sound: sound.filter(|_| wait > 0.),
+                sound_wait: wait,
             });
         }
     }
