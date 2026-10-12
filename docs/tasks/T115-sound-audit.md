@@ -25,14 +25,14 @@ Status key: **PLAYS** the rewrite requests the id on the original's trigger (not
 | Low-HP alarm (looped) | se000 #9, looped | `test_room.rs` SE_LOW_HP | PLAYS (not heard; autoplay HP never fell to the threshold) |
 | Magic denied | se000 #5 | `magic_room.rs` | PLAYS |
 | Item denied | se000 #5 | `item_room.rs` | PLAYS |
-| Drive start, revert, antiform, form level | se000 #114, #115, #132, #26 | `drive_room.rs`, `drive_fx.rs` | PLAYS (drive thread) |
+| Drive start, revert, antiform, form level | se000 #114, #115, #132, #26 | `drive_room.rs`, `drive_fx.rs` (on main at 3b7c738) | PLAYS (drive thread) |
 | Party hit | per-hit id | `party_room.rs` | PLAYS |
 | Keyblade swings and Sora hits | bank 500 (ATKP HitSound; W_EX010 trigger 8) | `test_room.rs` | PLAYS (combat thread, do not rework) |
 | Shadow claws and jump | bank 201 (201020 claw, 201021 jump) | `test_room.rs` | PLAYS (combat thread) |
 | Guard and deflect | 108 (PAX element sound), 500010 | `test_room.rs` (T069) | PLAYS (combat thread) |
 | Cutscene events | 0x2B PlaySound with bank and number from 0x2A | `cutscene.rs` | PLAYS (cutscene only) |
 | **Walking footsteps** | trigger 2 → bank from the room's 12soundinfo row, id = bank·1000 + p0 + material·16, p0 alternates by a counter (§2.5) | none | **MISSING**: the floor-material value (an actor field set from collision attributes) is unresolved, so no id can be chosen 1:1 |
-| Sora battle voice | motion trigger 14, voice banks `voice/us/battle/...` | none | **MISSING** (combat thread) |
+| Sora battle voice | motion trigger 14, voice banks `voice/us/battle/...` | `test_room.rs` plays voices from the battle voice bank (on main at 3b7c738) | PLAYS (drive thread, not reworked) |
 | Shadow appear and sink | effect-driven 201016, 201017, 201019 (PAX type 18) | only through the PAX element path above, if the Shadow's effects use them; not traced | UNRESEARCHED (combat and effects thread) |
 | PAX effect sounds in general | the effect's sound field (`package_reader/src/effect.rs`) | `test_room.rs` plays `element.sound` as a plain request id (marked inferred in code) | PARTIAL (combat and effects thread): the id rule is not confirmed against the original |
 | Field talk message window | per-character talk sounds (T070) | `test_room.rs` talk queue | PLAYS (not heard) |
@@ -47,7 +47,7 @@ Status key: **PLAYS** the rewrite requests the id on the original's trigger (not
 2. **Footsteps:** the timing and bank formula are known; the floor-material mapping (an actor field set from collision attributes) is not. Needs its own research task before any id can match the original.
 3. **Field event sounds (doors and field effects):** enumerate every 0x2B and 0x2A command across the installed field event scripts, then decide which play in the rewrite's rooms. This requires a field event player, which is a separate gate.
 4. **Magic casting and item-use sounds:** trace the cast and item-use sound sources (the cast motion trigger and the spell or item effect records).
-5. **Combat list for routing** (not implemented here): Sora battle voice (trigger 14), Shadow appear and sink (201016/17/19), and general PAX effect sounds.
+5. **Combat list for routing** (not implemented here; Sora battle voice and Drive sounds already on main): Shadow appear and sink (201016/17/19), and general PAX effect sounds.
 
 ## Checks
 
