@@ -516,10 +516,10 @@ const SOUND_BANK_LIMIT: u32 = 256 * 1024 * 1024;
 /// Mixer key flag of the room's ambient bed, so that its stop and fade never
 /// reach a sound request that has the same id.
 const AMBIENT_KEY: u32 = 0x4000_0000;
-/// System bank (se000, engine slot 2) sounds: cursor move, decide, close,
-/// low-HP alarm (sound-01 §2.2).
+/// System bank (se000, engine slot 2) sounds: cursor move, sub-menu open,
+/// close, low-HP alarm (magicsfx-01 §5).
 const SE_CURSOR: u32 = 1;
-const SE_DECIDE: u32 = 2;
+const SE_OPEN: u32 = 3;
 const SE_CLOSE: u32 = 4;
 const SE_LOW_HP: u32 = 9;
 
@@ -5223,16 +5223,22 @@ fn simulate(
         cursor_moved = (m.menu.cursor, m.menu.sub.as_ref().map(|s| s.cursor)) != before;
         attack =
             decision == Decision::Execute(0) && m.menu.items.first().is_some_and(|i| i.icon == 1);
-        // Executing a command plays decide, and backing out of a submenu
-        // plays close. Executing resets the cursor, so it plays decide alone,
-        // not the cursor move too.
-        if matches!(decision, Decision::Execute(_) | Decision::ExecuteSub { .. }) {
-            cursor_moved = false;
-            game.sound_queue.push((SE_DECIDE, "menu_decide"));
-        }
-        if matches!(decision, Decision::Closed) {
-            cursor_moved = false;
-            game.sound_queue.push((SE_CLOSE, "menu_close"));
+        // The command menu's own sounds (magicsfx-01 §5): a sub-menu push
+        // plays se000 #3 (FUN_1403b2800 with its play flag), and backing out
+        // of a sub-menu plays #4 (FUN_1403b20f0 with its play flag). Running
+        // a command plays no menu sound (#2 is the dialogue choice's decide).
+        // Opening and executing reset the cursor, which is not a move.
+        match decision {
+            Decision::Open(_) => {
+                cursor_moved = false;
+                game.sound_queue.push((SE_OPEN, "menu_open"));
+            }
+            Decision::Execute(_) | Decision::ExecuteSub { .. } => cursor_moved = false,
+            Decision::Closed => {
+                cursor_moved = false;
+                game.sound_queue.push((SE_CLOSE, "menu_close"));
+            }
+            _ => {}
         }
         match decision {
             // Limit Form: the Magic slot is "Limit" (0x2c3, submenu 12).
@@ -5249,7 +5255,6 @@ fn simulate(
                         })
                         .collect();
                     m.menu.open_sub(12, items);
-                    cursor_moved = true;
                 }
             }
             Decision::ExecuteSub { row: 1, index }
@@ -5276,7 +5281,6 @@ fn simulate(
                         .collect();
                     mg.menu_types = list.iter().map(|l| l.0).collect();
                     m.menu.open_sub(1, items);
-                    cursor_moved = true;
                 }
             }
             Decision::Open(2) => {
@@ -5298,7 +5302,6 @@ fn simulate(
                         .collect();
                     it.menu_slots = list.iter().map(|l| l.0).collect();
                     m.menu.open_sub(2, items);
-                    cursor_moved = true;
                 }
             }
             Decision::ExecuteSub { row: 2, index } => {
@@ -5327,7 +5330,6 @@ fn simulate(
                         .collect();
                     d.menu_forms = list.iter().map(|l| l.0).collect();
                     m.menu.open_sub(3, items);
-                    cursor_moved = true;
                 }
             }
             Decision::ExecuteSub { row: 3, index } => {

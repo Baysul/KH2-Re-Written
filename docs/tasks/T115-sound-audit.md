@@ -19,8 +19,9 @@ Status key: **PLAYS** the rewrite requests the id on the original's trigger (not
 | Camp and pause menus: open, move, decide, cancel, invalid | se000 #3, #1, #2, #4, #5 (sound-01 §2.2) | `camp.rs` `pick_sound`, camp submodules | PLAYS |
 | Title and New Game menus | se000 #1, #2, #4, #5 (T071, T072) | title binary | PLAYS |
 | Command menu cursor | se000 #1 (input bits 0x10/0x20) | `test_room.rs` SE_CURSOR | PLAYS |
-| Command menu decide | se000 #2 (input bit 0x04, same functions) | `test_room.rs` plays it when a command runs | PLAYS (0a3f828) |
-| Command menu back / close | se000 #4 | `test_room.rs` plays it when a submenu closes | PLAYS (0a3f828); open-submenu #3 still unmapped |
+| Command menu decide | none: se000 #2 is the dialogue choice's decide and camp decide (magicsfx-01 §5); running a command plays no menu sound | `test_room.rs` plays none | N/A (corrected) |
+| Command menu back / close | se000 #4 (menu pop, FUN_1403b20f0 with play flag) | `test_room.rs` plays it when a submenu closes | PLAYS |
+| Command menu sub-menu open | se000 #3 (FUN_1403b2800 with play flag) | `test_room.rs` plays it when a submenu opens | PLAYS |
 | Command menu unresolved labels | se000 #5 (error?), #24 (cancel?), #7 | none | UNRESEARCHED |
 | Low-HP alarm (looped) | se000 #9, looped | `test_room.rs` SE_LOW_HP | PLAYS (not heard; autoplay HP never fell to the threshold) |
 | Magic denied | se000 #5 | `magic_room.rs` | PLAYS |
@@ -43,7 +44,7 @@ Status key: **PLAYS** the rewrite requests the id on the original's trigger (not
 
 ## Gaps to close, in order
 
-1. **Done (0a3f828):** command-menu decide and close. Open-submenu sound #3 is not played yet; its trigger is inferred, not confirmed.
+1. **Done:** command-menu sub-menu open (#3) and close (#4). Running a command plays no menu sound; the earlier decide #2 was the dialogue's and has been removed.
 2. **Done (T116):** footsteps. Material is polygon byte 0 of the floor under Sora.
 3. **Done as far as the research goes (T117):** the room ambient bed. Doors have no sound. Chests, save points, prize orbs and event fades are not in the rewrite yet.
 4. **Partly done (T117):** spell cast and release sounds. Hit sounds and the item effect's #100–104 remain.
