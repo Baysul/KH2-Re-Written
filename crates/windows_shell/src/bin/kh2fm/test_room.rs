@@ -6327,28 +6327,31 @@ fn sora_sounds(game: &mut Game) {
         }
     }
     // Frame trigger 8 on Sora's own motion: cloth, jump and item-use sounds.
+    // The looped frame, so a walking or running cycle plays its triggers
+    // again each time it wraps (a wrap clears the scan, as for swings).
+    let looped = game.player.motion_frame(&game.clips);
     let from = match game.move_se_scan {
-        Some((s, a, f)) if (s, a) == key && f <= raw => Some(f),
+        Some((s, a, f)) if (s, a) == key && f <= looped => Some(f),
         _ => None,
     };
-    game.move_se_scan = Some((key.0, key.1, raw));
+    game.move_se_scan = Some((key.0, key.1, looped));
     for &(at, id) in &clip.sounds {
-        if from.is_none_or(|f| at > f) && at <= raw {
+        if from.is_none_or(|f| at > f) && at <= looped {
             game.sound_queue.push((id, "move_se"));
         }
     }
     // Frame trigger 2: footsteps on the floor polygon's material. Only map
     // collision has materials; the arena's triangles do not.
     let from = match game.step_scan {
-        Some((s, a, f)) if (s, a) == key && f <= raw => Some(f),
+        Some((s, a, f)) if (s, a) == key && f <= looped => Some(f),
         _ => None,
     };
-    game.step_scan = Some((key.0, key.1, raw));
+    game.step_scan = Some((key.0, key.1, looped));
     if let RoomWorld::Map(map) = &game.world {
         let material = map.floor_ground();
         for &(at, p0) in &clip.steps {
             if from.is_none_or(|f| at > f)
-                && at <= raw
+                && at <= looped
                 && let Some(id) = game.steps.id(game.step_bank, p0, material)
             {
                 game.sound_queue.push((id, "footstep"));
