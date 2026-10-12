@@ -487,8 +487,11 @@ fn sound_triggers(selected: &motion::SelectedMotion, weapon_bank: i16) -> Vec<(u
 
 /// Kingdom Key sound bank (its SEB stub's bank number, sound-01 §1.1).
 const WEAPON_BANK: i16 = 500;
-/// System bank (se000, engine slot 2) sounds: cursor move, low-HP alarm.
+/// System bank (se000, engine slot 2) sounds: cursor move, decide, close,
+/// low-HP alarm (sound-01 §2.2).
 const SE_CURSOR: u32 = 1;
+const SE_DECIDE: u32 = 2;
+const SE_CLOSE: u32 = 4;
 const SE_LOW_HP: u32 = 9;
 
 /// The room collision the controller and the enemy read: the generated
@@ -5126,6 +5129,17 @@ fn simulate(
         cursor_moved = (m.menu.cursor, m.menu.sub.as_ref().map(|s| s.cursor)) != before;
         attack =
             decision == Decision::Execute(0) && m.menu.items.first().is_some_and(|i| i.icon == 1);
+        // Executing a command plays decide, and backing out of a submenu
+        // plays close. Executing resets the cursor, so it plays decide alone,
+        // not the cursor move too.
+        if matches!(decision, Decision::Execute(_) | Decision::ExecuteSub { .. }) {
+            cursor_moved = false;
+            game.sound_queue.push((SE_DECIDE, "menu_decide"));
+        }
+        if matches!(decision, Decision::Closed) {
+            cursor_moved = false;
+            game.sound_queue.push((SE_CLOSE, "menu_close"));
+        }
         match decision {
             // Limit Form: the Magic slot is "Limit" (0x2c3, submenu 12).
             Decision::Open(1) if game.drive.as_ref().is_some_and(|d| d.limit_form()) => {
