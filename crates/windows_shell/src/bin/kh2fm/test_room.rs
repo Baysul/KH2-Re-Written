@@ -485,6 +485,18 @@ fn sound_triggers(selected: &motion::SelectedMotion, weapon_bank: i16) -> Vec<(u
         .collect()
 }
 
+/// Sora's footstep bank in a room: the 12soundinfo row of the room's own
+/// world, None for any other world or a room without a row.
+fn step_room_bank(
+    info: &Option<(u8, windows_shell::footstep::WorldInfo)>,
+    world: u8,
+    area: u8,
+) -> Option<i16> {
+    info.as_ref()
+        .filter(|(w, _)| *w == world)
+        .and_then(|(_, i)| i.sora_bank(area))
+}
+
 /// Kingdom Key sound bank (its SEB stub's bank number, sound-01 §1.1).
 const WEAPON_BANK: i16 = 500;
 /// System bank (se000, engine slot 2) sounds: cursor move, decide, close,
@@ -774,6 +786,14 @@ struct Game {
     drive: Option<drive_room::DriveRt>,
     /// Sora's battle voices: 00battle `vtbl`, the voice bank and the scan.
     voices: Option<drive_room::Voices>,
+    /// Footsteps (frame trigger 2): the world's 12soundinfo, the current
+    /// room's Sora bank, the step counter and the clip scan.
+    step_info: Option<(u8, windows_shell::footstep::WorldInfo)>,
+    step_bank: Option<i16>,
+    steps: windows_shell::footstep::Steps,
+    step_scan: Option<(u64, Action, u32)>,
+    /// The scan of the actor's own frame-8 sounds.
+    move_se_scan: Option<(u64, Action, u32)>,
     /// The shown kit's attack shapes by collision group (bone, offset,
     /// radius).
     sora_attack: HashMap<u8, Vec<(usize, Vec3, f32)>>,
@@ -1082,6 +1102,26 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
                     clip.effects.push((frame, n));
                 }
             }
+            // A footstep (FUN_1403b4fc0): p0 picks the step within the
+            // floor material's group of sixteen.
+            2 => {
+                if let Some(&p0) = record.parameters.first() {
+                    clip.steps.push((frame, p0));
+                }
+            }
+            // Play SE (FUN_14040dd70 case 8): id = p0 * 1000 + p1; with more
+            // than three parameters and p3 set, only for the equipped
+            // weapon's bank. The gate on the actor's flag bit 0 is not
+            // modelled (its meaning is unresolved).
+            8 => {
+                if let &[p0, p1, ref rest @ ..] = record.parameters.as_slice()
+                    && p0 >= 0
+                    && p1 >= 0
+                    && (rest.len() < 2 || rest[1] == 0 || p0 == WEAPON_BANK)
+                {
+                    clip.sounds.push((frame, p0 as u32 * 1000 + p1 as u32));
+                }
+            }
             // A script event (TR17) and a script mark.
             7 => clip.events.push((
                 frame,
@@ -1161,6 +1201,8 @@ struct Loaded {
     enemy_character: u16,
     fmab: player_sim::growth::Fmab,
     voices: Option<drive_room::Voices>,
+    /// The world's 12soundinfo rows (Sora's footstep bank by room).
+    step_info: Option<(u8, windows_shell::footstep::WorldInfo)>,
     /// Donald and Goofy's models and motions (empty when not installed).
     party: Vec<std::sync::Arc<party_room::PartyKind>>,
     spawn: Vec3,
@@ -2585,6 +2627,28 @@ fn load(
         })
         .and_then(|bytes| banks.insert(bytes).ok())
         .and_then(|bank| drive_room::Voices::read(bar_entry(&battle, b"vtbl").ok()?, bank));
+    // Footsteps: the world's 12soundinfo rows and every Sora step bank
+    // they name (se<bank>.win32.scd).
+    let step_info = area_load.as_ref().and_then(|(_, a)| {
+        let code = area_sim::progress::WORLDS.get(a.world as usize)?;
+        let mut library = package_reader::named::Library::open(source).ok()?;
+        let bytes = library.read("12soundinfo.bar").ok()?;
+        let table = package_reader::bar::read_bar(&bytes).ok()?;
+        let entry = table
+            .entries
+            .iter()
+            .find(|e| e.name_bytes[..2] == *code.as_bytes())?;
+        let start = entry.offset as usize;
+        let info = windows_shell::footstep::WorldInfo::read(
+            bytes.get(start..start.checked_add(entry.size as usize)?)?,
+        )?;
+        for bank in info.sora_banks() {
+            if let Ok(bank_bytes) = library.read(&format!("se/se{bank:03}.win32.scd")) {
+                let _ = banks.insert(bank_bytes);
+            }
+        }
+        Some((a.world, info))
+    });
     let npc = match &config.npc {
         Some(n) => Some(load_npc(source, base, &config, n)?),
         None => None,
@@ -2798,6 +2862,7 @@ fn load(
         enemy_character,
         fmab,
         voices,
+        step_info,
         kit,
         spawn,
         yaw,
@@ -3415,6 +3480,7 @@ fn area_transition(
     );
     area.rendered = next.npcs.len();
     game.world = RoomWorld::Map(MapWorld::new(next.take_collision()));
+    game.step_bank = step_room_bank(&game.step_info, next.world, next.area);
     let (position, yaw) = next.player;
     game.player = Player::new(position.to_array(), yaw);
     rig.collision = room
@@ -5664,7 +5730,8 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
             }
         };
         // The element's own sound [inferred: played as a plain request id].
-        if element.sound >= 0 {
+        // Only a positive id plays (FUN_1402c58f0); 0 is "no sound".
+        if element.sound > 0 {
             game.sound_queue.push((element.sound as u32, "effect_se"));
         }
         let Some(dpx) = pax.effect(element.effect_number) else {
@@ -6226,6 +6293,35 @@ fn sora_sounds(game: &mut Game) {
                 {
                     game.sound_queue.push((id, "voice"));
                 }
+            }
+        }
+    }
+    // Frame trigger 8 on Sora's own motion: cloth, jump and item-use sounds.
+    let from = match game.move_se_scan {
+        Some((s, a, f)) if (s, a) == key && f <= raw => Some(f),
+        _ => None,
+    };
+    game.move_se_scan = Some((key.0, key.1, raw));
+    for &(at, id) in &clip.sounds {
+        if from.is_none_or(|f| at > f) && at <= raw {
+            game.sound_queue.push((id, "move_se"));
+        }
+    }
+    // Frame trigger 2: footsteps on the floor polygon's material. Only map
+    // collision has materials; the arena's triangles do not.
+    let from = match game.step_scan {
+        Some((s, a, f)) if (s, a) == key && f <= raw => Some(f),
+        _ => None,
+    };
+    game.step_scan = Some((key.0, key.1, raw));
+    if let RoomWorld::Map(map) = &game.world {
+        let material = map.floor_ground();
+        for &(at, p0) in &clip.steps {
+            if from.is_none_or(|f| at > f)
+                && at <= raw
+                && let Some(id) = game.steps.id(game.step_bank, p0, material)
+            {
+                game.sound_queue.push((id, "footstep"));
             }
         }
     }
@@ -9123,6 +9219,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         poses.insert(*action, *clip);
     }
     let stay = loaded.stay;
+    let step_bank = loaded
+        .area
+        .as_ref()
+        .and_then(|(_, a)| step_room_bank(&loaded.step_info, a.world, a.area));
     let area_res = loaded.area.map(|(source, mut current)| AreaRes {
         music: Some(std::mem::take(&mut current.music)),
         rendered: current.npcs.len(),
@@ -9182,6 +9282,11 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         shortcuts: ROOM_SHORTCUTS,
         drive: None,
         voices: loaded.voices.take(),
+        step_bank,
+        step_info: loaded.step_info.take(),
+        steps: windows_shell::footstep::Steps::default(),
+        step_scan: None,
+        move_se_scan: None,
         sora_attack: std::mem::take(&mut loaded.kit.attack),
         party: loaded
             .party

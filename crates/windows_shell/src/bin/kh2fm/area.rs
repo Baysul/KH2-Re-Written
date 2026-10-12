@@ -696,6 +696,9 @@ pub struct MapWorld {
     /// Floor normal from the previous tick (obj+0x768 is −normal), (0, −1,
     /// 0) engine-side without a floor.
     floor_normal: std::sync::Mutex<[f32; 3]>,
+    /// Material of the floor polygon last hit (poly byte 0, 0 without one):
+    /// the footstep sound's material (obj+0x780).
+    floor_ground: std::sync::atomic::AtomicU8,
 }
 
 impl MapWorld {
@@ -719,7 +722,13 @@ impl MapWorld {
         Self {
             world,
             floor_normal: std::sync::Mutex::new([0., -1., 0.]),
+            floor_ground: std::sync::atomic::AtomicU8::new(0),
         }
+    }
+
+    /// The floor material under Sora as of the last move.
+    pub fn floor_ground(&self) -> u8 {
+        self.floor_ground.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -773,8 +782,10 @@ impl player_sim::World for MapWorld {
                 extra_snap: 0.,
             },
         );
-        *self.floor_normal.lock().expect("floor normal") =
-            field_collision::floor_info(&self.world, &s).normal;
+        let floor = field_collision::floor_info(&self.world, &s);
+        *self.floor_normal.lock().expect("floor normal") = floor.normal;
+        self.floor_ground
+            .store(floor.ground, std::sync::atomic::Ordering::Relaxed);
         // Airborne: landing needs a floor while not rising (disp.y ≥ 0 in
         // engine space) [FUN_1403b9090].
         let on_floor = if airborne {

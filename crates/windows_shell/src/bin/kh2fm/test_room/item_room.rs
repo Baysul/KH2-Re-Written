@@ -118,19 +118,17 @@ pub fn request(game: &mut Game, slot: usize, tick: u64) {
         clips,
         items,
         action_started,
-        sound_queue,
         ..
     } = game;
     let Some(rt) = items.as_mut() else { return };
     if rt.slots.get(slot).copied().unwrap_or(0) == 0 {
         return;
     }
+    // A refused state gate is silent: the "cannot" sound (se000 #5) plays
+    // only on deciding a dimmed row, which the command menu already does.
     if player.use_item(clips).is_some() {
         rt.using = Some(slot);
         *action_started = tick;
-    } else {
-        // The "cannot" cue.
-        sound_queue.push((5, "item_denied"));
     }
 }
 
