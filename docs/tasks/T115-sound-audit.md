@@ -19,8 +19,8 @@ Status key: **PLAYS** the rewrite requests the id on the original's trigger (not
 | Camp and pause menus: open, move, decide, cancel, invalid | se000 #3, #1, #2, #4, #5 (sound-01 §2.2) | `camp.rs` `pick_sound`, camp submodules | PLAYS |
 | Title and New Game menus | se000 #1, #2, #4, #5 (T071, T072) | title binary | PLAYS |
 | Command menu cursor | se000 #1 (input bits 0x10/0x20) | `test_room.rs` SE_CURSOR | PLAYS |
-| Command menu decide | se000 #2 (input bit 0x04, same functions) | none | **MISSING** (menus) |
-| Command menu back / close | se000 #4 | none | **MISSING** (menus) |
+| Command menu decide | se000 #2 (input bit 0x04, same functions) | `test_room.rs` plays it when a command runs | PLAYS (0a3f828) |
+| Command menu back / close | se000 #4 | `test_room.rs` plays it when a submenu closes | PLAYS (0a3f828); open-submenu #3 still unmapped |
 | Command menu unresolved labels | se000 #5 (error?), #24 (cancel?), #7 | none | UNRESEARCHED |
 | Low-HP alarm (looped) | se000 #9, looped | `test_room.rs` SE_LOW_HP | PLAYS (not heard; autoplay HP never fell to the threshold) |
 | Magic denied | se000 #5 | `magic_room.rs` | PLAYS |
@@ -43,7 +43,7 @@ Status key: **PLAYS** the rewrite requests the id on the original's trigger (not
 
 ## Gaps to close, in order
 
-1. **Command menu decide and back** (`se000` #2 and #4): the call sites are known (sound-01 §2.2). Small and menu-scope; blocked only on writing the command-menu hook. Not done here: the command menu is HUD code shared with combat.
+1. **Done (0a3f828):** command-menu decide and close. Open-submenu sound #3 is not played yet; its trigger is inferred, not confirmed.
 2. **Footsteps:** the timing and bank formula are known; the floor-material mapping (an actor field set from collision attributes) is not. Needs its own research task before any id can match the original.
 3. **Field event sounds (doors and field effects):** enumerate every 0x2B and 0x2A command across the installed field event scripts, then decide which play in the rewrite's rooms. This requires a field event player, which is a separate gate.
 4. **Magic casting and item-use sounds:** trace the cast and item-use sound sources (the cast motion trigger and the spell or item effect records).
@@ -61,4 +61,4 @@ NOT RUN for code: this change is documentation only, so no code checks changed. 
 
 ## Verdict / next
 
-PROGRESS: audit complete for the sources in sound-01. Missing and unresearched sounds are listed above, with the combat items routed to the combat thread. Next: command-menu decide and back (step 1), then the footstep material research (step 2).
+PROGRESS: audit complete for the sources in sound-01. Command-menu decide and close now play (0a3f828). Still missing: footsteps (floor material unresolved), field event sounds, magic-cast and item-use sounds, and the combat items routed to the combat thread.
