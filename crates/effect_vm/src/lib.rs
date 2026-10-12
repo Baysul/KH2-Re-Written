@@ -204,6 +204,9 @@ pub(crate) struct Ctx<'a> {
     pub ede0: Mat,
     /// f010..f018: lengths of the instance world axes.
     pub scales: [f32; 3],
+    /// DAT_142b0ec50 / eff0: the instance position (the translation the
+    /// instance was given, before the PDATA header's local transform).
+    pub origin: Vec4,
     pub colour: Vec4,
     /// The current part's parent `cur` matrix (work +4 handle; +0x10).
     pub parent_cur: Option<Mat>,
@@ -404,6 +407,7 @@ impl Instance {
             ed60: math::mul(view, &world),
             ede0: IDENTITY,
             scales,
+            origin: self.world[3],
             colour: self.colour,
             parent_cur: None,
             skip,

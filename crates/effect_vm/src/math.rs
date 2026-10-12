@@ -89,6 +89,27 @@ pub fn rot_yxz(a: [i32; 3]) -> Mat {
     mul(&mul(&rot_z(a[2]), &rot_x(a[0])), &rot_y(a[1]))
 }
 
+/// FUN_1404e00b0 (pppMatrixYZX): Rx·Rz·Ry from integer angles (Y applied
+/// first, then Z, then X).
+pub fn rot_yzx(a: [i32; 3]) -> Mat {
+    mul(&mul(&rot_x(a[0]), &rot_z(a[2])), &rot_y(a[1]))
+}
+
+/// FUN_14013f3a0 (FUN_140478ce0): the inverse of a rigid matrix, the 3×3
+/// part transposed and the translation −Rᵀt. The exe's copy keeps the
+/// input's last w.
+pub fn rigid_inverse(m: &Mat) -> Mat {
+    let mut out = IDENTITY;
+    for (c, col) in out.iter_mut().take(3).enumerate() {
+        for (r, x) in col.iter_mut().take(3).enumerate() {
+            *x = m[r][c];
+        }
+    }
+    let rt = apply(&out, [m[3][0], m[3][1], m[3][2], m[3][3]]);
+    out[3] = [-rt[0], -rt[1], -rt[2], rt[3]];
+    out
+}
+
 /// Float-radian rotations (instance matrix, FUN_1404b1280 → libvu0 RotMatrixX/Y/Z).
 pub fn rot_radians(m: &Mat, r: [f32; 3]) -> Mat {
     let rx = {

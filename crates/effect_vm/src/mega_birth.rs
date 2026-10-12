@@ -979,6 +979,7 @@ mod tests {
                     ed60: IDENTITY,
                     ede0: IDENTITY,
                     scales: [1.; 3],
+                    origin: [0., 0., 0., 1.],
                     colour: [1.; 4],
                     parent_cur: None,
                     skip,

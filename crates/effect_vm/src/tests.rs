@@ -910,3 +910,276 @@ fn ke_th_bolt_grows_to_its_target_and_draws_a_strip() {
     assert!(tris.iter().flat_map(|t| t.colours).any(|c| c[3] == 0));
     assert!(tris.iter().flat_map(|t| t.colours).any(|c| c == [128; 4]));
 }
+
+#[test]
+fn matrix_yzx_applies_y_then_z_then_x() {
+    // Angles (X, Y, Z) = (90°, 90°, 0) in u1: Y first leaves +Y alone, then
+    // X takes it to +Z (pppMatrixXYZ would give +X). Scales are 1 (u2).
+    let progs = vec![
+        Prog {
+            kind: 40,
+            size: 16,
+            keys: vec![0, f(1.), f(1.), f(1.)],
+            use_val: vec![32],
+        },
+        Prog {
+            kind: 41,
+            size: 16,
+            keys: vec![0, 0x4000, 0x4000, 0],
+            use_val: vec![16],
+        },
+        Prog {
+            kind: 89,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0, 16, 32],
+        },
+    ];
+    let dpd = build(&[(0, 8, progs)], &[], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    ticks(&mut inst, &mut rng, 1);
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    let p = inst.parts.iter().flatten().next().unwrap();
+    let y = p.cur[1];
+    assert!(
+        y[0].abs() < 1e-5 && y[1].abs() < 1e-5 && (y[2] - 1.).abs() < 1e-5,
+        "{y:?}"
+    );
+    let v = math::apply(&math::rot_yzx([0x4000, 0x4000, 0]), [0., 1., 0., 1.]);
+    assert!(v[2] > 0.99, "{v:?}");
+}
+
+#[test]
+fn rigid_inverse_undoes_a_rotated_translation() {
+    let mut m = math::rot_z(0x2000);
+    m[3] = [1., 2., 3., 1.];
+    let p = math::mul(&math::rigid_inverse(&m), &m);
+    for (c, col) in p.iter().enumerate() {
+        for (r, x) in col.iter().enumerate() {
+            let e = if c == r { 1. } else { 0. };
+            assert!((x - e).abs() < 1e-5, "{p:?}");
+        }
+    }
+}
+
+#[test]
+fn ke_angle_is_atan2_with_the_exe_branches() {
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+    let a = |p0: f32, p1: f32| programs::ke_angle(p0, p1).unwrap();
+    assert!(a(1., 0.).abs() < 1e-6);
+    assert!((a(0., 1.) - FRAC_PI_2).abs() < 1e-6);
+    assert!((a(0., -1.) + FRAC_PI_2).abs() < 1e-6);
+    assert!((a(-1., 0.) - PI).abs() < 1e-6);
+    assert!((a(-1., 1.) - 3. * FRAC_PI_4).abs() < 1e-5);
+    assert!((a(-1., -1.) + 3. * FRAC_PI_4).abs() < 1e-5);
+    assert!(programs::ke_angle(0., 0.).is_none());
+}
+
+#[test]
+fn rand_float_and_rand_down_fv_scale_their_draws() {
+    // RandFloat (u0 = 0): var 16 gains k·r − k, r in [0, 2), k = 10.
+    // RandDownFV (u0 = 4): vars 32.. gain k_i·r, r in [−1, 0].
+    let progs = vec![
+        Prog {
+            kind: 51,
+            size: 16,
+            keys: vec![0, 16, f(10.), 0],
+            use_val: vec![0],
+        },
+        Prog {
+            kind: 65,
+            size: 24,
+            keys: vec![0, 32, f(10.), f(20.), f(30.), 0],
+            use_val: vec![4],
+        },
+    ];
+    let dpd = build(&[(0, 8, progs)], &[], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    ticks(&mut inst, &mut rng, 1);
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    let p = inst.parts.iter().flatten().next().unwrap();
+    let r = p.f32(0);
+    assert!((0. ..2.).contains(&r), "{r}");
+    assert_eq!(p.f32(16), 10. * r - 10.);
+    let d = p.f32(4);
+    assert!((-1. ..=0.).contains(&d), "{d}");
+    for (i, k) in [10., 20., 30.].into_iter().enumerate() {
+        assert_eq!(p.f32(32 + 4 * i), k * d);
+    }
+}
+
+#[test]
+fn ke_mv_yp_eff_turns_a_velocity_into_pitch_and_yaw() {
+    // Velocity (1, 0, 1): pitch atan2(−1, 1) = −45° (−8192 in 0x10000 turns),
+    // yaw atan2(1, −0) = 90° (16384).
+    let progs = vec![
+        Prog {
+            kind: 40,
+            size: 16,
+            keys: vec![0, f(1.), 0, f(1.)],
+            use_val: vec![16],
+        },
+        Prog {
+            kind: 47,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0, 16],
+        },
+    ];
+    let dpd = build(&[(0, 8, progs)], &[], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    ticks(&mut inst, &mut rng, 1);
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    let p = inst.parts.iter().flatten().next().unwrap();
+    assert!((p.i32(0) + 8192).abs() <= 2, "{}", p.i32(0));
+    assert!((p.i32(8) - 16384).abs() <= 2, "{}", p.i32(8));
+}
+
+#[test]
+fn ke_mat_sn_turns_by_the_change_of_its_angles() {
+    // Angle (u1 = 16) adds 0x100 about X at frame 0; pppKeMatSN then turns
+    // the matrix at u0+0x40 by old − new = −0x100 about X (u0 = 0).
+    let progs = vec![
+        Prog {
+            kind: 41,
+            size: 16,
+            keys: vec![0, 0x100, 0, 0],
+            use_val: vec![16],
+        },
+        Prog {
+            kind: 85,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0, 16],
+        },
+    ];
+    let dpd = build(&[(0, 8, progs)], &[], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    ticks(&mut inst, &mut rng, 1);
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    let p = inst.parts.iter().flatten().next().unwrap();
+    assert_eq!(p.i32(0x80), 0x100);
+    let m = programs::read_matrix(p, 0x40);
+    let want = math::rot_xyz([-0x100, 0, 0]);
+    for c in 0..4 {
+        for r in 0..4 {
+            assert!((m[c][r] - want[c][r]).abs() < 1e-5, "{m:?}");
+        }
+    }
+}
+
+#[test]
+fn ang_move_loop_moves_no_value_during_a_loop_catch_up() {
+    // The loop-start test's Move with pppAngMoveLoop (ints): the restart's
+    // catch-up re-keys the rate but does not move the value, so 4 normal
+    // ticks give 4 where a plain Move gives 6.
+    let progs = vec![Prog {
+        kind: 211,
+        size: 16,
+        keys: vec![0, 1, 0, 0],
+        use_val: vec![0, 16],
+    }];
+    let dpd = build_looped(&[(0, 100, progs)], &[], &[], &[(0, 0x2000, 0x4000)]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    ticks(&mut inst, &mut rng, 4);
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    let p = inst.parts.iter().flatten().next().unwrap();
+    assert_eq!(p.frame, 0x2000);
+    assert_eq!(p.i32(0), 4);
+}
+
+#[test]
+fn matrix_no_rot_is_the_view_inverse_with_its_own_axes() {
+    // View = translation (5, 0, 0): its inverse is (−5, 0, 0), but the
+    // translation u0 = (1, 2, 3) replaces it; axes scaled by u1 = (1, 1, 1).
+    let progs = vec![
+        Prog {
+            kind: 40,
+            size: 16,
+            keys: vec![0, f(1.), f(2.), f(3.)],
+            use_val: vec![0],
+        },
+        Prog {
+            kind: 40,
+            size: 16,
+            keys: vec![0, f(1.), f(1.), f(1.)],
+            use_val: vec![16],
+        },
+        Prog {
+            kind: 96,
+            size: 4,
+            keys: vec![0],
+            use_val: vec![0, 16],
+        },
+    ];
+    let dpd = build(&[(0, 8, progs)], &[], &[]);
+    let mut inst = Instance::new(dpd, 0, math::IDENTITY, 0.).unwrap();
+    let mut rng = Rng::default();
+    for _ in 0..2 {
+        inst.frame(&VIEW_TRANSLATE, &mut rng);
+    }
+    assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+    let p = inst.parts.iter().flatten().next().unwrap();
+    let want = [
+        [1., 0., 0., 0.],
+        [0., 1., 0., 0.],
+        [0., 0., 1., 0.],
+        [1., 2., 3., 1.],
+    ];
+    assert_eq!(p.cur, want);
+}
+
+/// A view that is a translation by (5, 0, 0).
+const VIEW_TRANSLATE: math::Mat = [
+    [1., 0., 0., 0.],
+    [0., 1., 0., 0.],
+    [0., 0., 1., 0.],
+    [5., 0., 0., 1.],
+];
+
+#[test]
+fn world_draw_matrices_put_the_part_at_its_origin_plus_its_offset() {
+    // Instance at (10, 20, 30) (identity axes); MatrixLoc puts the cur
+    // translation at (1, 2, 3). Both draw matrices give the part (11, 22, 33).
+    for kind in [121, 123] {
+        let progs = vec![
+            Prog {
+                kind: 40,
+                size: 16,
+                keys: vec![0, f(1.), f(2.), f(3.)],
+                use_val: vec![48],
+            },
+            Prog {
+                kind: 93,
+                size: 4,
+                keys: vec![0],
+                use_val: vec![48],
+            },
+            Prog {
+                kind,
+                size: 4,
+                keys: vec![0],
+                use_val: vec![0, 16],
+            },
+        ];
+        let dpd = build(&[(0, 8, progs)], &[], &[]);
+        let world = instance_matrix([10., 20., 30.], [0.; 3], [1.; 3]);
+        let mut inst = Instance::new(dpd, 0, world, 0.).unwrap();
+        let mut rng = Rng::default();
+        ticks(&mut inst, &mut rng, 1);
+        assert!(inst.unsupported.is_empty(), "{:?}", inst.unsupported);
+        let p = inst.parts.iter().flatten().next().unwrap();
+        for c in 0..3 {
+            for r in 0..4 {
+                let e = if c == r { 1. } else { 0. };
+                assert!((p.draw[c][r] - e).abs() < 1e-5, "{kind}: {:?}", p.draw);
+            }
+        }
+        assert_eq!(p.draw[3], [11., 22., 33., 1.], "{kind}");
+    }
+}

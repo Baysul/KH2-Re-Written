@@ -67,6 +67,18 @@ const POINT_LOOP: u32 = 213;
 const ANGLE_LOOP: u32 = 214;
 const SCALE_LOOP: u32 = 215;
 const MATRIX_LOOP: u32 = 216;
+const KE_MV_YP_EFF: u32 = 47;
+const RAND_FLOAT: u32 = 51;
+const RAND_DOWN_FV: u32 = 65;
+const KE_MAT_SN: u32 = 85;
+const MATRIX_YZX: u32 = 89;
+const MATRIX_NO_ROT: u32 = 96;
+const DRAW_MATRIX_WORLD: u32 = 120;
+const DRAW_MATRIX_WORLD_FRONT: u32 = 121;
+const DRAW_MATRIX_WORLD_WOOD: u32 = 123;
+const ANG_MOVE_LOOP: u32 = 211;
+const SCL_MOVE_LOOP: u32 = 212;
+const MATRIX_LOOP_ZXY: u32 = 234;
 
 /// Whether the table record has an update function (+8).
 pub(crate) fn has_update(kind: u32) -> bool {
@@ -202,6 +214,18 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
             let o = use_val(ctx, p, 0);
             part.zero(o, 2);
         }
+        // FUN_1404c4440: the previous angles of pppKeMatSN.
+        KE_MAT_SN => {
+            let o = use_val(ctx, p, 0);
+            part.zero(o + 0x80, 12);
+        }
+        // FUN_1404c06c0 / FUN_1404c07f0: the loop move rate.
+        ANG_MOVE_LOOP | SCL_MOVE_LOOP => {
+            let o = use_val(ctx, p, 1);
+            part.zero(o, 12);
+        }
+        // FUN_1404c6b90 / FUN_1404c6ed0: the position and the axis lengths.
+        DRAW_MATRIX_WORLD_FRONT | DRAW_MATRIX_WORLD_WOOD => world_create(p, part, ctx),
         // FUN_1404c0a70 / FUN_1404c0cd0 / FUN_1404c0eb0: no first key yet.
         POINT_LOOP | ANGLE_LOOP | SCALE_LOOP => {
             let o = use_val(ctx, p, 0);
@@ -216,7 +240,8 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
 pub(crate) fn restart(p: &Program, part: &mut Part, ctx: &mut Ctx) {
     match p.kind {
         ACCELE | ANG_ACCELE | SCL_ACCELE | MOVE | ANG_MOVE | SCL_MOVE | COL_ACCELE | COL_MOVE
-        | POINT | ANGLE | SCALE | COLOR | DRAW_SHAPE_X | KE_TH_SFT => create(p, part, ctx),
+        | POINT | ANGLE | SCALE | COLOR | DRAW_SHAPE_X | KE_TH_SFT | ANG_MOVE_LOOP
+        | SCL_MOVE_LOOP => create(p, part, ctx),
         POINT_LOOP | ANGLE_LOOP | SCALE_LOOP => loop_restart(p, part, ctx),
         crate::ribbon::KIND => crate::ribbon::restart(p, part, ctx),
         crate::tail::KIND => crate::tail::restart(p, part, ctx),
@@ -300,6 +325,18 @@ pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx)
         KE_TH_SFT => ke_th_sft(p, cursor, part, ctx),
         KE_BORN_RND3 => born_rnd3(p, cursor, part, ctx),
         POINT_AP => point_ap(p, cursor, part, ctx),
+        KE_MV_YP_EFF => ke_mv_yp_eff(p, part, ctx),
+        RAND_FLOAT => rand_float(p, cursor, part, ctx),
+        RAND_DOWN_FV => rand_down_fv(p, cursor, part, ctx),
+        KE_MAT_SN => ke_mat_sn(p, part, ctx),
+        MATRIX_YZX => matrix_from(p, part, ctx, math::rot_yzx),
+        MATRIX_LOOP_ZXY => matrix_from(p, part, ctx, math::rot_zxy),
+        ANG_MOVE_LOOP => loop_move_i32(p, cursor, part, ctx),
+        SCL_MOVE_LOOP => loop_move_f32(p, cursor, part, ctx),
+        MATRIX_NO_ROT => matrix_no_rot(p, part, ctx),
+        DRAW_MATRIX_WORLD => draw_matrix_world(p, part, ctx),
+        DRAW_MATRIX_WORLD_FRONT => draw_matrix_world_front(p, part, ctx),
+        DRAW_MATRIX_WORLD_WOOD => draw_matrix_world_wood(p, part, ctx),
         crate::tail::KIND => crate::tail::update(p, cursor, part, ctx),
         crate::thunder::KIND => crate::thunder::update(p, cursor, part, ctx),
         MATRIX_SCL => {
@@ -1209,4 +1246,254 @@ fn point_ap(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
         countdown = byte(ctx, cursor + 0xc);
     }
     part.set_u8(u1 + 1, countdown.wrapping_sub(1));
+}
+
+/// FUN_1404c1ae0 (pppRandFloat): the one-component RandFV. At frame 0 u0
+/// takes rnd·2 (rnd + rnd when byte +0xc is set); at frame 0 or a key the
+/// target (−1: scratch) gains k·r − k.
+fn rand_float(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
+    if !active(part) {
+        return;
+    }
+    let u0 = use_val(ctx, p, 0);
+    if part.frame == 0 {
+        let r = if byte(ctx, cursor + 0xc) == 0 {
+            ctx.rng.unit() * 2.
+        } else {
+            ctx.rng.unit() + ctx.rng.unit()
+        };
+        part.set_f32(u0, r);
+    } else if !key(ctx, part, cursor) {
+        return;
+    }
+    let target = word(ctx, cursor + 4) as i32;
+    if target == -1 {
+        return;
+    }
+    let k = float(ctx, cursor + 8);
+    let t = target as usize;
+    let v = (k * part.f32(u0) - k) + part.f32(t);
+    part.set_f32(t, v);
+}
+
+/// FUN_1404c2840 (pppRandDownFV): u0 takes −rnd at frame 0, or
+/// (−rnd − rnd)·0.5 when byte +0x14 is set. At frame 0 or a key the target
+/// xyz (−1: scratch) gains k_i·r.
+fn rand_down_fv(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
+    if !active(part) {
+        return;
+    }
+    let u0 = use_val(ctx, p, 0);
+    if part.frame == 0 {
+        let mut r = -ctx.rng.unit();
+        if byte(ctx, cursor + 0x14) != 0 {
+            r = (r - ctx.rng.unit()) * 0.5;
+        }
+        part.set_f32(u0, r);
+    } else if !key(ctx, part, cursor) {
+        return;
+    }
+    let target = word(ctx, cursor + 4) as i32;
+    if target == -1 {
+        return;
+    }
+    let t = target as usize;
+    let r = part.f32(u0);
+    for i in 0..3 {
+        let k = float(ctx, cursor + 8 + 4 * i);
+        let v = k * r + part.f32(t + 4 * i);
+        part.set_f32(t + 4 * i, v);
+    }
+}
+
+/// FUN_1404c1510: atan2(p1, p0) in radians, branch for branch as the exe
+/// computes it (constants: DAT_1405b2e48 = −π/2, DAT_140623ab0 = π/2,
+/// DAT_140623c78 = −π, DAT_140623b78 = π). `None` at the origin, where the
+/// exe writes nothing.
+pub(crate) fn ke_angle(p0: f32, p1: f32) -> Option<f32> {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let prod = p0 * p1;
+    let a = if prod <= 0. {
+        if 0. <= prod {
+            if p0 == 0. {
+                if p1 == 0. {
+                    return None;
+                }
+                if 0. < p1 { FRAC_PI_2 } else { -FRAC_PI_2 }
+            } else if p0 <= 0. {
+                PI
+            } else {
+                0.
+            }
+        } else {
+            let base = if 0. < p1 { FRAC_PI_2 } else { -FRAC_PI_2 };
+            (base as f64 - ((p0 / p1) as f64).atan()) as f32
+        }
+    } else {
+        let base = if p0 <= 0. { -PI } else { 0. };
+        (((p1 / p0) as f64).atan() + base as f64) as f32
+    };
+    Some(a)
+}
+
+/// The 0x10000-per-turn word of an angle in radians: `(int)(a · 32768 / π)`.
+fn angle_word(a: f32) -> i32 {
+    models::cvtt(a * 32768. / std::f32::consts::PI)
+}
+
+/// FUN_1404c15f0 (pppKeMvYpEff, even frames): the velocity in u1 becomes two
+/// angles, u0 = pitch atan2(−z, √(x²+y²)) and u0+8 = yaw atan2(x, −y). A
+/// zero velocity, or an atan2 at the origin, leaves its target alone.
+fn ke_mv_yp_eff(p: &Program, part: &mut Part, ctx: &Ctx) {
+    if !active(part) {
+        return;
+    }
+    let (u0, u1) = (use_val(ctx, p, 0), use_val(ctx, p, 1));
+    let (x, y, z) = (part.f32(u1), part.f32(u1 + 4), part.f32(u1 + 8));
+    if x != 0. || y != 0. || z != 0. {
+        if let Some(a) = ke_angle(-y, x) {
+            part.set_i32(u0 + 8, angle_word(a));
+        }
+        let len = (x * x + y * y).abs().sqrt();
+        if let Some(a) = ke_angle(len, -z) {
+            part.set_i32(u0, angle_word(a));
+        }
+    }
+}
+
+/// FUN_1404c4380 (pppKeMatSN, once per VM tick): the matrix at u0+0x40 turns
+/// by the change of the u1 angles since the last tick (old − new, in the
+/// pppMatrixXYZ order); u0+0x80 keeps the new angles. The exe runs it only on
+/// VM ticks (the even part frames), so a second call would see no change.
+fn ke_mat_sn(p: &Program, part: &mut Part, ctx: &Ctx) {
+    if !active(part) {
+        return;
+    }
+    let (u0, u1) = (use_val(ctx, p, 0), use_val(ctx, p, 1));
+    let new = [part.i32(u1), part.i32(u1 + 4), part.i32(u1 + 8)];
+    let old = [
+        part.i32(u0 + 0x80),
+        part.i32(u0 + 0x84),
+        part.i32(u0 + 0x88),
+    ];
+    for (i, n) in new.into_iter().enumerate() {
+        part.set_i32(u0 + 0x80 + 4 * i, n);
+    }
+    let delta: [i32; 3] = std::array::from_fn(|i| old[i].wrapping_sub(new[i]));
+    let mut m = math::rot_xyz(delta);
+    m[3] = [0., 0., 0., 1.];
+    write_matrix(part, u0 + 0x40, &m);
+}
+
+/// FUN_1404c0640 (pppAngMoveLoop): the Move integrator with u0 gaining the
+/// rate only outside a loop catch-up (DAT_142b0efe4).
+fn loop_move_i32(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
+    if !active(part) {
+        return;
+    }
+    let (u0, u1) = (use_val(ctx, p, 0), use_val(ctx, p, 1));
+    if key(ctx, part, cursor) {
+        for i in 0..3 {
+            let r = part
+                .i32(u1 + 4 * i)
+                .wrapping_add(word(ctx, cursor + 4 + 4 * i) as i32);
+            part.set_i32(u1 + 4 * i, r);
+        }
+    }
+    if !ctx.catch_up {
+        for i in 0..3 {
+            let v = part.i32(u0 + 4 * i).wrapping_add(part.i32(u1 + 4 * i));
+            part.set_i32(u0 + 4 * i, v);
+        }
+    }
+}
+
+/// FUN_1404c0700 (pppSclMoveLoop): the float variant of [`loop_move_i32`].
+fn loop_move_f32(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
+    if !active(part) {
+        return;
+    }
+    let (u0, u1) = (use_val(ctx, p, 0), use_val(ctx, p, 1));
+    if key(ctx, part, cursor) {
+        for i in 0..3 {
+            let r = float(ctx, cursor + 4 + 4 * i) + part.f32(u1 + 4 * i);
+            part.set_f32(u1 + 4 * i, r);
+        }
+    }
+    if !ctx.catch_up {
+        for i in 0..3 {
+            let v = part.f32(u0 + 4 * i) + part.f32(u1 + 4 * i);
+            part.set_f32(u0 + 4 * i, v);
+        }
+    }
+}
+
+/// FUN_1404c50e0 (pppRyjMatrixNoRot): the cur matrix is the inverse of the
+/// view (FUN_140478ce0), its axes scaled by u1 and its translation u0.
+fn matrix_no_rot(p: &Program, part: &mut Part, ctx: &Ctx) {
+    let (u0, u1) = (use_val(ctx, p, 0), use_val(ctx, p, 1));
+    let mut m = math::rigid_inverse(&ctx.view);
+    for (c, col) in m.iter_mut().take(3).enumerate() {
+        *col = math::scale(*col, part.f32(u1 + 4 * c));
+    }
+    m[3] = [part.f32(u0), part.f32(u0 + 4), part.f32(u0 + 8), m[3][3]];
+    part.cur = m;
+}
+
+/// The translation matrix [I | u1..u1+2] that the pppRyjDrawMatrixWorld
+/// family keeps in its u1 block (the instance position, set at create).
+fn world_point(part: &Part, u1: usize) -> Mat {
+    let mut m = math::IDENTITY;
+    m[3] = [part.f32(u1), part.f32(u1 + 4), part.f32(u1 + 8), 1.];
+    m
+}
+
+/// FUN_1404c6b90 / FUN_1404c6ed0 (create of pppRyjDrawMatrixWorldFront and
+/// Wood): u1 takes the instance position (DAT_142b0eff0, the xyz of the
+/// copy) and u1+0x10 the world axis lengths (DAT_142b0f010..18).
+fn world_create(p: &Program, part: &mut Part, ctx: &Ctx) {
+    let u1 = use_val(ctx, p, 1);
+    for i in 0..3 {
+        part.set_f32(u1 + 4 * i, ctx.origin[i]);
+        part.set_f32(u1 + 0x10 + 4 * i, ctx.scales[i]);
+    }
+}
+
+/// FUN_1404c69e0 (pppRyjDrawMatrixWorld): the draw matrix is
+/// ede0·(ec60·M)·cur, M the matrix in the u1 block.
+fn draw_matrix_world(p: &Program, part: &mut Part, ctx: &Ctx) {
+    let u1 = use_val(ctx, p, 1);
+    let m = read_matrix(part, u1);
+    let d = math::mul(&ctx.ede0, &math::mul(&ctx.view, &m));
+    part.draw = math::mul(&d, &part.cur);
+}
+
+/// FUN_1404c6a70 (pppRyjDrawMatrixWorldFront): the axes are cur's scaled by
+/// u1+0x10.., the translation ec60·(u1 + cur t); the draw matrix is
+/// ede0 · that.
+fn draw_matrix_world_front(p: &Program, part: &mut Part, ctx: &Ctx) {
+    let u1 = use_val(ctx, p, 1);
+    let view = math::mul(&ctx.view, &world_point(part, u1));
+    let mut d = part.cur;
+    for (c, col) in d.iter_mut().take(3).enumerate() {
+        *col = math::scale(*col, part.f32(u1 + 0x10 + 4 * c));
+    }
+    d[3] = math::apply(&view, part.cur[3]);
+    part.draw = math::mul(&ctx.ede0, &d);
+}
+
+/// FUN_1404c6d90 (pppRyjDrawMatrixWorldWood): the upright billboard of
+/// [`draw_matrix_wood`] with axes scaled by u1+0x10.. and the translation
+/// ede0·ec60·(u1 + cur t).
+fn draw_matrix_world_wood(p: &Program, part: &mut Part, ctx: &Ctx) {
+    let u1 = use_val(ctx, p, 1);
+    let view = math::mul(&ctx.ede0, &math::mul(&ctx.view, &world_point(part, u1)));
+    let mut d = part.cur;
+    for (c, col) in d.iter_mut().take(3).enumerate() {
+        *col = math::scale(*col, part.f32(u1 + 0x10 + 4 * c));
+    }
+    let ee60 = math::mul(&ctx.ede0, &wood(&ctx.ed60));
+    let mut d = math::mul(&ee60, &d);
+    d[3] = math::apply(&view, part.cur[3]);
+    part.draw = d;
 }
