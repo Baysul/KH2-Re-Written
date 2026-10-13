@@ -411,7 +411,7 @@ fn start_viewer(v: &install::Viewer, b: &Bound) -> Result<Running, String> {
         .with_file_name(format!("{}.exe", v.program));
     if !exe.is_file() {
         return Err(format!(
-            "{}.exe is not next to kh2fm.exe. Build all of windows_shell (cargo build -p windows_shell).",
+            "{}.exe is not next to KH2RW Launcher.exe. Build all of windows_shell (cargo build -p windows_shell).",
             v.program
         ));
     }
@@ -1412,10 +1412,7 @@ pub fn main() -> std::process::ExitCode {
         .insert_resource(WinitSettings::game())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: format!(
-                    "KINGDOM HEARTS II FINAL MIX - Final Re:WRITE {}",
-                    env!("CARGO_PKG_VERSION")
-                ),
+                title: "KH2RW Launcher.exe".into(),
                 resolution: WindowResolution::new(1280, 720),
                 ..default()
             }),

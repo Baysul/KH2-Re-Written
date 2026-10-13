@@ -9750,7 +9750,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .insert_resource(ClearColor(Color::srgb(0.06, 0.07, 0.09)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "KH2FM test room (quarantined source) | WASD move, Space jump, Enter/LMB attack, RMB guard, F talk, M menu, F3 debug, Esc".into(),
+                title: "Kingdom Hearts II Re:Written (test room; quarantined source) | WASD move, Space jump, Enter/LMB attack, RMB guard, F talk, M menu, F3 debug, Esc".into(),
                 resolution: (1280, 720).into(),
                 ..default()
             }),
