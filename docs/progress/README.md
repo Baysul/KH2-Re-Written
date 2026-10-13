@@ -18,7 +18,7 @@ A PASS counts one reviewed unit. All other statuses count zero. Unknown required
 | P01 | Installed-source and release boundary | PARTIAL | [record](../../docs/milestones.md) |
 | P02 | Installed edition/build identity | PARTIAL | [record](../../docs/milestones.md) |
 | P03 | Windows/Rust/Bevy environment | PARTIAL | [record](../../docs/milestones.md) |
-| P04 | Durable repository/evidence | PARTIAL | [record](../../docs/milestones.md) |
+| P04 | Durable repository/evidence | PARTIAL | [record](../../docs/milestones.md), [record](../../docs/tasks/T121-public-progress-tracker.md) |
 | P05 | Pinned tool/license audit | PARTIAL | [record](../../docs/milestones.md) |
 | P06 | Native folder picker and source validation | PARTIAL | [record](../../docs/milestones.md) |
 | P07 | Packages/archives/dependencies | PARTIAL | [record](../../docs/milestones.md) |
