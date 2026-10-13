@@ -14,3 +14,5 @@ Read `docs/fidelity-contract.md`, `docs/milestones.md`, `docs/unknowns.md`, and 
 ## Changelog
 
 When an agent finishes a job, add an entry to `CHANGELOG.md` under the next version (the one after the last release; the next version is `0.1.1`). Keep each entry to plain sentences: what a player or the user would notice, grouped under Added, Changed or Fixed. Do not change the version in `Cargo.toml` unless the user asks for a release.
+
+When the user writes "log update", add an entry to `CHANGELOG.md` under the next version for the specific change or job that was just finished, even if it is small. Do this in the same turn and say what was logged. Do not log work that was not finished.
