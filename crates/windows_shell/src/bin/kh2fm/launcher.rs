@@ -1412,7 +1412,10 @@ pub fn main() -> std::process::ExitCode {
         .insert_resource(WinitSettings::game())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "KINGDOM HEARTS II FINAL MIX - Final Re:WRITE alpha 0.1.0".into(),
+                title: format!(
+                    "KINGDOM HEARTS II FINAL MIX - Final Re:WRITE {}",
+                    env!("CARGO_PKG_VERSION")
+                ),
                 resolution: WindowResolution::new(1280, 720),
                 ..default()
             }),
