@@ -13,6 +13,7 @@
 !/Cargo.toml
 !/Cargo.lock
 !/rust-toolchain.toml
+!/build.bat
 !/.github/workflows/*.yml
 !/.github/pull_request_template.md
 !/crates/*/Cargo.toml
