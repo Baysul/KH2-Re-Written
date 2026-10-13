@@ -10,9 +10,3 @@ Read `docs/fidelity-contract.md`, `docs/milestones.md`, `docs/unknowns.md`, and 
 - Nontrivial work requires an ID, gate, owner, prerequisites, build/source identity, steps, exact evidence locations, checks, uncertainty, verdict and next task in `docs/tasks/`. Use PASS, FAIL, NOT RUN, BLOCKED honestly. Unknown or skipped checks do not pass a gate.
 - Resolve public technical claims against pinned primary sources and installed-build observations. A tool's README is not compatibility evidence. No claim of whole-game equivalence from finite opening tests.
 - Preserve user files and saves. Do not switch Steam editions, repair/update the installation, spend money, share data or publish releases without the corresponding user instruction. Local inspection/builds are authorized.
-
-## Changelog
-
-When an agent finishes a job, add an entry to `CHANGELOG.md` under the next version (the one after the last release; the next version is `0.1.1`). Keep each entry to plain sentences: what a player or the user would notice, grouped under Added, Changed or Fixed. Do not change the version in `Cargo.toml` unless the user asks for a release.
-
-When the user writes "log update", add an entry to `CHANGELOG.md` under the next version for the specific change or job that was just finished, even if it is small. Do this in the same turn and say what was logged. Do not log work that was not finished.
