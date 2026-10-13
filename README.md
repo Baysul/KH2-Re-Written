@@ -1,4 +1,4 @@
-# Kingdom Hearts II Final Re:Write
+# Kingdom Hearts II Re:Written
 
 <p align="center">
   <img src="crates/windows_shell/assets/kingdom-hearts-final-rewrite-logo.png" alt="Kingdom Hearts Final Re:WRITE logo" width="480">
