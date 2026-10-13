@@ -44,6 +44,11 @@
 !/tools/*.java
 !/tools/fixtures/*.cs
 !/tools/fixtures/*.c
+# Authored progress tooling and public aggregate evidence only.
+!/tools/progress.py
+!/tools/test_progress.py
+!/docs/progress/coverage.json
+!/docs/progress/summary.json
 /target/
 /.local/
 /private/

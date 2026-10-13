@@ -1,0 +1,60 @@
+name: Verified KH2FM progress
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 13 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kh2fm-progress-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m unittest discover -s tools -p test_progress.py -v
+      - run: python tools/progress.py
+      - run: python tools/progress.py --check
+      - name: Preview
+        run: cat docs/progress/README.md >> "$GITHUB_STEP_SUMMARY"
+
+  refresh:
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m unittest discover -s tools -p test_progress.py -v
+      - run: python tools/progress.py
+      - run: python tools/progress.py --check
+      - name: Commit changed reports
+        run: |
+          git add -- README.md docs/progress/README.md docs/progress/summary.json
+          if git diff --cached --quiet; then
+            echo "Progress is unchanged."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'docs: refresh verified KH2FM progress'
+          git push origin HEAD:main

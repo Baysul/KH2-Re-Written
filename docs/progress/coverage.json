@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "game": "KH2 Final Mix",
+  "baseline": "Steam app 2552430 build 15194255 candidate - supported profile unqualified",
+  "inventories": {
+    "decompilation": {
+      "complete": false,
+      "inventory_evidence": [
+        "docs/research/native-inspection.md",
+        "docs/research/managed-inspection.md"
+      ],
+      "units": [
+        {
+          "id": "CIL-T010-01",
+          "label": "T010 managed method selection 1 - historical decompile, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T010-managed-reader.md"
+          ]
+        },
+        {
+          "id": "CIL-T010-02",
+          "label": "T010 managed method selection 2 - historical decompile, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T010-managed-reader.md"
+          ]
+        },
+        {
+          "id": "CIL-T010-03",
+          "label": "T010 managed method selection 3 - historical decompile, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T010-managed-reader.md"
+          ]
+        },
+        {
+          "id": "CIL-T010-04",
+          "label": "T010 managed method selection 4 - historical decompile, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T010-managed-reader.md"
+          ]
+        }
+      ]
+    },
+    "fidelity": {
+      "complete": false,
+      "inventory_evidence": [
+        "docs/fidelity-contract.md",
+        "docs/unknowns.md"
+      ],
+      "units": []
+    },
+    "roadmap": {
+      "complete": true,
+      "inventory_evidence": [
+        "docs/milestones.md"
+      ],
+      "units": [
+        {
+          "id": "P00",
+          "label": "Scope and fidelity contract",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P01",
+          "label": "Installed-source and release boundary",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P02",
+          "label": "Installed edition/build identity",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P03",
+          "label": "Windows/Rust/Bevy environment",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P04",
+          "label": "Durable repository/evidence",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P05",
+          "label": "Pinned tool/license audit",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P06",
+          "label": "Native folder picker and source validation",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P07",
+          "label": "Packages/archives/dependencies",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P08",
+          "label": "Read-only importer/source-bound cache",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P09",
+          "label": "Reference capture/replay harness",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P10",
+          "label": "Installed executable/runtime research",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P11",
+          "label": "Authoritative simulation boundary",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P12",
+          "label": "Traceable decoded representation",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P13",
+          "label": "Asset/animation inspection app",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P14",
+          "label": "PC rendering/presentation",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P15",
+          "label": "Animation/motion events",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P16",
+          "label": "Rooms/collision/streaming/actors",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P17",
+          "label": "Input/time/RNG/determinism",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P18",
+          "label": "Movement/camera/player states",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P19",
+          "label": "Combat/enemies/reactions",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P20",
+          "label": "Scripts/native services",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P21",
+          "label": "Complete playable slice",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P22",
+          "label": "Progression/party/inventory/systems",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P23",
+          "label": "Native saves/safe vendor import",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P24",
+          "label": "Story/cutscenes/transitions",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P25",
+          "label": "Menus/HUD/settings/EN/JA/fonts",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P26",
+          "label": "Audio/music/synchronization",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P27",
+          "label": "Every world/encounter/mode",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P28",
+          "label": "Campaign and both text options",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P29",
+          "label": "Steam changes/recovery",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P30",
+          "label": "Performance/Windows reliability",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        },
+        {
+          "id": "P31",
+          "label": "Windows package/release qualification",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/milestones.md"
+          ]
+        }
+      ]
+    }
+  }
+}

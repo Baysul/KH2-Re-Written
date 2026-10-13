@@ -18,6 +18,20 @@ A native Windows engine rewrite of **Kingdom Hearts II Final Mix** in Rust, usin
 
 For scope and progress, see the [fidelity contract](docs/fidelity-contract.md), [milestones](docs/milestones.md) and [unknowns](docs/unknowns.md).
 
+<!-- KH2FM-PROGRESS:START -->
+### Verified progress
+
+| Measure | Accepted / tracked | Percentage |
+|---|---:|---:|
+| Complete functions decompiled and checked | 0 / 4 (inventory incomplete) | Unmeasured |
+| Required behavior scenarios verified 1:1 | 0 / 0 (inventory incomplete) | Unmeasured |
+| Final roadmap gates accepted | 0 / 32 | 0.00% |
+
+Whole-game 1:1 coverage is **unmeasured** until the complete function and behavior inventories are qualified. Partial work, synthetic tests and successful builds do not count as 1:1 passes. Gate percentage measures accepted gates, not game size or implementation effort.
+
+[Progress details](docs/progress/README.md) · [Coverage ledger](docs/progress/coverage.json) · [Automatic updates](.github/workflows/progress.yml)
+<!-- KH2FM-PROGRESS:END -->
+
 ## Quick start
 
 You need Windows, your own **legally obtained** Steam copy of Kingdom Hearts HD 1.5 + 2.5 ReMIX, and the pinned Rust toolchain. See [CONTRIBUTING.md](CONTRIBUTING.md#setup).
