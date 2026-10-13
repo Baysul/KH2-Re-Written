@@ -4,9 +4,11 @@
   <img src="crates/windows_shell/assets/kingdom-hearts-final-rewrite-logo.png" alt="Kingdom Hearts Final Re:WRITE logo" width="850">
 </p>
 
-A native Windows rewrite of **Kingdom Hearts II Final Mix** in Rust, using [Bevy](https://bevy.org). It reads your own Steam installation at runtime. No game assets are distributed.
+A native Windows engine rewrite of **Kingdom Hearts II Final Mix** in Rust, using [Bevy](https://bevy.org). It reads your own Steam installation at runtime. No game assets are distributed.
 
-> **Status: early.** A playable test room runs. The rest of the game does not work yet.
+> **Status: very early.** All worlds playable and explorable and works as a sandbox.
+
+> **DISCLAIMER:** If you haven't noticed, this is entirely vibecoded using Claude AI. If you do not like it then you can simply move on with your life.
 
 ## What works
 
@@ -18,7 +20,7 @@ For scope and progress, see the [fidelity contract](docs/fidelity-contract.md), 
 
 ## Quick start
 
-You need Windows, your own Steam copy of KH2 Final Mix, and the pinned Rust toolchain. See [CONTRIBUTING.md](CONTRIBUTING.md#setup).
+You need Windows, your own **legally obtained** Steam copy of Kingdom Hearts HD 1.5 + 2.5 ReMIX, and the pinned Rust toolchain. See [CONTRIBUTING.md](CONTRIBUTING.md#setup).
 
 ```powershell
 cargo build --release -p windows_shell --bin kh2fm --locked
