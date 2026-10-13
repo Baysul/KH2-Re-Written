@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "area_sim"
-version = "0.1.0-alpha.1"
+version = "0.1.1"
 dependencies = [
  "package_reader",
 ]
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "audio_out"
-version = "0.1.0-alpha.1"
+version = "0.1.1"
 
 [[package]]
 name = "autocfg"
@@ -1773,7 +1773,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "effect_vm"
-version = "0.1.0-alpha.1"
+version = "0.1.1"
 dependencies = [
  "package_reader",
 ]
@@ -1882,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "event_sim"
-version = "0.1.0-alpha.1"
+version = "0.1.1"
 dependencies = [
  "package_reader",
 ]
@@ -1904,7 +1904,7 @@ dependencies = [
 
 [[package]]
 name = "field_collision"
-version = "0.1.0-alpha.1"
+version = "0.1.1"
 dependencies = [
  "package_reader",
 ]
@@ -3109,7 +3109,7 @@ dependencies = [
 
 [[package]]
 name = "package_reader"
-version = "0.1.0-alpha.1"
+version = "0.1.1"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -3229,7 +3229,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "player_sim"
-version = "0.1.0-alpha.1"
+version = "0.1.1"
 
 [[package]]
 name = "png"
@@ -3783,7 +3783,7 @@ dependencies = [
 
 [[package]]
 name = "skate_source"
-version = "0.1.0-alpha.1"
+version = "0.1.1"
 
 [[package]]
 name = "slab"
@@ -3817,7 +3817,7 @@ dependencies = [
 
 [[package]]
 name = "source_identity"
-version = "0.1.0-alpha.1"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4635,7 +4635,7 @@ checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 
 [[package]]
 name = "windows_shell"
-version = "0.1.0-alpha.1"
+version = "0.1.1"
 dependencies = [
  "area_sim",
  "audio_out",
