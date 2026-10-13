@@ -61,9 +61,16 @@ Public outputs: `docs/progress/coverage.json`, `docs/progress/summary.json`,
 - PASS `cargo run -p windows_shell --locked -- --frames 180`, exit 0. This is a
   synthetic window; its default controller mapping does not establish fidelity.
 - PASS diff whitespace, changed-file review and reporting provenance review.
-- NOT RUN at this record's initial commit: hosted workflow execution and scheduled
-  recurrence. Verify the push-triggered run after publication. A future daily
-  trigger cannot be observed in this session.
+- PASS hosted push-triggered validation and refresh:
+  [run 38475462537](https://github.com/BurBaGlurbus/KH2-Re-Written/actions/runs/38475462537)
+  on reporting commit `6ebc5b9`. Both jobs succeeded; unchanged outputs were skipped.
+- Automatic changed-output verification: add this record to P04's evidence links
+  in the ledger and publish the ledger update without regenerating outputs locally.
+  The next workflow must generate and commit the new report/ledger digest. This
+  exercises the same refresh used by the daily schedule without changing any gate
+  verdict. Record its result in the private delivery receipt after publication.
+- NOT RUN future scheduled recurrence; the daily trigger cannot be observed in
+  this session.
 
 ## Uncertainty, verdict and next task
 

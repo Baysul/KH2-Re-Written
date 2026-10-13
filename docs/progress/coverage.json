@@ -95,7 +95,8 @@
           "label": "Durable repository/evidence",
           "status": "PARTIAL",
           "evidence": [
-            "docs/milestones.md"
+            "docs/milestones.md",
+            "docs/tasks/T121-public-progress-tracker.md"
           ]
         },
         {
