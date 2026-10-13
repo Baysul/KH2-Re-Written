@@ -988,7 +988,7 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     .insert_resource(ClearColor(Color::BLACK))
     .add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            title: "KINGDOM HEARTS II FINAL MIX — event (rewrite)".into(),
+            title: "Kingdom Hearts II Re:Written — event (rewrite)".into(),
             resolution: (1280, 720).into(),
             ..default()
         }),
