@@ -26,6 +26,10 @@ fontdue = { version = "=0.9.4", default-features = false, features = ["std"] }
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 bevy = { version = "=0.19.1", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_log", "bevy_asset", "bevy_window", "bevy_winit", "bevy_render", "bevy_camera", "bevy_image", "bevy_sprite", "bevy_sprite_render", "bevy_core_pipeline", "bevy_pbr", "bmp", "bevy_gilrs"] }
 
+[[bin]]
+name = "KH2RW"
+path = "src/bin/kh2fm/main.rs"
+
 [features]
 # Riding Skate 3 on J (reads the user's own Skate 3 disc). A build with it
 # is a GPL-3.0 combined work.

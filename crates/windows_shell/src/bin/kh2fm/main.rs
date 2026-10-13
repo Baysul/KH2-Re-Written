@@ -49,7 +49,7 @@ fn run(program: &str, args: Vec<PathBuf>) -> ExitCode {
         "tt" | "eh" => test_room::main(args, false),
         "event" => cutscene::main(args, false),
         "--version" => {
-            println!("kh2fm {}", env!("CARGO_PKG_VERSION"));
+            println!("KH2RW {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         _ => {
