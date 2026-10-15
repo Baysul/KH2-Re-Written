@@ -21,7 +21,7 @@ use bevy::{
     shader::ShaderRef,
     sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPlugin},
 };
-use data::sequence::Quad;
+use data::sprite_sequence::Quad;
 use std::collections::HashMap;
 
 /// Visible layout width at 16:9 (512 x 4/3).

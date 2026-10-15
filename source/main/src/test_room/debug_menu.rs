@@ -1084,8 +1084,8 @@ fn scroll(cursor: usize, top: usize) -> usize {
     }
 }
 
-fn rect(x0: f32, y0: f32, x1: f32, y1: f32, rgba: [f32; 4]) -> sequence::Quad {
-    sequence::Quad {
+fn rect(x0: f32, y0: f32, x1: f32, y1: f32, rgba: [f32; 4]) -> sprite_sequence::Quad {
+    sprite_sequence::Quad {
         corners: [[x0, y0], [x1, y0], [x0, y1], [x1, y1]],
         uv: [0, 0, 1, 1],
         colors: [rgba; 4],
@@ -1096,16 +1096,16 @@ fn rect(x0: f32, y0: f32, x1: f32, y1: f32, rgba: [f32; 4]) -> sequence::Quad {
 /// The menu's draws: the box and highlight bar on `white`, the text on the
 /// system font sheet `font_sheet`.
 pub fn draws(view: &View, white: usize, font_sheet: usize, widths: &[u8]) -> Vec<Draw> {
-    let font = command::Font { widths, pad: 1 };
+    let font = field_command_menu::Font { widths, pad: 1 };
     let [x0, y0, x1, y1] = BOX;
     let fit = |text: &[u8], size: f32, width: f32| {
-        size.min(size * width.max(1.) / command::text_width(text, &font, size).max(1.))
+        size.min(size * width.max(1.) / field_command_menu::text_width(text, &font, size).max(1.))
     };
     let mut shapes = vec![rect(x0, y0, x1, y1, [0.04, 0.04, 0.06, 0.85])];
     let mut glyphs = Vec::new();
     let cell = 24. * TEXT_SIZE / 18.;
     let line = |y: f32| y + (ROW_HEIGHT - cell) / 2.;
-    glyphs.extend(command::text_quads_sized(
+    glyphs.extend(field_command_menu::text_quads_sized(
         &view.heading,
         [x0 + MARGIN, line(y0 + 6.)],
         [1.; 4],
@@ -1129,7 +1129,7 @@ pub fn draws(view: &View, white: usize, font_sheet: usize, widths: &[u8]) -> Vec
         } else {
             [0.5, 0.5, 0.5, 1.]
         };
-        glyphs.extend(command::text_quads_sized(
+        glyphs.extend(field_command_menu::text_quads_sized(
             label,
             [x0 + MARGIN, line(y)],
             colour,
@@ -1137,12 +1137,15 @@ pub fn draws(view: &View, white: usize, font_sheet: usize, widths: &[u8]) -> Vec
             fit(
                 label,
                 TEXT_SIZE,
-                x1 - x0 - MARGIN * 2. - command::text_width(value, &font, TEXT_SIZE) - 8.,
+                x1 - x0
+                    - MARGIN * 2.
+                    - field_command_menu::text_width(value, &font, TEXT_SIZE)
+                    - 8.,
             ),
         ));
         if !value.is_empty() {
-            let w = command::text_width(value, &font, TEXT_SIZE);
-            glyphs.extend(command::text_quads_sized(
+            let w = field_command_menu::text_width(value, &font, TEXT_SIZE);
+            glyphs.extend(field_command_menu::text_quads_sized(
                 value,
                 [x1 - MARGIN - w, line(y)],
                 colour,
@@ -1151,7 +1154,7 @@ pub fn draws(view: &View, white: usize, font_sheet: usize, widths: &[u8]) -> Vec
             ));
         }
     }
-    glyphs.extend(command::text_quads_sized(
+    glyphs.extend(field_command_menu::text_quads_sized(
         &view.footer,
         [x0 + MARGIN, line(y1 - ROW_HEIGHT - 6.)],
         [0.7, 0.7, 0.7, 1.],

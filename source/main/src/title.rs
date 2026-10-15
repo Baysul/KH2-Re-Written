@@ -13,24 +13,24 @@ use bevy::{
     prelude::*,
     render::view::screenshot::{Screenshot, ScreenshotCaptured},
 };
-use data::probe::ProbeSource;
-use data::sequence::Quad;
+use data::probe_source::ProbeSource;
+use data::sprite_sequence::Quad;
 use serde::Deserialize;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
-use visual::command::Font;
 use visual::controller::{self, Pad};
 use visual::fade::{self, Fade};
+use visual::field_command_menu::Font;
 use visual::hud::{self, SystemFont};
 use visual::input;
-use visual::layout::{self, Menu2ld};
+use visual::menu_screen::{self, Menu2ld};
 use visual::new_game::{self, NewGame, Texts};
 use visual::overlay::{Ui2dFrame, Ui2dPlugin};
 use visual::sound::{self, Banks, Music};
-use visual::sprite::Sheet;
+use visual::sprite_player::Sheet;
 use visual::title::{Action, Event, State, Title};
 use visual::title_banner;
 
@@ -290,7 +290,7 @@ fn tick(
     s.snapshot.clear();
     if let Some(t) = &s.title {
         for task in std::iter::once(&t.main).chain(t.cursor_layout.as_ref()) {
-            for b in layout::draw(&s.menu, task, [0, 0]) {
+            for b in menu_screen::draw(&s.menu, task, [0, 0]) {
                 s.snapshot.push((s.image_sheets[b.image], b.quads));
             }
         }
@@ -627,7 +627,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     }
     source.verify_session()?;
     let l = &config.title;
-    let mut menu = layout::load(&source, &l.index, l.ordinal, l.name_hash)?;
+    let mut menu = menu_screen::load(&source, &l.index, l.ordinal, l.name_hash)?;
     // The owner's edits [rebuild addition]: a shorter copyright hold and the
     // "Final Re:WRITE" banner.
     let copyright_cut = title_banner::shorten_copyright(&mut menu.layout);

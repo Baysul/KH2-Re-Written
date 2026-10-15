@@ -8,8 +8,8 @@
 //! The ring fill uses the original's depth trick: depth-only masks are drawn
 //! just before each ring, and depth-tested rings only show where their z is
 //! greater than the mask's. `Canvas` reproduces that in software.
-use data::sequence::{Modifiers, Player, Quad, Sequence};
-use player::camera::wrap;
+use data::sprite_sequence::{Modifiers, Player, Quad, Sequence};
+use player::follow_camera::wrap;
 
 /// X origin added to every gauge sprite and mask (literal 0x55). Outside
 /// 4:3 the HUD anchors right-half elements 85 units further right and

@@ -2,7 +2,7 @@
 //! text from Windows' own fonts, all as `Ui2dFrame` quads. Coordinates are
 //! a 1280x720 design space mapped onto the 16:9 layout space.
 use bevy::prelude::*;
-use data::sequence::Quad;
+use data::sprite_sequence::Quad;
 use std::collections::HashMap;
 use visual::overlay::{Sheet, Ui2dFrame, WIDE_WIDTH};
 

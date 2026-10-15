@@ -1,16 +1,14 @@
-﻿//! Reads everything one event needs from the bound installation, by the
+//! Reads everything one event needs from the bound installation, by the
 //! names the event script itself gives.
 use data::{
-    effect,
-    event::{self, Command, Load},
+    event_script::{self, Command, Load},
     model_inspection::{self, InspectionModel, ModelItem, ModelOptions},
     model_inspection_textures::{TextureMode, UvProfile},
     model_pose::PoseProfile,
     motion::{self, InterpolatedMotion},
-    motion_trigger,
-    named::Library,
-    objentry,
-    probe::ProbeSource,
+    motion_trigger, object_effect, objentry,
+    path_lookup::Library,
+    probe_source::ProbeSource,
 };
 use std::collections::{BTreeMap, HashMap};
 use visual::hud::{self, SystemFont};
@@ -47,7 +45,7 @@ pub struct FrameTrigger {
 /// motion triggers of the event's animations.
 pub struct EffectFiles {
     /// ReadEffect PAX files (`event/effect/<name>.pax`) by their Id.
-    pub paxes: Vec<(i16, effect::Pax)>,
+    pub paxes: Vec<(i16, object_effect::Pax)>,
     /// Frame triggers by (actor id, script animation path).
     pub triggers: HashMap<(i16, String), Vec<FrameTrigger>>,
 }
@@ -72,7 +70,7 @@ pub struct Loaded {
     /// ReadEffect PAX files and motion triggers for the effect player.
     pub paxes: EffectFiles,
     /// The resident common effect textures (`effect/texcommon.dpd`).
-    pub texcommon: Option<effect::Dpd>,
+    pub texcommon: Option<object_effect::Dpd>,
     pub summary: serde_json::Value,
 }
 
@@ -96,7 +94,7 @@ pub fn load(source: &ProbeSource, id: &EventId) -> Result<Loaded> {
     source.verify_session()?;
     let mut library = Library::open(source)?;
     let ard = library.read(&format!("ard/{LANGUAGE}/{}{:02}.ard", id.world, id.area))?;
-    let commands = event::read(event::find_in_ard(&ard, &id.name)?)?;
+    let commands = event_script::read(event_script::find_in_ard(&ard, &id.name)?)?;
     let map = library.read(&format!("map/{}{:02}.map", id.world, id.area))?;
     let room = room::load_room_archive(&map, None)?;
 
@@ -255,14 +253,14 @@ pub fn load(source: &ProbeSource, id: &EventId) -> Result<Loaded> {
     let mut pax_files = Vec::new();
     for (id, name) in effect_files {
         let bytes = library.read(&format!("event/effect/{name}.pax"))?;
-        pax_files.push((id, effect::read_pax(&bytes)?));
+        pax_files.push((id, object_effect::read_pax(&bytes)?));
     }
     let paxes = EffectFiles {
         paxes: pax_files,
         triggers,
     };
     let texcommon = match library.read("effect/texcommon.dpd") {
-        Ok(bytes) => Some(effect::read_dpd(&bytes)?),
+        Ok(bytes) => Some(object_effect::read_dpd(&bytes)?),
         Err(e) => {
             eprintln!("effect/texcommon.dpd unavailable: {e}");
             None

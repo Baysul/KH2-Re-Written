@@ -1,6 +1,6 @@
 //! Research probe: decodes one event script from an installed ARD and prints
 //! its commands.
-use data::{event, named::Library, probe::ProbeSource};
+use data::{event_script, path_lookup::Library, probe_source::ProbeSource};
 use std::path::PathBuf;
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -11,8 +11,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let source = ProbeSource::bind(&PathBuf::from(&args[0]), &PathBuf::from(&args[1]))?;
     let mut library = Library::open(&source)?;
     let ard = library.read(args[2].to_str().ok_or("name not UTF-8")?)?;
-    let script = event::find_in_ard(&ard, args[3].to_str().ok_or("name not UTF-8")?)?;
-    for command in event::read(script)? {
+    let script = event_script::find_in_ard(&ard, args[3].to_str().ok_or("name not UTF-8")?)?;
+    for command in event_script::read(script)? {
         println!("{command:?}");
     }
     Ok(())

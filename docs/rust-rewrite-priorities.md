@@ -24,7 +24,7 @@ The project is already written largely in Rust. The work is to finish and valida
 - **Exists:** `source`, bounded readers, launcher checks and session-bound chunk verification. [T080](tasks/T080-launcher-and-session-check.md) describes what the fast path does and does not verify. The probe code still explicitly handles a quarantined, unqualified manifest.
 - **Essential work:** finish build/edition/shared/language qualification; distinguish research admission from supported gameplay; audit all entry points and reads; reject changed or unsupported sources without accepting a remembered path or cache as proof. Extend readers only for actual needed formats, preserving unknown fields.
 - **Completion evidence:** synthetic corruption and admission tests, independently checked decoded records, complete dependency identity, and refusal of unsupported builds. Add transactional source-bound caching when needed; cache never replaces session validation.
-- **Gates:** P02, P06–P08, P12, P29. **Locations:** `source`, `data/src/probe.rs`, launcher install code.
+- **Gates:** P02, P06–P08, P12, P29. **Locations:** `validation`, `data/src/probe_source.rs`, launcher install code.
 
 ### 3. Player movement, collision, camera and action transitions
 

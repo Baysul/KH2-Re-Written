@@ -12,10 +12,9 @@ use bevy::prelude::Vec3;
 use collision::{Body, Query};
 use data::{
     ard::{self, tag},
-    bar,
-    named::Library,
-    objentry,
-    probe::ProbeSource,
+    bar, objentry,
+    path_lookup::Library,
+    probe_source::ProbeSource,
     room_collision,
 };
 use std::{collections::HashMap, sync::Arc};

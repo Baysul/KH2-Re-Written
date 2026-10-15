@@ -4,7 +4,7 @@
 //! animation from the command's frame, one tick = half an event frame.
 //! Nodes no command reaches play the model's default animation.
 use bevy::prelude::*;
-use data::event::Command;
+use data::event_script::Command;
 use std::collections::HashMap;
 
 /// Ticks per event frame (the exe runs events at dt 2).

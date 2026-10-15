@@ -382,8 +382,8 @@ fn made_config(dir: &Path, b: &Bound, key: &str) -> Result<PathBuf, String> {
         return Ok(path);
     }
     let fail = |e: Box<dyn std::error::Error>| format!("The game files could not be read: {e}");
-    let source = data::probe::ProbeSource::bind(&b.folder, &b.manifest).map_err(fail)?;
-    let library = data::named::Library::open(&source).map_err(fail)?;
+    let source = data::probe_source::ProbeSource::bind(&b.folder, &b.manifest).map_err(fail)?;
+    let library = data::path_lookup::Library::open(&source).map_err(fail)?;
     // The first package holding the name, as in the configs these were
     // made from (se/se000 is also in the sixth package).
     let find = |name: &str| {
@@ -857,7 +857,7 @@ mod tests {
             Some((
                 "Image/dt/kh2_first.hed".to_owned(),
                 name.len(),
-                data::named::md5(name.as_bytes()),
+                data::path_lookup::md5(name.as_bytes()),
             ))
         };
         write_made_configs(&f.0, "synthetic-identity", &find).unwrap();
@@ -885,7 +885,7 @@ mod tests {
         let title: serde_json::Value =
             serde_json::from_slice(&fs::read(f.0.join("auto-title.json")).unwrap()).unwrap();
         let hash: Vec<u8> = serde_json::from_value(title["music"]["name_hash"].clone()).unwrap();
-        assert_eq!(hash, data::named::md5(b"vagstream/Title.win32.scd"));
+        assert_eq!(hash, data::path_lookup::md5(b"vagstream/Title.win32.scd"));
         // A name the install lacks is reported by name.
         let err = write_made_configs(&f.0, "x", &|_: &str| None).unwrap_err();
         assert!(err.contains("is not in the installed game files"), "{err}");

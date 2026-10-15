@@ -2,7 +2,7 @@
 //! (type 28): props placing SEQD animation groups at positions and start
 //! times, grouped into scenes (layout read by FUN_140194d60; field meaning
 //! from FUN_140194550 / FUN_140194780 / FUN_1401948c0).
-use crate::sequence::{self, Sequence};
+use crate::sprite_sequence::{self, Sequence};
 use std::io;
 
 fn invalid(m: &str) -> io::Error {
@@ -67,7 +67,7 @@ pub fn read_layd(bytes: &[u8]) -> io::Result<Layout> {
     for k in 0..seq_count {
         let at = i32_at(bytes, seqs_at + 4 * k)?;
         let at = usize::try_from(at).map_err(|_| invalid("negative SEQD offset"))?;
-        sequences.push(sequence::read(
+        sequences.push(sprite_sequence::read(
             bytes
                 .get(at..)
                 .ok_or_else(|| invalid("SEQD outside LAYD"))?,
@@ -140,7 +140,7 @@ fn group_length(sequence: &Sequence, group: usize) -> i32 {
     let mut end = 0;
     for a in &sequence.animations[sequence.groups[group].animations.clone()] {
         if end < a.frames[1] {
-            end = a.frames[1] - (a.flags & sequence::LAST_CUT != 0) as i32;
+            end = a.frames[1] - (a.flags & sprite_sequence::LAST_CUT != 0) as i32;
         }
     }
     end + 1
@@ -156,7 +156,7 @@ pub struct ScenePlayer {
     pub state: u8,
     end: f32,
     looping: bool,
-    players: Vec<sequence::Player>,
+    players: Vec<sprite_sequence::Player>,
 }
 
 impl ScenePlayer {
@@ -184,7 +184,7 @@ impl ScenePlayer {
                 .any(|p| layout.sequences[p.sequence].groups[p.group].play_count == 0),
             players: props
                 .iter()
-                .map(|p| sequence::Player::new(&layout.sequences[p.sequence], p.group))
+                .map(|p| sprite_sequence::Player::new(&layout.sequences[p.sequence], p.group))
                 .collect(),
         }
     }
@@ -229,7 +229,7 @@ impl ScenePlayer {
         &'a self,
         layout: &'a Layout,
         offset: [i32; 2],
-    ) -> impl Iterator<Item = (&'a Prop, &'a sequence::Player, [f32; 2])> {
+    ) -> impl Iterator<Item = (&'a Prop, &'a sprite_sequence::Player, [f32; 2])> {
         let shown = matches!(self.state, 2 | 3);
         layout.props[layout.scenes[self.scene].props.clone()]
             .iter()
@@ -325,7 +325,7 @@ mod tests {
             put(&mut b, at + 4, o);
         }
         b[112..116].copy_from_slice(&[0, 0, 1, 0]);
-        put(&mut b, 116, sequence::LINEAR);
+        put(&mut b, 116, sprite_sequence::LINEAR);
         put(&mut b, 116 + 12, end);
         b[260..264].copy_from_slice(&[0, 0, 1, 0]);
         b[264..266].copy_from_slice(&plays.to_le_bytes());

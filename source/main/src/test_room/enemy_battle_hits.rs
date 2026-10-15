@@ -245,7 +245,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         }
         if battle.contacts.defeat_reward(battle.brain.hp()) {
             let low = rt.sora_hp * 2 <= rt.sora_target.max_hp;
-            let exp = player::prize::kill_exp(
+            let exp = player::enemy_prizes::kill_exp(
                 battle.assets.exp.0,
                 battle.assets.exp.1,
                 rt.difficulty == combat::Difficulty::Critical,
@@ -262,7 +262,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 let floor = world
                     .floor(at[0], at[2], at[1] + 30.)
                     .unwrap_or(at[1].max(0.));
-                for (kind, count) in player::prize::drops(
+                for (kind, count) in player::enemy_prizes::drops(
                     &prize.counts,
                     1. + player.abilities.jackpot,
                     player.abilities.drive_converter,
@@ -273,7 +273,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                             rt.rng.range(0., 1.),
                             rt.rng.range(0., 1.),
                         ];
-                        rt.orbs.push(player::prize::Orb::spawn(
+                        rt.orbs.push(player::enemy_prizes::Orb::spawn(
                             kind,
                             [at[0], floor.max(at[1]) + 20., at[2]],
                             random,

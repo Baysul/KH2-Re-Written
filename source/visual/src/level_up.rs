@@ -2,9 +2,9 @@
 //! FUN_14017ddc0 queues up to three, FUN_14017e1d0 starts them as one
 //! batch of 'gaug' sprites stacked by the group's padding, and
 //! FUN_14017d6f0 draws the title, level and two text lines over each.
-use crate::command::{Font, text_quads_sized, text_width};
+use crate::field_command_menu::{Font, text_quads_sized, text_width};
 use crate::gauge::Draw;
-use data::sequence::{Modifiers, Player, Sequence};
+use data::sprite_sequence::{Modifiers, Player, Sequence};
 use std::collections::VecDeque;
 
 /// DAT_14071ad78: the {one line, two lines} groups by form (0 = Sora).

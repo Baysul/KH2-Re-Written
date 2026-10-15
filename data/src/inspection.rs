@@ -2,7 +2,7 @@
 //! they do not infer font banks, filtering, glyph meaning or gameplay rules.
 use crate::{
     hd_image::{DecodedHdImage, HdPixelDecodeProfile, decode_hd_image_with_profile},
-    probe::ProbeSource,
+    probe_source::ProbeSource,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -92,7 +92,7 @@ pub fn read_selected_images(
                 .filter(|entry| entry.name_hash == item.name_hash)
                 .ok_or("image entry identity differs from HED")?;
             let replacements =
-                crate::replacement::read_all_replacements(&mut checked.reader, entry)?;
+                crate::replacement_payload::read_all_replacements(&mut checked.reader, entry)?;
             for replacement in replacements {
                 storage_bytes += replacement.bytes.len();
                 if storage_bytes > 128 * 1024 * 1024 {

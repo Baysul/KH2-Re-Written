@@ -8,9 +8,9 @@ use super::{
     enemy_gallery::EnemyGallery,
 };
 use bevy::prelude::*;
-use data::{motion::SelectedMotion, motion_eval, probe::ProbeSource};
+use data::{motion::SelectedMotion, motion_eval, probe_source::ProbeSource};
 use player::{
-    World, combat, dusk, physics,
+    World, actor_physics, combat, dusk,
     shadow::{self, ScriptRandom, Shadow},
     soldier,
 };
@@ -383,7 +383,7 @@ pub fn supported(e: &Entry) -> bool {
 }
 pub fn target_params(source: &ProbeSource) -> Result<player::targeting::Params, String> {
     source.verify_session().map_err(|e| e.to_string())?;
-    let mut lib = data::named::Library::open(source).map_err(|e| e.to_string())?;
+    let mut lib = data::path_lookup::Library::open(source).map_err(|e| e.to_string())?;
     let system = lib.read("03system.bin").map_err(|e| e.to_string())?;
     let pref = super::bar_entry(&system, b"pref").map_err(|e| e.to_string())?;
     let plyr = super::bar_entry(pref, b"plyr").map_err(|e| e.to_string())?;
@@ -413,7 +413,7 @@ pub fn target_params(source: &ProbeSource) -> Result<player::targeting::Params, 
     Ok(params)
 }
 pub fn lock_range(source: &ProbeSource) -> Result<f32, String> {
-    let mut lib = data::named::Library::open(source).map_err(|e| e.to_string())?;
+    let mut lib = data::path_lookup::Library::open(source).map_err(|e| e.to_string())?;
     let system = lib.read("03system.bin").map_err(|e| e.to_string())?;
     let pref = super::bar_entry(&system, b"pref").map_err(|e| e.to_string())?;
     let sstm = super::bar_entry(pref, b"sstm").map_err(|e| e.to_string())?;
@@ -607,7 +607,7 @@ impl BattleActor {
                     dusk::Input::arena(
                         player,
                         player,
-                        physics::ObjParams::defaults(self.assets.sstm.fall_max).turn,
+                        actor_physics::ObjParams::defaults(self.assets.sstm.fall_max).turn,
                     ),
                     &self.clips,
                     &Arena(world),
@@ -617,7 +617,7 @@ impl BattleActor {
                     dusk::Input::arena(
                         player,
                         player,
-                        physics::ObjParams::defaults(self.assets.sstm.fall_max).turn,
+                        actor_physics::ObjParams::defaults(self.assets.sstm.fall_max).turn,
                     ),
                     &self.clips,
                     &Arena(world),

@@ -2,7 +2,7 @@
 //! selected motions (helpers, joint order, constraints, activations,
 //! limiters, expressions, root position, inverse curves), decoded with the
 //! public OpenKH motion.md layouts. Output stays outside Git.
-use data::{model_inspection, motion, probe::ProbeSource};
+use data::{model_inspection, motion, probe_source::ProbeSource};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
@@ -189,7 +189,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .entries
             .get(model.ordinal)
             .ok_or("model entry absent")?;
-        let original = data::original::read_original(&mut checked.reader, entry)?;
+        let original = data::original_payload::read_original(&mut checked.reader, entry)?;
         write("model-original.bin".into(), &original.bytes)?;
         let mut mset = source.open_index(&set.index)?;
         let entry = mset
@@ -198,7 +198,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .get(set.ordinal)
             .filter(|e| e.name_hash == set.name_hash)
             .ok_or("motion set entry absent")?;
-        let original = data::original::read_original(&mut mset.reader, entry)?;
+        let original = data::original_payload::read_original(&mut mset.reader, entry)?;
         let table = data::bar::read_bar(&original.bytes)?;
         for (selected, id) in motions.iter().zip(&selection.motion_ids) {
             let e = &table.entries[selected.slot];

@@ -1192,7 +1192,7 @@ fn triangle(f: &mut Ui2dFrame, p: &Paint, pts: [[f32; 2]; 3], c: Rgba) {
     let at = |[x, y]: [f32; 2]| paint::to_layout(x, y);
     f.draws.push((
         p.white,
-        vec![data::sequence::Quad {
+        vec![data::sprite_sequence::Quad {
             corners: [at(pts[0]), at(pts[1]), at(pts[2]), at(pts[1])],
             uv: [1, 1, 3, 3],
             colors: [c; 4],

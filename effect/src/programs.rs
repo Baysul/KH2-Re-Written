@@ -5,7 +5,7 @@
 use crate::math::{self, Mat, Vec4};
 use crate::models;
 use crate::{Ctx, Part, Quad, key_i32};
-use data::effect::{self, Program, f32_at, i16_at, u32_at};
+use data::object_effect::{self, Program, f32_at, i16_at, u32_at};
 
 pub(crate) struct Birth {
     pub entry: usize,
@@ -663,7 +663,7 @@ fn shape_advance(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
     let o = use_val(ctx, p, 0);
     let index = part.i16(o + 2) as u16;
     let previous = part.i16(o + 4) as u16;
-    let (wait, flag) = effect::shape_sequence(b, anim, previous as usize).unwrap_or((1, 0));
+    let (wait, flag) = object_effect::shape_sequence(b, anim, previous as usize).unwrap_or((1, 0));
     part.set_i16(o + 4, index as i16);
     let speed = i16_at(b, cursor + 8).unwrap_or(0);
     let t = (part.i16(o) as u16).wrapping_add(speed as u16);
@@ -671,7 +671,7 @@ fn shape_advance(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
     if wait as i32 <= t as i32 {
         part.set_i16(o, t.wrapping_sub(wait as u16) as i16);
         part.set_i16(o + 2, index.wrapping_add(1) as i16);
-        let count = effect::shape_sequence_count(b, anim).unwrap_or(0);
+        let count = object_effect::shape_sequence_count(b, anim).unwrap_or(0);
         if count as i32 <= index.wrapping_add(1) as i32 {
             part.set_i16(o, 0);
             if flag & 0x80 != 0 {
@@ -708,7 +708,7 @@ fn draw_shape(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
 pub(crate) fn emit_sprites(ctx: &mut Ctx, anim: usize, index: usize, m: &Mat, packet: [u8; 4]) {
     let b = &ctx.dpd.bytes;
     let packet: [f32; 4] = packet.map(|c| c as f32 / 128.);
-    let Ok(sprites) = effect::shape_frame(b, anim, index) else {
+    let Ok(sprites) = object_effect::shape_frame(b, anim, index) else {
         return;
     };
     let address = i16_at(b, anim + 0x10 + index * 8).unwrap_or(0) as isize;

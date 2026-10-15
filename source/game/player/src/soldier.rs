@@ -4,7 +4,7 @@
 //! special step/flying/capture branches remain explicit faults.
 pub use crate::dusk::{Env, Input, Reaction};
 use crate::shadow::ScriptRandom;
-use crate::{combat, physics};
+use crate::{actor_physics, combat};
 
 pub trait Clips: crate::dusk::Clips {
     /// Qualified RANGE events 3/24/30 suppress the generic airborne Y result.
@@ -126,7 +126,7 @@ pub struct Soldier {
     pub yaw: f32,
     pub hp: i32,
     pub stats: combat::TargetStats,
-    pub sstm: physics::Sstm,
+    pub sstm: actor_physics::Sstm,
     pub motion: usize,
     pub motion_tick: u32,
     pub motion_serial: u64,
@@ -137,7 +137,7 @@ pub struct Soldier {
     pub airborne: bool,
     /// Script SysObj wish vector, before the physics consumer clears its Y.
     pub wish_motion: [f32; 4],
-    air: Option<physics::Arc>,
+    air: Option<actor_physics::Arc>,
     air_velocity: [f32; 2],
     blend_duration: u32,
     blend_elapsed: u32,
@@ -146,16 +146,16 @@ pub struct Soldier {
     queue: Vec<ActKind>,
     record: combat::HitRecord,
     desired_yaw: Option<f32>,
-    knock: Option<physics::Knock>,
-    blow: Option<physics::Blow>,
-    sampler: physics::Sampler,
+    knock: Option<actor_physics::Knock>,
+    blow: Option<actor_physics::Blow>,
+    sampler: actor_physics::Sampler,
 }
 impl Soldier {
     pub fn new(
         position: [f32; 3],
         yaw: f32,
         stats: combat::TargetStats,
-        sstm: physics::Sstm,
+        sstm: actor_physics::Sstm,
     ) -> Self {
         Self {
             position,
@@ -187,7 +187,7 @@ impl Soldier {
             desired_yaw: None,
             knock: None,
             blow: None,
-            sampler: physics::Sampler::default(),
+            sampler: actor_physics::Sampler::default(),
         }
     }
     pub fn alive(&self) -> bool {
@@ -275,7 +275,7 @@ impl Soldier {
                 speed = self.sstm.blow_speed
             }
             let d = horizontal(direction);
-            self.blow = Some(physics::Blow::new(
+            self.blow = Some(actor_physics::Blow::new(
                 [d[0] * speed, up, d[2] * speed],
                 &self.sstm,
             ));
@@ -286,7 +286,7 @@ impl Soldier {
             self.reaction = Reaction::Blow { back };
             self.reaction_motion(if back { 18 } else { 16 });
         } else if class == 3 {
-            self.knock = physics::Knock::new(
+            self.knock = actor_physics::Knock::new(
                 horizontal(direction),
                 self.sstm
                     .knock_strength(attack.knockback[0], class, attack.reaction),
@@ -317,7 +317,7 @@ impl Soldier {
             hit_back
         };
         self.knock = if strength > 0. {
-            physics::Knock::new([-self.yaw.sin(), 0., -self.yaw.cos()], strength, 0.)
+            actor_physics::Knock::new([-self.yaw.sin(), 0., -self.yaw.cos()], strength, 0.)
         } else {
             None
         };
@@ -367,9 +367,9 @@ impl Soldier {
             if !input.no_control
                 && let Some(desired) = self.desired_yaw
             {
-                let d = crate::camera::wrap(desired - self.yaw);
+                let d = crate::follow_camera::wrap(desired - self.yaw);
                 let limit = input.turn_rate.max(0.) * 2.;
-                self.yaw = crate::camera::wrap(self.yaw + d.clamp(-limit, limit));
+                self.yaw = crate::follow_camera::wrap(self.yaw + d.clamp(-limit, limit));
             }
             if self.air.is_some() {
                 self.step_air(clips, env)
@@ -416,15 +416,15 @@ impl Soldier {
             return;
         };
         if self.sampler.due(self.wish_motion[3]) {
-            let dt = physics::PHYSICS_STEP;
+            let dt = actor_physics::PHYSICS_STEP;
             self.wish_motion[1] = 0.;
             let dy = arc.step(self.position[1], self.sstm.fall_max, frozen, dt);
-            self.air_velocity = physics::steer(
+            self.air_velocity = actor_physics::steer(
                 self.air_velocity,
                 [self.wish_motion[0], self.wish_motion[2]],
                 self.wish_motion[3],
-                physics::AIR_INERTIA,
-                physics::AIR_DRAG,
+                actor_physics::AIR_INERTIA,
+                actor_physics::AIR_DRAG,
             );
             self.sampler
                 .store([self.air_velocity[0] * dt, dy, self.air_velocity[1] * dt]);
@@ -458,7 +458,7 @@ impl Soldier {
                     self.sampler.store(blow.step(
                         &self.sstm,
                         self.sstm.fall_max,
-                        physics::PHYSICS_STEP,
+                        actor_physics::PHYSICS_STEP,
                     ))
                 }
                 let d = self.sampler.displacement();
@@ -572,7 +572,7 @@ impl Soldier {
                         }
                         self.face(to);
                         self.wish_motion = [self.yaw.sin(), 0., self.yaw.cos(), 0.];
-                        self.air = Some(physics::Arc::launch(self.position[1], 260.));
+                        self.air = Some(actor_physics::Arc::launch(self.position[1], 260.));
                         self.air_velocity = [0.; 2];
                         self.airborne = true;
                         self.sampler.reset();
@@ -584,12 +584,12 @@ impl Soldier {
                             return true;
                         }
                         self.face(to);
-                        pending.timer = 24. - physics::DT;
+                        pending.timer = 24. - actor_physics::DT;
                         pending.stage = 2;
                     }
                     2 => {
                         if pending.timer > 0. {
-                            pending.timer -= physics::DT;
+                            pending.timer -= actor_physics::DT;
                         } else {
                             self.play(204, 8., clips);
                             let length = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
@@ -637,7 +637,7 @@ impl Soldier {
                     _ => {
                         if self.airborne {
                             self.face(to);
-                            pending.timer = 24. - physics::DT;
+                            pending.timer = 24. - actor_physics::DT;
                             pending.stage = 2;
                         } else {
                             self.action = None;
@@ -706,7 +706,7 @@ impl Soldier {
                         self.action = None;
                         return false;
                     }
-                    pending.timer -= physics::DT;
+                    pending.timer -= actor_physics::DT;
                 }
                 Action::MoveTarget | Action::MoveBack | Action::MoveRoll => {
                     if pending.stage == 0 {
@@ -753,7 +753,7 @@ impl Soldier {
                     if self.motion != 2 {
                         self.play(2, 8., clips);
                     }
-                    pending.timer -= physics::DT;
+                    pending.timer -= actor_physics::DT;
                 }
             },
             ActKind::Leave | ActKind::Dead => {
@@ -768,7 +768,7 @@ impl Soldier {
                     self.gone = true;
                     return true;
                 }
-                pending.timer -= physics::DT;
+                pending.timer -= actor_physics::DT;
             }
         }
         self.action = Some(pending);
@@ -993,7 +993,7 @@ mod tests {
             [0.; 3],
             0.,
             combat::TargetStats::enemy(100, 10000, 0, [100; 7], 20, 0),
-            physics::Sstm::read(&record).unwrap(),
+            actor_physics::Sstm::read(&record).unwrap(),
         )
     }
     #[test]
@@ -1026,7 +1026,7 @@ mod tests {
         actor.tick(input, &SyntheticClips, &Flat, &mut rng);
         assert_eq!(actor.motion, 3);
         assert!(actor.airborne);
-        assert_eq!(actor.air.unwrap().rise, physics::rise_time(260.));
+        assert_eq!(actor.air.unwrap().rise, actor_physics::rise_time(260.));
         for _ in 0..24 {
             actor.tick(input, &SyntheticClips, &Flat, &mut rng);
             assert_eq!(actor.motion, 3);

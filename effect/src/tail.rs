@@ -16,7 +16,7 @@
 use crate::math::{self, Mat, Vec4};
 use crate::programs::{active, byte, emit_sprites, float, key, use_val, word};
 use crate::{Ctx, Part};
-use data::effect::{Program, i16_at};
+use data::object_effect::{Program, i16_at};
 
 pub(crate) const KIND: u32 = 157;
 

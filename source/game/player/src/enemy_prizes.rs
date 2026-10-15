@@ -4,7 +4,7 @@
 //! table at 0x1405c7420 and the kill EXP of FUN_140410af0.
 
 use crate::Vec3;
-use crate::physics;
+use crate::actor_physics;
 
 /// Prize kinds, in przt count order.
 pub mod kind {
@@ -129,7 +129,7 @@ impl Orb {
         if self.landed {
             return;
         }
-        self.velocity[1] -= physics::G;
+        self.velocity[1] -= actor_physics::G;
         for i in 0..3 {
             self.position[i] += self.velocity[i];
         }

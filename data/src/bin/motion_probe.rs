@@ -1,4 +1,4 @@
-use data::{bar, motion, motion_trigger, original, probe::ProbeSource};
+use data::{bar, motion, motion_trigger, original_payload, probe_source::ProbeSource};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -46,7 +46,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .get(selected.ordinal)
         .filter(|e| e.name_hash == selected.name_hash)
         .ok_or("MSET source identity mismatch")?;
-    let original = original::read_original(&mut checked.reader, entry)?;
+    let original = original_payload::read_original(&mut checked.reader, entry)?;
     let table = bar::read_bar(&original.bytes)?;
     let mut payload = OpenOptions::new()
         .write(true)

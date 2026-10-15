@@ -1,4 +1,4 @@
-use data::plain::read_plain_original;
+use data::unencrypted_payload::read_plain_original;
 use sha2::{Digest, Sha256};
 use std::{
     fs::OpenOptions,
@@ -12,7 +12,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: plain_probe <selected-install-root> <private-source-manifest.json> <new-private-report.json>".into());
     }
     let source =
-        data::probe::ProbeSource::bind(&PathBuf::from(&args[0]), &PathBuf::from(&args[1]))?;
+        data::probe_source::ProbeSource::bind(&PathBuf::from(&args[0]), &PathBuf::from(&args[1]))?;
     let output = source.output_path(&PathBuf::from(&args[2]))?;
     let mut samples = Vec::new();
     for (relative, _) in validation::required_files()

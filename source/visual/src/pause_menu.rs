@@ -19,10 +19,10 @@ pub mod notice;
 pub mod party;
 pub mod picture;
 
-use crate::command::Font;
-use crate::sprite::{self, Id, LightCur, Sprites, Text};
-use data::layout::{Layout, LayoutTask};
-use data::sequence::{Modifiers, Player, Quad, Sequence};
+use crate::field_command_menu::Font;
+use crate::sprite_player::{self, Id, LightCur, Sprites, Text};
+use data::menu_layout::{Layout, LayoutTask};
+use data::sprite_sequence::{Modifiers, Player, Quad, Sequence};
 
 /// The camp sprites' SEQD (DAT_140743fd4) and image.
 pub const SEQUENCE: usize = 1;
@@ -2297,11 +2297,11 @@ impl Camp {
                 ));
             }
         }
-        let convert = |items: Vec<(sprite::Sheet, Vec<Quad>)>| {
+        let convert = |items: Vec<(sprite_player::Sheet, Vec<Quad>)>| {
             items.into_iter().map(|(sheet, quads)| match sheet {
-                sprite::Sheet::Art(_) => (Sheet::Art, quads),
-                sprite::Sheet::Font => (Sheet::Font, quads),
-                sprite::Sheet::Icon => (Sheet::Icon, quads),
+                sprite_player::Sheet::Art(_) => (Sheet::Art, quads),
+                sprite_player::Sheet::Font => (Sheet::Font, quads),
+                sprite_player::Sheet::Icon => (Sheet::Icon, quads),
             })
         };
         // The model paste at its priority (0x7538 on the top level, 0x7545

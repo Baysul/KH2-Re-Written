@@ -3,7 +3,7 @@
 //! from `se/seNNN.win32.scd` entries or from an object archive's
 //! `se/obj/seNNN` replacement asset.
 use audio::Clip;
-use data::{original, probe::ProbeSource, replacement, scd};
+use data::{original_payload, probe_source::ProbeSource, replacement_payload, scd};
 use std::collections::HashMap;
 
 /// Reads a bank: the entry's original payload, or its named replacement.
@@ -22,9 +22,9 @@ pub fn load_bank(
         .filter(|e| e.name_hash == name_hash)
         .ok_or("sound bank entry mismatch")?;
     let bytes = match replacement_name {
-        None => original::read_original(&mut checked.reader, entry)?.bytes,
+        None => original_payload::read_original(&mut checked.reader, entry)?.bytes,
         Some(name) => {
-            replacement::read_all_replacements(&mut checked.reader, entry)?
+            replacement_payload::read_all_replacements(&mut checked.reader, entry)?
                 .into_iter()
                 .find(|r| {
                     let n = &r.metadata.name_bytes;

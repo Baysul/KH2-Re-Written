@@ -1,5 +1,5 @@
 //! Private source-bound finite sampling evidence; no gameplay qualification.
-use data::{model_inspection, motion, probe::ProbeSource};
+use data::{model_inspection, motion, probe_source::ProbeSource};
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();

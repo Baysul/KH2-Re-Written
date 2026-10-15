@@ -1,7 +1,7 @@
 //! Research probe: copies installed files, looked up by path name, into a
 //! private directory outside the installation. Names that are absent are
 //! reported and skipped.
-use data::{named::Library, probe::ProbeSource};
+use data::{path_lookup::Library, probe_source::ProbeSource};
 use std::path::PathBuf;
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {

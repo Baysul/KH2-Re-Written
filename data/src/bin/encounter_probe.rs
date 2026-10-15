@@ -1,6 +1,6 @@
 //! Private, source-bound inventory of every Twilight Town spawn-set entity.
 //! This is a coverage denominator, not a claim that every set is reachable.
-use data::{ard, bar, bdscript, named::Library, objentry, probe::ProbeSource};
+use data::{ard, bar, bdscript, objentry, path_lookup::Library, probe_source::ProbeSource};
 use serde_json::json;
 use std::{collections::BTreeSet, fs::OpenOptions, io::Write, path::PathBuf};
 

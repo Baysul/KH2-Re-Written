@@ -4,9 +4,9 @@
 //! context alpha), and an optional text drawn by FUN_14016ae30 in font 1
 //! (sys). Sprites update and draw in ascending priority, then creation
 //! order.
-use crate::command::Font;
 use crate::dialogue;
-use data::sequence::{Modifiers, Player, Quad, Sequence, color};
+use crate::field_command_menu::Font;
+use data::sprite_sequence::{Modifiers, Player, Quad, Sequence, color};
 
 /// System font reference height and non-JP line spacing (command-spec
 /// §5.3).

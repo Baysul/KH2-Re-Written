@@ -4,7 +4,7 @@ use crate::{
     model_geometry::Geometry,
     model_inspection_textures::{InspectionTextures, TextureMode, UvProfile, UvRoutes},
     model_pose::{ModelPose, PoseProfile},
-    probe::ProbeSource,
+    probe_source::ProbeSource,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -337,7 +337,7 @@ fn read_models_profile(
                 .get(item.ordinal)
                 .filter(|entry| entry.name_hash == item.name_hash)
                 .ok_or("model entry identity differs from HED")?;
-            let original = crate::original::read_original(&mut checked.reader, entry)?;
+            let original = crate::original_payload::read_original(&mut checked.reader, entry)?;
             storage_bytes += original.bytes.len();
             if storage_bytes > 128 * 1024 * 1024 {
                 return Err("model storage exceeds 128 MiB".into());
@@ -345,7 +345,7 @@ fn read_models_profile(
             let bar = crate::bar::read_bar(&original.bytes)?;
             let textures = if options.textures {
                 let replacements = if include_replacements {
-                    crate::replacement::read_all_replacements(&mut checked.reader, entry)?
+                    crate::replacement_payload::read_all_replacements(&mut checked.reader, entry)?
                 } else {
                     Vec::new()
                 };

@@ -13,7 +13,7 @@
 //! Layout units are the PS2 512x416 space; windows have no X origin, so
 //! they stay centred on a 16:9 canvas.
 use crate::gauge::Draw;
-use data::sequence::{Modifiers, Player, Quad, Sequence, color};
+use data::sprite_sequence::{Modifiers, Player, Quad, Sequence, color};
 
 /// Event font (font id 3) descriptor for international text: 24x32 glyph
 /// cells in a 512x512 plane (21 columns), reference height 24, line spacing

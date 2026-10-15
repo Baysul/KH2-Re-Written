@@ -38,7 +38,7 @@
 use crate::math::{self, IDENTITY, Mat, Vec4};
 use crate::programs::{byte, emit_sprites, float, read_matrix, use_val, word, write_matrix};
 use crate::{Ctx, Part};
-use data::effect::{self, Program, i16_at};
+use data::object_effect::{self, Program, i16_at};
 
 /// Emitter block fields (offsets inside `V[u2]`).
 const E_AXIS: usize = 0x40;
@@ -286,14 +286,14 @@ fn tick(ctx: &mut Ctx, k: Key, part: &mut Part, pool: &mut Pool) {
         let b = &ctx.dpd.bytes;
         let index = slot.flip_index;
         let (wait, flag) =
-            effect::shape_sequence(b, anim, slot.flip_prev as usize).unwrap_or((0, 0));
+            object_effect::shape_sequence(b, anim, slot.flip_prev as usize).unwrap_or((0, 0));
         slot.flip_prev = index;
         let t = speed.wrapping_add(slot.flip_t);
         slot.flip_t = t;
         if wait as i32 <= t as i32 {
             slot.flip_t = t.wrapping_sub(wait as u16);
             slot.flip_index = index.wrapping_add(1);
-            let count = effect::shape_sequence_count(b, anim).unwrap_or(0);
+            let count = object_effect::shape_sequence_count(b, anim).unwrap_or(0);
             if count as i32 <= index.wrapping_add(1) as i32 {
                 slot.flip_t = 0;
                 slot.flip_index = if (flag as i8) < 0 { 0 } else { index };
@@ -859,7 +859,7 @@ fn offset_matrix(ctx: &Ctx, main: &Mat, extra: &mut Mat, offset: &mut Vec4) {
 mod tests {
     use super::*;
     use crate::{Quad, Rng};
-    use data::effect::{Dpd, ShapeRef};
+    use data::object_effect::{Dpd, ShapeRef};
     use std::collections::HashMap;
 
     const CURSOR: usize = 0x20;

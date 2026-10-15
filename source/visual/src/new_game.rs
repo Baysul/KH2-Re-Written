@@ -3,8 +3,8 @@
 //! FUN_1402b7940; driver FUN_1402b7e40; close FUN_1402b8470; intro skip
 //! FUN_1402b8830; apply FUN_1402b88c0). All sprites use title.2ld SEQD 0
 //! on image 0, in layout space with x origin 0.
-use crate::sprite::{Id, LightCur, Sprites, Text};
-use data::sequence::Sequence;
+use crate::sprite_player::{Id, LightCur, Sprites, Text};
+use data::sprite_sequence::Sequence;
 
 /// sys.bar ids (`& 0x7fff`) the dialog shows.
 pub const HEADING: u32 = 0xc32e;

@@ -4,8 +4,8 @@
 //! FUN_140301c80 and the show FUN_140301d80. The image is
 //! `itempic/item-%03d.imd` (an IMGD), drawn with the `ipic` SEQD of
 //! 03system.bin (FUN_1403b0c90); the caller loads the image into the cache.
-use crate::sprite::{Id, Sprites};
-use data::sequence::{Modifiers, Player, Quad, Sequence};
+use crate::sprite_player::{Id, Sprites};
+use data::sprite_sequence::{Modifiers, Player, Quad, Sequence};
 use std::collections::HashSet;
 
 /// FUN_140302370's timers (0x140623bd4 = 60.0, 0x140623bc0 = 15.0).

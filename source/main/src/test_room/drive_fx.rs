@@ -13,7 +13,7 @@
 use super::*;
 use ::effect::{Instance, ModelDraw, Quad, Rng, math::Mat};
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSamplerDescriptor};
-use data::effect::{Dpd, OmdHeader, OmdMesh, Pax};
+use data::object_effect::{Dpd, OmdHeader, OmdMesh, Pax};
 
 /// A start request: the PAX, the element id, and whether it binds to Sora.
 pub struct FxRequest {
@@ -352,8 +352,8 @@ fn model(
         .entry((Arc::as_ptr(dpd) as usize, d.model))
         .or_insert_with(|| {
             let m = dpd.models.get(&d.model)?;
-            let header = effect::omd_header(&dpd.bytes, m.hdr).ok()?;
-            let meshes = effect::omd_meshes(&dpd.bytes, m.hdr).ok()?;
+            let header = object_effect::omd_header(&dpd.bytes, m.hdr).ok()?;
+            let meshes = object_effect::omd_meshes(&dpd.bytes, m.hdr).ok()?;
             Some((header, meshes))
         });
     let Some((header, meshes)) = cached.as_ref() else {
@@ -429,7 +429,7 @@ fn image(fx: &mut DriveFx, key: TexKey, repeat: bool, images: &mut Assets<Image>
         .iter()
         .find(|d| Arc::as_ptr(d) as usize == key.dpd)
         .cloned();
-    let mut sources: Vec<&effect::DpdTexture> = Vec::new();
+    let mut sources: Vec<&object_effect::DpdTexture> = Vec::new();
     if let Some(d) = &own {
         sources.extend(d.textures.iter().filter(|t| t.dbp == key.tbp));
     }
@@ -446,7 +446,8 @@ fn image(fx: &mut DriveFx, key: TexKey, repeat: bool, images: &mut Assets<Image>
         .find(|t| t.cbp == key.cbp)
         .map(|t| t.palette.clone());
     for t in sources {
-        let rgba = effect::decode_psmt8(&t.indices, palette.as_deref().unwrap_or(&t.palette));
+        let rgba =
+            object_effect::decode_psmt8(&t.indices, palette.as_deref().unwrap_or(&t.palette));
         for row in 0..t.height {
             let y = t.y as u32 + row;
             if y >= h {

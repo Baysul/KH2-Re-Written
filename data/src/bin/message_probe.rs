@@ -6,8 +6,8 @@ use data::{
         InternationalContent, decode_international_system, international_fingerprint,
         international_reencoding_fingerprint, reencode_international_system,
     },
-    original::read_original,
-    probe::ProbeSource,
+    original_payload::read_original,
+    probe_source::ProbeSource,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};

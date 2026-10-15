@@ -24,7 +24,7 @@
 use crate::math::{self, Mat, Vec4};
 use crate::programs::{active, byte, float, use_val, word};
 use crate::{Ctx, Part, Quad};
-use data::effect::{self, Program};
+use data::object_effect::{self, Program};
 
 pub(crate) const KIND: u32 = 241;
 
@@ -364,7 +364,7 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
         .dpd
         .models
         .get(&(model as i16))
-        .and_then(|m| effect::omd_meshes(&ctx.dpd.bytes, m.hdr).ok())
+        .and_then(|m| object_effect::omd_meshes(&ctx.dpd.bytes, m.hdr).ok())
         .and_then(|m| m.first().map(|m| m.tex0))
     else {
         return;

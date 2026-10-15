@@ -9,8 +9,8 @@
 //!   `tools/Make-BannerText.ps1`) replaces the old text in title image 7.
 //!   The banner's ornaments move outward to fit it, and its end lines are
 //!   squeezed to keep their tapers.
-use crate::layout::Texture;
-use data::layout::Layout;
+use crate::menu_screen::Texture;
+use data::menu_layout::Layout;
 
 /// Frames cut from the copyright block's hold (60 Hz).
 pub const COPYRIGHT_CUT: i32 = 60;
@@ -156,8 +156,8 @@ fn compose_banner(t: &mut Texture, text: &[u8], text_size: [u32; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use data::layout::{Prop, Scene};
-    use data::sequence::{Animation, AnimationGroup, LINEAR, Sequence};
+    use data::menu_layout::{Prop, Scene};
+    use data::sprite_sequence::{Animation, AnimationGroup, LINEAR, Sequence};
 
     fn animation(frames: [i32; 2]) -> Animation {
         Animation {
@@ -220,7 +220,7 @@ mod tests {
     }
 
     fn scene_length(l: &Layout) -> u32 {
-        let mut p = data::layout::ScenePlayer::new(l, 0);
+        let mut p = data::menu_layout::ScenePlayer::new(l, 0);
         let mut frames = 0;
         while p.state != 3 && frames < 2000 {
             p.update(l, 1.);

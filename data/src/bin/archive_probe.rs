@@ -1,5 +1,5 @@
 //! Guarded original BAR inspection for a single explicit source-bound selection.
-use data::{bar, original, preferences, probe::ProbeSource};
+use data::{bar, original_payload, party_records, probe_source::ProbeSource};
 use serde::Deserialize;
 use std::{
     fs::{File, OpenOptions},
@@ -52,7 +52,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .get(item.ordinal)
         .filter(|e| e.name_hash == item.name_hash)
         .ok_or("archive source entry mismatch")?;
-    let original = original::read_original(&mut checked.reader, entry)?;
+    let original = original_payload::read_original(&mut checked.reader, entry)?;
     if original.bytes.len() > 32 * 1024 * 1024 {
         return Err("archive exceeds bounded output profile".into());
     }
@@ -79,7 +79,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     return Err("PRTY entry ambiguous".into());
                 }
                 let start = item.offset as usize;
-                prty_tables.push(preferences::read_prty(
+                prty_tables.push(party_records::read_prty(
                     &data[start..start + item.size as usize],
                 )?);
             }

@@ -4,10 +4,10 @@
 //! higher N are alternates the exe swaps in (e.g. title image 8's device
 //! glyph variants, FUN_14012eb70).
 use data::{
-    bar, hd_image, image_structure, layout, original,
-    probe::ProbeSource,
-    replacement,
-    sequence::{self, Modifiers},
+    bar, hd_image, image_structure, menu_layout, original_payload,
+    probe_source::ProbeSource,
+    replacement_payload,
+    sprite_sequence::{self, Modifiers},
 };
 
 pub const IMGZ: u16 = 29;
@@ -22,7 +22,7 @@ pub struct Texture {
 }
 
 pub struct Menu2ld {
-    pub layout: layout::Layout,
+    pub layout: menu_layout::Layout,
     /// Original IMGD sizes, by image index.
     pub image_sizes: Vec<[u32; 2]>,
     /// Every replacement by its number N (`..._2ld<N>.png`).
@@ -64,8 +64,8 @@ pub fn load_images(
         .get(ordinal)
         .filter(|e| e.name_hash == name_hash)
         .ok_or("2LD archive entry mismatch")?;
-    let archive = original::read_original(&mut checked.reader, entry)?.bytes;
-    let hd = replacement::read_all_replacements(&mut checked.reader, entry)?;
+    let archive = original_payload::read_original(&mut checked.reader, entry)?.bytes;
+    let hd = replacement_payload::read_all_replacements(&mut checked.reader, entry)?;
     checked.verify_unchanged()?;
     let table = bar::read_bar(&archive)?;
     let images: Vec<_> = table
@@ -80,7 +80,7 @@ pub fn load_images(
     // The HD files are stored in name order (`-10` before `-2`): put them
     // back in image order by their number.
     let mut files: Vec<_> = hd[first..].iter().collect();
-    let number = |r: &replacement::ReplacementSample| -> Option<usize> {
+    let number = |r: &replacement_payload::ReplacementSample| -> Option<usize> {
         let name = &r.metadata.name_bytes;
         let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
         let stem = std::str::from_utf8(&name[..end]).ok()?;
@@ -153,8 +153,8 @@ pub fn load_imgd(
     else {
         return Ok(None);
     };
-    let file = original::read_original(&mut checked.reader, entry)?.bytes;
-    let hd = replacement::read_all_replacements(&mut checked.reader, entry)?;
+    let file = original_payload::read_original(&mut checked.reader, entry)?.bytes;
+    let hd = replacement_payload::read_all_replacements(&mut checked.reader, entry)?;
     checked.verify_unchanged()?;
     let imgd: &[u8] = if file.starts_with(b"IMGD") {
         &file
@@ -195,8 +195,8 @@ pub fn load(
         .get(ordinal)
         .filter(|e| e.name_hash == name_hash)
         .ok_or("2LD archive entry mismatch")?;
-    let archive = original::read_original(&mut checked.reader, entry)?.bytes;
-    let hd = replacement::read_all_replacements(&mut checked.reader, entry)?;
+    let archive = original_payload::read_original(&mut checked.reader, entry)?.bytes;
+    let hd = replacement_payload::read_all_replacements(&mut checked.reader, entry)?;
     checked.verify_unchanged()?;
     let table = bar::read_bar(&archive)?;
     let slice = |kind: u16| -> Result<&[u8], Box<dyn std::error::Error>> {
@@ -209,8 +209,8 @@ pub fn load(
             .get(e.offset as usize..e.offset as usize + e.size as usize)
             .ok_or_else(|| "2LD entry exceeds archive".into())
     };
-    let layout = layout::read_layd(slice(LAYD)?)?;
-    let image_sizes = layout::read_imgz(slice(IMGZ)?)?
+    let layout = menu_layout::read_layd(slice(LAYD)?)?;
+    let image_sizes = menu_layout::read_imgz(slice(IMGZ)?)?
         .into_iter()
         .map(|imgd| {
             image_structure::read_imgd_header(imgd).map(|h| [h.width as u32, h.height as u32])
@@ -254,12 +254,12 @@ pub fn load(
 #[derive(Clone, Debug, PartialEq)]
 pub struct Batch {
     pub image: usize,
-    pub quads: Vec<sequence::Quad>,
+    pub quads: Vec<sprite_sequence::Quad>,
 }
 
 /// A layout task's draw (FUN_1401948c0): each shown prop's sequence frame at
 /// the prop position plus `offset`, in layout units.
-pub fn draw(menu: &Menu2ld, task: &layout::LayoutTask, offset: [i32; 2]) -> Vec<Batch> {
+pub fn draw(menu: &Menu2ld, task: &menu_layout::LayoutTask, offset: [i32; 2]) -> Vec<Batch> {
     if task.dead {
         return Vec::new();
     }

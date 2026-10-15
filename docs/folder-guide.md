@@ -90,6 +90,19 @@ Use these current names after `cargo ... -p`:
 | `crates/skate_source` | `extras/skateboard/source` (package name unchanged) |
 | `crates/skate3` | `extras/skateboard/engine` (upstream package names unchanged) |
 
+File renames (T130, same pattern as the display renames): `data/src/effect.rs` to
+`object_effect.rs`, `named.rs` to `path_lookup.rs`, `original.rs` to
+`original_payload.rs`, `plain.rs` to `unencrypted_payload.rs`, `replacement.rs` to
+`replacement_payload.rs`, `sequence.rs` to `sprite_sequence.rs`, `layout.rs` to
+`menu_layout.rs`, `event.rs` to `event_script.rs`, `preferences.rs` to `party_records.rs`,
+`probe.rs` to `probe_source.rs`; `visual` `command.rs` to `field_command_menu.rs`,
+`layout.rs` to `menu_screen.rs`, `sprite.rs` to `sprite_player.rs`, `fog.rs` to
+`area_fog.rs`; `main` `test_room/kit.rs` to `character_kit.rs`; player `physics.rs` to
+`actor_physics.rs`, `party.rs` to `party_members.rs`, `prize.rs` to `enemy_prizes.rs`,
+`wisdom.rs` to `wisdom_form.rs`, `limitform.rs` to `limit_form.rs`, `camera.rs` to
+`follow_camera.rs`; event `camera.rs` to `event_camera.rs`. Format and hardware names
+(BAR, ARD, PTYA, SCD, OGG, VIF, VPU, TEXA, OBJENTRY) are kept as file names.
+
 Display module renames: `camp` to `pause_menu`, `pad` to `controller`, `bobs` to
 `scenery`, `footstep` to `footsteps`, `newgame` to `new_game`, `levelup` to `level_up`,
 `title_edits` to `title_banner`, `layout2d` to `layout`, `sprite2d` to `sprite`,

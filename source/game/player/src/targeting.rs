@@ -218,7 +218,7 @@ pub fn cycle_manual<K: Copy + Eq>(
             delta
         };
         let difference =
-            crate::camera::wrap(normalized[0].atan2(normalized[2]) - angle) * direction;
+            crate::follow_camera::wrap(normalized[0].atan2(normalized[2]) - angle) * direction;
         if difference > 0. && best.is_none_or(|(_, prior)| difference < prior) {
             best = Some((candidate.candidate.key, difference));
         }

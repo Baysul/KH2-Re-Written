@@ -319,9 +319,9 @@ fn name_and_hp(
     }
 }
 
-fn rect(bounds: [f32; 4], rgba: [f32; 4]) -> sequence::Quad {
+fn rect(bounds: [f32; 4], rgba: [f32; 4]) -> sprite_sequence::Quad {
     let [x0, y0, x1, y1] = bounds;
-    sequence::Quad {
+    sprite_sequence::Quad {
         corners: [[x0, y0], [x1, y0], [x0, y1], [x1, y1]],
         uv: [0, 0, 1, 1],
         colors: [rgba; 4],
@@ -425,10 +425,12 @@ fn status_draws(
     font_sheet: usize,
     widths: &[u8],
 ) -> Vec<Draw> {
-    let font = command::Font { widths, pad: 1 };
+    let font = field_command_menu::Font { widths, pad: 1 };
     let mut quads = vec![rect([16., 42., 256., 83.], [0.03, 0.04, 0.07, 0.78])];
-    let size = 13_f32.min(13. * 226. / command::text_width(view.label, &font, 13.).max(1.));
-    let mut glyphs = command::text_quads_sized(view.label, [22., 46.], [1.; 4], &font, size);
+    let size =
+        13_f32.min(13. * 226. / field_command_menu::text_width(view.label, &font, 13.).max(1.));
+    let mut glyphs =
+        field_command_menu::text_quads_sized(view.label, [22., 46.], [1.; 4], &font, size);
     if view.scan_enabled {
         let fraction = if view.max_hp > 0 {
             view.hp.max(0) as f32 / view.max_hp as f32
@@ -441,7 +443,7 @@ fn status_draws(
             [22., 69., 22. + 148. * fraction, 76.],
             [0.2, 0.95, 0.35, 1.],
         ));
-        glyphs.extend(command::text_quads_sized(
+        glyphs.extend(field_command_menu::text_quads_sized(
             &pause_menu::encode_text(&format!("{}/{}", view.hp, view.max_hp)),
             [176., 64.],
             [1.; 4],
@@ -453,8 +455,9 @@ fn status_draws(
         .limitation
         .unwrap_or("Target status (debug presentation)");
     let caption = pause_menu::encode_text(caption);
-    let caption_size = 10_f32.min(10. * 226. / command::text_width(&caption, &font, 10.).max(1.));
-    glyphs.extend(command::text_quads_sized(
+    let caption_size =
+        10_f32.min(10. * 226. / field_command_menu::text_width(&caption, &font, 10.).max(1.));
+    glyphs.extend(field_command_menu::text_quads_sized(
         &caption,
         [22., 84.],
         [0.8, 0.85, 0.9, 1.],

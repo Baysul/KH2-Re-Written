@@ -1,5 +1,5 @@
 use super::*;
-use data::effect::read_dpd;
+use data::object_effect::read_dpd;
 
 fn put(b: &mut [u8], at: usize, v: u32) {
     b[at..at + 4].copy_from_slice(&v.to_le_bytes());

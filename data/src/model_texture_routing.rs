@@ -1,7 +1,7 @@
 //! Explicit bounded public texture-link candidates, not installed routing.
 //! EgsTools.RAW formulas and TextureAnimation header at the NOTICE pin;
 //! only bounded footer records are considered, never whole-payload tag scans.
-use crate::{model_geometry::Geometry, model_texture, replacement::ReplacementMetadata};
+use crate::{model_geometry::Geometry, model_texture, replacement_payload::ReplacementMetadata};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, io};

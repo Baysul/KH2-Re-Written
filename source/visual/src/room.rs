@@ -9,8 +9,8 @@ use bevy::{
 use data::{
     bar,
     model_texture_pixels::{self, DecodedTexture},
-    original,
-    probe::ProbeSource,
+    original_payload,
+    probe_source::ProbeSource,
     room_collision,
     room_geometry::{self, RoomModel},
 };
@@ -335,7 +335,7 @@ pub struct Environment {
     /// Screen clear colour (+0x00).
     pub clear: [u8; 3],
     /// Fog colour (+0x44) and near/far/min/max floats (+0x48..0x58).
-    pub fog: crate::fog::FogParams,
+    pub fog: crate::area_fog::FogParams,
 }
 
 impl Environment {
@@ -348,7 +348,7 @@ impl Environment {
         let b = d.get(..0x58)?;
         Some(Environment {
             clear: [b[0], b[1], b[2]],
-            fog: crate::fog::FogParams {
+            fog: crate::area_fog::FogParams {
                 colour: [b[0x44], b[0x45], b[0x46]],
                 near,
                 far,
@@ -405,7 +405,7 @@ pub fn load_rooms(
     if serde_json::to_value(entry.name_hash)? != item["name_hash"] {
         return Err("room identity mismatch".into());
     }
-    let archive = original::read_original(&mut index.reader, entry)?;
+    let archive = original_payload::read_original(&mut index.reader, entry)?;
     let ground = item
         .get("inspection_ground_polygon")
         .map(|p| p.as_u64().ok_or("inspection polygon ordinal invalid"))

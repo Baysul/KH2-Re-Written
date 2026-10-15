@@ -3,28 +3,28 @@
 //! the active action/motion frame; presentation only reads this state.
 //!
 //! Movement parameters follow the executable's object init
-//! (`physics::ObjParams`: PRTY walk/run/jump/turn, SSTM fall max) and its
-//! gravity (`physics::G`); PTYA supplies the combo motions and ANB range
+//! (`actor_physics::ObjParams`: PRTY walk/run/jump/turn, SSTM fall max) and its
+//! gravity (`actor_physics::G`); PTYA supplies the combo motions and ANB range
 //! triggers the windows. Step height, body size and the collision response
 //! are explicit test-room choices, not observed KH2 rules.
 
 pub mod abilities;
-pub mod camera;
+pub mod actor_physics;
 pub mod combat;
 pub mod drive;
 pub mod dusk;
+pub mod enemy_prizes;
+pub mod follow_camera;
 pub mod forms;
 pub mod growth;
-pub mod limitform;
+pub mod limit_form;
 pub mod magic;
-pub mod party;
-pub mod physics;
-pub mod prize;
+pub mod party_members;
 pub mod ptya;
 pub mod shadow;
 pub mod soldier;
 pub mod targeting;
-pub mod wisdom;
+pub mod wisdom_form;
 
 pub type Vec3 = [f32; 3];
 
@@ -459,11 +459,11 @@ pub struct Player {
     /// Last tick's vertical displacement (Y-up units per tick).
     pub vertical_speed: f32,
     /// Jump/fall curve while airborne (obj+0xf0..+0xfc).
-    pub arc: physics::Arc,
+    pub arc: actor_physics::Arc,
     /// Horizontal velocity while airborne (obj+0x20 x/z), units per tick.
     pub air_velocity: [f32; 2],
     /// Physics-mode velocity sampling (FUN_1403b89a0, obj+0xba8/+0xb98).
-    pub sampler: physics::Sampler,
+    pub sampler: actor_physics::Sampler,
     /// A jump waiting for its take-off trigger (obj+0x648 = 1): height and
     /// take-off velocity (+0xe0).
     pub pending_jump: Option<(f32, [f32; 2])>,
@@ -495,7 +495,7 @@ pub struct Player {
     released: Option<Released>,
     /// Knock-slide (FUN_1403d4960 / FUN_1403d4570), for hits and the guard
     /// recoil alike.
-    knock: Option<physics::Knock>,
+    knock: Option<actor_physics::Knock>,
     /// A blow in flight (physics mode 4) and the ticks it has run.
     flight: Option<Flight>,
     /// Dead and still falling (physics mode 0x29).
@@ -531,8 +531,8 @@ pub struct Player {
 /// the time in the mode (obj+0x110).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Flight {
-    blow: physics::Blow,
-    sstm: physics::Sstm,
+    blow: actor_physics::Blow,
+    sstm: actor_physics::Sstm,
     time: f32,
 }
 
@@ -609,7 +609,7 @@ pub struct Step {
 /// recoil (FUN_1403d61d0) start with blend 0.
 pub fn blend_for(action: Action) -> f32 {
     match action {
-        Action::Idle | Action::Walk | Action::Run | Action::Fall => physics::MOTION_BLEND,
+        Action::Idle | Action::Walk | Action::Run | Action::Fall => actor_physics::MOTION_BLEND,
         _ => 0.,
     }
 }
@@ -625,9 +625,9 @@ impl Player {
             position,
             yaw,
             vertical_speed: 0.,
-            arc: physics::Arc::default(),
+            arc: actor_physics::Arc::default(),
             air_velocity: [0.; 2],
-            sampler: physics::Sampler::default(),
+            sampler: actor_physics::Sampler::default(),
             pending_jump: None,
             jump_cut: JumpCut::default(),
             action: Action::Idle,
@@ -676,7 +676,7 @@ impl Player {
             _ => return false,
         };
         if action == Action::Fall && !matches!(self.action, Action::Fall) {
-            self.arc = physics::Arc::fall(self.position[1], 0.);
+            self.arc = actor_physics::Arc::fall(self.position[1], 0.);
             self.sampler.reset();
         }
         self.scripted_air = air;
@@ -745,7 +745,7 @@ impl Player {
         strength: f32,
         clips: &Clips,
     ) -> Option<Action> {
-        self.knock = physics::Knock::new([direction[0], 0., direction[1]], strength, 0.);
+        self.knock = actor_physics::Knock::new([direction[0], 0., direction[1]], strength, 0.);
         // A hit (vt+0xc0) removes the Aerial Dodge and ends a dash.
         self.dodge_ready = false;
         self.quick_run = None;
@@ -764,7 +764,7 @@ impl Player {
     /// A knock-slide without a reaction motion (`obj_hitback`, FUN_1403d4960):
     /// away along `direction` (XZ) at `strength` x 0.1 per tick.
     pub fn recoil(&mut self, direction: [f32; 2], strength: f32) {
-        self.knock = physics::Knock::new([direction[0], 0., direction[1]], strength, 0.);
+        self.knock = actor_physics::Knock::new([direction[0], 0., direction[1]], strength, 0.);
     }
 
     /// FUN_1403d2fe0 for Sora: the reaction class picks a knock-slide only
@@ -772,7 +772,12 @@ impl Player {
     /// flinch with a hop in the air (3), or a blow (4). Returns the new
     /// action when a motion started. Facing: a ground flinch keeps it; the
     /// air flinch and the blow turn to the attacker when hit from the front.
-    pub fn react(&mut self, hit: &Hit, sstm: &physics::Sstm, clips: &Clips) -> Option<Action> {
+    pub fn react(
+        &mut self,
+        hit: &Hit,
+        sstm: &actor_physics::Sstm,
+        clips: &Clips,
+    ) -> Option<Action> {
         if self.dead() {
             return None;
         }
@@ -787,7 +792,7 @@ impl Player {
             let d = if back { dir } else { [-dir[0], -dir[1]] };
             d[0].atan2(d[1])
         };
-        let slide = |kb: f32| physics::Knock::new([dir[0], 0., dir[1]], kb, 0.);
+        let slide = |kb: f32| actor_physics::Knock::new([dir[0], 0., dir[1]], kb, 0.);
         let strength = sstm.knock_strength(hit.knockback[0], original, hit.reaction);
         match class {
             1 => {
@@ -822,7 +827,7 @@ impl Player {
                 self.yaw = facing(back);
                 self.knock = None;
                 self.flight = None;
-                self.arc = physics::Arc::launch(self.position[1], AIR_HIT_HOP);
+                self.arc = actor_physics::Arc::launch(self.position[1], AIR_HIT_HOP);
                 self.jump_cut = JumpCut::default();
                 let v = strength * sstm.hit_back_to_jump;
                 self.air_velocity = [dir[0] * v, dir[1] * v];
@@ -849,7 +854,7 @@ impl Player {
                 let v = [dir[0] * side, up, dir[1] * side];
                 self.jump_cut = JumpCut::default();
                 self.flight = Some(Flight {
-                    blow: physics::Blow::new(v, sstm),
+                    blow: actor_physics::Blow::new(v, sstm),
                     sstm: *sstm,
                     time: 0.,
                 });
@@ -882,7 +887,7 @@ impl Player {
             return None;
         }
         self.begin_reaction(Action::Item);
-        self.blend = physics::MOTION_BLEND;
+        self.blend = actor_physics::MOTION_BLEND;
         Some(self.action)
     }
 
@@ -895,7 +900,7 @@ impl Player {
         self.knock = None;
         self.flight = None;
         self.air_velocity = [0.; 2];
-        self.sampler = physics::Sampler::default();
+        self.sampler = actor_physics::Sampler::default();
         self.jump_cut = JumpCut::default();
         self.vertical_speed = 0.;
         self.connected = false;
@@ -921,9 +926,9 @@ impl Player {
         self.frame = 0;
         self.blend = 0.;
         if airborne {
-            self.arc = physics::Arc::fall(self.position[1], 0.);
+            self.arc = actor_physics::Arc::fall(self.position[1], 0.);
             self.air_velocity = [0.; 2];
-            self.sampler = physics::Sampler::default();
+            self.sampler = actor_physics::Sampler::default();
             self.action = Action::Fall;
         } else if form != 0 && clips.drive_in.is_some() {
             self.action = Action::DriveIn;
@@ -954,9 +959,9 @@ impl Player {
         self.knock = None;
         self.flight = None;
         self.air_velocity = [0.; 2];
-        self.sampler = physics::Sampler::default();
+        self.sampler = actor_physics::Sampler::default();
         if air {
-            self.arc = physics::Arc::fall(self.position[1], self.vertical_speed);
+            self.arc = actor_physics::Arc::fall(self.position[1], self.vertical_speed);
             self.jump_cut = JumpCut::default();
         }
         self.begin_reaction(Action::Hurt(hurt::DEAD));
@@ -1005,7 +1010,7 @@ impl Player {
                 ([0.; 2], 0.)
             };
             self.flight = None;
-            self.arc = physics::Arc::launch(self.position[1], RECOVERY_HEIGHT);
+            self.arc = actor_physics::Arc::launch(self.position[1], RECOVERY_HEIGHT);
             self.jump_cut = JumpCut::default();
             self.air_velocity = [dir[0] * speed, dir[1] * speed];
             self.sampler.reset();
@@ -1046,7 +1051,7 @@ impl Player {
         };
         flight.time += 1.;
         if self.sampler.due(0.) {
-            let dt = physics::PHYSICS_STEP;
+            let dt = actor_physics::PHYSICS_STEP;
             let sstm = flight.sstm;
             let d = flight.blow.step(&sstm, p.fall_max, dt);
             self.sampler.store(d);
@@ -1059,7 +1064,7 @@ impl Player {
     /// Mode 0x29 for one tick: no horizontal motion, the curve's fall.
     fn dead_fall(&mut self, p: &Params) -> [f32; 3] {
         if self.sampler.due(0.) {
-            let dt = physics::PHYSICS_STEP;
+            let dt = actor_physics::PHYSICS_STEP;
             let dy = self.arc.step(self.position[1], p.fall_max, false, dt);
             self.sampler.store([0., dy, 0.]);
         }
@@ -1077,7 +1082,7 @@ impl Player {
         }
         self.cast = None;
         self.yaw = (-away[0]).atan2(-away[1]);
-        self.knock = physics::Knock::new([away[0], 0., away[1]], GUARD_KNOCK, 0.);
+        self.knock = actor_physics::Knock::new([away[0], 0., away[1]], GUARD_KNOCK, 0.);
         self.action = Action::GuardRecoil;
         self.frame = 0;
         self.blend = 0.;
@@ -1100,7 +1105,7 @@ impl Player {
         let time = self.motion_frame(clips) as f32;
         self.start(action, step);
         let new = self.clip(clips).end.max(1) as f32;
-        self.frame = ((new * ((time + physics::MOTION_BLEND) / old)) % new) as u32;
+        self.frame = ((new * ((time + actor_physics::MOTION_BLEND) / old)) % new) as u32;
     }
 
     pub fn clip<'a>(&self, clips: &'a Clips) -> &'a Clip {
@@ -1225,7 +1230,7 @@ impl Player {
                 };
                 let len = t[0].hypot(t[1]);
                 let reach = len - input.target_reach + finite(step.hop_reach);
-                let per_tick = reach / physics::rise_time(height);
+                let per_tick = reach / actor_physics::rise_time(height);
                 let (smin, smax) = (finite(step.hop_speed_min), finite(step.hop_speed));
                 let speed = if smin <= per_tick {
                     per_tick.min(smax)
@@ -1240,7 +1245,7 @@ impl Player {
                 finite(step.hop_speed),
             ),
         };
-        self.arc = physics::Arc::launch(self.position[1], height);
+        self.arc = actor_physics::Arc::launch(self.position[1], height);
         self.air_velocity = [dir[0] * speed, dir[1] * speed];
         self.sampler.reset();
         self.jump_cut = JumpCut::default();
@@ -1291,7 +1296,7 @@ impl Player {
         if moving {
             self.yaw = direction[0].atan2(direction[1]);
         }
-        self.arc = physics::Arc::launch(self.position[1], row.dodge_height);
+        self.arc = actor_physics::Arc::launch(self.position[1], row.dodge_height);
         self.air_velocity = [dir[0] * speed, dir[1] * speed];
         self.launch_velocity = Some(self.air_velocity);
         self.sampler.reset();
@@ -1407,7 +1412,7 @@ impl Player {
         self.dodge_ready = true;
         self.launch_velocity = None;
         self.quick_run = None;
-        self.arc = physics::Arc::fall(self.position[1], 0.);
+        self.arc = actor_physics::Arc::fall(self.position[1], 0.);
         self.pending_jump = None;
         self.jump_cut = JumpCut::default();
         self.air_velocity = velocity;
@@ -1562,7 +1567,7 @@ impl Player {
                     // FUN_1403cbd30 (mode 1 enter): the arc's base is the
                     // take-off height; the stored +0xe0 velocity applies;
                     // a variable jump becomes cuttable (bit 16 → bit 17).
-                    self.arc = physics::Arc::launch(self.position[1], height);
+                    self.arc = actor_physics::Arc::launch(self.position[1], height);
                     self.jump_cut = JumpCut {
                         held: self.jump_cut.variable,
                         ..JumpCut::default()
@@ -1691,7 +1696,7 @@ impl Player {
                     // The queued FALL (blend 8); on flat ground it lands at
                     // once [I: the hand-back to mode 0 is not traced].
                     self.quick_run = None;
-                    self.arc = physics::Arc::fall(self.position[1], 0.);
+                    self.arc = actor_physics::Arc::fall(self.position[1], 0.);
                     self.launch_velocity = None;
                     self.air_velocity = [0.; 2];
                     self.sampler.reset();
@@ -1761,11 +1766,11 @@ impl Player {
                 // Mode 0x10 (FUN_140423480): no gravity, the decaying dash.
                 let v = q.velocity[0].hypot(q.velocity[1]);
                 if self.sampler.due(v) {
-                    let d = q.step(physics::PHYSICS_STEP);
+                    let d = q.step(actor_physics::PHYSICS_STEP);
                     self.sampler.store(d);
                 }
             } else if self.sampler.due(speed) {
-                let dt = physics::PHYSICS_STEP;
+                let dt = actor_physics::PHYSICS_STEP;
                 let clip = self.clip(clips);
                 if Clip::within(&clip.inertia, self.frame) {
                     let dir = if speed > 0. {
@@ -1773,8 +1778,13 @@ impl Player {
                     } else {
                         [0.; 2]
                     };
-                    self.air_velocity =
-                        physics::steer(self.air_velocity, dir, speed, p.land_inertia, p.land_drag);
+                    self.air_velocity = actor_physics::steer(
+                        self.air_velocity,
+                        dir,
+                        speed,
+                        p.land_inertia,
+                        p.land_drag,
+                    );
                 } else {
                     self.air_velocity = ground_request;
                 }
@@ -1810,7 +1820,7 @@ impl Player {
                 // short. The air velocity stays in obj+0x20 for LAND's
                 // inertial slide.
                 self.vertical_speed = 0.;
-                self.sampler = physics::Sampler::default();
+                self.sampler = actor_physics::Sampler::default();
                 self.jump_cut = JumpCut::default();
                 self.glide = None;
                 self.quick_run = None;
@@ -2083,7 +2093,7 @@ impl Player {
         self.pending_jump = None;
         let action = if airborne {
             // The air cast hop (physics vt+0x20 with SSTM +0x48 = 40).
-            self.arc = physics::Arc::launch(self.position[1], magic::AIR_HOP);
+            self.arc = actor_physics::Arc::launch(self.position[1], magic::AIR_HOP);
             self.jump_cut = JumpCut::default();
             self.air_velocity = [0.; 2];
             self.sampler.reset();
@@ -2199,7 +2209,7 @@ impl Player {
         let Some(row) = self.glide else { return };
         if !self.square_held || height < row.glide_end {
             self.glide = None;
-            self.arc = physics::Arc::fall(self.position[1], 0.);
+            self.arc = actor_physics::Arc::fall(self.position[1], 0.);
             self.launch_velocity = None;
             self.sampler.reset();
             self.start(Action::Fall, step);
@@ -2249,7 +2259,7 @@ impl Player {
     /// toward the row's along the facing. Either sinks by the row.
     fn glide_velocity(&mut self, row: &growth::Row, height: f32) -> [f32; 3] {
         if self.sampler.due(1.) {
-            let dt = physics::PHYSICS_STEP;
+            let dt = actor_physics::PHYSICS_STEP;
             if self.action == Action::Growth(growth::motion::GLIDE_STAND) {
                 self.air_velocity = [
                     self.air_velocity[0] * growth::GLIDE_STAND_KEEP,
@@ -2367,7 +2377,7 @@ impl Player {
             if matches!(self.action, Action::Jump | Action::HighJump) {
                 self.start(Action::Fall, step);
             }
-            self.arc = physics::Arc::launch(self.position[1], physics::JUMP_CUT_HOP);
+            self.arc = actor_physics::Arc::launch(self.position[1], actor_physics::JUMP_CUT_HOP);
             self.sampler.reset();
             self.jump_cut = JumpCut::default();
         } else if self.arc.falling_motion() {
@@ -2398,14 +2408,14 @@ impl Player {
         // FUN_1403b89a0: the mode routine runs every second frame with a
         // two-frame step; its displacement is spread over those frames.
         if self.sampler.due(speed) {
-            let dt = physics::PHYSICS_STEP;
+            let dt = actor_physics::PHYSICS_STEP;
             let dy = self.arc.step(self.position[1], p.fall_max, floating, dt);
-            self.air_velocity = physics::steer(
+            self.air_velocity = actor_physics::steer(
                 self.air_velocity,
                 dir,
                 speed,
-                physics::AIR_INERTIA,
-                physics::AIR_DRAG,
+                actor_physics::AIR_INERTIA,
+                actor_physics::AIR_DRAG,
             );
             self.sampler
                 .store([self.air_velocity[0] * dt, dy, self.air_velocity[1] * dt]);
@@ -2963,7 +2973,7 @@ mod tests {
         assert_eq!(player.action, Action::AirAttack(3));
         // Height clamps to the 21 minimum; speed 400 / √(2·21/g) > 8 caps
         // at 8 toward +X, then the first two-frame sample drags it ×0.95.
-        assert!((player.arc.rise - physics::rise_time(21.)).abs() < 1e-4);
+        assert!((player.arc.rise - actor_physics::rise_time(21.)).abs() < 1e-4);
         assert!((player.air_velocity[0] - 7.6).abs() < 1e-4);
     }
 
@@ -3246,7 +3256,7 @@ mod tests {
             player.abilities = a.clone();
             if air {
                 player.action = Action::Fall;
-                player.arc = physics::Arc::fall(1000., 0.);
+                player.arc = actor_physics::Arc::fall(1000., 0.);
             }
             for (i, id) in sequence.into_iter().enumerate() {
                 let started = modifier_press(&mut player, &c, true).started.unwrap();
@@ -3576,8 +3586,8 @@ mod tests {
         assert_eq!(player.action, Action::Idle);
     }
 
-    fn sstm() -> physics::Sstm {
-        physics::Sstm {
+    fn sstm() -> actor_physics::Sstm {
+        actor_physics::Sstm {
             fall_max: 16.,
             blow_brake_xz: 0.8,
             blow_min_xz: 0.1,
@@ -3636,7 +3646,7 @@ mod tests {
     fn a_class_three_hit_in_the_air_flinches_and_hops() {
         let (p, c, s, w) = (params(), clips(), sstm(), room());
         let mut player = Player::new([0., 100., 0.], 0.);
-        player.arc = physics::Arc::fall(100., 0.);
+        player.arc = actor_physics::Arc::fall(100., 0.);
         player.action = Action::Fall;
         // Hit from the front: AIR_FRONT, turned to face the attacker.
         let hit = claw([0., -1.], 3);
@@ -3951,7 +3961,7 @@ mod tests {
 
     #[test]
     fn cut_hop_is_five_ticks_of_rise() {
-        assert!((physics::rise_time(physics::JUMP_CUT_HOP) - 5.).abs() < 1e-4);
+        assert!((actor_physics::rise_time(actor_physics::JUMP_CUT_HOP) - 5.).abs() < 1e-4);
     }
 
     #[test]
@@ -4066,7 +4076,7 @@ mod tests {
     fn death_holds_the_dead_motion_and_falls_in_the_air() {
         let (p, c, w) = (params(), clips(), room());
         let mut player = Player::new([0., 120., 0.], 0.);
-        player.arc = physics::Arc::fall(120., 0.);
+        player.arc = actor_physics::Arc::fall(120., 0.);
         player.action = Action::Fall;
         assert_eq!(player.die(&c), Some(Action::Hurt(hurt::DEAD)));
         assert!(player.dead());
@@ -4114,7 +4124,7 @@ mod tests {
         assert_eq!(fired, Some(18));
         // Not in the air, not while locked, not while dead.
         let mut air = Player::new([0., 50., 0.], 0.);
-        air.arc = physics::Arc::fall(50., 0.);
+        air.arc = actor_physics::Arc::fall(50., 0.);
         air.action = Action::Fall;
         assert_eq!(air.use_item(&c), None);
         let mut busy = Player::new([0.; 3], 0.);

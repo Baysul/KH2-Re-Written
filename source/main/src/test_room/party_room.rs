@@ -1,14 +1,14 @@
 //! Donald and Goofy in the test room: their models, staff and shield, and
 //! motions found by name in the installed archives, the behaviour of
-//! `player::party`, the hits their weapon windows land on the enemy,
+//! `player::party_members`, the hits their weapon windows land on the enemy,
 //! and the mesh presentation.
 //!
 //! Built: standing, walking, running and the two ground attacks. Air
 //! attacks, spells, items, KO and revive, and Limits follow the specs under
 //! `party-01`.
 use super::*;
-use data::named::Library;
-use player::party::{self, Follower, Target};
+use data::path_lookup::Library;
+use player::party_members::{self, Follower, Target};
 use std::sync::Arc;
 
 /// The motion ids loaded for a member: idle, walk, run and the two ground
@@ -57,7 +57,7 @@ pub struct PartyKind {
     /// Strength and Magic from the character's LVUP row at level 1.
     pub strength: i32,
     pub magic: i32,
-    pub records: &'static [party::Record],
+    pub records: &'static [party_members::Record],
 }
 
 /// A member in the room.
@@ -160,7 +160,7 @@ pub fn load(
     lvup: &[u8],
     name: &'static str,
     character: usize,
-    records: &'static [party::Record],
+    records: &'static [party_members::Record],
 ) -> Result<PartyKind, Box<dyn std::error::Error>> {
     let found = library
         .find(&format!("obj/{name}.mdlx"))
@@ -297,7 +297,7 @@ pub fn tick(game: &mut Game, tick: u64) {
                 .and_then(|d| d.root.get(t as usize))
                 .map_or([0.; 3], |r| r.to_array())
         };
-        let scene = party::Scene {
+        let scene = party_members::Scene {
             leader: player.position,
             leader_yaw: player.yaw,
             target,

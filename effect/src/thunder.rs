@@ -26,7 +26,7 @@
 use crate::math::{self, Vec4};
 use crate::programs::{active, byte, float, key, use_val, word};
 use crate::{Ctx, Part, Triangle};
-use data::effect::{Program, i16_at};
+use data::object_effect::{Program, i16_at};
 
 pub(crate) const KIND: u32 = 129;
 

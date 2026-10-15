@@ -3,7 +3,7 @@ use crate::{
     hd_image::{self, HdPixelDecodeProfile},
     model_geometry::Geometry,
     model_texture_routing::{self, PartTextureRoute, TargetKind, TextureLinks},
-    replacement::ReplacementSample,
+    replacement_payload::ReplacementSample,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

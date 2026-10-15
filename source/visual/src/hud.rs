@@ -1,11 +1,14 @@
 //! Source-bound HUD sheets: a SEQD sequence and the HD replacement of its
 //! IMGD, e.g. the gauge from `field2d/<lang>/<world>0field.2dd` or a
 //! character face from `obj/<model>.a.<lang>`.
-use data::{bar, hd_image, image_structure, original, probe::ProbeSource, replacement, sequence};
+use data::{
+    bar, hd_image, image_structure, original_payload, probe_source::ProbeSource,
+    replacement_payload, sprite_sequence,
+};
 use std::io;
 
 pub struct Sheet {
-    pub sequence: sequence::Sequence,
+    pub sequence: sprite_sequence::Sequence,
     /// Straight RGBA of the HD replacement for the IMGD.
     pub texture_rgba: Vec<u8>,
     pub texture_size: [u32; 2],
@@ -35,8 +38,8 @@ pub fn load(
         .get(ordinal)
         .filter(|e| e.name_hash == name_hash)
         .ok_or("HUD archive entry mismatch")?;
-    let archive = original::read_original(&mut checked.reader, entry)?.bytes;
-    let replacements = replacement::read_all_replacements(&mut checked.reader, entry)?;
+    let archive = original_payload::read_original(&mut checked.reader, entry)?.bytes;
+    let replacements = replacement_payload::read_all_replacements(&mut checked.reader, entry)?;
     checked.verify_unchanged()?;
     let table = bar::read_bar(&archive)?;
     let slice = |e: &bar::BarEntry| -> io::Result<&[u8]> {
@@ -61,7 +64,7 @@ pub fn load(
     let [seq_entry] = sequences.as_slice() else {
         return Err("expected one HUD sequence".into());
     };
-    let sequence = sequence::read(slice(seq_entry)?)?;
+    let sequence = sprite_sequence::read(slice(seq_entry)?)?;
     let header = image_structure::read_imgd_header(slice(images[image_slot])?)?;
     let first_image = replacements
         .len()
@@ -114,7 +117,7 @@ fn read_entry(
     ordinal: usize,
     name_hash: [u8; 16],
     replacements: bool,
-) -> Result<(Vec<u8>, Vec<replacement::ReplacementSample>), Box<dyn std::error::Error>> {
+) -> Result<(Vec<u8>, Vec<replacement_payload::ReplacementSample>), Box<dyn std::error::Error>> {
     let mut checked = source.open_index(index)?;
     let entry = checked
         .inventory
@@ -122,9 +125,9 @@ fn read_entry(
         .get(ordinal)
         .filter(|e| e.name_hash == name_hash)
         .ok_or("archive entry mismatch")?;
-    let archive = original::read_original(&mut checked.reader, entry)?.bytes;
+    let archive = original_payload::read_original(&mut checked.reader, entry)?.bytes;
     let hd = if replacements {
-        replacement::read_all_replacements(&mut checked.reader, entry)?
+        replacement_payload::read_all_replacements(&mut checked.reader, entry)?
     } else {
         Vec::new()
     };
@@ -213,7 +216,7 @@ pub fn load_window_sheet(
         .iter()
         .find(|e| e.entry_type == SEQD)
         .ok_or("window SEQD absent")?;
-    let sequence = sequence::read(
+    let sequence = sprite_sequence::read(
         infos
             .get(e.offset as usize..e.offset as usize + e.size as usize)
             .ok_or("window SEQD exceeds archive")?,

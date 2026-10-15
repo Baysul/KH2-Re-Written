@@ -2,7 +2,7 @@
 //! FUN_1403ecf30), the prizes scattered on the ground (FUN_1403dc170) and
 //! their pickup effects (FUN_1403dca50).
 use super::*;
-use player::prize::{self, Orb};
+use player::enemy_prizes::{self, Orb};
 
 /// One line of the unattended log.
 fn log_event(log: &mut Option<std::fs::File>, record: serde_json::Value) {
@@ -54,7 +54,7 @@ pub fn tick(game: &mut Game, tick: u64) {
     }
     for i in collected.into_iter().rev() {
         let orb = rt.orbs.remove(i);
-        let e = prize::effect(orb.kind);
+        let e = enemy_prizes::effect(orb.kind);
         // Antiform's pickup skips HP orbs (formcmd-01 §5).
         if e.hp > 0 && form != player::forms::ANTI {
             rt.sora_hp = (rt.sora_hp + e.hp).min(rt.sora_target.max_hp);
@@ -94,7 +94,7 @@ fn kill(
     let critical = rt.difficulty == combat::Difficulty::Critical;
     let low = rt.sora_hp * 2 <= rt.sora_target.max_hp;
     let boost = low.then_some(player.abilities.experience_boost as u32);
-    let exp = prize::kill_exp(enemy_exp, level_exp, critical, boost);
+    let exp = enemy_prizes::kill_exp(enemy_exp, level_exp, critical, boost);
     grant_exp(rt, exp, log, tick);
     // FUN_1403dc170: counts scaled by Jackpot, munny converted by Drive
     // Converter, three item rolls with Lucky Lucky.
@@ -105,7 +105,7 @@ fn kill(
     let floor = world
         .floor(at[0], at[2], at[1] + 30.)
         .unwrap_or(at[1].max(0.));
-    for (kind, n) in prize::drops(&rt.prize.counts, jackpot, converter) {
+    for (kind, n) in enemy_prizes::drops(&rt.prize.counts, jackpot, converter) {
         for _ in 0..n {
             let r = [
                 rt.rng.range(0., 1.),
@@ -136,7 +136,7 @@ pub fn grant_exp(rt: &mut EnemyRuntime, exp: u32, log: &mut Option<std::fs::File
     rt.exp_total = (rt.exp_total + exp).min(9_999_999);
     let before = rt.level;
     let levels = &rt.sora_levels;
-    let after = prize::level_for(rt.exp_total, before, |l| {
+    let after = enemy_prizes::level_for(rt.exp_total, before, |l| {
         levels.get(l as usize - 1).map(|r| r.exp)
     });
     for l in before + 1..=after {

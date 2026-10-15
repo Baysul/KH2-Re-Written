@@ -20,7 +20,7 @@ use bevy::{
 use data::{
     model_inspection::{InspectionModel, read_selected_models},
     model_inspection_textures::TextureMode,
-    probe::ProbeSource,
+    probe_source::ProbeSource,
 };
 use sha2::{Digest, Sha256};
 use std::{

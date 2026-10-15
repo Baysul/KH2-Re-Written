@@ -13,7 +13,7 @@ use data::{
     model_inspection::{self, InspectionModel},
     model_inspection_textures::TextureMode,
     motion::{self, SelectedMotion},
-    probe::ProbeSource,
+    probe_source::ProbeSource,
 };
 use sha2::{Digest, Sha256};
 use std::{

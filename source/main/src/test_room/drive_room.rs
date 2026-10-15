@@ -8,7 +8,7 @@
 //! `Player` keeps its state and the kit (model, motions, PTYA set,
 //! movement record) is exchanged; the presentation respawns the model.
 use super::*;
-use data::{command_table, named::Library, sklt};
+use data::{command_table, path_lookup::Library, sklt};
 use player::forms::{self, Forms};
 use std::sync::Mutex;
 
@@ -62,7 +62,7 @@ pub struct FormSources {
     /// slot (FUN_1403ef750).
     wmst: Vec<u8>,
     items: Vec<u8>,
-    sstm: physics::Sstm,
+    sstm: actor_physics::Sstm,
     base_set: motion::MotionSetSelection,
     spell_ids: Vec<u16>,
     hurt: bool,
@@ -88,12 +88,12 @@ pub struct FormSources {
     pub revert_label: Vec<u8>,
     /// 00effect's PAX (the form level-up's element 16) and the resident
     /// `effect/texcommon.dpd`.
-    pub system_pax: Option<Arc<data::effect::Pax>>,
-    pub texcommon: Option<data::effect::Dpd>,
+    pub system_pax: Option<Arc<data::object_effect::Pax>>,
+    pub texcommon: Option<data::object_effect::Dpd>,
 }
 
 /// An object's own effects: the PAX (entry type 18) of `obj/<name>.a.us`.
-pub fn object_pax(library: &mut Library, name: &str) -> Option<data::effect::Pax> {
+pub fn object_pax(library: &mut Library, name: &str) -> Option<data::object_effect::Pax> {
     let bytes = library.read(&format!("obj/{name}.a.us")).ok()?;
     let table = data::bar::read_bar(&bytes).ok()?;
     let e = table
@@ -101,7 +101,7 @@ pub fn object_pax(library: &mut Library, name: &str) -> Option<data::effect::Pax
         .iter()
         .find(|e| e.entry_type == 18 && e.size > 0)?;
     let pax = bytes.get(e.offset as usize..e.offset as usize + e.size as usize)?;
-    data::effect::read_pax(pax).ok()
+    data::object_effect::read_pax(pax).ok()
 }
 
 fn u16_at(b: &[u8], at: usize) -> Option<u16> {
@@ -119,7 +119,7 @@ impl FormSources {
         spell_ids: Vec<u16>,
         hurt: bool,
         basic_fk: bool,
-        sstm: physics::Sstm,
+        sstm: actor_physics::Sstm,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // memt: u32 version, u32 count, 0x34-byte rows; row 0's u16 at
         // +0x16 + form × 2 is the form's object (FUN_140405190).
@@ -223,7 +223,7 @@ impl FormSources {
         &self,
         source: &ProbeSource,
         form: u8,
-    ) -> Result<kit::Kit, Box<dyn std::error::Error>> {
+    ) -> Result<character_kit::Kit, Box<dyn std::error::Error>> {
         let object = self.object(form)?;
         let name = String::from_utf8_lossy(&object.model_name).into_owned();
         let library = Library::open(source)?;
@@ -294,9 +294,9 @@ impl FormSources {
             .is_some()
             .then_some(self.second_joint)
             .flatten();
-        kit::load_kit(
+        character_kit::load_kit(
             source,
-            kit::KitInputs {
+            character_kit::KitInputs {
                 form,
                 actor,
                 weapon,
@@ -356,7 +356,7 @@ impl BattleState {
 }
 
 /// A form kit being built off the main thread.
-type KitSlot = Arc<Mutex<Option<Result<kit::Kit, String>>>>;
+type KitSlot = Arc<Mutex<Option<Result<character_kit::Kit, String>>>>;
 /// Sora's model and Keyblade parts.
 type ModelParts = Or<(With<SoraPart>, With<WeaponPart>)>;
 
@@ -404,7 +404,7 @@ pub struct DriveRt {
     /// Keyblades each kit shows: 0 (Antiform), 1 or 2.
     pub weapons: HashMap<u8, u8>,
     loading: Option<(u8, KitSlot)>,
-    ready: HashMap<u8, kit::Kit>,
+    ready: HashMap<u8, character_kit::Kit>,
     /// The shared battle RNG DAT_140783ca0 (image value 1).
     pub seed: u32,
     pub battle: BattleState,
@@ -439,7 +439,7 @@ pub struct DriveRt {
     pub menu_forms: Vec<u8>,
     /// Each kit's object PAX, the effect starts this tick, the kit whose
     /// object was just replaced, and the motion trigger scan's position.
-    pub paxes: HashMap<u8, Arc<data::effect::Pax>>,
+    pub paxes: HashMap<u8, Arc<data::object_effect::Pax>>,
     pub fx_requests: Vec<drive_fx::FxRequest>,
     pub fx_owner_left: Option<u8>,
     fx_scan: Option<(u64, Action, u32)>,
@@ -447,7 +447,7 @@ pub struct DriveRt {
     /// Limit Form: the running limit, a requested one, the reaction
     /// command offered this tick, and the limit's colour filter (colour
     /// and ramp 0..=1).
-    pub limit: Option<player::limitform::Limit>,
+    pub limit: Option<player::limit_form::Limit>,
     pub limit_request: Option<u16>,
     pub offer: Option<u16>,
     pub tint: [u8; 3],
@@ -457,7 +457,7 @@ pub struct DriveRt {
     /// and the ticks left once the swap starts its fade.
     after: Option<(f32, f32, u32)>,
     /// Wisdom Form's bullets in flight.
-    pub bullets: Vec<player::wisdom::Bullet>,
+    pub bullets: Vec<player::wisdom_form::Bullet>,
     bullet_serial: u64,
 }
 
@@ -607,13 +607,13 @@ impl DriveRt {
 
     /// Submenu 12's rows and colours (FUN_1403d88e0).
     pub fn limit_rows(&self, mp: i32, charging: bool) -> Vec<(u16, usize)> {
-        player::limitform::LIMITS
+        player::limit_form::LIMITS
             .iter()
             .map(|&c| {
                 let cost = self.src.commands.get(&c).map_or(0, |r| r.cost);
                 (
                     c,
-                    player::limitform::colour(cost, self.limit.is_some(), mp, charging),
+                    player::limit_form::colour(cost, self.limit.is_some(), mp, charging),
                 )
             })
             .collect()
@@ -1012,7 +1012,7 @@ pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
     // Strike Raid and Infinity with MP refilled, each follow-up pressed as
     // soon as it is offered.
     if game.autoplay.is_some() {
-        use player::limitform::{INFINITY, STRIKE_RAID};
+        use player::limit_form::{INFINITY, STRIKE_RAID};
         match game.tick {
             7480 => game.player.drive.refill(),
             7490 => d.request = Some(forms::LIMIT),
@@ -1304,7 +1304,7 @@ pub fn present(
 }
 
 /// Wisdom Form's Shoot: frame trigger 1 of the attack motion fires a
-/// bullet (`player::wisdom`); live bullets fly and join the spell
+/// bullet (`player::wisdom_form`); live bullets fly and join the spell
 /// volumes, and a bullet that hit is removed.
 pub fn shots(game: &mut Game) {
     let Game {
@@ -1345,7 +1345,7 @@ pub fn shots(game: &mut Game) {
                 if f != player.frame {
                     continue;
                 }
-                let Some(sub) = player::wisdom::shot_sub(n) else {
+                let Some(sub) = player::wisdom_form::shot_sub(n) else {
                     continue;
                 };
                 d.bullet_serial += 1;
@@ -1354,7 +1354,7 @@ pub fn shots(game: &mut Game) {
                 // geometry is not decoded; Sora's TARGET height here].
                 let muzzle = [p[0], p[1] + m.src.target_lift, p[2]];
                 let dir = [player.yaw.sin(), 0., player.yaw.cos()];
-                d.bullets.push(player::wisdom::Bullet::new(
+                d.bullets.push(player::wisdom_form::Bullet::new(
                     BULLET_KEYS | d.bullet_serial,
                     sub,
                     muzzle,
@@ -1371,11 +1371,11 @@ pub fn shots(game: &mut Game) {
     for b in &d.bullets {
         m.volumes.push(player::magic::Volume {
             key: b.key,
-            atkp: player::wisdom::ATKP,
+            atkp: player::wisdom_form::ATKP,
             sub: b.sub,
             centre: b.pos,
-            radius: player::wisdom::RADIUS,
-            height: player::wisdom::RADIUS,
+            radius: player::wisdom_form::RADIUS,
+            height: player::wisdom_form::RADIUS,
             previous: b.previous(),
             moving: Some(b.dir),
             role: player::magic::Role::Damage,
@@ -1470,13 +1470,13 @@ pub fn limit_tick(game: &mut Game, rc: bool, abilities: Option<&mut Vec<u16>>) {
     {
         let cost = d.src.commands.get(&cmd).map_or(0, |r| r.cost);
         let colour =
-            player::limitform::colour(cost, false, game.player.mp.cur, game.player.mp_charging);
+            player::limit_form::colour(cost, false, game.player.mp.cur, game.player.mp_charging);
         if colour < 4 && game.player.can_command(&game.clips) {
-            let l = player::limitform::Limit::start(cmd, cost, &mut game.player, &game.clips);
+            let l = player::limit_form::Limit::start(cmd, cost, &mut game.player, &game.clips);
             game.action_started = game.tick;
             let Some(d) = game.drive.as_mut() else { return };
             d.tint = l.tint;
-            d.tint_step = 1. / player::limitform::TINT_IN;
+            d.tint_step = 1. / player::limit_form::TINT_IN;
             d.limit = Some(l);
             let tick = game.tick;
             game.event(
@@ -1521,7 +1521,7 @@ pub fn limit_tick(game: &mut Game, rc: bool, abilities: Option<&mut Vec<u16>>) {
         Vec3::from_array(p),
     );
     let top = (root * hand).transform_point3(Vec3::new(-78., 0., 0.));
-    let scene = player::limitform::Scene {
+    let scene = player::limit_form::Scene {
         targets: &targets.iter().map(|v| v.to_array()).collect::<Vec<_>>(),
         body: [p[0], p[1] + 70., p[2]],
         keyblade_top: top.to_array(),
@@ -1549,7 +1549,7 @@ pub fn limit_tick(game: &mut Game, rc: bool, abilities: Option<&mut Vec<u16>>) {
     }
     d.offer = out.offer;
     if out.ended {
-        d.tint_step = -1. / player::limitform::TINT_OUT;
+        d.tint_step = -1. / player::limit_form::TINT_OUT;
         let tick = game.tick;
         game.event(serde_json::json!({"event":"limit_end","tick":tick}));
     } else {

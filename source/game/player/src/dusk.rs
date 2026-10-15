@@ -2,8 +2,8 @@
 //! ranges, collision response and host status are supplied by the caller.
 //! This translation does not qualify native timing, effects or boss variants.
 
+use crate::actor_physics;
 use crate::combat::{self, AttackParams, AttackerStats, TargetStats};
-use crate::physics;
 use crate::shadow::ScriptRandom;
 
 pub type Vec3 = [f32; 3];
@@ -205,7 +205,7 @@ struct PendingFly {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Fly {
-    arc: physics::Arc,
+    arc: actor_physics::Arc,
     velocity: [f32; 2],
     initial_height: f32,
     original_airborne: bool,
@@ -239,12 +239,12 @@ pub struct Dusk {
     pub culled_leave_distance: f32,
     pub wished: Vec3,
     pub moved: Vec3,
-    sstm: physics::Sstm,
+    sstm: actor_physics::Sstm,
     action: Option<Action>,
     queue: Vec<ActKind>,
-    blow: Option<physics::Blow>,
-    knock: Option<physics::Knock>,
-    sampler: physics::Sampler,
+    blow: Option<actor_physics::Blow>,
+    knock: Option<actor_physics::Knock>,
+    sampler: actor_physics::Sampler,
     record: combat::HitRecord,
     desired_yaw: Option<f32>,
     pending_fly: Option<PendingFly>,
@@ -268,7 +268,7 @@ fn horizontal(v: Vec3) -> Vec3 {
 }
 
 impl Dusk {
-    pub fn new(position: Vec3, yaw: f32, stats: TargetStats, sstm: physics::Sstm) -> Self {
+    pub fn new(position: Vec3, yaw: f32, stats: TargetStats, sstm: actor_physics::Sstm) -> Self {
         let mut actor = Self {
             position,
             spawn: position,
@@ -299,7 +299,7 @@ impl Dusk {
             queue: Vec::new(),
             blow: None,
             knock: None,
-            sampler: physics::Sampler::default(),
+            sampler: actor_physics::Sampler::default(),
             record: combat::HitRecord::new(false),
             desired_yaw: None,
             pending_fly: None,
@@ -429,7 +429,7 @@ impl Dusk {
                 speed = self.sstm.blow_speed;
             }
             let d = horizontal(direction);
-            self.blow = Some(physics::Blow::new(
+            self.blow = Some(actor_physics::Blow::new(
                 [d[0] * speed, up, d[2] * speed],
                 &self.sstm,
             ));
@@ -444,7 +444,7 @@ impl Dusk {
             let strength = self
                 .sstm
                 .knock_strength(attack.knockback[0], class, attack.reaction);
-            self.knock = physics::Knock::new(horizontal(direction), strength, 0.);
+            self.knock = actor_physics::Knock::new(horizontal(direction), strength, 0.);
             self.reaction = Reaction::Flinch;
             self.set_reaction_motion(10 + (back as usize) * 2 + (!high) as usize);
         }
@@ -477,7 +477,7 @@ impl Dusk {
             hit_back
         };
         self.knock = if strength > 0. {
-            physics::Knock::new([-self.yaw.sin(), 0., -self.yaw.cos()], strength, 0.)
+            actor_physics::Knock::new([-self.yaw.sin(), 0., -self.yaw.cos()], strength, 0.)
         } else {
             None
         };
@@ -538,9 +538,9 @@ impl Dusk {
             && !input.no_control
             && let Some(desired) = self.desired_yaw
         {
-            let delta = crate::camera::wrap(desired - self.yaw);
+            let delta = crate::follow_camera::wrap(desired - self.yaw);
             let step = input.turn_rate.max(0.) * 2.;
-            self.yaw = crate::camera::wrap(self.yaw + delta.clamp(-step, step));
+            self.yaw = crate::follow_camera::wrap(self.yaw + delta.clamp(-step, step));
         }
         if self.fault.is_none() && self.pending_fly.is_some() {
             match clips.takeoff(self.motion, self.motion_tick) {
@@ -548,7 +548,7 @@ impl Dusk {
                     let launch = self.pending_fly.take().expect("pending launch");
                     let floor = env.floor(self.position[0], self.position[2], self.position[1]);
                     self.fly = Some(Fly {
-                        arc: physics::Arc::launch(self.position[1], launch.height),
+                        arc: actor_physics::Arc::launch(self.position[1], launch.height),
                         velocity: [
                             launch.direction[0] * launch.speed,
                             launch.direction[2] * launch.speed,
@@ -607,7 +607,7 @@ impl Dusk {
         // Its tick uses the shared fall switch and restores the original mode
         // after reaching the launch height relative to the current floor.
         if !fly.fall_started && fly.arc.falling_motion() && self.reaction == Reaction::None {
-            if !self.play(motion::FLY_JUMP + 1, physics::MOTION_BLEND, clips) {
+            if !self.play(motion::FLY_JUMP + 1, actor_physics::MOTION_BLEND, clips) {
                 return;
             }
             fly.fall_started = true;
@@ -627,16 +627,16 @@ impl Dusk {
             return;
         };
         if self.sampler.due(self.wish_speed) {
-            let dt = physics::PHYSICS_STEP;
+            let dt = actor_physics::PHYSICS_STEP;
             let dy = fly
                 .arc
                 .step(self.position[1], self.sstm.fall_max, frozen, dt);
-            fly.velocity = physics::steer(
+            fly.velocity = actor_physics::steer(
                 fly.velocity,
                 [self.wish_direction[0], self.wish_direction[2]],
                 self.wish_speed,
-                physics::AIR_INERTIA,
-                physics::AIR_DRAG,
+                actor_physics::AIR_INERTIA,
+                actor_physics::AIR_DRAG,
             );
             self.sampler
                 .store([fly.velocity[0] * dt, dy, fly.velocity[1] * dt]);
@@ -681,7 +681,7 @@ impl Dusk {
                     self.sampler.store(blow.step(
                         &self.sstm,
                         self.sstm.fall_max,
-                        physics::PHYSICS_STEP,
+                        actor_physics::PHYSICS_STEP,
                     ));
                 }
                 let d = self.sampler.displacement();
@@ -894,7 +894,7 @@ impl Dusk {
                         return self.continue_action(a);
                     }
                 } else if a.timer > 0. {
-                    a.timer -= physics::DT;
+                    a.timer -= actor_physics::DT;
                 } else {
                     self.action = None;
                     return false;
@@ -943,7 +943,7 @@ impl Dusk {
                     }
                     return false;
                 } else if a.kind == ActKind::IdleTime {
-                    a.timer -= physics::DT;
+                    a.timer -= actor_physics::DT;
                 }
             }
             ActKind::MoveStep => {
@@ -993,7 +993,7 @@ impl Dusk {
                     }
                     Some(v) => self.fault = Some(Fault::UnsupportedStep(v)),
                 }
-                a.timer -= physics::DT;
+                a.timer -= actor_physics::DT;
             }
             ActKind::Jump => {
                 if a.stage == 0 {
@@ -1035,7 +1035,7 @@ impl Dusk {
                     };
                     self.face(facing, input.turn_rate);
                     if a.timer > 0. {
-                        a.timer -= physics::DT;
+                        a.timer -= actor_physics::DT;
                     } else if in_loop {
                         a.timer = 60. * rng.range(1., 2.);
                         a.stage = 2;
@@ -1044,7 +1044,7 @@ impl Dusk {
                     if a.timer <= 0. || distance < a.value {
                         a.stage = 3;
                     } else {
-                        a.timer -= physics::DT;
+                        a.timer -= actor_physics::DT;
                     }
                 } else if a.stage == 3 && end {
                     self.play(base + 1, 0., clips);
@@ -1117,7 +1117,7 @@ impl Dusk {
                         a.stage = 3;
                         return self.continue_action(a);
                     } else {
-                        a.timer -= physics::DT;
+                        a.timer -= actor_physics::DT;
                     }
                 } else if a.stage == 3 {
                     if end {
@@ -1184,7 +1184,7 @@ impl Dusk {
                 } else {
                     a.timer / a.value.max(f32::MIN_POSITIVE)
                 };
-                a.timer -= physics::DT;
+                a.timer -= actor_physics::DT;
                 if a.timer <= 0. {
                     self.alpha = 0.;
                     self.gone = true;
@@ -1248,7 +1248,7 @@ mod tests {
             [0.; 3],
             0.,
             TargetStats::enemy(100, 10000, 0, [100; 7], 100, 0),
-            physics::Sstm {
+            actor_physics::Sstm {
                 fall_max: 20.,
                 blow_brake_xz: 0.9,
                 blow_min_xz: 1.,

@@ -27,7 +27,7 @@
 use crate::math::{self, Mat};
 use crate::programs::{Birth, active, byte, float, key, read_matrix, use_val, word};
 use crate::{Ctx, ModelDraw, Part};
-use data::effect::{Program, i16_at};
+use data::object_effect::{Program, i16_at};
 use std::sync::Arc;
 
 pub(crate) const VT_MIME: u32 = 49;

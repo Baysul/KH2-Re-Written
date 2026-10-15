@@ -8,9 +8,9 @@ use super::{
     spawn_model,
 };
 use bevy::prelude::*;
-use data::{motion, probe::ProbeSource};
+use data::{motion, probe_source::ProbeSource};
 use std::sync::Arc;
-use visual::fog::FogMaterial;
+use visual::area_fog::FogMaterial;
 
 pub const MAX_ACTORS: usize = 16;
 const MAX_PENDING: usize = 32;

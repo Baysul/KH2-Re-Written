@@ -3,8 +3,8 @@ use data::{
         IMGD_INDEXED8_LINEAR_PROFILE, decode_imgd_indexed8_linear, read_imgd_header, summarize_rgba,
     },
     inspection::read_selected_images,
-    original::read_original,
-    probe::ProbeSource,
+    original_payload::read_original,
+    probe_source::ProbeSource,
 };
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, fs::OpenOptions, io::Write, path::PathBuf};
@@ -51,7 +51,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if total_original_bytes > 128 * 1024 * 1024 {
             return Err("original observation budget exceeded".into());
         }
-        let replacements = data::replacement::read_all_replacements(&mut checked.reader, entry)?;
+        let replacements =
+            data::replacement_payload::read_all_replacements(&mut checked.reader, entry)?;
         let bar = data::bar::read_bar(&original.bytes)?;
         for (bar_ordinal, record) in bar.entries.iter().enumerate() {
             if record.offset < 0 || record.size == 0 {

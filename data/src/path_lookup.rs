@@ -2,7 +2,7 @@
 //! digest of the file's path (for example `map/tt08.map`), so a name the
 //! game builds at run time can be looked up directly instead of carrying an
 //! ordinal and digest in a private selection file.
-use crate::{original, probe::CheckedIndex, probe::ProbeSource};
+use crate::{original_payload, probe_source::CheckedIndex, probe_source::ProbeSource};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -128,7 +128,7 @@ impl Library {
     }
 
     pub fn read_found(&mut self, found: &Found) -> Result<Vec<u8>> {
-        self.read_found_limited(found, crate::original::MAX_ORIGINAL_BYTES)
+        self.read_found_limited(found, crate::original_payload::MAX_ORIGINAL_BYTES)
     }
 
     pub fn read_found_limited(&mut self, found: &Found, limit: u32) -> Result<Vec<u8>> {
@@ -145,7 +145,7 @@ impl Library {
         if entry.name_hash != found.name_hash {
             return Err("entry identity mismatch".into());
         }
-        Ok(original::read_original_limited(&mut checked.reader, entry, limit)?.bytes)
+        Ok(original_payload::read_original_limited(&mut checked.reader, entry, limit)?.bytes)
     }
 }
 

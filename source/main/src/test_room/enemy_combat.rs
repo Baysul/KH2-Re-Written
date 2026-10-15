@@ -3,10 +3,10 @@
 use super::enemy_catalog::{Entry, Kind};
 use bevy::prelude::*;
 use data::{
-    bar, battle_tables, motion::SelectedMotion, named::Library, object_collision, objentry,
-    probe::ProbeSource,
+    bar, battle_tables, motion::SelectedMotion, object_collision, objentry, path_lookup::Library,
+    probe_source::ProbeSource,
 };
-use player::{combat, physics};
+use player::{actor_physics, combat};
 use std::collections::HashMap;
 
 type Result<T> = std::result::Result<T, String>;
@@ -73,7 +73,7 @@ pub struct EnemyCombat {
     pub level: u16,
     pub stats: combat::TargetStats,
     pub attacker: combat::AttackerStats,
-    pub sstm: physics::Sstm,
+    pub sstm: actor_physics::Sstm,
     pub difficulty: combat::Difficulty,
     /// Global native manual/cycle lock range, SSTM record +0x4c.
     pub lock_range: f32,
@@ -229,7 +229,7 @@ impl EnemyCombat {
         ) as usize;
         let sstm = sstm_bytes
             .get(sstm_offset..)
-            .and_then(physics::Sstm::read)
+            .and_then(actor_physics::Sstm::read)
             .ok_or("combat SSTM record truncated")?;
         let lock_at = sstm_offset
             .checked_add(0x4c)
@@ -557,7 +557,7 @@ mod tests {
             level: 1,
             stats: combat::TargetStats::enemy(100, 10000, 0, [100; 7], 20, 2),
             attacker: combat::AttackerStats::default(),
-            sstm: physics::Sstm::read(&[0; 0x3c]).unwrap(),
+            sstm: actor_physics::Sstm::read(&[0; 0x3c]).unwrap(),
             difficulty: combat::Difficulty::Standard,
             lock_range: 1000.,
             body,

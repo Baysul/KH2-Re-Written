@@ -9,8 +9,8 @@
 //! Units: positions in the simulation's Y-up space; one tick is one 60 Hz
 //! frame (`trap_frametime` = 1.0). Test-room choices are named constants.
 
+use crate::actor_physics;
 use crate::combat::{self, AttackParams, AttackerStats, TargetStats};
-use crate::physics;
 
 pub type Vec3 = [f32; 3];
 // The native sixteen-slot ring keeps one slot empty to distinguish full/empty.
@@ -26,7 +26,7 @@ fn hlen(v: Vec3) -> f32 {
     v[0].hypot(v[2])
 }
 fn wrap(a: f32) -> f32 {
-    crate::camera::wrap(a)
+    crate::follow_camera::wrap(a)
 }
 
 /// The scripts' shared random generator (LCG x69069, initial 1;
@@ -111,7 +111,7 @@ pub trait Env {
 /// 2.0 x rate per call.
 pub const TURN_RATE: f32 = 0.13;
 /// Gravity (`DAT_1405ce184`).
-pub const GRAVITY: f32 = physics::G;
+pub const GRAVITY: f32 = actor_physics::G;
 /// Respawn delay after leaving/dying (test room only).
 pub const RESPAWN_TICKS: u32 = 120;
 /// The ReflectHitBack used when the ATKP field is −1 (DAT_1405b532c).
@@ -231,16 +231,16 @@ pub struct Shadow {
     pub motion_serial: u32,
     velocity: Vec3,
     /// Jump curve while a jump (not a blow) is airborne (FUN_1403cbb00).
-    arc: Option<physics::Arc>,
+    arc: Option<actor_physics::Arc>,
     /// Blow flight (physics mode 4, FUN_140422780).
-    blow: Option<physics::Blow>,
+    blow: Option<actor_physics::Blow>,
     /// Physics-mode velocity sampling (FUN_1403b89a0).
-    sampler: physics::Sampler,
+    sampler: actor_physics::Sampler,
     /// Knock-slide (FUN_1403d4960 / FUN_1403d4570), for flinches and
     /// reflects.
-    knock: Option<physics::Knock>,
+    knock: Option<actor_physics::Knock>,
     /// SSTM battle parameters (FallMax is obj+0x138, FUN_14040a440).
-    pub sstm: physics::Sstm,
+    pub sstm: actor_physics::Sstm,
     airborne: bool,
     /// The Magnet holding it, if any.
     pub held: Option<Held>,
@@ -258,7 +258,7 @@ pub struct Shadow {
 }
 
 impl Shadow {
-    pub fn new(position: Vec3, yaw: f32, stats: TargetStats, sstm: physics::Sstm) -> Self {
+    pub fn new(position: Vec3, yaw: f32, stats: TargetStats, sstm: actor_physics::Sstm) -> Self {
         let mut s = Shadow {
             position,
             spawn: position,
@@ -276,7 +276,7 @@ impl Shadow {
             velocity: [0.; 3],
             arc: None,
             blow: None,
-            sampler: physics::Sampler::default(),
+            sampler: actor_physics::Sampler::default(),
             knock: None,
             sstm,
             airborne: false,
@@ -423,7 +423,7 @@ impl Shadow {
                 (0., 0.)
             };
             self.velocity = [dx * speed, up, dz * speed];
-            self.blow = Some(physics::Blow::new(self.velocity, &self.sstm));
+            self.blow = Some(actor_physics::Blow::new(self.velocity, &self.sstm));
             self.sampler.reset();
             self.arc = None;
             self.knock = None;
@@ -435,7 +435,7 @@ impl Shadow {
             let strength = self
                 .sstm
                 .knock_strength(attack.knockback[0], class, attack.reaction);
-            self.knock = physics::Knock::new([direction[0], 0., direction[2]], strength, 0.);
+            self.knock = actor_physics::Knock::new([direction[0], 0., direction[2]], strength, 0.);
             self.reaction = Reaction::Flinch;
             self.motion_start(motion::FLINCH[(back as usize) * 2 + (!high) as usize]);
         }
@@ -499,7 +499,7 @@ impl Shadow {
         }
         self.reaction = Reaction::None;
         self.velocity = [0.; 3];
-        self.sampler = physics::Sampler::default();
+        self.sampler = actor_physics::Sampler::default();
         self.airborne = true;
         self.motion_start(motion::FALL);
     }
@@ -521,7 +521,7 @@ impl Shadow {
         };
         if hb > 0. {
             let f = self.forward();
-            self.knock = physics::Knock::new([-f[0], 0., -f[2]], hb, 0.);
+            self.knock = actor_physics::Knock::new([-f[0], 0., -f[2]], hb, 0.);
         }
         self.act_clear();
         self.act_start(ActKind::ModeRevenge);
@@ -614,7 +614,7 @@ impl Shadow {
             // FUN_1403b89a0: the mode routine runs every second frame with a
             // two-frame step; its displacement is spread over those frames.
             if self.sampler.due(0.) {
-                let dt = physics::PHYSICS_STEP;
+                let dt = actor_physics::PHYSICS_STEP;
                 let d = if let Some(blow) = self.blow.as_mut() {
                     let d = blow.step(&self.sstm, self.sstm.fall_max, dt);
                     self.velocity = blow.velocity;
@@ -623,12 +623,12 @@ impl Shadow {
                     // Mode 1 horizontal (FUN_1403b7ad0): no move request
                     // during the jump claw, so the take-off velocity decays
                     // ×0.95 per run [I: the AI leaves obj+0x1c at 0 here].
-                    let [x, z] = physics::steer(
+                    let [x, z] = actor_physics::steer(
                         [self.velocity[0], self.velocity[2]],
                         [0.; 2],
                         0.,
-                        physics::AIR_INERTIA,
-                        physics::AIR_DRAG,
+                        actor_physics::AIR_INERTIA,
+                        actor_physics::AIR_DRAG,
                     );
                     let dy = arc.step(self.position[1], self.sstm.fall_max, false, dt);
                     self.velocity = [x, dy / dt, z];
@@ -652,7 +652,7 @@ impl Shadow {
                 self.velocity = [0.; 3];
                 self.arc = None;
                 self.blow = None;
-                self.sampler = physics::Sampler::default();
+                self.sampler = actor_physics::Sampler::default();
                 self.airborne = false;
                 if let Reaction::Blow { back } = self.reaction {
                     self.reaction = Reaction::BlowLand;
@@ -878,7 +878,7 @@ impl Shadow {
                     // closed-form curve, horizontal speed 5 along the facing.
                     let f = self.forward();
                     self.velocity = [f[0] * 5., 0., f[2] * 5.];
-                    self.arc = Some(physics::Arc::launch(self.position[1], 100.));
+                    self.arc = Some(actor_physics::Arc::launch(self.position[1], 100.));
                     self.sampler.reset();
                     self.airborne = true;
                     self.motion_start(motion::JUMP);
@@ -1132,8 +1132,8 @@ mod tests {
         }
     }
 
-    fn sstm() -> physics::Sstm {
-        physics::Sstm {
+    fn sstm() -> actor_physics::Sstm {
+        actor_physics::Sstm {
             fall_max: 16.,
             blow_brake_xz: 0.8,
             blow_min_xz: 0.1,

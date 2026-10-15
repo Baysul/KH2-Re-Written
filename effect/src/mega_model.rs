@@ -24,7 +24,7 @@ use crate::math::{self, IDENTITY, Mat, Vec4};
 use crate::models::cvtt;
 use crate::programs::{byte, float, key, use_val, word};
 use crate::{Ctx, ModelDraw, Part};
-use data::effect::{Program, i16_at};
+use data::object_effect::{Program, i16_at};
 
 const POOL_MAX: usize = 4096;
 

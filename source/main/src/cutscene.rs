@@ -20,7 +20,7 @@ use bevy::{
 };
 use data::{
     model_inspection::InspectionModel, model_inspection_textures::TextureMode,
-    motion::InterpolatedMotion, probe::ProbeSource,
+    motion::InterpolatedMotion, probe_source::ProbeSource,
 };
 use event::Timeline;
 use std::{collections::HashMap, fs::OpenOptions, path::PathBuf, sync::Arc};
@@ -426,7 +426,7 @@ fn tick(
     }
     // The BGM record at full level (frame 336): music151 at 0x3000.
     let cue = event.timeline.play_bgm.iter().find_map(|c| match c {
-        data::event::Command::PlayBgm {
+        data::event_script::Command::PlayBgm {
             frame: f,
             volume_end: 0,
             ..
@@ -649,7 +649,7 @@ fn compose(
         let (l, r) = (256. - half, 256. + half);
         frame.draws.push((
             sheet,
-            vec![data::sequence::Quad {
+            vec![data::sprite_sequence::Quad {
                 corners: [
                     [r, 0.],
                     [l, 0.],
@@ -679,7 +679,7 @@ fn compose(
             let (l, r) = (-86., 598.);
             frame.draws.push((
                 white,
-                vec![data::sequence::Quad {
+                vec![data::sprite_sequence::Quad {
                     corners: [[l, -1.], [r, -1.], [l, 417.], [r, 417.]],
                     uv: [0, 0, 1, 1],
                     colors: [[tone, tone, tone, c.alpha]; 4],
@@ -723,7 +723,7 @@ fn compose(
                 let w = 220.;
                 frame.draws.push((
                     white,
-                    vec![data::sequence::Quad {
+                    vec![data::sprite_sequence::Quad {
                         corners: [
                             [256. - w / 2., y as f32 - 20.],
                             [256. + w / 2., y as f32 - 20.],
@@ -927,8 +927,8 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut bank = 0i16;
     for c in &loaded.commands {
         match c {
-            data::event::Command::SoundData { bank: b, .. } => bank = *b,
-            data::event::Command::PlaySound {
+            data::event_script::Command::SoundData { bank: b, .. } => bank = *b,
+            data::event_script::Command::PlaySound {
                 kind: 0,
                 number,
                 frame,

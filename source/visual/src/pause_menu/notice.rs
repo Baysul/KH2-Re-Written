@@ -6,7 +6,7 @@
 //! table `THelpText.bin`. The picture and strip are camp.2ld sequence 0;
 //! the heading and counter are sequence 1 sprites.
 use super::*;
-use data::sequence::{Player, Quad};
+use data::sprite_sequence::{Player, Quad};
 use std::collections::HashSet;
 
 /// Table 0x1405bc3e0: file, story flag, category, variant mask.
@@ -460,7 +460,7 @@ impl Camp {
         ];
         for c in &self.notice.callouts {
             let at = [ctx[0] + c.at[0] as f32, ctx[1] + c.at[1] as f32];
-            let q = sprite::text_quads(&c.text, at, CALLOUT_SIZE, 0, 0., rgba, true, font);
+            let q = sprite_player::text_quads(&c.text, at, CALLOUT_SIZE, 0, 0., rgba, true, font);
             out.push((Sheet::Font, q.glyphs));
             if !q.icons.is_empty() {
                 out.push((Sheet::Icon, q.icons));

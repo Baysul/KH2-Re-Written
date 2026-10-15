@@ -12,7 +12,7 @@ use bevy::{
 };
 use data::{
     inspection::{InspectionImage, Projection, read_selected_images},
-    probe::ProbeSource,
+    probe_source::ProbeSource,
 };
 use sha2::{Digest, Sha256};
 use std::{

@@ -1,5 +1,5 @@
 //! The event's commands indexed by frame.
-use data::event::{CameraData, Command};
+use data::event_script::{CameraData, Command};
 
 /// One `SeqPlayAnimation` (0x2C).
 #[derive(Clone, Debug, PartialEq)]

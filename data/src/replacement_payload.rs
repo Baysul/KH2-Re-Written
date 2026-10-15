@@ -2,7 +2,7 @@
 //! Declared offsets remain opaque; this is a compatibility sample, not a name map.
 use crate::{
     HedEntry,
-    original::{MAX_ORIGINAL_BYTES, decode_payload},
+    original_payload::{MAX_ORIGINAL_BYTES, decode_payload},
     read_asset_header,
 };
 use serde::Serialize;
@@ -145,7 +145,7 @@ fn read_replacements<R: Read + Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::original::transform_prefix;
+    use crate::original_payload::transform_prefix;
     use flate2::{Compression, write::ZlibEncoder};
     use std::io::{Cursor, Write};
 

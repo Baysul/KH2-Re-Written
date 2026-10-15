@@ -18,10 +18,10 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 use data::{
-    effect::{self, Dpd, OmdHeader, OmdMesh, Pax},
-    event::Command,
+    event_script::Command,
+    object_effect::{self, Dpd, OmdHeader, OmdMesh, Pax},
 };
-use event::{Timeline, camera};
+use event::{Timeline, event_camera};
 use std::{collections::HashMap, sync::Arc};
 
 /// Selects a texture image: which DPD's buffers (own textures shadow the
@@ -219,7 +219,7 @@ pub fn camera_pose(timeline: &Timeline, frame: f32) -> Option<(Transform, f32)> 
     let cut = timeline.cut_at(frame)?;
     let data = timeline.camera(cut.camera)?;
     let seconds = (frame - cut.start as f32).min((cut.end - cut.start) as f32) / super::EVENT_FPS;
-    let v = camera::view(data, seconds);
+    let v = event_camera::view(data, seconds);
     let eye = Vec3::new(v.eye[0], v.eye[1], -v.eye[2]);
     let target = Vec3::new(v.target[0], v.target[1], -v.target[2]);
     let mut transform = Transform::from_translation(eye).looking_at(target, Vec3::Y);
@@ -579,8 +579,8 @@ impl Fx {
             .entry((Arc::as_ptr(dpd) as usize, d.model))
             .or_insert_with(|| {
                 let m = dpd.models.get(&d.model)?;
-                let header = effect::omd_header(&dpd.bytes, m.hdr).ok()?;
-                let meshes = effect::omd_meshes(&dpd.bytes, m.hdr).ok()?;
+                let header = object_effect::omd_header(&dpd.bytes, m.hdr).ok()?;
+                let meshes = object_effect::omd_meshes(&dpd.bytes, m.hdr).ok()?;
                 Some((header, meshes))
             });
         let Some((header, meshes)) = cached.as_ref() else {
@@ -652,7 +652,7 @@ impl Fx {
             .chain(self.paxes.values().flat_map(|p| p.dpds.iter()))
             .find(|d| Arc::as_ptr(d) as usize == key.dpd)
             .cloned();
-        let mut sources: Vec<&effect::DpdTexture> = Vec::new();
+        let mut sources: Vec<&object_effect::DpdTexture> = Vec::new();
         if let Some(d) = &own {
             sources.extend(d.textures.iter().filter(|t| t.dbp == key.tbp));
         }
@@ -671,7 +671,8 @@ impl Fx {
             .find(|t| t.cbp == key.cbp)
             .map(|t| t.palette.clone());
         for t in sources {
-            let rgba = effect::decode_psmt8(&t.indices, palette.as_deref().unwrap_or(&t.palette));
+            let rgba =
+                object_effect::decode_psmt8(&t.indices, palette.as_deref().unwrap_or(&t.palette));
             for row in 0..t.height {
                 let y = t.y as u32 + row;
                 if y >= h {

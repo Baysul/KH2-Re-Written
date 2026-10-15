@@ -5,7 +5,7 @@
 //! FUN_14016ae30. Input follows FUN_1403b11e0 (wrapping up/down). Layout
 //! units are the PS2 512x416 space; the menu's X origin is -85 at 16:9.
 use crate::gauge::Draw;
-use data::sequence::{Modifiers, Player, Quad, Sequence, color};
+use data::sprite_sequence::{Modifiers, Player, Quad, Sequence, color};
 
 /// X origin of the command menu outside exact 4:3 (0xffffffab).
 pub const X_ORIGIN: f32 = -85.;

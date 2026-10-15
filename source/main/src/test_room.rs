@@ -23,15 +23,16 @@ use bevy::{
     },
 };
 use data::{
-    bar, effect, model_inspection, model_inspection_textures::TextureMode, motion,
-    object_collision, objentry, original, preferences, probe::ProbeSource, ptya, sequence, sklt,
+    bar, model_inspection, model_inspection_textures::TextureMode, motion, object_collision,
+    object_effect, objentry, original_payload, party_records, probe_source::ProbeSource, ptya,
+    sklt, sprite_sequence,
 };
 use player::shadow::{self, ScriptRandom, Shadow};
 use player::{
     Action, Clip, Clips, Input, Params, Player, TriangleWorld, World,
-    camera::{self, CameraInput, FollowCamera},
+    follow_camera::{self, CameraInput, FollowCamera},
 };
-use player::{abilities, combat, magic, physics};
+use player::{abilities, actor_physics, combat, magic};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -41,14 +42,14 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use visual::command::{self, CommandMenu, Decision, Item};
+use visual::area_fog::{AddFogged, FogMaterial, FogPlugin};
 use visual::controller::{self, Pad};
 use visual::fade::{self, Fade};
-use visual::fog::{AddFogged, FogMaterial, FogPlugin};
+use visual::field_command_menu::{self, CommandMenu, Decision, Item};
 use visual::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
 use visual::hud::{self, Sheet, SystemFont};
 use visual::input;
-use visual::layout::{self, Menu2ld};
+use visual::menu_screen::{self, Menu2ld};
 use visual::overlay::{Ui2dFrame, Ui2dPlugin};
 use visual::pause_menu::journal::{self, Curtain, Journal};
 use visual::pause_menu::{self, Camp};
@@ -62,6 +63,7 @@ struct Locator {
     name_hash: [u8; 16],
 }
 mod ability_inventory;
+mod character_kit;
 mod debug_menu;
 mod drive_fx;
 mod drive_room;
@@ -74,7 +76,6 @@ mod enemy_gallery;
 mod enemy_target;
 mod enemy_tour;
 mod item_room;
-mod kit;
 mod magic_room;
 mod party_room;
 mod prize_room;
@@ -278,9 +279,9 @@ struct EffectConfig {
 }
 
 struct EffectSources {
-    weapon: effect::Pax,
-    enemy: Option<effect::Pax>,
-    system: Option<effect::Pax>,
+    weapon: object_effect::Pax,
+    enemy: Option<object_effect::Pax>,
+    system: Option<object_effect::Pax>,
     atlas: visual::effects::Atlas,
 }
 
@@ -305,15 +306,15 @@ struct RunningEffect {
     instance: ::effect::Instance,
     label: &'static str,
     /// Element transform kept for effects bound to the enemy.
-    bound: Option<effect::Element>,
+    bound: Option<object_effect::Element>,
 }
 
 /// Running effect instances and the quads they drew this tick.
 #[derive(Resource)]
 struct Effects {
-    weapon: Option<Arc<effect::Pax>>,
-    enemy: Option<Arc<effect::Pax>>,
-    system: Option<Arc<effect::Pax>>,
+    weapon: Option<Arc<object_effect::Pax>>,
+    enemy: Option<Arc<object_effect::Pax>>,
+    system: Option<Arc<object_effect::Pax>>,
     running: Vec<RunningEffect>,
     rng: ::effect::Rng,
     quads: Vec<::effect::Quad>,
@@ -455,7 +456,7 @@ const LOCOMOTION: [(&str, u16); 6] = [
 /// Test-room choices, recorded in the startup log.
 const STEP_HEIGHT: f32 = 24.;
 /// Run at stick magnitude 0.8 (DAT_140585c7c).
-const WALK_THRESHOLD: f32 = physics::RUN_MAGNITUDE;
+const WALK_THRESHOLD: f32 = actor_physics::RUN_MAGNITUDE;
 const BODY_RADIUS: f32 = 30.;
 const BODY_HEIGHT: f32 = 140.;
 const FLOOR_MIN_NORMAL_Y: f32 = 0.5;
@@ -645,7 +646,7 @@ struct AreaRes {
 /// (128, 128, 64, 0) while the iris opens (group 0) [exit-01 §4].
 struct Transition {
     stage: Stage,
-    iris: Option<sequence::Player>,
+    iris: Option<sprite_sequence::Player>,
     fade: Fade,
     target: (u8, u8, u8),
     /// The next area, decoded on a worker thread while the iris closes
@@ -1000,7 +1001,7 @@ fn read_archive(
         .get(locator.ordinal)
         .filter(|e| e.name_hash == locator.name_hash)
         .ok_or("archive source entry mismatch")?;
-    let original = original::read_original(&mut checked.reader, entry)?;
+    let original = original_payload::read_original(&mut checked.reader, entry)?;
     checked.verify_unchanged()?;
     Ok(original.bytes)
 }
@@ -1021,7 +1022,7 @@ fn read_named(
     else {
         return Ok(None);
     };
-    let bytes = original::read_original(&mut checked.reader, entry)?.bytes;
+    let bytes = original_payload::read_original(&mut checked.reader, entry)?.bytes;
     checked.verify_unchanged()?;
     Ok(Some(bytes))
 }
@@ -1408,12 +1409,12 @@ struct Loaded {
     arena_mesh: Option<visual::room::ArenaMesh>,
     params: Params,
     /// SSTM battle parameters (blow, hit-back, fall max).
-    sstm: physics::Sstm,
+    sstm: actor_physics::Sstm,
     abilities: AbilitySource,
     magic: Option<magic_room::MagicSource>,
     items: Option<item_room::ItemSource>,
     /// Base Sora's kit, and what builds the Drive forms' kits.
-    kit: kit::Kit,
+    kit: character_kit::Kit,
     forms: Option<drive_room::FormSources>,
     enemy_character: u16,
     fmab: player::growth::Fmab,
@@ -1449,8 +1450,8 @@ struct Loaded {
 struct JournalSource {
     book: Menu2ld,
     curtain: Menu2ld,
-    world_icons: Vec<layout::Texture>,
-    tops: Vec<(String, Vec<layout::Texture>)>,
+    world_icons: Vec<menu_screen::Texture>,
+    tops: Vec<(String, Vec<menu_screen::Texture>)>,
     worlds: Vec<data::journal_table::World>,
     stories: Vec<data::journal_table::Story>,
     texts: HashMap<u16, Vec<u8>>,
@@ -1473,8 +1474,8 @@ fn load_journal(
 ) -> Result<JournalSource, Box<dyn std::error::Error>> {
     use data::journal_table;
     use visual::pause_menu::journal;
-    let two_ld = |l: &Locator| layout::load(source, &l.index, l.ordinal, l.name_hash);
-    let images = |l: &Locator| layout::load_images(source, &l.index, l.ordinal, l.name_hash);
+    let two_ld = |l: &Locator| menu_screen::load(source, &l.index, l.ordinal, l.name_hash);
+    let images = |l: &Locator| menu_screen::load_images(source, &l.index, l.ordinal, l.name_hash);
     let book = two_ld(&j.book)?;
     let curtain = two_ld(&j.curtain)?;
     let world_icons = images(&j.worlds)?;
@@ -1611,7 +1612,7 @@ struct CampSource {
     /// The font image's icon plane (0x09 icons).
     icons: SystemFont,
     /// 03system.bin `ipic`: the item pictures' sequence.
-    picture_sequence: Option<data::sequence::Sequence>,
+    picture_sequence: Option<data::sprite_sequence::Sequence>,
     /// The tutorial notices' headings, "PAGE " and callouts.
     notice_headings: [Vec<u8>; 4],
     notice_page: Vec<u8>,
@@ -1945,7 +1946,7 @@ struct EnemyRuntime {
     level: u8,
     exp_total: u32,
     munny: u32,
-    orbs: Vec<player::prize::Orb>,
+    orbs: Vec<player::enemy_prizes::Orb>,
     was_dead: bool,
     /// Ability items learned by level-ups, waiting for the camp.
     learned: Vec<u16>,
@@ -2077,7 +2078,7 @@ fn load_camp_source(
     battle: &[u8],
     system: &[u8],
 ) -> Result<CampSource, Box<dyn std::error::Error>> {
-    let menu = layout::load(source, &l.index, l.ordinal, l.name_hash)?;
+    let menu = menu_screen::load(source, &l.index, l.ordinal, l.name_hash)?;
     let ids: Vec<u32> = CAMP_ENTRIES
         .iter()
         .flat_map(|&(_, label, help)| [label, help])
@@ -2284,7 +2285,7 @@ fn load_camp_source(
         equip_stats,
         picture_sequence: bar_entry(system, b"ipic")
             .ok()
-            .map(data::sequence::read)
+            .map(data::sprite_sequence::read)
             .transpose()?,
         notice_headings: {
             let mut h = msg(&pause_menu::notice::HEADING_IDS)?.into_iter();
@@ -2316,9 +2317,9 @@ fn player_params(
     objects: &[objentry::ObjectEntry],
     name: &str,
     pref: &[u8],
-    sstm: &physics::Sstm,
+    sstm: &actor_physics::Sstm,
 ) -> Result<(Params, i32, Option<u32>), Box<dyn std::error::Error>> {
-    let mut obj_params = physics::ObjParams::defaults(sstm.fall_max);
+    let mut obj_params = actor_physics::ObjParams::defaults(sstm.fall_max);
     let player_object = objects
         .iter()
         .find(|o| o.model_name == name.as_bytes())
@@ -2326,8 +2327,9 @@ fn player_params(
     let prty_index = player_object.neo_moveset as i16 as i32;
     let mut prty_offset = None;
     if prty_index != 0 {
-        let prty = preferences::read_prty(bar_entry(pref, b"prty")?)?;
-        let offset = physics::prty_offset(&prty.offsets, prty_index).ok_or("PRTY record absent")?;
+        let prty = party_records::read_prty(bar_entry(pref, b"prty")?)?;
+        let offset =
+            actor_physics::prty_offset(&prty.offsets, prty_index).ok_or("PRTY record absent")?;
         let record = prty
             .records
             .iter()
@@ -2449,7 +2451,7 @@ fn load(
     let sstm_offset = u32::from_le_bytes(sstm_bytes.get(4..8).ok_or("SSTM pointer")?.try_into()?);
     let sstm = sstm_bytes
         .get(sstm_offset as usize..)
-        .and_then(physics::Sstm::read)
+        .and_then(actor_physics::Sstm::read)
         .ok_or("SSTM record truncated")?;
     let battle = read_archive(source, &config.battle)?;
     let ability_source = {
@@ -2597,13 +2599,13 @@ fn load(
     };
     // Sora's object effects (obj/P_EX100.a.us), 00effect's and the
     // resident common effect textures.
-    let (base_pax, texcommon) = match data::named::Library::open(source) {
+    let (base_pax, texcommon) = match data::path_lookup::Library::open(source) {
         Ok(mut library) => (
             drive_room::object_pax(&mut library, &config.player_object_name),
             library
                 .read("effect/texcommon.dpd")
                 .ok()
-                .and_then(|b| effect::read_dpd(&b).ok()),
+                .and_then(|b| object_effect::read_dpd(&b).ok()),
         ),
         Err(_) => (None, None),
     };
@@ -2612,9 +2614,9 @@ fn load(
         .as_ref()
         .and_then(|e| e.system.as_ref())
         .and_then(|l| visual::effects::load_pax(source, &l.index, l.ordinal, l.name_hash).ok());
-    let kit = kit::load_kit(
+    let kit = character_kit::load_kit(
         source,
-        kit::KitInputs {
+        character_kit::KitInputs {
             form: 0,
             actor,
             weapon,
@@ -2722,7 +2724,7 @@ fn load(
             .iter()
             .find(|o| {
                 let name = format!("obj/{}.mdlx", String::from_utf8_lossy(&o.model_name));
-                data::named::md5(name.as_bytes()) == e.model.name_hash
+                data::path_lookup::md5(name.as_bytes()) == e.model.name_hash
             })
             .map_or(0, |o| o.character)
     });
@@ -2816,7 +2818,7 @@ fn load(
     };
     let summary = serde_json::json!({"event":"admission","source_qualification":"quarantined_unqualified",
         "params":{"walk_speed":params.walk_speed,"run_speed":params.run_speed,"jump_height":params.jump_height,
-            "turn_speed":params.turn_speed,"fall_max":params.fall_max,"gravity":physics::G,"run_magnitude":WALK_THRESHOLD,
+            "turn_speed":params.turn_speed,"fall_max":params.fall_max,"gravity":actor_physics::G,"run_magnitude":WALK_THRESHOLD,
             "prty_index":prty_index,"prty_offset":prty_offset,"land_inertia":params.land_inertia,"land_drag":params.land_drag,"sstm":format!("{sstm:?}")},
         "test_room_choices":{"step_height":STEP_HEIGHT,
             "body_radius":BODY_RADIUS,"body_height":BODY_HEIGHT,"floor_min_normal_y":FLOOR_MIN_NORMAL_Y,
@@ -2848,7 +2850,7 @@ fn load(
         .area
         .as_ref()
         .map_or("tt".to_owned(), |a| a.world.clone());
-    let voices = data::named::Library::open(source)
+    let voices = data::path_lookup::Library::open(source)
         .ok()
         .and_then(|mut library| {
             library
@@ -2861,7 +2863,7 @@ fn load(
     // they name (se<bank>.win32.scd).
     let step_info = area_load.as_ref().and_then(|(_, a)| {
         let code = ::area::progress::WORLDS.get(a.world as usize)?;
-        let mut library = data::named::Library::open(source).ok()?;
+        let mut library = data::path_lookup::Library::open(source).ok()?;
         let bytes = library.read("12soundinfo.bar").ok()?;
         let table = data::bar::read_bar(&bytes).ok()?;
         let entry = table
@@ -3067,11 +3069,11 @@ fn load(
             // The party stands in rooms with a fight to join.
             Some(_) => {
                 let mut kinds = Vec::new();
-                if let Ok(mut library) = data::named::Library::open(source) {
+                if let Ok(mut library) = data::path_lookup::Library::open(source) {
                     let lvup = bar_entry(&battle, b"lvup").unwrap_or(&[]);
                     for (name, character, records) in [
-                        ("P_EX020", 2, &player::party::DONALD[..]),
-                        ("P_EX030", 3, &player::party::GOOFY[..]),
+                        ("P_EX020", 2, &player::party_members::DONALD[..]),
+                        ("P_EX030", 3, &player::party_members::GOOFY[..]),
                     ] {
                         match party_room::load(
                             source,
@@ -3517,7 +3519,9 @@ fn area_tick(area: Option<ResMut<AreaRes>>, hud: Option<ResMut<Hud>>) {
     match t.stage {
         Stage::Closing => match seq {
             Some(seq) => {
-                let p = t.iris.get_or_insert_with(|| sequence::Player::new(seq, 1));
+                let p = t
+                    .iris
+                    .get_or_insert_with(|| sprite_sequence::Player::new(seq, 1));
                 p.update(seq, 1.0);
                 if p.finished() {
                     t.fade.fade_out(1, false);
@@ -3728,7 +3732,7 @@ fn area_transition(
         .map(|t| t.map(|p| to_world(p.to_array())))
         .collect();
     rig.camera = FollowCamera::new(
-        camera::OUTDOOR,
+        follow_camera::OUTDOOR,
         &camera_input(&game.player, game.player.position, game.params.run_speed),
     );
     rig.previous_position = game.player.position;
@@ -3754,7 +3758,7 @@ fn area_transition(
         t.iris = hud
             .as_ref()
             .and_then(|h| h.iris.as_ref())
-            .map(|s| sequence::Player::new(&s.sequence, 0));
+            .map(|s| sprite_sequence::Player::new(&s.sequence, 0));
         t.fade.fade_in(1, false);
     }
 }
@@ -4192,7 +4196,7 @@ fn spawn_room(
 ) {
     let mut texa_workers = Vec::new();
     // The area's type-14 record: screen clear colour and fog (draw-01 §8.1).
-    visual::fog::set_current(room.environment.map(|e| e.fog));
+    visual::area_fog::set_current(room.environment.map(|e| e.fog));
     if let Some(e) = &room.environment {
         commands.insert_resource(ClearColor(Color::srgb_u8(
             e.clear[0], e.clear[1], e.clear[2],
@@ -4941,7 +4945,7 @@ fn setup(
         },
         bevy::camera::RenderTarget::Image(compose.scene.clone().into()),
         Projection::Perspective(PerspectiveProjection {
-            fov: FollowCamera::new(camera::OUTDOOR, &CameraInput::default()).vertical_fov(),
+            fov: FollowCamera::new(follow_camera::OUTDOOR, &CameraInput::default()).vertical_fov(),
             near: 5.,
             far: 200_000.,
             ..default()
@@ -5159,9 +5163,10 @@ fn compose_2d(
             hud.as_ref().and_then(|h| h.iris.as_ref()),
             t.iris.as_ref(),
         ) {
-            let quads = sheet
-                .sequence
-                .quads(player, [0., 0.], &sequence::Modifiers::default());
+            let quads =
+                sheet
+                    .sequence
+                    .quads(player, [0., 0.], &sprite_sequence::Modifiers::default());
             frame.draws.push((slot, quads));
         }
         if t.fade.state != fade::State::Idle
@@ -5421,7 +5426,7 @@ fn simulate(
                 }
             }
             // A limit's follow-up is the reaction command (slot 1).
-            m.menu.reaction = d.offer.map(|cmd| command::Reaction {
+            m.menu.reaction = d.offer.map(|cmd| field_command_menu::Reaction {
                 label: d.src.names.get(&cmd).cloned().unwrap_or_default(),
                 dimmed: false,
             });
@@ -5488,7 +5493,7 @@ fn simulate(
                 if game.drive.as_ref().is_some_and(|d| d.limit_form()) =>
             {
                 if let Some(d) = game.drive.as_mut() {
-                    d.limit_request = player::limitform::LIMITS.get(index).copied();
+                    d.limit_request = player::limit_form::LIMITS.get(index).copied();
                 }
             }
             Decision::Open(1) => {
@@ -5657,7 +5662,7 @@ fn simulate(
             && let Some(d) = game.drive.as_mut()
             && d.limit_form()
         {
-            d.limit_request = player::limitform::LIMITS.get(k).copied();
+            d.limit_request = player::limit_form::LIMITS.get(k).copied();
         }
         let cmd = if game.drive.as_ref().is_some_and(|d| d.limit_form()) && !item {
             0
@@ -5877,7 +5882,7 @@ fn simulate(
     } = &mut *rig;
     let hits = std::cell::Cell::new(0);
     follow.tick(&camera, &|a, b| {
-        let hit = camera::segment_hit(collision, a, b);
+        let hit = follow_camera::segment_hit(collision, a, b);
         hits.set(hits.get() + hit.is_some() as u64);
         hit
     });
@@ -5938,7 +5943,11 @@ fn game_view(eye: [f32; 3], look_at: [f32; 3]) -> ::effect::math::Mat {
 
 /// The enemy's object matrix in game world space (scene yaw θ is a game
 /// rotation of −θ about Y) composed with a bound element's transform.
-fn bound_world(position: [f32; 3], yaw: f32, element: &effect::Element) -> ::effect::math::Mat {
+fn bound_world(
+    position: [f32; 3],
+    yaw: f32,
+    element: &object_effect::Element,
+) -> ::effect::math::Mat {
     let object = ::effect::instance_matrix(to_world(position), [0., -yaw, 0.], [1.; 3]);
     let local = ::effect::instance_matrix(element.translation, element.rotation, element.scale);
     ::effect::math::mul(&object, &local)
@@ -6477,7 +6486,7 @@ fn talk_tick(mut game: ResMut<Game>, talk: Option<ResMut<Talk>>, hud: Option<Res
             None
         } else {
             talk.reaction
-                .map(|dimmed| command::Reaction { label, dimmed })
+                .map(|dimmed| field_command_menu::Reaction { label, dimmed })
         };
     }
 }
@@ -6818,7 +6827,7 @@ fn hud_present(
         } else {
             m.menu.draw(
                 &m.sheet.sequence,
-                &command::Font {
+                &field_command_menu::Font {
                     widths: &m.font.widths,
                     pad: 1,
                 },
@@ -6832,7 +6841,7 @@ fn hud_present(
         if let Some((font_sheet, widths)) = menu_font.as_ref() {
             draws.extend(panels.draw(
                 &sheets[0].sequence,
-                &command::Font { widths, pad: 1 },
+                &field_command_menu::Font { widths, pad: 1 },
                 0,
                 *font_sheet,
             ));
@@ -6860,17 +6869,17 @@ fn hud_present(
         && a.transition.is_none()
     {
         let sheet = *sheet;
-        let font = command::Font { widths, pad: 1 };
+        let font = field_command_menu::Font { widths, pad: 1 };
         for (text, y) in [a.banner.as_ref().map(|b| &b.0), a.guide.as_ref()]
             .into_iter()
             .zip([192., 384.])
             .filter_map(|(t, y)| t.map(|t| (t, y)))
         {
             let size = 20.;
-            let width = command::text_width(text, &font, size);
+            let width = field_command_menu::text_width(text, &font, size);
             let origin = [256. - width / 2., y - 24. * size / 18.];
             draws.push(Draw::Quads {
-                quads: command::text_quads_sized(text, origin, [1.; 4], &font, size),
+                quads: field_command_menu::text_quads_sized(text, origin, [1.; 4], &font, size),
                 z: 0,
                 sheet,
             });
@@ -6878,12 +6887,12 @@ fn hud_present(
     }
     // The skateboard key's notice (system font, white, upper centre).
     if let (Some((text, _)), Some((sheet, widths))) = (skate.notice.as_ref(), menu_font.as_ref()) {
-        let font = command::Font { widths, pad: 1 };
+        let font = field_command_menu::Font { widths, pad: 1 };
         let size = 14.;
-        let width = command::text_width(text, &font, size);
+        let width = field_command_menu::text_width(text, &font, size);
         let origin = [256. - width / 2., 112. - 24. * size / 18.];
         draws.push(Draw::Quads {
-            quads: command::text_quads_sized(text, origin, [1.; 4], &font, size),
+            quads: field_command_menu::text_quads_sized(text, origin, [1.; 4], &font, size),
             z: 0,
             sheet: *sheet,
         });
@@ -6891,7 +6900,7 @@ fn hud_present(
     if !debug.open
         && let Some((sheet, widths)) = menu_font.as_ref()
     {
-        let font = command::Font { widths, pad: 1 };
+        let font = field_command_menu::Font { widths, pad: 1 };
         let status = format!(
             "Enemies ({}/{}) - F3: {}",
             gallery.actors.len(),
@@ -6899,9 +6908,10 @@ fn hud_present(
             gallery.status
         );
         let label = pause_menu::encode_text(&status);
-        let size = 12_f32.min(12. * 480. / command::text_width(&label, &font, 12.).max(1.));
+        let size =
+            12_f32.min(12. * 480. / field_command_menu::text_width(&label, &font, 12.).max(1.));
         draws.push(Draw::Quads {
-            quads: command::text_quads_sized(&label, [16., 20.], [1.; 4], &font, size),
+            quads: field_command_menu::text_quads_sized(&label, [16., 20.], [1.; 4], &font, size),
             z: 0,
             sheet: *sheet,
         });
@@ -7705,7 +7715,7 @@ fn present_orbs(
         match orbs.get(slot.0) {
             Some(o) => {
                 *visibility = Visibility::Visible;
-                let lift = player::prize::centre_height(o.kind);
+                let lift = player::enemy_prizes::centre_height(o.kind);
                 transform.translation =
                     Vec3::new(o.position[0], o.position[1] + lift, o.position[2]);
                 transform.scale = Vec3::splat(if o.kind % 3 == 2 || o.kind == 8 {
@@ -8701,7 +8711,7 @@ fn upload_camp_sheets(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asset
         c.source.icons.texel_scale as f32,
     );
     if let Some(j) = c.journal_source.as_mut() {
-        let mut add = |t: &mut layout::Texture| {
+        let mut add = |t: &mut menu_screen::Texture| {
             frame.add_sheet(images, std::mem::take(&mut t.rgba), t.size, t.texel_scale)
         };
         let s = &mut c.journal_sheets;
@@ -9193,7 +9203,7 @@ fn load_wanted_picture(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asse
         return;
     }
     let path = format!("itempic/item-{id:03}.imd");
-    let sheet = match layout::load_imgd(source, PICTURE_INDEX, &path) {
+    let sheet = match menu_screen::load_imgd(source, PICTURE_INDEX, &path) {
         Ok(Some(t)) => Some(frame.add_sheet(images, t.rgba, t.size, t.texel_scale)),
         Ok(None) => None,
         Err(e) => {
@@ -9234,7 +9244,7 @@ fn load_wanted_journal(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asse
         if let std::collections::hash_map::Entry::Vacant(slot) = c.journal_sheets.faces.entry(key) {
             let faces = code_of(key).and_then(|code| {
                 let path = format!("menu/jmface_{code}.2ld");
-                match layout::load_images_named(source, PICTURE_INDEX, &path) {
+                match menu_screen::load_images_named(source, PICTURE_INDEX, &path) {
                     Ok(f) => f,
                     Err(e) => {
                         eprintln!("Journal faces {path} rejected: {e}");
@@ -9264,11 +9274,15 @@ fn load_wanted_journal(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asse
         && let Some(code) = code_of(a.world as u8)
     {
         let mut path = format!("menu/{}/jm_photo/{code}{}.bin", c.lang, a.suffix);
-        if c.lang != "us" && !matches!(layout::load_imgd(source, PICTURE_INDEX, &path), Ok(Some(_)))
+        if c.lang != "us"
+            && !matches!(
+                menu_screen::load_imgd(source, PICTURE_INDEX, &path),
+                Ok(Some(_))
+            )
         {
             path = format!("menu/us/jm_photo/{code}{}.bin", a.suffix);
         }
-        match layout::load_imgd(source, PICTURE_INDEX, &path) {
+        match menu_screen::load_imgd(source, PICTURE_INDEX, &path) {
             Ok(Some(t)) => {
                 let slot = frame.add_sheet(images, t.rgba, t.size, t.texel_scale);
                 c.journal_sheets.photos.insert(row, slot);
@@ -9293,10 +9307,15 @@ fn load_wanted_notice(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asset
         return;
     };
     let mut path = format!("menu/{}/{file}", c.lang);
-    if c.lang != "us" && !matches!(layout::load_imgd(source, PICTURE_INDEX, &path), Ok(Some(_))) {
+    if c.lang != "us"
+        && !matches!(
+            menu_screen::load_imgd(source, PICTURE_INDEX, &path),
+            Ok(Some(_))
+        )
+    {
         path = format!("menu/us/{file}");
     }
-    match layout::load_imgd(source, PICTURE_INDEX, &path) {
+    match menu_screen::load_imgd(source, PICTURE_INDEX, &path) {
         Ok(Some(t)) => {
             let slot = frame.add_sheet(images, t.rgba, t.size, t.texel_scale);
             c.notice_sheets.insert(file.clone(), slot);
@@ -9321,7 +9340,7 @@ fn camp_present(
 ) {
     let Some(mut c) = camp else { return };
     let c = &mut *c;
-    let font = command::Font {
+    let font = field_command_menu::Font {
         widths: &c.source.font.widths,
         // The keyboard or mouse was last used: key caps (pad 0).
         pad: c.glyph as u8,
@@ -9809,7 +9828,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             .enumerate()
             .map(|(i, kind)| party_room::MemberRt {
                 kind,
-                follower: player::party::Follower::spawn(
+                follower: player::party_members::Follower::spawn(
                     loaded.spawn.to_array(),
                     loaded.yaw,
                     i as u8,
@@ -10082,7 +10101,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     }
     let rig = CameraRig {
         camera: FollowCamera::new(
-            camera::OUTDOOR,
+            follow_camera::OUTDOOR,
             &camera_input(&game.player, game.player.position, game.params.run_speed),
         ),
         previous_position: game.player.position,

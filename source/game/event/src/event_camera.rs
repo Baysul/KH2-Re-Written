@@ -1,6 +1,6 @@
 //! Event camera key evaluation. Key times are 1/512 s ticks; a cut's local
 //! time runs from its start frame.
-use data::event::{CameraData, CameraKey};
+use data::event_script::{CameraData, CameraKey};
 
 pub const KEY_TICKS_PER_SECOND: f32 = 512.;
 

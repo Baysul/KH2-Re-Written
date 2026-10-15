@@ -1,4 +1,4 @@
-use data::original::read_original;
+use data::original_payload::read_original;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -49,7 +49,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: original_probe <selected-install-root> <private-source-manifest.json> <new-private-report.json> [private-explicit-selection.json] [existing-private-preview-directory]".into());
     }
     let source =
-        data::probe::ProbeSource::bind(&PathBuf::from(&args[0]), &PathBuf::from(&args[1]))?;
+        data::probe_source::ProbeSource::bind(&PathBuf::from(&args[0]), &PathBuf::from(&args[1]))?;
     let output = source.output_path(&PathBuf::from(&args[2]))?;
     let (
         selections,
@@ -237,9 +237,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             selected[category] += 1;
             total_bytes += original.bytes.len();
             let replacement_samples = if selections.is_some() {
-                data::replacement::read_all_replacements(&mut checked.reader, entry)?
+                data::replacement_payload::read_all_replacements(&mut checked.reader, entry)?
             } else {
-                data::replacement::read_first_replacements(&mut checked.reader, entry)?
+                data::replacement_payload::read_first_replacements(&mut checked.reader, entry)?
             };
             total_bytes += replacement_samples
                 .iter()

@@ -7,9 +7,9 @@ use data::{
     message_text::{self, InternationalContent},
     model_inspection::{self, InspectionModel},
     motion::{self, SelectedMotion},
-    named::Library,
     objentry::{self, ObjectEntry},
-    probe::ProbeSource,
+    path_lookup::Library,
+    probe_source::ProbeSource,
 };
 use std::{collections::HashMap, sync::Arc};
 use visual::hud;

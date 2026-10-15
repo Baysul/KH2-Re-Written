@@ -9,7 +9,7 @@ use super::{
     sound_triggers,
 };
 use bevy::prelude::*;
-use data::{model_inspection, motion, object_collision, probe::ProbeSource, ptya};
+use data::{model_inspection, motion, object_collision, probe_source::ProbeSource, ptya};
 use player::{Action, AttackStep, Clip, Clips, Params};
 use std::collections::HashMap;
 
@@ -45,7 +45,7 @@ pub(super) struct KitInputs<'a> {
     pub basic_fk: bool,
     pub params: Params,
     /// The object's own effects (its `.a.us` PAX), if installed.
-    pub pax: Option<data::effect::Pax>,
+    pub pax: Option<data::object_effect::Pax>,
     /// Motions its script starts by id (Limit Form's limits), loaded when
     /// the set holds them.
     pub scripted: Vec<u16>,
@@ -69,7 +69,7 @@ pub(super) struct Kit {
     pub target_lift: f32,
     pub summary: serde_json::Value,
     pub set: Vec<ptya::PtyaEntry>,
-    pub pax: Option<data::effect::Pax>,
+    pub pax: Option<data::object_effect::Pax>,
     /// Weapon slots with a motion set (0 leaves the Keyblade unattached).
     pub weapon_motions: u8,
 }

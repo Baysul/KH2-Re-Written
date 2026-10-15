@@ -3,7 +3,7 @@
 //! main layout plays the start fade, intro and idle scenes of title.2ld; once
 //! idle, a cursor layout shows the rows. Decisions hand off to the New Game
 //! dialog, the file menu, the Theater or the collection launcher.
-use data::layout::{Layout, LayoutTask};
+use data::menu_layout::{Layout, LayoutTask};
 
 /// Logical pad bits read by the title (pad mode 7, FUN_14039c720).
 pub mod bits {
@@ -267,14 +267,14 @@ impl Title {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use data::layout::{Prop, Scene};
-    use data::sequence::{Animation, AnimationGroup, Sequence};
+    use data::menu_layout::{Prop, Scene};
+    use data::sprite_sequence::{Animation, AnimationGroup, Sequence};
 
     /// Twenty scenes, each one prop on a group lasting `len` frames; the
     /// idle scene (14) loops.
     fn layout(len: i32) -> Layout {
         let animation = |end| Animation {
-            flags: data::sequence::LINEAR,
+            flags: data::sprite_sequence::LINEAR,
             sprite_group: 0,
             frames: [0, end],
             translate: [0; 4],

@@ -13,11 +13,11 @@
 //! pause.2ld curtain (`Curtain`, FUN_14031adc0 / FUN_14031a690).
 use super::bits;
 use super::{MenuList, Pad, SOUND_CLOSE, SOUND_CURSOR, SOUND_DECIDE, SOUND_INVALID, SOUND_OPEN};
-use crate::command::Font;
-use crate::sprite::{self, Id, LightCur, Sprites, Text};
+use crate::field_command_menu::Font;
+use crate::sprite_player::{self, Id, LightCur, Sprites, Text};
 use data::journal_table::{Album, Char, Diag, Story, World};
-use data::layout::{Layout, LayoutTask};
-use data::sequence::{Modifiers, Player, Quad, Sequence};
+use data::menu_layout::{Layout, LayoutTask};
+use data::sprite_sequence::{Modifiers, Player, Quad, Sequence};
 use std::collections::{HashMap, HashSet};
 
 mod album;
@@ -1652,11 +1652,11 @@ impl Journal {
                 ));
             }
         }
-        let convert = |items: Vec<(sprite::Sheet, Vec<Quad>)>| {
+        let convert = |items: Vec<(sprite_player::Sheet, Vec<Quad>)>| {
             items.into_iter().map(|(sheet, quads)| match sheet {
-                sprite::Sheet::Art(_) => (Sheet::Art, quads),
-                sprite::Sheet::Font => (Sheet::Font, quads),
-                sprite::Sheet::Icon => (Sheet::Icon, quads),
+                sprite_player::Sheet::Art(_) => (Sheet::Art, quads),
+                sprite_player::Sheet::Font => (Sheet::Font, quads),
+                sprite_player::Sheet::Icon => (Sheet::Icon, quads),
             })
         };
         let mut prios: Vec<u32> = self.pictures.iter().map(|p| p.prio).collect();

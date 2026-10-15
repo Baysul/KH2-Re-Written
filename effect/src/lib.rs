@@ -16,7 +16,7 @@ mod ribbon;
 mod tail;
 mod thunder;
 
-use data::effect::{Dpd, Program, i32_at, u32_at};
+use data::object_effect::{Dpd, Program, i32_at, u32_at};
 use math::{IDENTITY, Mat, Vec4};
 use std::sync::Arc;
 

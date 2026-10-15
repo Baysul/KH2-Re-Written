@@ -29,24 +29,33 @@ read, no gameplay admission, no game data touched.
    now looks for `target/debug/validation.exe`.
 7. Left historical task records (T000–T129) with their original paths. The folder
    guide maps old names to current ones.
+8. Renamed the unclear Rust file names so each reads as its job: for example
+   `data/src/effect.rs` to `object_effect.rs`, `named.rs` to `path_lookup.rs`,
+   `layout.rs` to `menu_layout.rs`, and player `physics.rs` to `actor_physics.rs`.
+   The full list is in [the folder guide](../folder-guide.md#names-used-by-older-records).
+   Module declarations, imports, bare module paths, the `data` and `effect` reference
+   sites and the docs were updated; the compiler checked each step. Format and hardware
+   names (BAR, ARD, PTYA, SCD, OGG, VIF, VPU, TEXA, OBJENTRY) were kept, because
+   AGENTS.md requires established format names. Developer binary names were kept too,
+   since the docs use them as commands.
 
 ## Checks
 
 - `cargo fmt --all --check`: PASS after `cargo fmt --all` re-sorted renamed imports.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: PASS.
-- `cargo test --workspace --locked`: PASS, all suites.
+- `cargo test --workspace --locked`: PASS, 559 tests.
 - `cargo build --workspace --locked`: PASS.
 - `cargo build -p main --features skate3 --locked`: PASS.
 - `python -m unittest discover -s tools -p test_progress.py`: 9 tests, OK.
-- `cargo run -p main --locked -- --frames 180`: the window opened and the run
-  completed. The exit code was not captured, so this is not a strict PASS.
+- `cargo run -p main --locked -- --frames 180`: exit 0.
 
 ## Not done
 
-- No per-file renames beyond T129. Names such as `data/src/probe.rs`,
-  `data/src/vpu.rs`, `data/src/vif.rs` and `data/src/ogg.rs` still use format
-  or research terms. Renaming them is a separate step.
 - Not pushed and not merged to `main`. Waiting for the user to approve the merge.
+- Format-named files are not renamed (`vif.rs`, `vpu.rs`, `ogg.rs`, `ptya.rs`,
+  `scd.rs`, `texa.rs`) because AGENTS.md keeps established format names.
+- Some remaining names are research or game terms, such as `data/src/inspection.rs`,
+  `source/game/area/src/script.rs` and `source/main/src/npcs.rs`. They were not changed.
 
 ## Uncertainty
 
@@ -60,5 +69,4 @@ NOT RUN for the final merge; engineering checks above PASS on the branch.
 
 ## Next task
 
-Approve or stop the merge to `main`. Then decide whether to do the per-file
-renames listed above.
+Approve or stop the merge to `main`.

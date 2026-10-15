@@ -18,11 +18,10 @@ use bevy::prelude::*;
 use data::{
     ard::{Entity as ArdEntity, WalkPath},
     model_inspection::{self, InspectionModel},
-    motion,
-    named::Library,
-    object_collision,
+    motion, object_collision,
     objentry::ObjectEntry,
-    probe::ProbeSource,
+    path_lookup::Library,
+    probe_source::ProbeSource,
 };
 use std::collections::HashMap;
 use std::sync::Arc;

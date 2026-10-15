@@ -2,7 +2,9 @@
 //! of `obj/<model>.a.us`) and the resident common atlas
 //! (`effect/texcommon.dpd` texture 10, TBP 10752), with the PC remaster's
 //! replacement for the atlas when present.
-use data::{bar, effect, hd_image, original, probe::ProbeSource, replacement};
+use data::{
+    bar, hd_image, object_effect, original_payload, probe_source::ProbeSource, replacement_payload,
+};
 use std::io;
 
 /// Texture base pointer of the common effect atlas (texcommon #10).
@@ -25,7 +27,7 @@ fn read_entry(
     ordinal: usize,
     name_hash: [u8; 16],
     replacements: bool,
-) -> Result<(Vec<u8>, Vec<replacement::ReplacementSample>), Box<dyn std::error::Error>> {
+) -> Result<(Vec<u8>, Vec<replacement_payload::ReplacementSample>), Box<dyn std::error::Error>> {
     let mut checked = source.open_index(index)?;
     let entry = checked
         .inventory
@@ -33,9 +35,9 @@ fn read_entry(
         .get(ordinal)
         .filter(|e| e.name_hash == name_hash)
         .ok_or("effect source entry mismatch")?;
-    let bytes = original::read_original(&mut checked.reader, entry)?.bytes;
+    let bytes = original_payload::read_original(&mut checked.reader, entry)?.bytes;
     let hd = if replacements {
-        replacement::read_all_replacements(&mut checked.reader, entry)?
+        replacement_payload::read_all_replacements(&mut checked.reader, entry)?
     } else {
         Vec::new()
     };
@@ -49,7 +51,7 @@ pub fn load_pax(
     index: &str,
     ordinal: usize,
     name_hash: [u8; 16],
-) -> Result<effect::Pax, Box<dyn std::error::Error>> {
+) -> Result<object_effect::Pax, Box<dyn std::error::Error>> {
     let (archive, _) = read_entry(source, index, ordinal, name_hash, false)?;
     let table = bar::read_bar(&archive)?;
     let e = table
@@ -60,7 +62,7 @@ pub fn load_pax(
     let bytes = archive
         .get(e.offset as usize..e.offset as usize + e.size as usize)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PAX exceeds archive"))?;
-    Ok(effect::read_pax(bytes)?)
+    Ok(object_effect::read_pax(bytes)?)
 }
 
 /// texcommon.dpd texture 10, from its first replacement (keyed to that
@@ -72,7 +74,7 @@ pub fn load_atlas(
     name_hash: [u8; 16],
 ) -> Result<Atlas, Box<dyn std::error::Error>> {
     let (bytes, hd) = read_entry(source, index, ordinal, name_hash, true)?;
-    let dpd = effect::read_dpd(&bytes)?;
+    let dpd = object_effect::read_dpd(&bytes)?;
     let original = dpd.textures.get(10).ok_or("texcommon has no texture 10")?;
     let texel_size = [original.width, original.height];
     if let Some(r) = hd.first()

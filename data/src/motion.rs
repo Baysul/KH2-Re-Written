@@ -426,7 +426,7 @@ pub struct SelectedMotion {
 /// Fresh source-bound inspection admission; selections are locators, not proof
 /// of installed action routing or supported gameplay.
 pub fn read_selected(
-    source: &crate::probe::ProbeSource,
+    source: &crate::probe_source::ProbeSource,
     path: &std::path::Path,
 ) -> Result<Vec<SelectedMotion>, Box<dyn std::error::Error>> {
     use std::{fs::File, io::Read};
@@ -493,7 +493,7 @@ pub fn read_anb(anb: &[u8], slot: usize) -> Result<SelectedMotion, Box<dyn std::
 /// +0xc bit 0 is clear (e.g. M_EX020.mset) index slots directly by motion id
 /// (executable FUN_1403c7c50 / FUN_14040d7d0).
 pub fn read_slots(
-    source: &crate::probe::ProbeSource,
+    source: &crate::probe_source::ProbeSource,
     index: &str,
     ordinal: usize,
     name_hash: [u8; 16],
@@ -509,7 +509,7 @@ pub fn read_slots(
         .get(ordinal)
         .filter(|e| e.name_hash == name_hash)
         .ok_or("motion source entry mismatch")?;
-    let original = crate::original::read_original(&mut checked.reader, entry)?;
+    let original = crate::original_payload::read_original(&mut checked.reader, entry)?;
     let table = crate::bar::read_bar(&original.bytes)?;
     let mut result = Vec::new();
     for &slot in slots {
@@ -557,7 +557,7 @@ pub struct MotionSetSelection {
     pub has_weapon: bool,
 }
 pub fn read_motion_ids(
-    source: &crate::probe::ProbeSource,
+    source: &crate::probe_source::ProbeSource,
     selection: &MotionSetSelection,
     motion_ids: &[u16],
 ) -> Result<Vec<SelectedMotion>, Box<dyn std::error::Error>> {
@@ -572,7 +572,7 @@ pub fn read_motion_ids(
         .get(selection.ordinal)
         .filter(|e| e.name_hash == selection.name_hash)
         .ok_or("motion source entry mismatch")?;
-    let original = crate::original::read_original(&mut checked.reader, entry)?;
+    let original = crate::original_payload::read_original(&mut checked.reader, entry)?;
     let table = crate::bar::read_bar(&original.bytes)?;
     let present = |slot: usize| {
         table
@@ -598,7 +598,7 @@ pub fn read_motion_ids(
 /// Like [`read_motion_ids`], reading the set once; an id with no populated
 /// slot gives `None` instead of failing (any count).
 pub fn read_motion_ids_optional(
-    source: &crate::probe::ProbeSource,
+    source: &crate::probe_source::ProbeSource,
     selection: &MotionSetSelection,
     motion_ids: &[u16],
 ) -> Result<Vec<Option<SelectedMotion>>, Box<dyn std::error::Error>> {
@@ -613,7 +613,7 @@ pub fn read_motion_ids_optional(
         .get(selection.ordinal)
         .filter(|e| e.name_hash == selection.name_hash)
         .ok_or("motion source entry mismatch")?;
-    let original = crate::original::read_original(&mut checked.reader, entry)?;
+    let original = crate::original_payload::read_original(&mut checked.reader, entry)?;
     let table = crate::bar::read_bar(&original.bytes)?;
     let present = |slot: usize| {
         table

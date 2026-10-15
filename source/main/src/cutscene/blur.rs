@@ -17,7 +17,7 @@ use bevy::{
     prelude::*,
     render::render_resource::TextureFormat,
 };
-use data::event::Command;
+use data::event_script::Command;
 use visual::overlay::{LayoutMaterial, Ui2dFrame};
 
 /// First render layer used by the two blur cameras.

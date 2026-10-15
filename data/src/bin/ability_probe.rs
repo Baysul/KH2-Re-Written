@@ -1,5 +1,5 @@
 //! Read-only, source-bound ability/progression table evidence for private research.
-use data::{bar, named::Library, probe::ProbeSource};
+use data::{bar, path_lookup::Library, probe_source::ProbeSource};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{fs::OpenOptions, io::Write, path::PathBuf};

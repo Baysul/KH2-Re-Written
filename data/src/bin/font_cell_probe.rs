@@ -2,8 +2,8 @@ use data::{
     bar::read_bar,
     font::{FontSlot, PaletteLane, decode_font},
     font_cell::{CellProfile, project_font_cell},
-    original::read_original,
-    probe::ProbeSource,
+    original_payload::read_original,
+    probe_source::ProbeSource,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
