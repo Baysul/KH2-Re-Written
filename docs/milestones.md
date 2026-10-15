@@ -1,5 +1,41 @@
 # Roadmap status and work queue
 
+2026-10-15 continuation: T125 adds ordinary Shadow/Dusk/Soldier source AI,
+shared multi-actor combat, stable lock-on and equipped Scan in the generated
+arena. Native motion/target/identity evidence and independent decision oracles
+support a passing three-actor combat/Scan/lock renderer tour and 556 passing
+test executions. The local launcher is updated. Full roster/context, camera projection,
+installed comparisons and final gates remain open. See
+[T125](tasks/T125-enemy-ai-and-combat.md).
+2026-10-14 action continuation: T124 recovers 407 additional literal source
+motion requests across the retained catalog, exposing dynamic-blend attack
+animations while preserving unknown helper/context requests. Fresh source reads,
+native stack/trap/scheduler research and an independent Dusk oracle support the
+change; the existing Shadow pending-action limit is corrected to fifteen.
+All 520 test executions pass; the delivered launcher passes the four-actor
+render tour with Dusk source attack candidates visibly inspected.
+Full enemy AI and installed comparisons remain open. See
+[T124](tasks/T124-enemy-action-arguments-and-scheduler.md).
+
+2026-10-14 continuation: T123 resolves the fifteen retained raw-motion endpoint
+failures and one model EOF-link failure. The finite source audit now retains
+295/304 primary model loads and 7,338/7,338 sampled motion slots; nine archives
+have no model entry and nineteen material profiles remain unqualified. All 516
+test executions pass. These inspection checks do not advance full enemy AI or
+installed comparisons. See [T123](tasks/T123-enemy-motion-and-model-boundaries.md).
+
+2026-10-14 supplement: T122 delivers a larger generated development arena and
+source-derived enemy summon/animation inspection controls. The local release
+launcher passes the three-actor render tour; 513 tests pass. The finite corpus
+retains 294/304 primary model loads and 7,323/7,338 sampled motion slots, with
+every failure retained. Full enemy AI, encounter activation, contextual animation selection
+and installed comparisons remain open; P15/P19/P21/P27 do not pass. See
+[T122](tasks/T122-enemy-summons-and-large-arena.md).
+
+2026-10-13 supplement: T121 replaces the incomplete development ability list with the source-derived Sora inventory, grants all five normal growth families and adds F3 growth-tier selection. The delivered local launcher passes an actual equip-menu/battle-state tour and High Jump activation; 488 workspace tests pass. Magic combo continuation follows the traced unconditional dispatch rule. Paired reference timing, campaign acquisition and remaining ability consumers still block complete P18/P19/P22 acceptance. See [T121](tasks/T121-equipable-growth-and-combos.md).
+
+2026-10-13 supplement: T120 adds fresh REA mixed-CLR/native identity evidence and a separate read-only native ability/growth/combo audit. Rust now rebuilds equipment abilities, preserves member slots without the menu, and corrects boost bit gates/arithmetic, unsigned Defender and Square contact requirements. See [T120](tasks/T120-abilities-growth-combo-audit.md) and [the rules/evidence report](research/abilities-growth-combos.md). P18/P19/P22 remain open: reference timing/gameplay comparisons and remaining ability/progression consumers are required. Earlier status rows below retain their original evidence boundaries.
+
 Updated 2026-10-08. The [user-supplied roadmap](https://docs.google.com/document/d/1lewKD-h2ZVOOES1qugUgj82QVMybWwb8sqK3ed-4wPI/edit?tab=t.0) is the acceptance authority. Core scope is confirmed: KH2FM only, installed Steam source. No final gate is represented as passed where user review, reference evidence or dependencies are missing. Source inspection/build/records below are the expressly allowed fallback while P00 is draft.
 
 | Gate | Objective | Status / evidence / dependency |
@@ -22,7 +58,7 @@ Updated 2026-10-08. The [user-supplied roadmap](https://docs.google.com/document
 | P15 | Animation/motion events | T053 independently matches four interpolated skeletal motions' complete reported raw fields and 24 basic public FK/skin samples over 377784 float words; retained legacy bind remains exact over 15741 words. Eight grounded native preview captures visibly change pose; IK/root/weapon evaluation and reference pose/foot-placement comparison remain incomplete. Full IK/inverse/constraint/expression/root/trigger behavior, installed action selection and measured timing remain unqualified. T042's TEXA graphs remain reader evidence only. T057 adds a data-driven evaluator for IK helpers, constraints, two-joint IK chains, expressions and root curves (solver rules inferred, visually checked against a user reference); installed equivalence NOT RUN |
 | P16 | Rooms/collision/streaming/actors | T051 adds a Rust COCT v1 reader and explicit polygon display topology for one source-bound room candidate: 33 nodes, 21 meshes, 30 polygons, 100 vertices and 57 triangles independently compared; T052 independently compares two visual map blocks/1817 chunks/2133 VU stops/58525 vertices/34299 triangles and displays a source-bound textured room with a static character; animation, installed rendering/culling, collision response, actual spawn/streaming and authoritative actor integration remain required |
 | P17 | Input/time/RNG/determinism | Not started; actual clock/input/RNG evidence required |
-| P18 | Movement/camera/player states | T054 matches installed PRTY records. T056 adds a playable test-room controller (`player_sim`) driven by Sora's PRTY walk/run/jump/turn, SSTM fall max, PTYA combo motions and ANB combo/blend triggers, with explicit gravity/step/body/blend choices; scripted autoplay verifies walk/run/jump/land/ground and air combos in a source-bound room. Interactive playtest and any measured reference comparison remain NOT RUN; the gate does not pass |
+| P18 | Movement/camera/player states | T054 matches installed PRTY records. T056 adds a playable test-room controller (`player`) driven by Sora's PRTY walk/run/jump/turn, SSTM fall max, PTYA combo motions and ANB combo/blend triggers, with explicit gravity/step/body/blend choices; scripted autoplay verifies walk/run/jump/land/ground and air combos in a source-bound room. Interactive playtest and any measured reference comparison remain NOT RUN; the gate does not pass |
 | P19 | Combat/enemies/reactions | Not started; observed state rules required |
 | P20 | Scripts/native services | Not started; decoded scripts and traced services required |
 | P21 | Complete playable slice | Not started; movement/fight/script/save dependencies must be demonstrated |

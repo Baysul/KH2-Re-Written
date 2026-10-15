@@ -46,6 +46,8 @@ $content = @(
     ''
     'The verdict column quotes the first sentences of each record''s `Verdict` line. Gate and owner are stated in each record''s opening paragraph, because the records do not share a label for them.'
     ''
+    'Records through T128 retain historical commands and paths. See [the folder guide](../folder-guide.md#names-used-by-older-records) for current equivalents.'
+    ''
     '| ID | Title | Verdict |'
     '|---|---|---|'
 ) + $rows

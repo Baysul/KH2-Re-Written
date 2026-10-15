@@ -59,7 +59,7 @@ These tools read only what they are given and write only private output. Source-
 | `Verify-OriginalSamples.ps1` | Compares samples against pinned public OpenKH code and .NET `DeflateStream` | T005, T038, [model-inspection.md](../docs/research/model-inspection.md) |
 | `Compare-Rgba.ps1` | First-divergence diagnostics for RGBA evidence | none (repo-reorganization-plan.md only) |
 | `Verify-FontCells.ps1` | Font cell draw check against pinned draw methods | none (repo-reorganization-plan.md only) |
-| `Make-BannerText.ps1` | Renders the "Final Re:WRITE" banner text from a system font | T087, `crates/windows_shell/src/title_edits.rs` |
+| `Make-BannerText.ps1` | Renders the "Final Re:WRITE" banner text from a system font | T087, `visual/src/title_banner.rs` |
 
 ## Models and motion
 
@@ -80,11 +80,25 @@ These tools read only what they are given and write only private output. Source-
 
 ## Other
 
+The `KH2RW room` developer program supports `--enemy-audit <new-private-report.json>`
+for sequential source-bound catalog/model/motion inspection and
+`--enemy-tour <new-empty-private-capture-directory>` for a bounded renderer check.
+Supply the usual selected Steam root, manifest and room configuration; every
+launch validates that source. Reports/captures stay outside Git and the install.
+These checks do not execute or qualify complete enemy combat scripts.
+The current enemy tour requires exact Shadow, Dusk, Mushroom IV and the retained
+raw-motion candidate; it fails instead of substituting a different model.
+For Dusk it selects source candidates from the claw, kick and walking-attack
+actions. It previews their animations without executing the combat callbacks.
+
 | File | Purpose | Cited by |
 |---|---|---|
 | `Compare-CandidateNames.ps1` | Candidate-only name metadata, following pinned OpenKH name generation | T006 |
+| `Build-Launcher.ps1` | Builds the KH2FM launcher and two viewers; `-Debug` and `-LauncherOnly` support quick edits | T126 |
 | `New-TaskIndex.ps1` | Regenerates `docs/tasks/README.md` from the task records | none (documentation tool) |
 
 ## Fixtures
+
+`AbilityNativeAudit.java` is T120's source-bound static ability/growth/combo research helper. It writes pseudocode/instruction receipts only to a new private destination outside the installation and Git. Use a read-only Ghidra project; reported slices are static analysis, not gameplay or complete-function equivalence.
 
 `fixtures/ManagedConformance.cs` and `fixtures/NativeConformance.c` are authored conformance inputs. Only the oracles above compile and run them.

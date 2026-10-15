@@ -1,5 +1,19 @@
 [workspace]
-members = ["crates/source_identity", "crates/windows_shell", "crates/package_reader", "crates/player_sim", "crates/audio_out", "crates/effect_vm", "crates/area_sim", "crates/field_collision", "crates/event_sim", "crates/skate_source", "crates/skate3/skate-disc", "crates/skate3/skate-sim"]
+members = [
+    "main",
+    "visual",
+    "game/player",
+    "game/area",
+    "game/collision",
+    "game/event",
+    "effect",
+    "audio",
+    "data",
+    "source",
+    "extras/skateboard/source",
+    "extras/skateboard/engine/skate-disc",
+    "extras/skateboard/engine/skate-sim",
+]
 resolver = "3"
 
 [workspace.package]
@@ -16,10 +30,26 @@ sha2 = "0.10"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
+# Keep file/line backtraces for our code without emitting full type/variable
+# information for every Bevy instantiation. Tests inherit this profile.
+[profile.dev]
+debug = "line-tables-only"
+
+# Registry/git dependencies are rebuilt less often and do not need local
+# debugger symbols. Keep incremental compilation for workspace edits.
+[profile.dev.package."*"]
+debug = 0
+
+# Opt in when inspecting workspace locals/types in a debugger. This has its
+# own output directory so ordinary development retains the compact cache.
+[profile.dev-symbols]
+inherits = "dev"
+debug = "full"
+
 # Full selected-source hashing is required even for development inspection.
 # Optimize only this measured startup path; simulation/presentation stays on
 # the ordinary development profile.
-[profile.dev.package.source_identity]
+[profile.dev.package.source]
 opt-level = 3
 
 [profile.dev.package.sha2]
@@ -27,7 +57,7 @@ opt-level = 3
 
 # The test room precomputes every motion frame through the checked readers at
 # startup; unoptimized FK sampling made that step impractically slow.
-[profile.dev.package.package_reader]
+[profile.dev.package.data]
 opt-level = 3
 
 # Music is decoded whole at startup; an unoptimized Vorbis decode of the

@@ -13,24 +13,49 @@
 !/Cargo.toml
 !/Cargo.lock
 !/rust-toolchain.toml
+!/.cargo/config.toml
 !/build.bat
 !/.github/workflows/*.yml
 !/.github/pull_request_template.md
-!/crates/*/Cargo.toml
-!/crates/*/src/**/*.rs
-!/crates/*/src/**/*.wgsl
-!/crates/*/examples/*.rs
-# The optional Skate 3 skateboard (GPL-3.0-only; see crates/skate3/README.md).
-!/crates/skate3/README.md
-!/crates/skate3/LICENSE
-!/crates/skate3/*/Cargo.toml
-!/crates/skate3/*/src/**/*.rs
-# AttribSys name dictionary carried from the Skate 3 engine's setup (names only).
-!/crates/skate3/skate-disc/src/names.txt
-!/crates/windows_shell/assets/development-checker.bmp
-# Banner text drawn by tools/Make-BannerText.ps1 from a system font (no game data).
-!/crates/windows_shell/assets/final-rewrite-text.png
-!/crates/windows_shell/assets/kingdom-hearts-final-rewrite-logo.png
+!/main/Cargo.toml
+!/main/src/**/*.rs
+!/visual/Cargo.toml
+!/visual/src/**/*.rs
+!/source/Cargo.toml
+!/source/src/**/*.rs
+!/data/Cargo.toml
+!/data/src/**/*.rs
+!/audio/Cargo.toml
+!/audio/src/**/*.rs
+!/effect/Cargo.toml
+!/effect/src/**/*.rs
+!/game/*/Cargo.toml
+!/game/*/src/**/*.rs
+!/extras/skateboard/source/Cargo.toml
+!/extras/skateboard/source/src/**/*.rs
+!/extras/skateboard/engine/*/Cargo.toml
+!/extras/skateboard/engine/*/src/**/*.rs
+!/main/examples/*.rs
+!/main/src/**/*.wgsl
+!/data/examples/*.rs
+!/extras/skateboard/source/examples/*.rs
+!/visual/src/**/*.wgsl
+!/game/README.md
+!/main/README.md
+!/visual/README.md
+!/source/README.md
+!/data/README.md
+!/audio/README.md
+!/effect/README.md
+!/extras/README.md
+# Preserve the optional extension's source attribution, license and name dictionary.
+!/extras/skateboard/engine/README.md
+!/extras/skateboard/engine/LICENSE
+!/extras/skateboard/engine/skate-disc/src/names.txt
+# Authored development image, title banner and project logo only.
+!/main/assets/development-checker.bmp
+!/visual/assets/final-rewrite-text.png
+!/visual/assets/kingdom-hearts-final-rewrite-logo.png
 !/docs/**/*.md
 !/docs/research/*.csv
 !/docs/release/dependency-inventory.csv

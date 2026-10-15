@@ -4,6 +4,8 @@ Start with [ARCHITECTURE.md](../ARCHITECTURE.md) for the layout of the repositor
 
 ## Start here
 
+[Folder guide](folder-guide.md): common edits, Rust terms, naming rules and old-to-new paths.
+
 | File | Purpose |
 |---|---|
 | [fidelity-contract.md](fidelity-contract.md) | Scope and what counts as established (P00) |
@@ -11,7 +13,7 @@ Start with [ARCHITECTURE.md](../ARCHITECTURE.md) for the layout of the repositor
 | [unknowns.md](unknowns.md) | Open evidence and decisions |
 | [supported-builds.md](research/supported-builds.md) | Builds that may be selected, with their identity |
 | [source-and-release-policy.md](research/source-and-release-policy.md) | What may be read, stored and distributed (P01) |
-| [source-manifest-schema.md](research/source-manifest-schema.md) | Schema v1 of the source manifest written by `source_identity` |
+| [source-manifest-schema.md](research/source-manifest-schema.md) | Schema v1 of the source manifest written by `source` |
 | [environment.md](research/environment.md) | Measured development environment (P03) |
 | [references.md](research/references.md) | Primary sources for public technical claims |
 | [decisions/](decisions/) | Architecture decisions, one file per decision |
@@ -47,4 +49,4 @@ Ledgers (CSV): [asset-coverage.csv](research/asset-coverage.csv), [content-ledge
 
 ## Superseded
 
-- [repo-reorganization-plan.md](repo-reorganization-plan.md) is the proposal for the moves and deletions in progress. It is not a record of what changed.
+- [repo-reorganization-plan.md](repo-reorganization-plan.md) is a historical proposal. T129 supersedes its code layout; use [folder-guide.md](folder-guide.md) for current paths.

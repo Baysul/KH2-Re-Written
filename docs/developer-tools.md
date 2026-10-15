@@ -7,7 +7,7 @@ These need a selected Steam install and a private output directory outside Steam
 Write a candidate manifest to an **existing private directory**:
 
 ```powershell
-cargo run -p source_identity --release --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json'
+cargo run -p source --release --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json'
 ```
 
 The scanner hashes only the observed KH2 candidate set, recording each file's SHA-256 and the SHA-256 of every 1 MiB chunk. It never labels an unknown build supported and refuses existing output files. Full shared/language dependency coverage and actual gameplay remain pending. Every session still checks the installation itself: a manifest only records what the bytes must be. Use the optimized scanner for multi-gigabyte packages.
@@ -15,7 +15,7 @@ The scanner hashes only the observed KH2 candidate set, recording each file's SH
 ## Room preview
 
 ```powershell
-cargo run -p windows_shell --bin room_scene --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/room-selection.json' '<private-directory>/actor-selection.json' '<private-directory>/new-scene.jsonl' '<private-directory>/new-scene.png'
+cargo run -p main --bin room_scene --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/room-selection.json' '<private-directory>/actor-selection.json' '<private-directory>/new-scene.jsonl' '<private-directory>/new-scene.png'
 ```
 
 - J/L orbit the camera, +/- zoom, Escape exits. The preview captures a private PNG after settling.
@@ -27,7 +27,7 @@ cargo run -p windows_shell --bin room_scene --locked -- '<selected-install-root>
 Unencrypted originals and BAR table metadata only:
 
 ```powershell
-cargo run -p package_reader --bin plain_probe --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/new-plain-report.json'
+cargo run -p data --bin plain_probe --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/new-plain-report.json'
 ```
 
 This verifies the bound HED hashes and package metadata, retains unknown formats, and exports no original asset files.
@@ -35,7 +35,7 @@ This verifies the bound HED hashes and package metadata, retains unknown formats
 Bounded storage samples and their first two HD replacements:
 
 ```powershell
-cargo run -p package_reader --bin original_probe --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/new-storage-report.json'
+cargo run -p data --bin original_probe --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/new-storage-report.json'
 ```
 
 The storage reader is checked against pinned OpenKH and .NET on finite samples. Source names, full dependency closure and semantic/gameplay decoding remain under research. Both commands retain only private metadata and hashes, and they require a full source rescan to establish mutation assurance. See [T005 evidence](tasks/T005-storage-decoding.md).
@@ -43,7 +43,7 @@ The storage reader is checked against pinned OpenKH and .NET on finite samples. 
 Selected message and font structure:
 
 ```powershell
-cargo run -p package_reader --bin message_probe --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/selection.json' '<private-directory>/new-message-report.json'
+cargo run -p data --bin message_probe --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/selection.json' '<private-directory>/new-message-report.json'
 ```
 
 The bounded selection names source identity and each index/ordinal/name hash plus a `message` or `font` research purpose. Message records retain encoded spans and hashes. Recognized localized RawBitmap records decode to indexed pixels, palettes and straight RGBA fingerprints. Glyph/Unicode mapping and in-game rendering remain unverified. An optional fifth argument names an existing private directory for new checkerboard font BMP previews, outside Steam and Git, with a 32 MiB aggregate cap. These are research assets and must not be distributed. See [T007 structure evidence](tasks/T007-message-font-structure.md), [T008 pixel evidence](tasks/T008-font-planes.md), and the [requested-tool prerequisite audit](research/tool-prerequisites.md).

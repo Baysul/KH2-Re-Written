@@ -1,0 +1,64 @@
+[package]
+name = "main"
+default-run = "smoke"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+visual = { path = "../visual" }
+audio = { path = "../audio" }
+effect = { path = "../effect" }
+area = { path = "../game/area" }
+collision = { path = "../game/collision" }
+event = { path = "../game/event" }
+data = { path = "../data" }
+player = { path = "../game/player" }
+source = { path = "../source" }
+skate_source = { path = "../extras/skateboard/source" }
+# The optional Skate 3 skateboard (GPL-3.0-only, extras/skateboard/engine); see T103.
+skate-disc = { path = "../extras/skateboard/engine/skate-disc", optional = true }
+skate-sim = { path = "../extras/skateboard/engine/skate-sim", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+fontdue = { version = "=0.9.4", default-features = false, features = ["std"] }
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+bevy = { version = "=0.19.1", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_log", "bevy_asset", "bevy_window", "bevy_winit", "bevy_render", "bevy_camera", "bevy_image", "bevy_sprite", "bevy_sprite_render", "bevy_core_pipeline", "bevy_pbr", "bmp", "bevy_gilrs"] }
+
+[[bin]]
+name = "KH2RW"
+path = "src/main.rs"
+
+# These tools have no unit tests; the launcher and model viewer keep theirs.
+[[bin]]
+name = "smoke"
+test = false
+bench = false
+
+[[bin]]
+name = "image_inspector"
+test = false
+bench = false
+
+[[bin]]
+name = "motion_eval_compare"
+test = false
+bench = false
+
+[[bin]]
+name = "motion_ik_probe"
+test = false
+bench = false
+
+[[bin]]
+name = "room_scene"
+test = false
+bench = false
+
+[features]
+skate3 = ["dep:skate-disc", "dep:skate-sim"]
+
+[lints]
+workspace = true

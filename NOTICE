@@ -1,14 +1,14 @@
 KH2FinalRewrite
 
 The bounded bdscript header/opcode reader in
-crates/package_reader/src/bdscript.rs follows OpenKH BdxHeader.cs and
+data/src/bdscript.rs follows OpenKH BdxHeader.cs and
 BdxInstructionDescs.cs at commit
 7a3b945c538d32c6a285128c98aefba093f52ceb (Apache-2.0), checked against the
 selected native interpreter with Ghidra. Bounds and direct control-flow
 inspection are owned; this is not an implementation of engine traps,
 indirect act callbacks, or installed PC-specific interpreter adjustments.
 
-The package original transform in crates/package_reader/src/original.rs
+The package original transform in data/src/original.rs
 is adapted from OpenKH EgsEncryption.cs at commit
 7a3b945c538d32c6a285128c98aefba093f52ceb under Apache-2.0.
 The implementation is modified for bounded byte-wise handling in Rust.
@@ -144,7 +144,7 @@ motion slot chooser follows MotionSet.GetMotionSetIndex. Range-trigger IDs
 honoured by the test room follow docs/kh2/file/anb/anb.md and COCT surface
 flag bits follow docs/kh2/file/type/coct.md. These are public labels; the
 test-room controller does not claim installed movement or combat rules.
-The motion evaluator in crates/package_reader/src/motion_eval.rs reads the IK
+The motion evaluator in data/src/motion_eval.rs reads the IK
 helper, joint order, constraint, limiter, expression and root-position tables
 using the layouts in OpenKH docs/kh2/file/anb/motion.md (pin above) and
 kenjiuno's msetDoc README (gitlab.com/kenjiuno/msetDoc). No code was copied;

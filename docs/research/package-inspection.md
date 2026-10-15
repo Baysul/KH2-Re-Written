@@ -26,7 +26,7 @@ Independent check: PowerShell BinaryReader field reads on all six HEDs matched R
 Reader command after selecting the install root:
 
 ```powershell
-cargo run -p package_reader --locked -- '<selected-install-root>' '<existing-private-directory>/new-inventory.json'
+cargo run -p data --locked -- '<selected-install-root>' '<existing-private-directory>/new-inventory.json'
 ```
 
 Output must be outside the source and use a new filename. The index/header command writes metadata only. No semantic asset decoder or importer is present.

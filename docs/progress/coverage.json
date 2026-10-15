@@ -7,7 +7,9 @@
       "complete": false,
       "inventory_evidence": [
         "docs/research/native-inspection.md",
-        "docs/research/managed-inspection.md"
+        "docs/research/managed-inspection.md",
+        "docs/tasks/T124-enemy-action-arguments-and-scheduler.md",
+        "docs/tasks/T125-enemy-ai-and-combat.md"
       ],
       "units": [
         {
@@ -41,6 +43,1462 @@
           "evidence": [
             "docs/tasks/T010-managed-reader.md"
           ]
+        },
+        {
+          "id": "NATIVE-T124-01",
+          "label": "Enemy scheduler/VM candidate 01 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-02",
+          "label": "Enemy scheduler/VM candidate 02 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-03",
+          "label": "Enemy scheduler/VM candidate 03 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-04",
+          "label": "Enemy scheduler/VM candidate 04 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-05",
+          "label": "Enemy scheduler/VM candidate 05 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-06",
+          "label": "Enemy scheduler/VM candidate 06 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-07",
+          "label": "Enemy scheduler/VM candidate 07 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-08",
+          "label": "Enemy scheduler/VM candidate 08 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-09",
+          "label": "Enemy scheduler/VM candidate 09 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-10",
+          "label": "Enemy scheduler/VM candidate 10 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-11",
+          "label": "Enemy scheduler/VM candidate 11 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-12",
+          "label": "Enemy scheduler/VM candidate 12 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-13",
+          "label": "Enemy scheduler/VM candidate 13 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-14",
+          "label": "Enemy scheduler/VM candidate 14 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-15",
+          "label": "Enemy scheduler/VM candidate 15 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-16",
+          "label": "Enemy scheduler/VM candidate 16 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-17",
+          "label": "Enemy scheduler/VM candidate 17 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-18",
+          "label": "Enemy scheduler/VM candidate 18 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-19",
+          "label": "Enemy scheduler/VM candidate 19 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-20",
+          "label": "Enemy scheduler/VM candidate 20 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-21",
+          "label": "Enemy scheduler/VM candidate 21 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-22",
+          "label": "Enemy scheduler/VM candidate 22 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-23",
+          "label": "Enemy scheduler/VM candidate 23 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-24",
+          "label": "Enemy scheduler/VM candidate 24 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-25",
+          "label": "Enemy scheduler/VM candidate 25 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-26",
+          "label": "Enemy scheduler/VM candidate 26 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-27",
+          "label": "Enemy scheduler/VM candidate 27 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-28",
+          "label": "Enemy scheduler/VM candidate 28 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-29",
+          "label": "Enemy scheduler/VM candidate 29 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-30",
+          "label": "Enemy scheduler/VM candidate 30 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-31",
+          "label": "Enemy scheduler/VM candidate 31 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-32",
+          "label": "Enemy scheduler/VM candidate 32 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-33",
+          "label": "Enemy scheduler/VM candidate 33 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T124-34",
+          "label": "Enemy scheduler/VM candidate 34 - logical bounds and equivalence unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-01",
+          "label": "Enemy combat and targeting candidate 01 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-02",
+          "label": "Enemy combat and targeting candidate 02 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-03",
+          "label": "Enemy combat and targeting candidate 03 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-04",
+          "label": "Enemy combat and targeting candidate 04 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-05",
+          "label": "Enemy combat and targeting candidate 05 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-06",
+          "label": "Enemy combat and targeting candidate 06 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-07",
+          "label": "Enemy combat and targeting candidate 07 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-08",
+          "label": "Enemy combat and targeting candidate 08 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-09",
+          "label": "Enemy combat and targeting candidate 09 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-10",
+          "label": "Enemy combat and targeting candidate 10 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-11",
+          "label": "Enemy combat and targeting candidate 11 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-12",
+          "label": "Enemy combat and targeting candidate 12 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-13",
+          "label": "Enemy combat and targeting candidate 13 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-14",
+          "label": "Enemy combat and targeting candidate 14 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-15",
+          "label": "Enemy combat and targeting candidate 15 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-16",
+          "label": "Enemy combat and targeting candidate 16 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-17",
+          "label": "Enemy combat and targeting candidate 17 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-18",
+          "label": "Enemy combat and targeting candidate 18 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-19",
+          "label": "Enemy combat and targeting candidate 19 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-20",
+          "label": "Enemy combat and targeting candidate 20 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-21",
+          "label": "Enemy combat and targeting candidate 21 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-22",
+          "label": "Enemy combat and targeting candidate 22 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-23",
+          "label": "Enemy combat and targeting candidate 23 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-24",
+          "label": "Enemy combat and targeting candidate 24 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-25",
+          "label": "Enemy combat and targeting candidate 25 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-26",
+          "label": "Enemy combat and targeting candidate 26 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-27",
+          "label": "Enemy combat and targeting candidate 27 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-28",
+          "label": "Enemy combat and targeting candidate 28 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-29",
+          "label": "Enemy combat and targeting candidate 29 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-30",
+          "label": "Enemy combat and targeting candidate 30 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-31",
+          "label": "Enemy combat and targeting candidate 31 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-32",
+          "label": "Enemy combat and targeting candidate 32 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-33",
+          "label": "Enemy combat and targeting candidate 33 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-34",
+          "label": "Enemy combat and targeting candidate 34 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-35",
+          "label": "Enemy combat and targeting candidate 35 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-36",
+          "label": "Enemy combat and targeting candidate 36 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-37",
+          "label": "Enemy combat and targeting candidate 37 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-38",
+          "label": "Enemy combat and targeting candidate 38 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-39",
+          "label": "Enemy combat and targeting candidate 39 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-40",
+          "label": "Enemy combat and targeting candidate 40 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-41",
+          "label": "Enemy combat and targeting candidate 41 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-42",
+          "label": "Enemy combat and targeting candidate 42 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-43",
+          "label": "Enemy combat and targeting candidate 43 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-44",
+          "label": "Enemy combat and targeting candidate 44 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-45",
+          "label": "Enemy combat and targeting candidate 45 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-46",
+          "label": "Enemy combat and targeting candidate 46 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-47",
+          "label": "Enemy combat and targeting candidate 47 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-48",
+          "label": "Enemy combat and targeting candidate 48 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-49",
+          "label": "Enemy combat and targeting candidate 49 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-50",
+          "label": "Enemy combat and targeting candidate 50 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-51",
+          "label": "Enemy combat and targeting candidate 51 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-52",
+          "label": "Enemy combat and targeting candidate 52 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-53",
+          "label": "Enemy combat and targeting candidate 53 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-54",
+          "label": "Enemy combat and targeting candidate 54 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-55",
+          "label": "Enemy combat and targeting candidate 55 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-56",
+          "label": "Enemy combat and targeting candidate 56 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-57",
+          "label": "Enemy combat and targeting candidate 57 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-58",
+          "label": "Enemy combat and targeting candidate 58 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-59",
+          "label": "Enemy combat and targeting candidate 59 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-60",
+          "label": "Enemy combat and targeting candidate 60 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-61",
+          "label": "Enemy combat and targeting candidate 61 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-62",
+          "label": "Enemy combat and targeting candidate 62 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-63",
+          "label": "Enemy combat and targeting candidate 63 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-64",
+          "label": "Enemy combat and targeting candidate 64 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-65",
+          "label": "Enemy combat and targeting candidate 65 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-66",
+          "label": "Enemy combat and targeting candidate 66 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-67",
+          "label": "Enemy combat and targeting candidate 67 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-68",
+          "label": "Enemy combat and targeting candidate 68 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-69",
+          "label": "Enemy combat and targeting candidate 69 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-70",
+          "label": "Enemy combat and targeting candidate 70 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-71",
+          "label": "Enemy combat and targeting candidate 71 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-72",
+          "label": "Enemy combat and targeting candidate 72 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-73",
+          "label": "Enemy combat and targeting candidate 73 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-74",
+          "label": "Enemy combat and targeting candidate 74 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-75",
+          "label": "Enemy combat and targeting candidate 75 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-76",
+          "label": "Enemy combat and targeting candidate 76 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-77",
+          "label": "Enemy combat and targeting candidate 77 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-78",
+          "label": "Enemy combat and targeting candidate 78 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-79",
+          "label": "Enemy combat and targeting candidate 79 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-80",
+          "label": "Enemy combat and targeting candidate 80 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-81",
+          "label": "Enemy combat and targeting candidate 81 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-82",
+          "label": "Enemy combat and targeting candidate 82 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-83",
+          "label": "Enemy combat and targeting candidate 83 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-84",
+          "label": "Enemy combat and targeting candidate 84 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-85",
+          "label": "Enemy combat and targeting candidate 85 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-86",
+          "label": "Enemy combat and targeting candidate 86 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-87",
+          "label": "Enemy combat and targeting candidate 87 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-88",
+          "label": "Enemy combat and targeting candidate 88 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-89",
+          "label": "Enemy combat and targeting candidate 89 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-90",
+          "label": "Enemy combat and targeting candidate 90 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-91",
+          "label": "Enemy combat and targeting candidate 91 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-92",
+          "label": "Enemy combat and targeting candidate 92 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-93",
+          "label": "Enemy combat and targeting candidate 93 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-94",
+          "label": "Enemy combat and targeting candidate 94 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-95",
+          "label": "Enemy combat and targeting candidate 95 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-96",
+          "label": "Enemy combat and targeting candidate 96 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-97",
+          "label": "Enemy combat and targeting candidate 97 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-98",
+          "label": "Enemy combat and targeting candidate 98 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-99",
+          "label": "Enemy combat and targeting candidate 99 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-100",
+          "label": "Enemy combat and targeting candidate 100 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-101",
+          "label": "Enemy combat and targeting candidate 101 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-102",
+          "label": "Enemy combat and targeting candidate 102 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-103",
+          "label": "Enemy combat and targeting candidate 103 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-104",
+          "label": "Enemy combat and targeting candidate 104 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-105",
+          "label": "Enemy combat and targeting candidate 105 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-106",
+          "label": "Enemy combat and targeting candidate 106 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-107",
+          "label": "Enemy combat and targeting candidate 107 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-108",
+          "label": "Enemy combat and targeting candidate 108 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-109",
+          "label": "Enemy combat and targeting candidate 109 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-110",
+          "label": "Enemy combat and targeting candidate 110 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-111",
+          "label": "Enemy combat and targeting candidate 111 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-112",
+          "label": "Enemy combat and targeting candidate 112 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-113",
+          "label": "Enemy combat and targeting candidate 113 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-114",
+          "label": "Enemy combat and targeting candidate 114 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-115",
+          "label": "Enemy combat and targeting candidate 115 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-116",
+          "label": "Enemy combat and targeting candidate 116 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-117",
+          "label": "Enemy combat and targeting candidate 117 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-118",
+          "label": "Enemy combat and targeting candidate 118 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-119",
+          "label": "Enemy combat and targeting candidate 119 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-120",
+          "label": "Enemy combat and targeting candidate 120 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-121",
+          "label": "Enemy combat and targeting candidate 121 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-122",
+          "label": "Enemy combat and targeting candidate 122 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-123",
+          "label": "Enemy combat and targeting candidate 123 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-124",
+          "label": "Enemy combat and targeting candidate 124 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-125",
+          "label": "Enemy combat and targeting candidate 125 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-126",
+          "label": "Enemy combat and targeting candidate 126 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-127",
+          "label": "Enemy combat and targeting candidate 127 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-128",
+          "label": "Enemy combat and targeting candidate 128 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-129",
+          "label": "Enemy combat and targeting candidate 129 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-130",
+          "label": "Enemy combat and targeting candidate 130 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-131",
+          "label": "Enemy combat and targeting candidate 131 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-132",
+          "label": "Enemy combat and targeting candidate 132 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-133",
+          "label": "Enemy combat and targeting candidate 133 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-134",
+          "label": "Enemy combat and targeting candidate 134 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-135",
+          "label": "Enemy combat and targeting candidate 135 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-136",
+          "label": "Enemy combat and targeting candidate 136 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-137",
+          "label": "Enemy combat and targeting candidate 137 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-138",
+          "label": "Enemy combat and targeting candidate 138 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-139",
+          "label": "Enemy combat and targeting candidate 139 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-140",
+          "label": "Enemy combat and targeting candidate 140 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-141",
+          "label": "Enemy combat and targeting candidate 141 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-142",
+          "label": "Enemy combat and targeting candidate 142 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-143",
+          "label": "Enemy combat and targeting candidate 143 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-144",
+          "label": "Enemy combat and targeting candidate 144 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-145",
+          "label": "Enemy combat and targeting candidate 145 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-146",
+          "label": "Enemy combat and targeting candidate 146 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-147",
+          "label": "Enemy combat and targeting candidate 147 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T125-148",
+          "label": "Enemy combat and targeting candidate 148 - complete function unqualified",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
         }
       ]
     },
@@ -50,7 +1508,65 @@
         "docs/fidelity-contract.md",
         "docs/unknowns.md"
       ],
-      "units": []
+      "units": [
+        {
+          "id": "OBS-T122-01",
+          "label": "Enemy spawn and action selection - reference comparison required",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/tasks/T122-enemy-summons-and-large-arena.md"
+          ]
+        },
+        {
+          "id": "OBS-T122-02",
+          "label": "Enemy idle and attack behavior - reference comparison required",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/tasks/T122-enemy-summons-and-large-arena.md"
+          ]
+        },
+        {
+          "id": "OBS-T122-03",
+          "label": "Enemy animation and model presentation - reference comparison required",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/tasks/T122-enemy-summons-and-large-arena.md",
+            "docs/tasks/T123-enemy-motion-and-model-boundaries.md"
+          ]
+        },
+        {
+          "id": "OBS-T122-04",
+          "label": "Enemy encounter roster and reachability - reference comparison required",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/tasks/T122-enemy-summons-and-large-arena.md"
+          ]
+        },
+        {
+          "id": "OBS-T124-01",
+          "label": "Enemy action queue and script scheduling - reference comparison required",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/tasks/T124-enemy-action-arguments-and-scheduler.md"
+          ]
+        },
+        {
+          "id": "OBS-T125-01",
+          "label": "Multiple actor combat and damage - reference comparison required",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "OBS-T125-02",
+          "label": "Lock-on, Scan and camera - reference comparison required",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        }
+      ]
     },
     "roadmap": {
       "complete": true,

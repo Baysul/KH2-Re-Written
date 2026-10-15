@@ -143,10 +143,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "area_sim"
+name = "area"
 version = "0.1.1"
 dependencies = [
- "package_reader",
+ "data",
 ]
 
 [[package]]
@@ -282,7 +282,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "audio_out"
+name = "audio"
 version = "0.1.1"
 
 [[package]]
@@ -1465,6 +1465,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "collision"
+version = "0.1.1"
+dependencies = [
+ "data",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1679,6 +1686,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "data"
+version = "0.1.1"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "image",
+ "lewton",
+ "serde",
+ "serde_json",
+ "sha2",
+ "source",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1772,10 +1793,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
-name = "effect_vm"
+name = "effect"
 version = "0.1.1"
 dependencies = [
- "package_reader",
+ "data",
 ]
 
 [[package]]
@@ -1861,6 +1882,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "event"
+version = "0.1.1"
+dependencies = [
+ "data",
+]
+
+[[package]]
 name = "event-listener"
 version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1881,13 +1909,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "event_sim"
-version = "0.1.1"
-dependencies = [
- "package_reader",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1900,13 +1921,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
-]
-
-[[package]]
-name = "field_collision"
-version = "0.1.1"
-dependencies = [
- "package_reader",
 ]
 
 [[package]]
@@ -2534,6 +2548,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "main"
+version = "0.1.1"
+dependencies = [
+ "area",
+ "audio",
+ "bevy",
+ "collision",
+ "data",
+ "effect",
+ "event",
+ "fontdue",
+ "image",
+ "player",
+ "serde",
+ "serde_json",
+ "sha2",
+ "skate-disc",
+ "skate-sim",
+ "skate_source",
+ "source",
+ "visual",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3108,20 +3146,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "package_reader"
-version = "0.1.1"
-dependencies = [
- "crc32fast",
- "flate2",
- "image",
- "lewton",
- "serde",
- "serde_json",
- "sha2",
- "source_identity",
-]
-
-[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3228,7 +3252,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
-name = "player_sim"
+name = "player"
 version = "0.1.1"
 
 [[package]]
@@ -3816,7 +3840,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "source_identity"
+name = "source"
 version = "0.1.1"
 dependencies = [
  "serde",
@@ -4181,6 +4205,23 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "visual"
+version = "0.1.1"
+dependencies = [
+ "audio",
+ "bevy",
+ "data",
+ "effect",
+ "fontdue",
+ "image",
+ "player",
+ "serde",
+ "serde_json",
+ "sha2",
+ "source",
+]
 
 [[package]]
 name = "walkdir"
@@ -4632,29 +4673,6 @@ name = "windows_i686_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
-
-[[package]]
-name = "windows_shell"
-version = "0.1.1"
-dependencies = [
- "area_sim",
- "audio_out",
- "bevy",
- "effect_vm",
- "event_sim",
- "field_collision",
- "fontdue",
- "image",
- "package_reader",
- "player_sim",
- "serde",
- "serde_json",
- "sha2",
- "skate-disc",
- "skate-sim",
- "skate_source",
- "source_identity",
-]
 
 [[package]]
 name = "windows_x86_64_gnu"

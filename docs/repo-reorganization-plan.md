@@ -1,5 +1,9 @@
 # Repository reorganization plan
 
+Historical proposal. The user authorized T129 restructuring on 2026-10-15.
+Use [folder-guide.md](folder-guide.md) for current paths and naming rules.
+Earlier approval/hold notes below describe the state at the time.
+
 Status: **partly applied; see [Status](#status) at the end.** Items not marked done there were held, and each held item says why. The current layout is described in [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 Checked 2026-10-09 on branch `claude/project-thread-98hhql` (in sync with origin). Uncommitted work from the "1:1 title sequence" thread (`windows_shell/src/bin/kh2fm/title.rs`, `src/lib.rs`, untracked `src/splash.rs`) and the "Playable Sora test room" thread (camp, test room, music) is in progress. Phases avoid those files until those threads push.

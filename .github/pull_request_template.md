@@ -16,7 +16,7 @@
 - [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] `cargo test --workspace --locked`
 - [ ] `cargo build --workspace --locked`
-- [ ] `cargo run -p windows_shell --locked -- --frames 180`
+- [ ] `cargo run -p main --locked -- --frames 180`
 
 Mark any check not run as NOT RUN and give the reason.
 

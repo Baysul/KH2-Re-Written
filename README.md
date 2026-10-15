@@ -1,7 +1,7 @@
 # Kingdom Hearts II Re:Written
 
 <p align="center">
-  <img src="crates/windows_shell/assets/kingdom-hearts-final-rewrite-logo.png" alt="Kingdom Hearts Final Re:WRITE logo" width="850">
+  <img src="visual/assets/kingdom-hearts-final-rewrite-logo.png" alt="Kingdom Hearts Final Re:WRITE logo" width="850">
 </p>
 
 A native Windows engine rewrite of **Kingdom Hearts II Final Mix** in Rust, using [Bevy](https://bevy.org). It reads your own Steam installation at runtime. No game assets are distributed.
@@ -23,8 +23,8 @@ For scope and progress, see the [fidelity contract](docs/fidelity-contract.md), 
 
 | Measure | Accepted / tracked | Percentage |
 |---|---:|---:|
-| Complete functions decompiled and checked | 0 / 4 (inventory incomplete) | Unmeasured |
-| Required behavior scenarios verified 1:1 | 0 / 0 (inventory incomplete) | Unmeasured |
+| Complete functions decompiled and checked | 0 / 186 (inventory incomplete) | Unmeasured |
+| Required behavior scenarios verified 1:1 | 0 / 7 (inventory incomplete) | Unmeasured |
 | Final roadmap gates accepted | 0 / 32 | 0.00% |
 
 Whole-game 1:1 coverage is **unmeasured** until the complete function and behavior inventories are qualified. Partial work, synthetic tests and successful builds do not count as 1:1 passes. Gate percentage measures accepted gates, not game size or implementation effort.
@@ -32,12 +32,21 @@ Whole-game 1:1 coverage is **unmeasured** until the complete function and behavi
 [Progress details](docs/progress/README.md) · [Coverage ledger](docs/progress/coverage.json) · [Automatic updates](.github/workflows/progress.yml)
 <!-- KH2FM-PROGRESS:END -->
 
+## Find your way around
+
+Start with the [folder guide](docs/folder-guide.md) for common edits and naming rules.
+`game/` holds gameplay, `visual/` holds rendering and menus, `effect/` runs effects,
+and `main/` holds the launcher and application. `data/` reads game formats,
+`source/` validates the installation, and `audio/` handles sound output.
+Each main folder has a short README. See [ARCHITECTURE.md](ARCHITECTURE.md)
+for package boundaries and current limitations.
+
 ## Quick start
 
 You need Windows, your own **legally obtained** Steam copy of Kingdom Hearts HD 1.5 + 2.5 ReMIX, and the pinned Rust toolchain. See [CONTRIBUTING.md](CONTRIBUTING.md#setup).
 
 ```powershell
-cargo build --release -p windows_shell --locked
+powershell -NoProfile -File tools/Build-Launcher.ps1
 & '.\target\release\KH2RW Launcher.exe'
 ```
 
@@ -46,7 +55,7 @@ The first launch opens a short quick start guide (F1 in the launcher brings it b
 Command-line runs also work:
 
 ```powershell
-cargo run -p windows_shell --bin kh2fm --locked -- room '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/test-room.json'
+cargo run -p main --bin KH2RW --locked -- room '<selected-install-root>' '<private-directory>/source-manifest.json' '<private-directory>/test-room.json'
 ```
 
 `title` and `talk` take the same arguments with their own configuration. The configuration format is in [T056](docs/tasks/T056-playable-test-room.md).
@@ -58,6 +67,8 @@ cargo run -p windows_shell --bin kh2fm --locked -- room '<selected-install-root>
 | Move | WASD | Left stick |
 | Walk | Hold Left Alt | Tilt the stick slightly |
 | Camera | Mouse | Right stick |
+| Lock on / release | R | RB |
+| Cycle locked target | | Hold RT and tilt right stick left/right |
 | Attack | Enter, left click | A |
 | Jump | Space | B |
 | Guard | Right Shift, right click | X |
@@ -65,14 +76,27 @@ cargo run -p windows_shell --bin kh2fm --locked -- room '<selected-install-root>
 | Shortcuts | Hold Left Shift | LB |
 | Skateboard (needs the Skate 3 ISO) | J | |
 | Collision overlay | F1 | |
+| Debug options, summons and Scan | F3 | |
 | Leave the test | Esc | |
 
+In the generated arena, F3 → Summon enemies → Summoned actors lets you enable
+AI and combat for ordinary Shadow, Dusk and Soldier. Other enemies currently
+support animation inspection. F3's Scan option toggles the learned ability;
+equipping it shows the selected enemy's live HP in the debug target panel.
+Full roster combat and installed-game comparisons remain unfinished.
+
 ## Build and check
+
+`build.bat` builds the optimized launcher and its two viewers. Use
+`build.bat -Debug` for faster development builds, and add `-LauncherOnly` when
+the viewers are already built. Compact development symbols and Rust's bundled
+LLVM linker reduce build-output overhead; see
+[local build options and cleanup](CONTRIBUTING.md#local-builds-and-disk-use).
 
 ```powershell
 cargo build --workspace --locked
 cargo test --workspace --locked
-cargo run -p windows_shell --locked -- --frames 180
+cargo run -p main --locked -- --frames 180
 ```
 
 The full list of checks, and the rules for contributing, are in [CONTRIBUTING.md](CONTRIBUTING.md). Developer tools for reading the installed game are in [docs/developer-tools.md](docs/developer-tools.md).
@@ -87,7 +111,7 @@ Source manifests, package records, captures and saves stay outside this reposito
 - **Code:** written with [Claude](https://claude.com/claude-code), an AI coding assistant, under the owner's direction.
 - **Format research:** [OpenKH](https://git.openkh.dev/) (Apache-2.0) documents the game's file formats, and the project's reader follows it. The attribution list is in [NOTICE](NOTICE).
 - **Other third-party code:** [Bevy](https://bevy.org), the `image` and `png` crates, zlib-rs, Microsoft DirectXTex (MIT), the .NET runtime (MIT), and `bevy_mikktspace` (Morten Mikkelsen). Release licences are in [docs/release/](docs/release/).
-- **Skate 3 crates** (`crates/skate3/`, GPL-3.0): adapted from [SK8-ENGINE/skate-3-rust-engine](https://github.com/SK8-ENGINE/skate-3-rust-engine). See [its README](crates/skate3/README.md).
+- **Skate 3 crates** (`extras/skateboard/engine/`, GPL-3.0): adapted from [SK8-ENGINE/skate-3-rust-engine](https://github.com/SK8-ENGINE/skate-3-rust-engine). See [its README](extras/skateboard/engine/README.md).
 - **Games:** *Kingdom Hearts* is by Square Enix and Disney. This project is not affiliated with or endorsed by either company.
 
 ## License

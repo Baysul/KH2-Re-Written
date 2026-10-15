@@ -1,0 +1,93 @@
+[package]
+name = "data"
+default-run = "data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+source = { path = "../source" }
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+image = { version = "=0.25.10", default-features = false, features = ["png", "dds"] }
+crc32fast = "=1.5.2"
+lewton = { version = "=0.10.2", default-features = false }
+
+[lints]
+workspace = true
+
+# These CLI adapters contain no unit tests or private test modules. Keep
+# compiling them in workspace builds/Clippy without linking empty harnesses.
+# Remove test=false for any adapter that gains its own tests.
+[[bin]]
+name = "data"
+test = false
+bench = false
+
+[[bin]]
+name = "ability_probe"
+test = false
+bench = false
+
+[[bin]]
+name = "archive_probe"
+test = false
+bench = false
+
+[[bin]]
+name = "encounter_probe"
+test = false
+bench = false
+
+[[bin]]
+name = "event_probe"
+test = false
+bench = false
+
+[[bin]]
+name = "font_cell_probe"
+test = false
+bench = false
+
+[[bin]]
+name = "image_structure_probe"
+test = false
+bench = false
+
+[[bin]]
+name = "message_probe"
+test = false
+bench = false
+
+[[bin]]
+name = "motion_probe"
+test = false
+bench = false
+
+[[bin]]
+name = "motion_sample_probe"
+test = false
+bench = false
+
+[[bin]]
+name = "named_dump"
+test = false
+bench = false
+
+[[bin]]
+name = "original_probe"
+test = false
+bench = false
+
+[[bin]]
+name = "plain_probe"
+test = false
+bench = false
+
+[[bin]]
+name = "room_probe"
+test = false
+bench = false

@@ -1,104 +1,79 @@
 # Architecture
 
-Native Windows Rust/Bevy/wgpu rewrite of **Kingdom Hearts II Final Mix (PC) only**, reading the user's own Steam installation at runtime. Nothing from the game (assets, executable extracts, captures, saves, decompiled output) is stored in Git or distributed. Scope and gates: [fidelity contract](docs/fidelity-contract.md), [milestones](docs/milestones.md), [unknowns](docs/unknowns.md). Working rules: [AGENTS.md](AGENTS.md).
+This is a Windows Rust/Bevy rewrite of Kingdom Hearts II Final Mix. It reads the
+selected Steam installation without modifying it. Game files, manifests, saves,
+captures and research output stay outside Git. Scope and acceptance remain in the
+[fidelity contract](docs/fidelity-contract.md), [milestones](docs/milestones.md)
+and [unknowns](docs/unknowns.md).
 
-Status: the test room (walk, jump, two combos) and the title/camp screens run from the selected install. Fidelity is not established for combat rules, progression, saves or the full campaign.
+## Folder map
 
-## Layers
+Start with the [folder guide](docs/folder-guide.md) for examples of common edits,
+a glossary and the old-to-new name table.
 
-Data flows one way. Each layer may depend only on the layers above it.
+| Folder | What belongs here | Cargo package |
+|---|---|---|
+| `main/` | Launcher, application startup, playable scene assembly and developer programs | `main` |
+| `game/player/` | Player movement, abilities, combat, forms, targeting and current enemy controllers | `player` |
+| `game/area/` | Area setup, spawn activation, exits and progress | `area` |
+| `game/collision/` | Movement against room geometry | `collision` |
+| `game/event/` | Cutscene timeline and camera state | `event` |
+| `visual/` | Rendering, menus, HUD, controller input and scene presentation | `visual` |
+| `effect/` | Particle and model effect execution | `effect` |
+| `audio/` | Mixing and Windows sound output | `audio` |
+| `data/` | Bounded readers for game packages, models, motion, images, text and sound | `data` |
+| `source/` | Selected-install validation, hashing and manifest tools | `source` |
+| `extras/` | Existing optional skateboard extension and its license boundary | See its README |
+| `tools/` | Build helpers and research/verification scripts | None |
+| `docs/` | Guides, evidence, scope, roadmap and acceptance records | None |
 
-1. **Source identity**: hash the selected install, write a manifest. Detection is evidence, not build qualification.
-2. **Decoding (package_reader)**: bounded readers for BAR packages, models, motion, rooms, fonts, messages, audio. Every session re-checks the selected files against the manifest before reading a byte.
-3. **Cache**: planned, transactional, bound to source identity. Not yet implemented.
-4. **Authoritative simulation**: fixed-tick game state (`player_sim`, `effect_vm`). Renderer, window and input cannot change progression. Saves serialize versioned state.
-5. **Presentation and adapters**: Bevy rendering, windows, audio output, pad/keyboard input (`windows_shell`, `audio_out`).
+`Cargo.toml` at the root lists the workspace members. Each package has its own
+`Cargo.toml` and Rust source under `src/`. These Rust conventions are explained in
+the folder guide. New folders are added when working code needs them.
 
-The rule is stated in AGENTS.md. Part of the current code does not yet follow it; see "Known gaps".
+## Boundaries
 
-## Workspace crates
+Data moves from selected-source validation (`source`) through decoding (`data`)
+into game/effect state and presentation. Presentation reads the state; game rules
+must not depend on Bevy or the window. `audio` supplies output rather than game
+rules. Every gameplay and installed-data inspection session still validates the
+selected files. Folder names do not qualify a supported build.
 
-| Crate | Layer | Contents | Notes |
-|---|---|---|---|
-| `source_identity` | 1 | `lib.rs` (identity, hashing), `main.rs` (manifest CLI) | Read-only. Refuses existing output files. |
-| `package_reader` | 2 | `src/` modules (BAR, plain/original payloads, message, font, model_*, motion*, room_*, scd, ogg, sequence, layout, objentry, preferences, ptya, battle_tables, effect); `src/bin/` developer probes; `examples/` boundary checks | Decodes; no gameplay rules. Probes and examples are research tooling. |
-| `effect_vm` | 4 | `lib.rs`, `math.rs`, `programs.rs`, `mega_birth.rs`, `tests.rs` | Particle VM translated from the PC executable. |
-| `player_sim` | 4 | `lib.rs` (locomotion state machine), `camera.rs`, `combat.rs`, `shadow.rs` | Test-room controller. Fixed-tick. Not a measured reproduction of KH2 rules. |
-| `skate_source` | 1-2 | `lib.rs` (Skate 3 disc admission), `xdvdfs.rs` (Xbox ISO reader) | Owner-requested exception ([T101](docs/tasks/T101-skate3-board.md)): reads the user's own Skate 3 ISO in place for the J skateboard. |
-| `skate3/skate-disc`, `skate3/skate-sim` | 2, 4 | Skate 3 disc setup and skater simulation | **GPL-3.0-only**, optional (`windows_shell` feature `skate3`); see `crates/skate3/README.md` and [T103](docs/tasks/T103-skate3-riding.md). |
-| `audio_out` | 5 | `lib.rs` (software mixer), `winmm.rs` (Windows output) | |
-| `windows_shell` | 5, plus launcher and dev tools | See below | Largest crate; holds presentation and some game-state code. |
+`main/src/main.rs` starts the KH2RW launcher. `main/src/launcher/` checks the game
+folder and prepares the launch configurations. `main/src/test_room.rs` assembles
+the development room; `main/src/area.rs` and `cutscene/` connect state to scenes.
+`main/src/bin/` holds the smoke window and research viewers/probes. The default
+`cargo run -p main` program is the source-free smoke window; the player launcher
+is selected with `--bin KH2RW` or built with `build.bat`.
 
-Dependencies: `windows_shell` uses all others; `package_reader` uses `source_identity`; `effect_vm` uses `package_reader`. Workspace lints forbid `unsafe_code`. Pinned toolchain: Rust 1.99.0 (`rust-toolchain.toml`). Bevy 0.19.1.
+`visual/src/lib.rs` lists the shared presentation modules. The pause menu is in
+`visual/src/pause_menu.rs` and `pause_menu/`. The title state and title banner are
+`visual/src/title.rs` and `title_banner.rs`; `main/src/title.rs` assembles the title
+application. `visual/src/overlay.rs` and `overlay.wgsl` compose the 2D display.
 
-### windows_shell
+The optional Skate 3 code retains its upstream package names and GPL notices in
+`extras/skateboard/engine/`. It is existing extension code, not a roadmap for
+rewriting another collection game. The `skate3` feature remains opt-in for Cargo;
+`build.bat` retains its existing feature selection.
 
-- `src/lib.rs`: shared source-bound helpers for the developer binaries. Modules: `camp/` (abilities, customize, equip, items, party), `command`, `dialogue`, `effects`, `fade`, `gauge`, `hud`, `input`, `layout2d`, `newgame`, `pad`, `room`, `sound`, `splash`, `sprite2d`, `title`, `ui2d` (+ `ui2d.wgsl`).
-- `src/main.rs`: `windows_shell` smoke app (synthetic checker BMP from `assets/development-checker.bmp`).
-- `src/bin/kh2fm/`: **the player launcher**. `main.rs` runs a program (`title`, `room`, `talk`, `play`) with its launch file or arguments, or with no arguments opens the launcher window (`launcher.rs`; `launcher/install.rs` finds and checks the game folder, `launcher/paint.rs` draws without game files). `test_room.rs` is the playable test room. `title.rs` is the title screen presentation; its state machine lives in `src/title.rs`.
-- `src/bin/room_scene.rs`, `model_inspector.rs`, `image_inspector.rs`, `motion_eval_compare.rs`, `motion_ik_probe.rs`: developer research binaries.
-- `assets/`: `development-checker.bmp` (smoke app), `final-rewrite-text.png` (title banner, [T087](docs/tasks/T087-title-edits.md)). Both are allowlisted in `.gitignore`.
+## Current limitations
 
-## Where things are
+This move preserves behavior and existing unfinished boundaries. The visual
+package still contains menu/title state and input adapters. The main package
+still assembles gameplay and rendering in the development room, and current enemy
+controllers still share the player package. Future behavior work should extract
+state where it needs independent verification. These are not newly completed
+simulation or gameplay gates. A source-bound transactional cache is still planned.
 
-```
-crates/                      one folder per crate (layers above)
-  source_identity/ package_reader/ effect_vm/ player_sim/ audio_out/ windows_shell/
-docs/
-  fidelity-contract.md milestones.md unknowns.md   scope and gates (paths fixed by AGENTS.md)
-  tasks/                     one record per unit of work (T001-T088, plus T001R); format in AGENTS.md; index in tasks/README.md
-  decisions/                 architecture decisions (0001-foundation.md)
-  release/                   provenance, dependency inventory, third-party licences
-  scenarios/                 scenario evidence format
-  research/                  research and tool notes, CSV ledgers
-tools/                       PowerShell, C#, Java and C++ research scripts (verify-*, native/managed readers, C++ references)
-  fixtures/                  authored conformance inputs for those tools
-.github/workflows/ci.yml     fmt, clippy, test, build on windows-latest
-.local/                      git-ignored development outputs (see below)
-```
+## Private local files
 
-Outside the checkout (private, never committed):
+`target/` contains disposable compiler outputs. `.local/` is ignored development
+storage; historical local test-room files are retained during this refactor.
+Source data, manifests, saves, captures, disassembly, logs and backups belong in
+private storage outside the checkout. Do not create tracked asset or mod-data
+folders containing installed game content. The default-deny `.gitignore` admits
+only maintained code, documentation, authored fixtures and explicitly reviewed
+project images.
 
-- `%LOCALAPPDATA%/KH2FinalRewrite/`: logs (`logs/`), research output (`research/<name>/`), and launch files `test-room-<name>.json` checked by the launcher. Files written under LOCALAPPDATA by development tools are virtualized and invisible to the user's own launches, so the double-click launch files live in `.local/test-room/` instead.
-- `%USERPROFILE%/KH2FinalRewrite-private/`: evidence logs (`logs/evidence-2026-10-03/`), pinned research clones (`research/requested-repos/`, `research/tools/openkh/`), and the handoff note (`handoff/`). Outside the checkout and outside OneDrive.
-- Any directory the user names on the command line: source manifests, selections, configs, captures, saves.
-
-## Local-only folders
-
-- `.local/test-room/`: double-click launch files `launch.json`, `launch-talk.json`, `launch-title.json` (each names `steam_root`, `manifest`, `config`), plus source manifests (`source-manifest-0{1,2}.json`), test-room and arena configs, and a map-survey selection (`map-survey-01/`).
-- `target/`: Cargo build output.
-
-## Data flow
-
-```
-Steam install (read-only)
-  -> source_identity  -> source manifest (private file)
-  -> package_reader   (checks each read against the manifest; decodes in memory)
-  -> windows_shell room/title/camp loaders (source-bound scene data)
-  -> player_sim / effect_vm (fixed-tick state)
-  -> windows_shell presentation (Bevy), audio_out (mixer), pad/keyboard input
-```
-
-Launch commands (examples; paths are placeholders):
-
-```powershell
-cargo run -p source_identity --release --locked -- '<install-root>' '<private>/source-manifest.json'
-cargo run -p windows_shell --bin kh2fm --locked -- room '<install-root>' '<private>/source-manifest.json' '<private>/test-room.json'
-cargo run -p windows_shell --locked -- --frames 180
-```
-
-The checks required after every change are listed in [CONTRIBUTING.md](CONTRIBUTING.md#checks).
-
-## Known gaps against the rules
-
-1. **Game state inside the presentation crate.** `windows_shell` contains state machines for the camp menu, command menu, field talk, new-game dialog, title flow, gauge, fade and effect sources. AGENTS.md assigns game state to the authoritative layer. Move these when a test needs the boundary (see the plan).
-2. **Two title modules.** `windows_shell/src/title.rs` (state) and `windows_shell/src/bin/kh2fm/title.rs` (presentation) split one screen. This is intentional for now; document it in the move.
-3. **Private data in the checkout.** `.local/test-room/` holds source manifests, selections and captures. AGENTS.md says these belong outside the checkout.
-4. **No cache layer.** Layer 3 is not implemented; nothing reads a cache.
-
-## Adding things
-
-- A new crate only when a tested behavior needs the boundary (AGENTS.md). No empty subsystems.
-- Translated game routines must note the original function address in a comment or the task record. Assets stay out of the repo.
-- Every nontrivial change gets a record in `docs/tasks/` with its gate, evidence locations and verdict.
-- New `.gitignore` allowlist entries are reviewed for provenance before they are added.
+For build commands and required checks, see [CONTRIBUTING.md](CONTRIBUTING.md).
+For naming and placement rules, see [the folder guide](docs/folder-guide.md).

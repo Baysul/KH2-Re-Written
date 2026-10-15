@@ -1,8 +1,8 @@
-# Renders the "Final Re:WRITE" banner text (crates/windows_shell/assets/
+# Renders the "Final Re:WRITE" banner text (visual/assets/
 # final-rewrite-text.png) from a Windows system font in the gold bevel
 # colours measured on the title logo banner. Reads no game data; the
 # ornaments and lines around it come from the install at runtime
-# (windows_shell::banner). Downloads/installs nothing.
+# (main::banner). Downloads/installs nothing.
 param(
     [string]$Font = "Bahnschrift",
     [string]$Text = "Final Re:WRITE",

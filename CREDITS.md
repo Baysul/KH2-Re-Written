@@ -18,7 +18,7 @@ The project's own code and documents are Apache-2.0 (see [LICENSE](LICENSE)). Th
 
 ## Skate 3 (optional feature, GPL-3.0)
 
-The `crates/skate3` folder holds two crates from [SK8-ENGINE/skate-3-rust-engine](https://github.com/SK8-ENGINE/skate-3-rust-engine) at commit `2e16697`. They are licensed **GPL-3.0-only**, unlike the rest of this repository. A `kh2fm.exe` built with `--features skate3` is therefore a GPL-3.0 combined work. Without that feature the program does not include them. See [crates/skate3/README.md](crates/skate3/README.md).
+The `extras/skateboard/engine` folder holds two crates from [SK8-ENGINE/skate-3-rust-engine](https://github.com/SK8-ENGINE/skate-3-rust-engine) at commit `2e16697`. They are licensed **GPL-3.0-only**, unlike the rest of this repository. A `KH2RW.exe` built with `--features skate3` is therefore a GPL-3.0 combined work. Without that feature the program does not include them. See [extras/skateboard/engine/README.md](extras/skateboard/engine/README.md).
 
 ## Rust libraries
 

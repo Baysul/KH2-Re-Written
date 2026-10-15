@@ -1,6 +1,6 @@
 # Source manifest schema v1
 
-Owner: `source_identity`. Stored privately outside source/Git. JSON fields:
+Owner: `source`. Stored privately outside source/Git. JSON fields:
 
 | Field | Type / meaning |
 |---|---|

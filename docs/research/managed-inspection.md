@@ -19,7 +19,7 @@ pwsh -NoProfile -File tools/Verify-ManagedReader.ps1 `
 
 This compiles our two-method fixture, statically decompiles it, recompiles under another namespace and compares 22 cases, including integer boundaries and switch defaults. Only authored assemblies are executed. The receipt binds the tool hashes and current fixture source hash. Finite cases do not establish general decompiler correctness.
 
-Use a candidate manifest from `source_identity`. A private selection JSON must contain `schema_version: 1`, the manifest's `source_content_identity`, the bound `executable_sha256`, and `method_tokens`: one to eight unique lowercase MethodDef tokens such as `0x06000001`. Choose tokens from an observed metadata inventory, not guessed behavior. Then run:
+Use a candidate manifest from `source`. A private selection JSON must contain `schema_version: 1`, the manifest's `source_content_identity`, the bound `executable_sha256`, and `method_tokens`: one to eight unique lowercase MethodDef tokens such as `0x06000001`. Choose tokens from an observed metadata inventory, not guessed behavior. Then run:
 
 ```powershell
 pwsh -NoProfile -File tools/Inspect-ManagedExecutable.ps1 `

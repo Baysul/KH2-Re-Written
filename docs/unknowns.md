@@ -1,5 +1,37 @@
 # Open evidence and decisions
 
+T124 (2026-10-14 action continuation) exposes additional named attack-animation
+candidates and corrects the Shadow action queue's capacity from sixteen to
+fifteen pending entries. Native stack/trap and bounded scheduler evidence is
+qualified for inspection; complete logical functions, actor context,
+motion-end/range flag producers, clock/PC adjustments, task children,
+effects/hits and full enemy behavior remain unqualified. The finite catalog
+still retains 2,272 actions with dynamic requests. Installed comparisons remain
+NOT RUN. See [T124](tasks/T124-enemy-action-arguments-and-scheduler.md).
+
+T123 (2026-10-14 continuation) resolves T122's fifteen raw endpoint failures
+and one model link boundary: 295/304 primary models and all 7,338 finite motion
+samples now load. Nine archives lack model entries; nineteen material profiles,
+linked presentation, species/encounter closure and full enemy behavior remain
+unqualified. These results qualify inspection only; installed comparisons remain
+NOT RUN. See [T123](tasks/T123-enemy-motion-and-model-boundaries.md). The T122
+paragraph below retains its historical audit result.
+
+T122 (2026-10-14): the expanded development arena and source-bound enemy
+summon/animation browser pass local build/tests and a three-actor renderer tour.
+Ten candidate models, fifteen raw motion timeline mappings, eighteen material
+profiles and 211 species classifications remain failed or unqualified. Every discovered typed enemy and
+journal enemy remains a candidate, including unresolved variants and failed
+decodes. Named callback motion candidates preserve conditional/dynamic requests
+and native logical-to-variant mapping; they do not execute AI, select the native
+context, or establish a complete reachable roster. Complete spawn/idle/attack
+behavior, linked models, effects, combat identities and paired reference
+comparisons remain required. See [T122](tasks/T122-enemy-summons-and-large-arena.md).
+
+T121 (2026-10-13): the source-derived development inventory and actual equip-menu tour resolve missing normal-Sora growth availability. All five families equip and High Jump activates in the rebuilt launcher. Campaign acquisition, remaining ability consumers and paired installed-game timing/pose/combo comparisons remain open; development AP/grants do not establish campaign equivalence. See [T121](tasks/T121-equipable-growth-and-combos.md).
+
+T120 (2026-10-13): ability/growth/combo construction and selected native branches have fresh static evidence, with equipment, slot persistence, boost arithmetic and Square routing corrections. Complete 1:1 remains open: controlled reference scenarios, animation-window/timing/pose/root comparisons, special-context growth, equipment/save population, Hyper Healing/Combination Boost consumers, summons and complete progression. See [the evidence report](research/abilities-growth-combos.md). Historical T090/T108 private research directories were absent; T120 uses newly retained evidence. REA's Windows Ghidra provider rejects this mixed CLR/native target; its canonical managed inspection succeeded and native research used the existing direct read-only Ghidra route.
+
 Priority after user steering: use decoded room/character data to deliver a first playable scene; retain all required fidelity and source gates. Room collision response, movement/camera and animation need measured evidence before gameplay claims.
 
 | ID | Unknown | Owner | Blocks | Resolution |
@@ -26,3 +58,9 @@ Priority after user steering: use decoded room/character data to deliver a first
 | U020 | Sora parameter mapping, locomotion/jump/attack rules and reference access | Agent | P12/P17/P18/P19/P21 | T054 independently matches 70 PRTY offsets, 34 distinct records and 442 raw words. One zero offset overlaps the header; public field/CharacterMap labels do not establish active actor selection, units or equations. Selected horizontal polygon height improves inspection placement without establishing spawn/collision response. KH2 title showed Load disabled; user confirms no existing Sora save. No Sora gameplay measurements or authoritative walking/jump/attack behavior yet |
 | U021 | Test-room controller choices and scene handedness | Agent + user | P15/P16/P18/P19/P21 | T056 runs a playable room with data-backed speeds/jump/turn/fall cap/combo motions/windows/weapon joint. Gravity 0.8, step 24, walk threshold 0.6, body 30x140, combo ID order, 6-tick blend, PTYA Jump as lift height, objentry weapon-entry joint as the hand, and the X-mirrored presentation are choices or inferences. Root motion, IK, hit detection, enemies, effects and measured timing are absent. Requires a reference (Sora save) to compare speeds, airtime and combo cadence |
 | U022 | Interpolated-motion solver semantics | Agent | P15/P18/P21 | T057 evaluates IK helpers, joint order, position/orientation/direction/limit constraints, two-joint IK and expressions from the motion data. Aim axis (+X), bend axis/sign, constraint order, activation default, expression list/condition semantics, Hermite tangent scaling and limiter damping are inferred and only visually checked against a user reference image; path/up-vector/two-point/scale/camera/int constraint types, scale channels and root rotation are not applied |
+T125 (2026-10-14): ordinary Shadow/Dusk/Soldier AI and shared Sora combat now execute
+in the generated development arena. Stable lock-on and equipped Scan are
+implemented against fresh native holder/HP consumer evidence in the debug host. Every
+other required enemy, encounter, unsupported action service and controlled
+installed comparison remains open; this does not complete the enemy roster.
+See [T125](tasks/T125-enemy-ai-and-combat.md).

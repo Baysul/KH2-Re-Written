@@ -17,7 +17,7 @@ Task records that clashed between branches were renumbered during the merge: Twi
 Built:
 - The boot sequence plays on every launch: opening fade, Disney, Square Enix, copyright, then the intro and the title screen with its music (T086). The studio splash was removed.
 - The owner's edits: a shorter copyright hold and the "Final Re:WRITE" banner (T087).
-- `kh2fm.exe` with no arguments opens a plain launcher: find or browse to the game folder, quick-check or full-scan it, refuse any other build, then pick a test (Title Screen, Test Room, Twilight Town, the cutscene, and model/image viewers) (T089). New Game on the title continues straight into the test room.
+- `KH2RW.exe` with no arguments opens a plain launcher: find or browse to the game folder, quick-check or full-scan it, refuse any other build, then pick a test (Title Screen, Test Room, Twilight Town, the cutscene, and model/image viewers) (T089). New Game on the title continues straight into the test room.
 
 Unfinished:
 - The owner has not signed off on the banner's look; its font is the nearest system face, not the original's.
