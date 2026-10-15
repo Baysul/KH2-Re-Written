@@ -8,12 +8,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() != 2 {
         return Err(
-            "usage: source <selected-Steam-install-root> <new-private-manifest.json>".into(),
+            "usage: validation <selected-Steam-install-root> <new-private-manifest.json>".into(),
         );
     }
     let root = PathBuf::from(&args[0]);
-    let output = source::safe_output(&root, &PathBuf::from(&args[1]))?;
-    let manifest = source::scan(&root)?;
+    let output = validation::safe_output(&root, &PathBuf::from(&args[1]))?;
+    let manifest = validation::scan(&root)?;
     let bytes = serde_json::to_vec_pretty(&manifest)?;
     let mut file = OpenOptions::new()
         .write(true)
@@ -23,7 +23,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     file.sync_all()?;
     writeln!(
         io::stdout(),
-        "Scanned {} KH2 candidate files. Qualification: {}. Private manifest written outside source.",
+        "Scanned {} KH2 candidate files. Qualification: {}. Private manifest written outside validation.",
         manifest.files.len(),
         manifest.qualification
     )?;

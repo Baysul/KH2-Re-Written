@@ -64,7 +64,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("selection schema/source identity/count is invalid".into());
     }
-    let indexes: Vec<_> = source::required_files()
+    let indexes: Vec<_> = validation::required_files()
         .into_iter()
         .filter(|(p, _)| p.ends_with(".hed"))
         .map(|(p, _)| p)

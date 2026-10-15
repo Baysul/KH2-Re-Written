@@ -1,13 +1,13 @@
 //! Common source binding for developer probes; it never qualifies gameplay.
 use crate::{IndexInventory, MAX_INDEX_BYTES, read_hed};
 use sha2::{Digest, Sha256};
-use source::SourceManifest;
 use std::{
     fs::{self, File, Metadata},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
+use validation::SourceManifest;
 
 type ProbeResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -83,8 +83,8 @@ impl SourceReader {
             self.cache.push(hit);
             return Ok(self.cache.len() - 1);
         }
-        let start = k * source::CHUNK_SIZE;
-        let size = (self.len - start).min(source::CHUNK_SIZE) as usize;
+        let start = k * validation::CHUNK_SIZE;
+        let size = (self.len - start).min(validation::CHUNK_SIZE) as usize;
         let mut bytes = vec![0; size];
         self.file.seek(SeekFrom::Start(start))?;
         self.file.read_exact(&mut bytes)?;
@@ -115,8 +115,8 @@ impl Read for SourceReader {
         if self.pos >= self.len || buf.is_empty() {
             return Ok(0);
         }
-        let k = self.pos / source::CHUNK_SIZE;
-        let at = (self.pos % source::CHUNK_SIZE) as usize;
+        let k = self.pos / validation::CHUNK_SIZE;
+        let at = (self.pos % validation::CHUNK_SIZE) as usize;
         let i = self.chunk(k)?;
         let data = &self.cache[i].1[at..];
         let n = data.len().min(buf.len());
@@ -152,18 +152,18 @@ impl ProbeSource {
             return Err("source manifest exceeds inspection limit".into());
         }
         let manifest: SourceManifest = serde_json::from_slice(&bytes)?;
-        let required = source::required_files();
+        let required = validation::required_files();
         let chunks_ok = manifest.schema_version == 1
-            || (manifest.schema_version == source::SCHEMA
-                && source::chunk_identity(&manifest.files) == manifest.chunk_identity
+            || (manifest.schema_version == validation::SCHEMA
+                && validation::chunk_identity(&manifest.files) == manifest.chunk_identity
                 && manifest
                     .files
                     .iter()
-                    .all(|f| f.chunks.len() as u64 == f.size.div_ceil(source::CHUNK_SIZE)));
+                    .all(|f| f.chunks.len() as u64 == f.size.div_ceil(validation::CHUNK_SIZE)));
         if !chunks_ok
             || manifest.canonical_source_path != root
             || manifest.qualification != "quarantined_unqualified"
-            || source::content_identity(&manifest.files) != manifest.content_identity
+            || validation::content_identity(&manifest.files) != manifest.content_identity
             || manifest.files.len() != required.len()
             || required.iter().any(|(path, _)| {
                 manifest
@@ -204,7 +204,7 @@ impl ProbeSource {
         if self.session.as_ref().is_some_and(|s| s.get().is_some()) {
             return Ok(());
         }
-        let fresh = source::scan_with(&self.root, false)?;
+        let fresh = validation::scan_with(&self.root, false)?;
         if fresh.content_identity != self.manifest.content_identity
             || fresh.files.iter().any(|observed| {
                 self.manifest
@@ -237,14 +237,14 @@ impl ProbeSource {
         if self.session.as_ref().is_some_and(|s| s.get().is_some()) {
             return Ok(());
         }
-        if self.manifest.schema_version < source::SCHEMA {
+        if self.manifest.schema_version < validation::SCHEMA {
             return self.verify_full_source();
         }
-        let whole: Vec<(String, &str)> = source::required_files()
+        let whole: Vec<(String, &str)> = validation::required_files()
             .into_iter()
             .filter(|(p, _)| !p.ends_with(".pkg"))
             .collect();
-        let fresh = source::inspect_files(&self.root, &whole, false)?;
+        let fresh = validation::inspect_files(&self.root, &whole, false)?;
         for observed in &fresh {
             let expected = self.expected(&observed.relative_path)?;
             if observed.sha256 != expected.sha256
@@ -258,7 +258,7 @@ impl ProbeSource {
                 .into());
             }
         }
-        for (relative, _) in source::required_files() {
+        for (relative, _) in validation::required_files() {
             if !relative.ends_with(".pkg") {
                 continue;
             }
@@ -280,7 +280,7 @@ impl ProbeSource {
         Ok(())
     }
 
-    fn expected(&self, relative: &str) -> ProbeResult<&source::SourceFile> {
+    fn expected(&self, relative: &str) -> ProbeResult<&validation::SourceFile> {
         self.manifest
             .files
             .iter()
@@ -289,14 +289,14 @@ impl ProbeSource {
     }
 
     pub fn output_path(&self, path: &Path) -> std::io::Result<PathBuf> {
-        source::safe_output(&self.root, path)
+        validation::safe_output(&self.root, path)
     }
 
     pub fn open_index(&self, relative: &str) -> ProbeResult<CheckedIndex> {
         if self.session.as_ref().is_some_and(|s| s.get().is_none()) {
             return Err("session source not admitted yet (verify_session)".into());
         }
-        if !source::required_files()
+        if !validation::required_files()
             .iter()
             .any(|(name, _)| name == relative && name.ends_with(".hed"))
         {
@@ -317,7 +317,7 @@ impl ProbeSource {
         {
             return Err("index exceeds inspection limit before hashing".into());
         }
-        let observed = source::inspect_file(&self.root, relative, "index_check")?;
+        let observed = validation::inspect_file(&self.root, relative, "index_check")?;
         if observed.sha256 != expected.sha256
             || observed.size != expected.size
             || observed.modified_unix_nanos != expected.modified_unix_nanos
@@ -409,7 +409,7 @@ mod tests {
             ));
             let root = base.join("source");
             fs::create_dir_all(root.join("Image/dt")).unwrap();
-            for (relative, _) in source::required_files() {
+            for (relative, _) in validation::required_files() {
                 let data = if relative.ends_with(".hed") {
                     let mut record = vec![0; 24];
                     record.extend(16i32.to_le_bytes());
@@ -423,7 +423,7 @@ mod tests {
             let manifest = base.join("manifest.json");
             fs::write(
                 &manifest,
-                serde_json::to_vec(&source::scan(&root).unwrap()).unwrap(),
+                serde_json::to_vec(&validation::scan(&root).unwrap()).unwrap(),
             )
             .unwrap();
             Self {
@@ -488,7 +488,7 @@ mod tests {
         let mut manifest: SourceManifest =
             serde_json::from_slice(&fs::read(&fixture.manifest).unwrap()).unwrap();
         manifest.files.pop();
-        manifest.content_identity = source::content_identity(&manifest.files);
+        manifest.content_identity = validation::content_identity(&manifest.files);
         fs::write(&fixture.manifest, serde_json::to_vec(&manifest).unwrap()).unwrap();
         assert!(ProbeSource::bind(&fixture.root, &fixture.manifest).is_err());
     }
@@ -520,7 +520,7 @@ mod tests {
         assert!(checked.reader.read(&mut one).is_err());
         // A changed executable fails a fresh session.
         let source = ProbeSource::bind_session(&fixture.root, &fixture.manifest).unwrap();
-        fs::write(fixture.root.join(source::KH2_EXECUTABLE), [1; 16]).unwrap();
+        fs::write(fixture.root.join(validation::KH2_EXECUTABLE), [1; 16]).unwrap();
         assert!(source.verify_session().is_err());
     }
 
@@ -529,7 +529,7 @@ mod tests {
         let fixture = Fixture::new();
         let source = ProbeSource::bind(&fixture.root, &fixture.manifest).unwrap();
         source.verify_full_source().unwrap();
-        fs::write(fixture.root.join(source::KH2_EXECUTABLE), [1; 16]).unwrap();
+        fs::write(fixture.root.join(validation::KH2_EXECUTABLE), [1; 16]).unwrap();
         assert!(source.verify_full_source().is_err());
     }
 
@@ -545,7 +545,7 @@ mod tests {
         .unwrap();
         fs::write(
             &fixture.manifest,
-            serde_json::to_vec(&source::scan(&fixture.root).unwrap()).unwrap(),
+            serde_json::to_vec(&validation::scan(&fixture.root).unwrap()).unwrap(),
         )
         .unwrap();
         let source = ProbeSource::bind(&fixture.root, &fixture.manifest).unwrap();
@@ -560,7 +560,7 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(decoding_error.contains("invalid BAR"), "{decoding_error}");
-        fs::write(fixture.root.join(source::KH2_EXECUTABLE), [1; 16]).unwrap();
+        fs::write(fixture.root.join(validation::KH2_EXECUTABLE), [1; 16]).unwrap();
         assert!(
             crate::model_inspection::read_selected_models(&source, &path)
                 .err()

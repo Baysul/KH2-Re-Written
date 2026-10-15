@@ -13,16 +13,16 @@ a glossary and the old-to-new name table.
 
 | Folder | What belongs here | Cargo package |
 |---|---|---|
-| `main/` | Launcher, application startup, playable scene assembly and developer programs | `main` |
-| `game/player/` | Player movement, abilities, combat, forms, targeting and current enemy controllers | `player` |
-| `game/area/` | Area setup, spawn activation, exits and progress | `area` |
-| `game/collision/` | Movement against room geometry | `collision` |
-| `game/event/` | Cutscene timeline and camera state | `event` |
-| `visual/` | Rendering, menus, HUD, controller input and scene presentation | `visual` |
+| `source/main/` | Launcher, application startup, playable scene assembly and developer programs | `main` |
+| `source/game/player/` | Player movement, abilities, combat, forms, targeting and current enemy controllers | `player` |
+| `source/game/area/` | Area setup, spawn activation, exits and progress | `area` |
+| `source/game/collision/` | Movement against room geometry | `collision` |
+| `source/game/event/` | Cutscene timeline and camera state | `event` |
+| `source/visual/` | Rendering, menus, HUD, controller input and scene presentation | `visual` |
 | `effect/` | Particle and model effect execution | `effect` |
 | `audio/` | Mixing and Windows sound output | `audio` |
 | `data/` | Bounded readers for game packages, models, motion, images, text and sound | `data` |
-| `source/` | Selected-install validation, hashing and manifest tools | `source` |
+| `validation/` | Selected-install validation, hashing and manifest tools | `validation` |
 | `extras/` | Existing optional skateboard extension and its license boundary | See its README |
 | `tools/` | Build helpers and research/verification scripts | None |
 | `docs/` | Guides, evidence, scope, roadmap and acceptance records | None |
@@ -33,23 +33,23 @@ the folder guide. New folders are added when working code needs them.
 
 ## Boundaries
 
-Data moves from selected-source validation (`source`) through decoding (`data`)
+Data moves from selected-source validation (`validation`) through decoding (`data`)
 into game/effect state and presentation. Presentation reads the state; game rules
 must not depend on Bevy or the window. `audio` supplies output rather than game
 rules. Every gameplay and installed-data inspection session still validates the
 selected files. Folder names do not qualify a supported build.
 
-`main/src/main.rs` starts the KH2RW launcher. `main/src/launcher/` checks the game
-folder and prepares the launch configurations. `main/src/test_room.rs` assembles
-the development room; `main/src/area.rs` and `cutscene/` connect state to scenes.
-`main/src/bin/` holds the smoke window and research viewers/probes. The default
+`source/main/src/main.rs` starts the KH2RW launcher. `source/main/src/launcher/` checks the game
+folder and prepares the launch configurations. `source/main/src/test_room.rs` assembles
+the development room; `source/main/src/area.rs` and `cutscene/` connect state to scenes.
+`source/main/src/bin/` holds the smoke window and research viewers/probes. The default
 `cargo run -p main` program is the source-free smoke window; the player launcher
 is selected with `--bin KH2RW` or built with `build.bat`.
 
-`visual/src/lib.rs` lists the shared presentation modules. The pause menu is in
-`visual/src/pause_menu.rs` and `pause_menu/`. The title state and title banner are
-`visual/src/title.rs` and `title_banner.rs`; `main/src/title.rs` assembles the title
-application. `visual/src/overlay.rs` and `overlay.wgsl` compose the 2D display.
+`source/visual/src/lib.rs` lists the shared presentation modules. The pause menu is in
+`source/visual/src/pause_menu.rs` and `pause_menu/`. The title state and title banner are
+`source/visual/src/title.rs` and `title_banner.rs`; `source/main/src/title.rs` assembles the title
+application. `source/visual/src/overlay.rs` and `overlay.wgsl` compose the 2D display.
 
 The optional Skate 3 code retains its upstream package names and GPL notices in
 `extras/skateboard/engine/`. It is existing extension code, not a roadmap for

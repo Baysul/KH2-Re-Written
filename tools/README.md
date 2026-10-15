@@ -59,7 +59,7 @@ These tools read only what they are given and write only private output. Source-
 | `Verify-OriginalSamples.ps1` | Compares samples against pinned public OpenKH code and .NET `DeflateStream` | T005, T038, [model-inspection.md](../docs/research/model-inspection.md) |
 | `Compare-Rgba.ps1` | First-divergence diagnostics for RGBA evidence | none (repo-reorganization-plan.md only) |
 | `Verify-FontCells.ps1` | Font cell draw check against pinned draw methods | none (repo-reorganization-plan.md only) |
-| `Make-BannerText.ps1` | Renders the "Final Re:WRITE" banner text from a system font | T087, `visual/src/title_banner.rs` |
+| `Make-BannerText.ps1` | Renders the "Final Re:WRITE" banner text from a system font | T087, `source/visual/src/title_banner.rs` |
 
 ## Models and motion
 

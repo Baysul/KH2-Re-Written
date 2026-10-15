@@ -1,4 +1,4 @@
-# Renders the "Final Re:WRITE" banner text (visual/assets/
+# Renders the "Final Re:WRITE" banner text (source/visual/assets/
 # final-rewrite-text.png) from a Windows system font in the gold bevel
 # colours measured on the title logo banner. Reads no game data; the
 # ornaments and lines around it come from the install at runtime

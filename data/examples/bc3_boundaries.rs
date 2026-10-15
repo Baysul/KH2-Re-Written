@@ -57,7 +57,7 @@ fn generate(root: &Path, directory: &Path) -> Result<(), Box<dyn std::error::Err
         "normalized-bc3.rgba",
     ]
     .iter()
-    .map(|name| source::safe_output(root, &directory.join(name)))
+    .map(|name| validation::safe_output(root, &directory.join(name)))
     .collect::<io::Result<_>>()?;
     let (width, height) = (2048u32, 1072u32);
     let mut bytes = vec![0u8; 128];
@@ -231,7 +231,7 @@ fn compare(
     oracle: &Path,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let output = source::safe_output(root, output)?;
+    let output = validation::safe_output(root, output)?;
     let bytes = bounded(dds, 32 * 1024 * 1024)?;
     let decoded = decode_hd_image(&bytes, bytes.len())?;
     if decoded.format != HdImageFormat::DdsBc3 {

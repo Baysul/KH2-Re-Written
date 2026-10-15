@@ -379,7 +379,7 @@ fn start_check(folder: PathBuf, dir: PathBuf, hint: Option<PathBuf>) -> Job {
             Ok(b) => Ok(b),
             Err(CheckError::Rejected(why)) => Err(why),
             Err(CheckError::NeedsScan) => {
-                t.store(source::required_bytes(&f), Ordering::Relaxed);
+                t.store(validation::required_bytes(&f), Ordering::Relaxed);
                 s.store(true, Ordering::Relaxed);
                 install::full_scan(&dir, &f, &p)
             }

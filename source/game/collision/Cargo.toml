@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-data = { path = "../../data" }
+data = { path = "../../../data" }
 
 [lints]
 workspace = true

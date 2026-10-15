@@ -800,7 +800,7 @@ mod tests {
             ));
             let root = base.join("source");
             fs::create_dir_all(root.join("Image/dt")).unwrap();
-            for (path, _) in source::required_files() {
+            for (path, _) in validation::required_files() {
                 let bytes = if path.ends_with(".hed") {
                     let mut bytes = vec![0; 24];
                     bytes.extend(16i32.to_le_bytes());
@@ -814,7 +814,7 @@ mod tests {
             let manifest = base.join("manifest.json");
             fs::write(
                 &manifest,
-                serde_json::to_vec(&source::scan(&root).unwrap()).unwrap(),
+                serde_json::to_vec(&validation::scan(&root).unwrap()).unwrap(),
             )
             .unwrap();
             let source = Arc::new(ProbeSource::bind_session(&root, &manifest).unwrap());

@@ -251,7 +251,7 @@ fn read_selection_models(
     }
     let mut seen = HashSet::new();
     for item in &selection.selections {
-        if !source::required_files()
+        if !validation::required_files()
             .iter()
             .any(|(name, _)| name == &item.index && name.ends_with(".hed"))
             || !seen.insert((&item.index, item.ordinal))
@@ -321,7 +321,7 @@ fn read_models_profile(
     let mut texture_rgba = 0usize;
     let mut texture_images = 0usize;
     let mut uv_corners = 0usize;
-    for (relative, _) in source::required_files()
+    for (relative, _) in validation::required_files()
         .into_iter()
         .filter(|(name, _)| name.ends_with(".hed"))
     {

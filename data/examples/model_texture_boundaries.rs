@@ -28,7 +28,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         (16, 16, 4, 1),
     ];
     let write_new = |name: &str, bytes: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
-        let path = source::safe_output(&args[0], &args[1].join(name))?;
+        let path = validation::safe_output(&args[0], &args[1].join(name))?;
         let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
         file.write_all(bytes)?;
         file.sync_all()?;

@@ -15,7 +15,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         data::probe::ProbeSource::bind(&PathBuf::from(&args[0]), &PathBuf::from(&args[1]))?;
     let output = source.output_path(&PathBuf::from(&args[2]))?;
     let mut samples = Vec::new();
-    for (relative, _) in source::required_files()
+    for (relative, _) in validation::required_files()
         .into_iter()
         .filter(|(name, _)| name.ends_with(".hed"))
     {

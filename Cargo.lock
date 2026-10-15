@@ -1696,7 +1696,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "source",
+ "validation",
 ]
 
 [[package]]
@@ -2567,7 +2567,7 @@ dependencies = [
  "skate-disc",
  "skate-sim",
  "skate_source",
- "source",
+ "validation",
  "visual",
 ]
 
@@ -3840,15 +3840,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "source"
-version = "0.1.1"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
 name = "spade"
 version = "2.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4178,6 +4169,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "validation"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4220,7 +4220,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "source",
+ "validation",
 ]
 
 [[package]]

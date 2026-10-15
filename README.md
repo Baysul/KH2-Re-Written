@@ -1,7 +1,7 @@
 # Kingdom Hearts II Re:Written
 
 <p align="center">
-  <img src="visual/assets/kingdom-hearts-final-rewrite-logo.png" alt="Kingdom Hearts Final Re:WRITE logo" width="850">
+  <img src="source/visual/assets/kingdom-hearts-final-rewrite-logo.png" alt="Kingdom Hearts Final Re:WRITE logo" width="850">
 </p>
 
 A native Windows engine rewrite of **Kingdom Hearts II Final Mix** in Rust, using [Bevy](https://bevy.org). It reads your own Steam installation at runtime. No game assets are distributed.
@@ -35,9 +35,9 @@ Whole-game 1:1 coverage is **unmeasured** until the complete function and behavi
 ## Find your way around
 
 Start with the [folder guide](docs/folder-guide.md) for common edits and naming rules.
-`game/` holds gameplay, `visual/` holds rendering and menus, `effect/` runs effects,
-and `main/` holds the launcher and application. `data/` reads game formats,
-`source/` validates the installation, and `audio/` handles sound output.
+`source/game/` holds gameplay, `source/visual/` holds rendering and menus, `effect/` runs effects,
+and `source/main/` holds the launcher and application. `data/` reads game formats,
+`validation/` validates the installation, and `audio/` handles sound output.
 Each main folder has a short README. See [ARCHITECTURE.md](ARCHITECTURE.md)
 for package boundaries and current limitations.
 

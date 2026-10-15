@@ -82,7 +82,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         let mut seen = HashSet::new();
         for item in &selection.selections {
-            if !source::required_files()
+            if !validation::required_files()
                 .iter()
                 .any(|(name, _)| name == &item.index && name.ends_with(".hed"))
                 || !seen.insert((&item.index, item.ordinal))
@@ -186,7 +186,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut texture_image_count = 0usize;
     let (mut animation_slots, mut animation_groups, mut animation_frames) =
         (0usize, 0usize, 0usize);
-    for (relative, _) in source::required_files()
+    for (relative, _) in validation::required_files()
         .into_iter()
         .filter(|(name, _)| name.ends_with(".hed"))
     {

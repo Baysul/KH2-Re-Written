@@ -59,7 +59,7 @@ pub fn read_selected_images(
     }
     let mut seen = HashSet::new();
     for item in &selection.selections {
-        if !source::required_files()
+        if !validation::required_files()
             .iter()
             .any(|(name, _)| name == &item.index && name.ends_with(".hed"))
             || !seen.insert((&item.index, item.ordinal))
@@ -71,7 +71,7 @@ pub fn read_selected_images(
     let mut images = Vec::new();
     let mut storage_bytes = 0usize;
     let mut rgba_bytes = 0usize;
-    for (relative, _) in source::required_files()
+    for (relative, _) in validation::required_files()
         .into_iter()
         .filter(|(name, _)| name.ends_with(".hed"))
     {

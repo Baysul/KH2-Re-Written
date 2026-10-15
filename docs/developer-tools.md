@@ -7,7 +7,7 @@ These need a selected Steam install and a private output directory outside Steam
 Write a candidate manifest to an **existing private directory**:
 
 ```powershell
-cargo run -p source --release --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json'
+cargo run -p validation --release --locked -- '<selected-install-root>' '<private-directory>/source-manifest.json'
 ```
 
 The scanner hashes only the observed KH2 candidate set, recording each file's SHA-256 and the SHA-256 of every 1 MiB chunk. It never labels an unknown build supported and refuses existing output files. Full shared/language dependency coverage and actual gameplay remain pending. Every session still checks the installation itself: a manifest only records what the bytes must be. Use the optimized scanner for multi-gigabyte packages.

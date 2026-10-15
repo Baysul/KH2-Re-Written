@@ -7928,7 +7928,7 @@ fn read_board_model(
     idle: Option<&motion::SelectedMotion>,
 ) -> Result<BoardModel, Box<dyn std::error::Error>> {
     let hash = data::name_hash::of_path(&format!("obj/{name}.mdlx"));
-    for (index, _) in source::required_files()
+    for (index, _) in validation::required_files()
         .into_iter()
         .filter(|(n, _)| n.ends_with(".hed"))
     {

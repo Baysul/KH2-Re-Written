@@ -107,7 +107,7 @@ function Get-BoundCurrentParent {
     return $proc
 }
 $proc=Get-BoundCurrentParent
-$scanner=Join-Path (Split-Path $PSScriptRoot -Parent) 'target/debug/source.exe'
+$scanner=Join-Path (Split-Path $PSScriptRoot -Parent) 'target/debug/validation.exe'
 & $scanner $source ($out+'/source-session.json') *> ($out+'/source-session.log')
 if ($LASTEXITCODE) {throw 'Fresh full selected-source scan failed'}
 $fresh=Read-PrivatePrerequisite ($out+'/source-session.json')

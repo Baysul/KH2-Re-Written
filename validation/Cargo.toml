@@ -1,5 +1,5 @@
 [package]
-name = "source"
+name = "validation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,6 +15,6 @@ workspace = true
 
 # The scanner CLI delegates to the tested library; no CLI unit tests exist.
 [[bin]]
-name = "source"
+name = "validation"
 test = false
 bench = false

@@ -8,12 +8,12 @@
 //! `verify_session`) when it starts.
 use super::test_configs::TEST_CONFIGS;
 use serde::{Deserialize, Serialize};
-use source::{KH2_EXECUTABLE, SourceManifest};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::time::UNIX_EPOCH;
+use validation::{KH2_EXECUTABLE, SourceManifest};
 
 const APP_ID: &str = "2552430";
 const SETTINGS: &str = "launcher.json";
@@ -157,7 +157,7 @@ pub fn detect_installs() -> Vec<PathBuf> {
             continue;
         };
         let text = String::from_utf8_lossy(&bytes);
-        let Some(dir) = source::vdf_value(&text, "installdir") else {
+        let Some(dir) = validation::vdf_value(&text, "installdir") else {
             continue;
         };
         let folder = apps.join("common").join(dir);
@@ -218,10 +218,10 @@ fn bound(folder: PathBuf, manifest_path: PathBuf, m: SourceManifest) -> Bound {
 fn quick_match(folder: &Path, manifest_path: &Path) -> Option<Bound> {
     let bytes = read_limited(manifest_path, MANIFEST_LIMIT).ok()?;
     let m: SourceManifest = serde_json::from_slice(&bytes).ok()?;
-    let required = source::required_files();
+    let required = validation::required_files();
     if m.canonical_source_path != folder
         || m.qualification != "quarantined_unqualified"
-        || source::content_identity(&m.files) != m.content_identity
+        || validation::content_identity(&m.files) != m.content_identity
         || m.files.len() != required.len()
     {
         return None;
@@ -275,7 +275,7 @@ pub fn quick_check(dir: &Path, folder: &Path, hint: Option<&Path>) -> Result<Bou
 pub fn full_scan(dir: &Path, folder: &Path, progress: &AtomicU64) -> Result<Bound, String> {
     let folder = fs::canonicalize(folder).map_err(|e| e.to_string())?;
     let manifest =
-        source::scan_with_progress(&folder, true, progress).map_err(|e| e.to_string())?;
+        validation::scan_with_progress(&folder, true, progress).map_err(|e| e.to_string())?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let dir = fs::canonicalize(dir).map_err(|e| e.to_string())?;
     if dir.starts_with(&folder) {
@@ -779,7 +779,7 @@ mod tests {
         }
     }
     fn populate(root: &Path) {
-        for (file, _) in source::required_files() {
+        for (file, _) in validation::required_files() {
             let path = root.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, b"synthetic fixture only").unwrap();

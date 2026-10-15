@@ -137,3 +137,4 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T127](T127-mesh-and-test-optimization.md) | Reuse animated mesh storage and omit empty CLI harnesses | PASS for local engineering optimization and required checks only. |
 | [T128](T128-repository-cleanup.md) | Remove disposable compilation outputs | PASS for removal of disposable build outputs, verified runtime retention |
 | [T129](T129-folder-structure.md) | Simple folders and names for contributors | NOT RUN final engineering checks while verification is in progress. |
+| [T130](T130-source-folder.md) | Group app folders under source and rename the validator | NOT RUN for the final merge; engineering checks above PASS on the branch. |
