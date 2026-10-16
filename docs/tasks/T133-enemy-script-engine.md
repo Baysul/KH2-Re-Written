@@ -31,7 +31,12 @@ read only; no writer or mod manager was launched against it.
 5. Attack objects (`YS::ATTACK`): state, flag words and the table 2 attack functions
    in `enemy::attack`. The per-frame hit test against Sora and the damage it applies
    are not translated; hit flags stay clear until a host sets them.
-6. Sora is reachable from scripts through a proxy object, so every function that
+6. Two engine bugs found by comparing the script brain's act order with the
+   default Dusk brain, both fixed: the motion end pulse carried over into a newly
+   started motion (every act finished at once), and script vectors have +Y down in
+   the executable, which scripts use to name `down`, test landing and probe the
+   ground; the engine keeps +Y up and flips y at the trap boundary.
+6a. Sora is reachable from scripts through a proxy object, so every function that
    takes an object also works on the player (position and heading follow the host).
 7. Test-room hook: `KH2RW_ENEMY_AI=script` runs actors through this engine
    (`source/main/src/test_room/enemy_script.rs`). The default brain is unchanged.
@@ -46,13 +51,20 @@ read only; no writer or mod manager was launched against it.
 - `cargo test --workspace --locked`: PASS.
 - `cargo build --workspace --locked`: PASS.
 - Run of all 234 installed enemy and boss object scripts in a synthetic flat arena
-  for 300 ticks (private tool): 187 run without a fault or an unimplemented
-  function, 13 stop on a script fault (up from 131 at the first run). A run without
+  for 300 ticks (private tool): 196 run without a fault or an unimplemented
+  function, 11 stop on a script fault (up from 131 at the first run). A run without
   a fault has not been shown to match the game.
 - Static coverage (private tool, every function a script calls is implemented, stubs
   included): 94 of 234 scripts (70 of 139 enemies, 24 of 95 bosses).
-- Combat tour with `KH2RW_ENEMY_AI=script`: ran before the motion-event change
-  only; not re-run on the current code.
+- Combat tour (`--enemy-combat-tour`, three actors in the debug arena) with
+  `KH2RW_ENEMY_AI=script` on the current code: PASS, no script faults, ten positive
+  damage contacts to enemies and two to Sora. Against the default Shadow, Dusk and
+  Soldier brains on the same tour, the first ten to twelve acts of each actor come
+  in the same order (appear, footwork, move_step, kick, escape, move_down for Dusk;
+  move_roll, claw, idle_time for Soldier). Timings differ by a few ticks and later
+  acts diverge with the random draws and the target's movement. This is a
+  comparison between two rewrite brains in the test room, not with the installed
+  game.
 - Comparison against the installed game for any enemy: NOT RUN.
 - `docs/progress/coverage.json` and `python tools/progress.py`: NOT RUN; no
   reviewed evidence changed coverage.
@@ -77,6 +89,8 @@ read only; no writer or mod manager was launched against it.
   tables, the mission HUD.
 - Per-enemy behaviour comparison with the installed game. A per-script list of the
   functions each script still needs is kept privately next to the research notes.
+- The script brain runs beside the motion-window damage path; attack objects add
+  to it. Their combo group and hit callbacks are not used yet.
 
 ## Verdict
 
