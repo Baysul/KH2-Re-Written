@@ -76,6 +76,7 @@ mod enemy_gallery;
 mod enemy_script;
 mod enemy_target;
 mod enemy_tour;
+mod game_over;
 mod item_room;
 mod magic_room;
 mod party_room;
@@ -973,6 +974,11 @@ struct WeaponRoot;
 struct CollisionOverlay;
 
 impl Game {
+    /// The game-over tour's scripted knock-out tick.
+    fn tour_defeat_due(&self) -> bool {
+        self.tick == game_over::TOUR_DEFEAT
+    }
+
     fn event(&mut self, value: serde_json::Value) {
         if let Some(log) = &mut self.log {
             serde_json::to_writer(&mut *log, &value).expect("test room log write");
@@ -1441,6 +1447,8 @@ struct Loaded {
     npc: Option<NpcSource>,
     camp: Option<CampSource>,
     journal: Option<JournalSource>,
+    /// The game-over sequence's files (absent when the install lacks any).
+    game_over: Option<game_over::Source>,
     /// The menus' configured files, for a text language change.
     language: Option<settings_room::LanguageSources>,
     /// Field and battle music SCD bytes.
@@ -3053,6 +3061,24 @@ fn load(
             .ok()?
             .pop()
     });
+    // The game-over sequence (obj/GAMEOVER.mset, pause.2ld, the death event).
+    let game_over = {
+        let joint = objects
+            .iter()
+            .find(|o| o.model_name == b"P_EX100")
+            .map_or(1, |o| o.weapon_joint);
+        match data::path_lookup::Library::open(source)
+            .map_err(|e| e.to_string())
+            .and_then(|mut library| {
+                game_over::Source::load(source, &mut library, joint).map_err(|e| e.to_string())
+            }) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                eprintln!("Game over assets unavailable: {e}");
+                None
+            }
+        }
+    };
     Ok(Loaded {
         board_motion,
         keyblades,
@@ -3115,6 +3141,7 @@ fn load(
         npc,
         camp,
         journal,
+        game_over,
         language: match (&config.camp, &config.menu) {
             (Some(camp), Some(menu)) => Some(settings_room::LanguageSources {
                 camp: camp.clone(),
@@ -4994,9 +5021,12 @@ struct MenuModel {
 
 /// While the camp shows its members, render Sora's walk at the menu time
 /// (root motion kept, camp-03 §3).
+#[allow(clippy::too_many_arguments)]
 fn menu_model_present(
     camp: Option<Res<CampRes>>,
     model: Option<Res<MenuModel>>,
+    game_over: Option<Res<game_over::GameOverRes>>,
+    sora_rig: Option<Res<SoraRig>>,
     game: Res<Game>,
     mut cameras: Query<&mut Camera, With<MenuCamera>>,
     mut roots: Query<&mut Visibility, With<MenuModelRoot>>,
@@ -5004,7 +5034,11 @@ fn menu_model_present(
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let Some(model) = model else { return };
-    let time = camp.and_then(|c| c.open.as_ref().and_then(|m| m.model_time));
+    // The game-over list shows Sora on the GAMEOVER set's motion.
+    let over = game_over.as_ref().and_then(|g| g.model_time());
+    let time = camp
+        .and_then(|c| c.open.as_ref().and_then(|m| m.model_time))
+        .or(over);
     if let Ok(mut camera) = cameras.single_mut() {
         camera.is_active = time.is_some();
     }
@@ -5019,6 +5053,17 @@ fn menu_model_present(
         }
     }
     let Some(t) = time else { return };
+    if let (Some(t), Some(g), Some(rig)) = (over, game_over.as_ref(), sora_rig.as_ref()) {
+        if let Some(positions) = game_over::pose(g, rig, t) {
+            for (part, handle) in &parts {
+                let positions = model.indices[part.0].iter().map(|&i| positions[i as usize]);
+                if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+                    visual::room::update_positions(&mut mesh, positions);
+                }
+            }
+        }
+        return;
+    }
     // The member model is base Sora's walk; in a Drive form the room's
     // clips are the form's.
     if game.drive.as_ref().is_some_and(|d| d.shown != 0) {
@@ -5071,13 +5116,16 @@ struct Afterimage {
 fn afterimage(
     mut after: ResMut<Afterimage>,
     game: Res<Game>,
+    game_over: Option<Res<game_over::GameOverRes>>,
     mut cameras: Query<&mut Camera>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
+    // The death event's SeqBlur (alpha 56/128) feeds the same pass.
     let alpha = game
         .drive
         .as_ref()
-        .and_then(drive_room::DriveRt::afterimage);
+        .and_then(drive_room::DriveRt::afterimage)
+        .or(game_over.and_then(|g| g.blur()));
     let weight = alpha.map(|a| if after.on { a } else { 0. });
     after.on = alpha.is_some();
     after.blur.feed(weight, &mut cameras, &mut meshes);
@@ -5126,6 +5174,7 @@ fn compose_2d(
     settings: Res<settings_room::SettingsRes>,
     game: Res<Game>,
     after: Option<Res<Afterimage>>,
+    game_over: Option<Res<game_over::GameOverRes>>,
 ) {
     let Some(c) = compose else { return };
     // Brightness tints the scene; the HUD setting hides the field HUD. A
@@ -5149,7 +5198,7 @@ fn compose_2d(
     {
         frame.full_screen(s, [1., 1., 1., t.dissolve as f32 / DISSOLVE_FRAMES as f32]);
     }
-    let camp_open = camp.is_some_and(|c| c.menu_up());
+    let camp_open = camp.is_some_and(|c| c.menu_up()) || game_over.is_some_and(|g| g.hides_hud());
     if let Some(h) = c.hud_sheet
         && !camp_open
         && settings.current.show_hud
@@ -5183,12 +5232,14 @@ fn compose_2d(
 /// presses queue the field actions: jump 0x100 (back button), decide 0x4,
 /// guard 0x200 (Square), reaction 0x400 (Triangle), talk advance 0x40c and
 /// the command menu's up/down 0x4000/0x8000.
+#[allow(clippy::too_many_arguments)]
 fn read_pad(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     pads: Query<(&Gamepad, Option<&Name>)>,
     camp: Option<Res<CampRes>>,
     debug: Res<debug_menu::DebugMenu>,
+    game_over: Option<Res<game_over::GameOverRes>>,
     mut game: ResMut<Game>,
     mut targeting: ResMut<enemy_target::Targeting>,
 ) {
@@ -5196,7 +5247,7 @@ fn read_pad(
         return;
     }
     let (data, _, _) = input::read_devices(&keys, &mouse, 0., &pads);
-    let menu = camp.is_some_and(|c| c.menu_up());
+    let menu = camp.is_some_and(|c| c.menu_up()) || game_over.is_some_and(|g| g.menu_up());
     let mode = if menu {
         controller::MODE_TITLE
     } else {
@@ -8734,8 +8785,12 @@ fn upload_camp_sheets(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asset
     }
 }
 
-fn field_running(camp: Option<Res<CampRes>>, debug: Res<debug_menu::DebugMenu>) -> bool {
-    camp.is_none_or(|c| !c.menu_up()) && !debug.open
+fn field_running(
+    camp: Option<Res<CampRes>>,
+    debug: Res<debug_menu::DebugMenu>,
+    game_over: Option<Res<game_over::GameOverRes>>,
+) -> bool {
+    camp.is_none_or(|c| !c.menu_up()) && !debug.open && game_over.is_none_or(|g| g.field_runs())
 }
 
 /// START (logical 0x2 in the field's pad mode) opens the camp
@@ -9564,6 +9619,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut ability_tour = false;
     let mut enemy_tour = false;
     let mut enemy_battle_tour = false;
+    let mut game_over_tour = false;
     let mut enemy_audit = None;
     let mut options = args[3..].iter();
     while let Some(option) = options.next() {
@@ -9602,6 +9658,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("enemy combat tour capture directory absent")?,
+                );
+            }
+            Some("--game-over-tour") if autoplay.is_none() => {
+                game_over_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("game over tour capture directory absent")?,
                 );
             }
             Some("--ability-tour") if autoplay.is_none() => {
@@ -9736,7 +9801,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let captures = if enemy_battle_tour {
+    let captures = if game_over_tour {
+        game_over::CAPTURES.to_vec()
+    } else if enemy_battle_tour {
         enemy_battle_tour::CAPTURES.to_vec()
     } else if enemy_tour {
         enemy_tour::CAPTURES.to_vec()
@@ -9751,7 +9818,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 }
             })
     };
-    let autoplay_end = if enemy_battle_tour {
+    let autoplay_end = if game_over_tour {
+        game_over::END
+    } else if enemy_battle_tour {
         enemy_battle_tour::END
     } else if enemy_tour {
         enemy_tour::END
@@ -10178,6 +10247,13 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             lang: settings.loaded_or("us"),
         });
     }
+    if let Some(src) = loaded.game_over.take() {
+        app.insert_resource(game_over::GameOverRes::new(
+            src,
+            (loaded.spawn.to_array(), loaded.yaw),
+            game_over_tour,
+        ));
+    }
     Ok(app
         .insert_resource(game)
         .insert_resource(Startup {
@@ -10236,7 +10312,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .init_resource::<debug_menu::DebugMenu>()
         .init_resource::<enemy_battle_tour::Checks>()
         .add_plugins(SkatePlugins)
-        .add_systems(Startup, (setup, pause_for_autoplay, camp_setup))
+        .add_systems(
+            Startup,
+            (setup, pause_for_autoplay, camp_setup, game_over::setup),
+        )
         .add_systems(Update, crate::skate::toggle)
         .add_systems(Update, settings_room::apply_settings)
         .add_systems(
@@ -10244,6 +10323,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             (
                 read_pad,
                 camp_tick,
+                game_over::tick,
                 (
                     simulate,
                     skate_tick,
@@ -10281,6 +10361,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 field_npc_present,
                 dissolve_present,
                 camera_control,
+                game_over::camera,
                 skate_camera,
             )
                 .chain(),
@@ -10302,7 +10383,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 afterimage.run_if(resource_exists::<Afterimage>),
                 compose_2d,
                 menu_model_present,
-                camp_present,
+                (camp_present, game_over::present, game_over::snap).chain(),
                 finish,
                 frame_stats,
             )
