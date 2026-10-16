@@ -35,6 +35,15 @@ impl Env for BrainEnv<'_> {
     fn player_yaw(&self) -> f32 {
         self.player_yaw
     }
+    /// Vertical segments only: the floor where it crosses the segment.
+    fn line_hit(&self, from: Vec3, to: Vec3) -> Option<Vec3> {
+        if from[0] != to[0] || from[2] != to[2] {
+            return None;
+        }
+        let top = from[1].max(to[1]);
+        let floor = self.room?.floor(from[0], from[2], top)?;
+        (from[1].min(to[1]) <= floor && floor <= top).then_some([from[0], floor, from[2]])
+    }
     fn target_position(&self, _id: u32) -> Option<Vec3> {
         None
     }

@@ -62,9 +62,13 @@ pub trait Env {
     fn area_number(&self) -> i32 {
         0
     }
-    /// Whether the map blocks the line between two points (`bghit_check_line`).
-    fn line_blocked(&self, _from: Vec3, _to: Vec3) -> bool {
-        false
+    /// The first point where the map crosses the segment (`bghit_check_line`).
+    fn line_hit(&self, _from: Vec3, _to: Vec3) -> Option<Vec3> {
+        None
+    }
+    /// Whether the map blocks the line between two points.
+    fn line_blocked(&self, from: Vec3, to: Vec3) -> bool {
+        self.line_hit(from, to).is_some()
     }
     /// Sora's heading about Y (the direction scripts read from the player object).
     fn player_yaw(&self) -> f32 {

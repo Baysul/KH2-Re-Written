@@ -11,6 +11,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
     Some(match (table, index) {
         (0, 46) => vector_homing,
         (0, 68) => vector_rotx,
+        (0, 83) => vector_rot,
         _ => return None,
     })
 }
@@ -114,6 +115,21 @@ fn vector_rotx(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result
     let matrix = axis_angle([1.0, 0.0, 0.0, 1.0], angle);
     let r = apply(&matrix, v);
     let cell = ctx.world.static_cell(0, 68, 0);
+    for (k, lane) in r.iter().enumerate() {
+        ctx.write_f32(m, cell + 4 * k as u32, *lane);
+    }
+    args[0] = Slot::address(cell);
+    Ok(())
+}
+
+/// 0:83 FUN_14041d650 -> FUN_1403b7560: `vector_rot(v, axis, angle)`, the
+/// vector turned about the axis by the angle wrapped into [-pi, pi).
+fn vector_rot(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let v = read_sanitized(ctx, m, args[0].value)?;
+    let axis = read_sanitized(ctx, m, args[1].value)?;
+    let matrix = axis_angle(axis, wrap_pi(args[2].as_float()));
+    let r = apply(&matrix, v);
+    let cell = ctx.world.static_cell(0, 83, 0);
     for (k, lane) in r.iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }

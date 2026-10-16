@@ -179,6 +179,9 @@ pub struct World {
     /// `teamwork_alloc` blocks by key (DAT_142ae75d0).
     pub teamwork: HashMap<i32, u32>,
     next_magic: u32,
+    /// The global control-off bits (DAT_142a171e8) and the hidden map parts.
+    pub control_off: Vec<u32>,
+    pub bg_hidden: u64,
     /// The stand-in traps reach when a script names Sora (see [`PLAYER_OBJECT`]).
     pub player_proxy: Option<Box<Object>>,
     /// The attack objects scripts created (`attack_new`), by slot.
@@ -204,6 +207,8 @@ impl Default for World {
             target_dups: Vec::new(),
             teamwork: HashMap::new(),
             next_magic: 0,
+            control_off: Vec::new(),
+            bg_hidden: 0,
             player_proxy: Some(Box::new(Object::bare(PLAYER_OBJECT))),
             attacks: Vec::new(),
             combo_group: 0,
@@ -225,6 +230,30 @@ impl World {
     pub fn next_effect_handle(&mut self) -> u32 {
         self.next_effect += 1;
         EFFECT_HANDLES + self.next_effect * 16
+    }
+
+    /// `func_obj_control_off` / `_on`: set or clear control bit `index`.
+    pub fn set_control_bit(&mut self, index: u32, off: bool) {
+        let w = (index >> 5) as usize;
+        if self.control_off.len() <= w {
+            self.control_off.resize(w + 1, 0);
+        }
+        let bit = 1u32 << (index & 31);
+        if off {
+            self.control_off[w] |= bit;
+        } else {
+            self.control_off[w] &= !bit;
+        }
+    }
+
+    /// `trap_bg_hide` / `trap_bg_show`: whether map part `index` shows.
+    pub fn set_bg_part(&mut self, index: u32, shown: bool) {
+        let bit = 1u64 << (index & 63);
+        if shown {
+            self.bg_hidden &= !bit;
+        } else {
+            self.bg_hidden |= bit;
+        }
     }
 
     /// A fresh handle for a magic thread the host will create.

@@ -18,7 +18,26 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 114) => search_by_entry,
         (1, 177) => set_path,
         (1, 222) => get_entry_id,
+        (0, 8) => vector_dump,
         (0, 14) => progress_set_flag,
+        (0, 78) => vector_inter,
+        (1, 36) => bg_hide,
+        (1, 37) => bg_show,
+        (1, 42) => control_off,
+        (1, 43) => control_on,
+        (1, 73) => obj_hover,
+        (1, 141) => bg_ground_pos,
+        (1, 153) => reset_pos,
+        (1, 156) => obj_hop,
+        (1, 172) => can_look,
+        (1, 174) => look_start,
+        (1, 176) => look_end,
+        (1, 318) => play_se,
+        (4, 6) => mission_increment_count,
+        (4, 9) => mission_add_gauge,
+        (4, 48) => mission_set_count_figure,
+        (6, 8) => searcher_add,
+        (6, 16) => searcher_clear,
         (0, 49) => effect_is_alive,
         (1, 0) => sysobj_appear,
         (1, 24) => area_area,
@@ -973,6 +992,123 @@ exec_damage_traps! {
     exec_damage_small = "enemy_exec_damage_small";
     exec_damage_hitback = "enemy_exec_damage_hitback";
     exec_damage_large = "enemy_exec_damage_large";
+}
+
+/// 0:8 FUN_14041d1a0: a debug print that does nothing in the shipped build.
+fn vector_dump(_: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
+    Ok(())
+}
+
+/// 1:42 and 1:43 FUN_14042c530 / FUN_14042c540: the global control-off bits.
+fn control_off(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    ctx.world.set_control_bit(args[0].value, true);
+    Ok(())
+}
+
+fn control_on(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    ctx.world.set_control_bit(args[0].value, false);
+    Ok(())
+}
+
+/// 1:36 and 1:37 FUN_14042e690 / FUN_14042e6a0: hide or show a map part.
+fn bg_hide(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    ctx.world.set_bg_part(args[0].value, false);
+    Ok(())
+}
+
+fn bg_show(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    ctx.world.set_bg_part(args[0].value, true);
+    Ok(())
+}
+
+/// 1:153 FUN_14042b880 -> FUN_1403b6100: place the object where it will not
+/// be interpolated from.
+fn reset_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let v = read_sanitized(ctx, m, args[1].value)?;
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let sys = &mut ctx.object(id)?.sys;
+    sys.position = [v[0], v[1], v[2]];
+    sys.knock = None;
+    Ok(())
+}
+
+/// 1:141 FUN_14042e8b0 -> FUN_1403f3dd0: the first map surface on a vertical
+/// segment from `pos` up by `reach`. The hit point replaces `out`, otherwise
+/// `out` becomes `pos`.
+fn bg_ground_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let p = read_sanitized(ctx, m, args[0].value)?;
+    let out = args[1].value;
+    let reach = args[2].as_float();
+    let from = [p[0], p[1], p[2]];
+    let to = [p[0], p[1] + reach, p[2]];
+    let hit = ctx.env.line_hit(from, to);
+    let at = hit.unwrap_or(from);
+    for (k, lane) in [at[0], at[1], at[2], 1.0].iter().enumerate() {
+        ctx.write_f32(m, out + 4 * k as u32, *lane);
+    }
+    args[0] = Slot::int(hit.is_some() as i32);
+    Ok(())
+}
+
+/// 1:318 FUN_14042c060: play a sound effect at the object. [U] Recorded.
+fn play_se(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    ctx.world.events.push(Event::Presentation {
+        name: "obj_play_se",
+        words: [id, args[1].value, 0],
+    });
+    Ok(())
+}
+
+/// 1:172 FUN_14042d6c0: can the object look at another. [U] Never.
+fn can_look(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    args[0] = Slot::int(0);
+    Ok(())
+}
+
+/// 1:156 FUN_14042ce60 -> FUN_1403cbec0: a hop (a short ballistic move in
+/// physics mode 2) with its motion. [U] The hop mode is not translated; the
+/// motion starts and the call is recorded.
+fn obj_hop(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let (slot, blend) = (args[4].as_int(), args[5].as_float());
+    let env = ctx.env;
+    let obj = ctx.object(id)?;
+    obj.sys
+        .motion_start(slot.max(0) as usize, blend, env.clips(obj.sys.model));
+    ctx.world.events.push(Event::Unsupported("obj_hop"));
+    Ok(())
+}
+
+/// 1:73 FUN_14042d010 -> FUN_140422950: hover in physics mode 6. [U] Recorded.
+fn obj_hover(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
+    ctx.world.events.push(Event::Unsupported("obj_hover"));
+    Ok(())
+}
+
+/// 0:78 FUN_14041d490 -> FUN_140140230: `vector_inter(a, b, t)` =
+/// `b * (1 - t) + a * t`, in a static result vector.
+fn vector_inter(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let a = read_sanitized(ctx, m, args[0].value)?;
+    let b = read_sanitized(ctx, m, args[1].value)?;
+    let t = args[2].as_float();
+    let u = 1.0 - t;
+    let cell = ctx.world.static_cell(0, 78, 0);
+    for k in 0..4 {
+        ctx.write_f32(m, cell + 4 * k as u32, b[k] * u + a[k] * t);
+    }
+    args[0] = Slot::address(cell);
+    Ok(())
+}
+
+recorded_traps! {
+    look_start = "obj_look_start";
+    look_end = "obj_look_end";
+    searcher_add = "target_searcher_add";
+    searcher_clear = "target_clear";
+    mission_add_gauge = "mission_add_gauge";
+    mission_increment_count = "mission_increment_count";
+    mission_set_count_figure = "mission_set_count_figure_num";
 }
 
 #[cfg(test)]
