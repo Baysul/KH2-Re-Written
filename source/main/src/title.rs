@@ -112,6 +112,22 @@ const FILES_PRESSES: &[(u64, u64)] = &[
 ];
 const FILES_CAPTURES: &[u64] = &[700, 880, 940, 1040, 1075, 1200];
 const FILES_END: u64 = 1250;
+
+/// Unattended plan for the save point menu (`--autoplay-savepoint`): the menu
+/// opens at tick 720 as at a world point; down to World Map and its question,
+/// back, Save, the list, the overwrite question, back out to the rows.
+const SAVEPOINT_PRESSES: &[(u64, u64)] = &[
+    (850, pad_bits::DOWN),
+    (950, pad_bits::DECIDE),
+    (1050, pad_bits::CANCEL),
+    (1100, pad_bits::UP),
+    (1150, pad_bits::DECIDE),
+    (1300, pad_bits::DECIDE),
+    (1400, pad_bits::CANCEL),
+    (1450, pad_bits::CANCEL),
+];
+const SAVEPOINT_CAPTURES: &[u64] = &[800, 900, 1010, 1250, 1350, 1500];
+const SAVEPOINT_END: u64 = 1550;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 mod pad_bits {
@@ -162,12 +178,15 @@ struct Session {
     /// The Load menu's art and state; None when `save.2ld` is missing.
     files: Option<save_files::Files>,
     files_plan: bool,
+    savepoint_plan: bool,
     loaded_slot: Option<usize>,
 }
 
 impl Session {
     fn presses(&self) -> &'static [(u64, u64)] {
-        if self.files_plan {
+        if self.savepoint_plan {
+            SAVEPOINT_PRESSES
+        } else if self.files_plan {
             FILES_PRESSES
         } else {
             AUTOPLAY_PRESSES
@@ -175,7 +194,9 @@ impl Session {
     }
 
     fn captures(&self) -> &'static [u64] {
-        if self.files_plan {
+        if self.savepoint_plan {
+            SAVEPOINT_CAPTURES
+        } else if self.files_plan {
             FILES_CAPTURES
         } else {
             AUTOPLAY_CAPTURES
@@ -183,7 +204,9 @@ impl Session {
     }
 
     fn end(&self) -> u64 {
-        if self.files_plan {
+        if self.savepoint_plan {
+            SAVEPOINT_END
+        } else if self.files_plan {
             FILES_END
         } else {
             AUTOPLAY_END
@@ -468,6 +491,24 @@ fn tick(
             t.timer = 0.;
         }
         let mut loaded = None;
+        let widths = s.font.widths.clone();
+        if s.savepoint_plan
+            && tick == 720
+            && let Some(f) = s.files.as_mut()
+            && f.ui.is_none()
+        {
+            let menu = save::menu::Menu::new(
+                save::menu::Kind::SavePoint { world_map: true },
+                &f.backend,
+                f.last_slot,
+            );
+            f.ui = Some(visual::file_menu::FileMenu::new(
+                menu,
+                f.texts.clone(),
+                &f.menu.layout,
+                widths.clone(),
+            ));
+        }
         let mut file_sounds = Vec::new();
         if let Some(f) = s.files.as_mut()
             && let Some(ui) = f.ui.as_mut()
@@ -510,6 +551,7 @@ fn tick(
                             menu,
                             f.texts.clone(),
                             &f.menu.layout,
+                            widths.clone(),
                         ));
                         s.play(11, "file menu open");
                     }
@@ -707,6 +749,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     }
     let (mut log_path, mut limit, mut autoplay) = (None, None, None);
     let mut files_plan = false;
+    let mut savepoint_plan = false;
     let mut options = args[3..].iter();
     while let Some(option) = options.next() {
         match option.to_str() {
@@ -721,6 +764,11 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 )
             }
             Some("--autoplay") if autoplay.is_none() => autoplay = options.next().cloned(),
+            Some("--autoplay-savepoint") if autoplay.is_none() => {
+                files_plan = true;
+                savepoint_plan = true;
+                autoplay = options.next().cloned();
+            }
             Some("--autoplay-files") if autoplay.is_none() => {
                 files_plan = true;
                 autoplay = options.next().cloned();
@@ -786,14 +834,18 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     } else {
         save_files::FileBackend::open(&crate::launcher::data_dir(), Path::new(&args[0]))?
     };
-    let files =
-        match save_files::Files::load(&source, (&m.index, m.ordinal, m.name_hash), backend, 1) {
-            Ok(f) => Some(f),
-            Err(e) => {
-                eprintln!("Load menu unavailable: {e}");
-                None
-            }
-        };
+    let files = match save_files::Files::load(
+        &source,
+        (&m.index, m.ordinal, m.name_hash),
+        backend,
+        usize::from(!savepoint_plan),
+    ) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!("Load menu unavailable: {e}");
+            None
+        }
+    };
     let (fi, fo) = (&config.font_image, &config.font_info);
     let font = hud::load_font(
         &source,
@@ -874,6 +926,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         exit_code: None,
         files,
         files_plan,
+        savepoint_plan,
         loaded_slot: None,
     };
     eprintln!(

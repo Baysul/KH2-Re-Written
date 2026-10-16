@@ -150,6 +150,12 @@ pub struct FileMenu {
     dialog: Vec<Id>,
     dialog_rows: Vec<Id>,
     dialog_text: Vec<Id>,
+    /// The message window box (sequence 0 copy, refitted per message) and
+    /// its text, drawn over the cards.
+    s3: Sprites,
+    s4: Sprites,
+    dialog_seq: Sequence,
+    widths: Vec<u8>,
     help: Option<Id>,
     frames: u32,
 }
@@ -168,7 +174,12 @@ pub struct Draw {
 }
 
 impl FileMenu {
-    pub fn new(menu: Menu, texts: Texts, layout: &data::menu_layout::Layout) -> Self {
+    pub fn new(
+        menu: Menu,
+        texts: Texts,
+        layout: &data::menu_layout::Layout,
+        widths: Vec<u8>,
+    ) -> Self {
         let mut frame = LayoutTask::new(layout, SCENE[0]);
         frame.next = Some(SCENE[1]);
         Self {
@@ -190,6 +201,10 @@ impl FileMenu {
             dialog: Vec::new(),
             dialog_rows: Vec::new(),
             dialog_text: Vec::new(),
+            s3: Sprites::default(),
+            s4: Sprites::default(),
+            dialog_seq: layout.sequences[0].clone(),
+            widths,
             help: None,
             frames: 0,
         }
@@ -231,11 +246,14 @@ impl FileMenu {
     }
 
     fn clear_dialog(&mut self) {
-        for id in self.dialog.drain(..).chain(self.dialog_rows.drain(..)) {
+        for id in self.dialog_rows.drain(..) {
             self.s0.kill(id);
         }
+        for id in self.dialog.drain(..) {
+            self.s3.kill(id);
+        }
         for id in self.dialog_text.drain(..) {
-            self.s2.kill(id);
+            self.s4.kill(id);
         }
         self.dialog_key = None;
     }
@@ -258,6 +276,8 @@ impl FileMenu {
         self.s0.update(&layout.sequences[0]);
         self.s1.update(&layout.sequences[1]);
         self.s2.update(&layout.sequences[2]);
+        self.s3.update(&self.dialog_seq);
+        self.s4.update(&layout.sequences[2]);
         events
     }
 
@@ -563,18 +583,28 @@ impl FileMenu {
         };
         if message_id != 0 {
             // The message window: the dialogue box groups (67 + 3t, t 0 for
-            // information, 2 for a question) with the message's lines drawn
-            // over it from a text-only sprite (the box art is not sized to
-            // the text yet).
-            let body = self.texts.message(message_id);
-            let (open, idle) = if ask { (73, 74) } else { (67, 68) };
-            let id = self.s0.create(seq0, PRIO_DIALOG, 0, open, Some(idle), None);
-            self.s0.get_mut(id).base = DIALOG_AT;
+            // information, 2 for a question) fitted around the message
+            // (FUN_140193430), its lines drawn from a text-only sprite.
+            let bytes = self.texts.message(message_id);
+            let (w, h) = crate::dialogue::measure(&bytes, &self.widths);
+            let first = if ask { 73 } else { 67 };
+            for g in first..first + 3 {
+                self.dialog_seq.fit_nine_slice(g, w, h);
+            }
+            let id = self.s3.create(
+                &self.dialog_seq,
+                PRIO_DIALOG,
+                0,
+                first,
+                Some(first + 1),
+                None,
+            );
+            self.s3.get_mut(id).base = DIALOG_AT;
             self.dialog.push(id);
-            let mut t = Self::text(body, TEXT_SIZE, 0);
+            let mut t = Self::text(bytes, TEXT_SIZE, 0);
             t.anim_colour = false;
-            t.offset = [DIALOG_AT[0] - 150., DIALOG_AT[1] - 40.];
-            let text = self.s2.create(seq2, PRIO_DIALOG + 1, 2, 0, None, Some(t));
+            t.offset = [DIALOG_AT[0] - w as f32 / 2., DIALOG_AT[1] - h as f32 / 2.];
+            let text = self.s4.create(seq2, PRIO_DIALOG + 1, 2, 0, None, Some(t));
             self.dialog_text.push(text);
         }
         match dialog {
@@ -623,6 +653,8 @@ impl FileMenu {
         sheets.extend(self.s1.draw(&layout.sequences[1], font));
         sheets.extend(self.s0.draw(&layout.sequences[0], font));
         sheets.extend(self.s2.draw(&layout.sequences[2], font));
+        sheets.extend(self.s3.draw(&self.dialog_seq, font));
+        sheets.extend(self.s4.draw(&layout.sequences[2], font));
         Draw { art, sheets }
     }
 }
