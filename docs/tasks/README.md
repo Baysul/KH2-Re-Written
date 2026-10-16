@@ -144,3 +144,4 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T161](T161-prize-sprites-heal-effect-item-boxes.md) | Prize sprites, the heal effect and item treasure boxes | PARTIAL. |
 | [T162](T162-new-badges-items.md) | NEW! badges: the Items row, new items from pickups | PARTIAL. |
 | [T163](T163-npc-push-and-pop-fade.md) | Twilight Town townspeople: pop-in and pop-out fade, and the push | PARTIAL. |
+| [T164](T164-journal-limits-missions-minigames-story-synthesis.md) | Journal: Limits, Missions, Minigames, Story and Synthesis Notes pages | PARTIAL. |

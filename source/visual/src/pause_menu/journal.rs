@@ -8,8 +8,8 @@
 //! and Collection (0xd, FUN_14032bb90 / FUN_14032b210). The book draws
 //! from `menu/<lang>/jmemo.2ld` sequence 5; the pictures use sequences 2-4
 //! on the images of `menu/jm_world.2ld` and `menu/jm_top_<code>.2ld`. The
-//! category pages (Story, Album, Characters …) are not built: deciding a
-//! category plays the decide sound only. The pause_menu hands over under the
+//! category pages are built except Puzzles and Pieces: deciding one of those
+//! plays the decide sound only. The pause_menu hands over under the
 //! pause.2ld curtain (`Curtain`, FUN_14031adc0 / FUN_14031a690).
 use super::bits;
 use super::{MenuList, Pad, SOUND_CLOSE, SOUND_CURSOR, SOUND_DECIDE, SOUND_INVALID, SOUND_OPEN};
@@ -26,7 +26,11 @@ mod characters;
 mod files;
 mod limits;
 mod lists;
+mod story;
+mod synthesis;
 mod treasure;
+
+pub use synthesis::Synthesis;
 
 /// The journal sprites' SEQD (DAT_1407434e8) and image (DAT_1407434e4).
 pub const SEQUENCE: usize = 5;
@@ -174,10 +178,14 @@ pub const MESSAGES: [u16; 52] = [
     0x26b3,
 ];
 /// Messages of the category pages (help lines and the empty album).
-pub const PAGE_MESSAGES: [u16; 28] = [
+pub const PAGE_MESSAGES: [u16; 35] = [
     0x48d5, 0x48d6, 0x48d8, 0x48d9, 0x32dd, 0x48ee, 0x48ef, 0x48f0, 0x48f1, 0x48f2, 0x36b3, 0x2874,
     0x2dc6, 0x48f4, 0x48f5, 0x4a0f, 0x4a12, 0x4a11, 0x4a13, 0x48ec, 0x48ed, 0x48f8, 0x4b00, 0x4b06,
-    0x48f6, 0x48f7, 0x4b71, 0x4b80,
+    0x48f6, 0x48f7, 0x4b71, 0x4b80, 0x48d7, 0x4b37, 0x4b38, 0x4b39, 0x4b3a, 0x36f8, 0x48f9,
+];
+/// The Moogle level names (0x1405bbd50: nine system messages).
+pub const MOOGLE_NAMES: [u32; 9] = [
+    0x3cd2, 0x3cd3, 0x3cd4, 0x3cd5, 0x3cd6, 0x3cd7, 0x3cd8, 0x3cd9, 0x3cda,
 ];
 
 /// FUN_1402f5db0: the "show everything" story flag.
@@ -283,6 +291,13 @@ pub struct JournalData {
     pub menu_flags: Vec<u16>,
     pub seen_quests: Vec<u16>,
     pub seen_minigames: Vec<u16>,
+    /// The `stor` rows already seen (save+0x4c38 + 0xac).
+    pub seen_story: Vec<u16>,
+    /// Synthesis Notes: the save's fields, the Moogle level names and the
+    /// four lines already seen (save+0x4d78).
+    pub synthesis: Synthesis,
+    pub moogle_names: Vec<Vec<u8>>,
+    pub seen_synthesis: Vec<u8>,
 }
 
 /// The face and photo files the caller has loaded for the journal, and
@@ -556,6 +571,8 @@ pub struct Journal {
     files: files::Page,
     limits: limits::Page,
     lists: lists::Page,
+    story: story::Page,
+    synthesis: synthesis::Page,
     treasure: treasure::Page,
     /// First list entry shown by the 10-row file lists (the hand follows
     /// the row `cursor − scroll`).
@@ -651,6 +668,8 @@ impl Journal {
             files: files::Page::default(),
             limits: limits::Page::default(),
             lists: lists::Page::default(),
+            story: story::Page::default(),
+            synthesis: synthesis::Page::default(),
             treasure: treasure::Page::default(),
             scroll: 0,
             chars: characters::Page::default(),
@@ -674,6 +693,10 @@ impl Journal {
         j.lists.seen_quests_at_open = j.lists.seen_quests.clone();
         j.lists.seen_minis = j.data.seen_minigames.iter().copied().collect();
         j.lists.seen_minis_at_open = j.lists.seen_minis.clone();
+        j.story.seen = j.data.seen_story.iter().copied().collect();
+        j.story.seen_at_open = j.story.seen.clone();
+        j.synthesis.seen = j.data.seen_synthesis.iter().copied().collect();
+        j.synthesis.seen_at_open = j.synthesis.seen.clone();
         j.build(layout, first);
         (j, vec![SOUND_OPEN])
     }
@@ -937,6 +960,8 @@ impl Journal {
             | lists::MISSIONS_COLLECTION
             | lists::MINIGAMES_NOTES
             | lists::MINIGAMES_COLLECTION => self.build_list(layout),
+            story::STATE => self.build_story(layout),
+            synthesis::STATE => self.build_synthesis(layout),
             7 | 9 | 0x1a | 0x22 => self.build_treasure(layout),
             0xf | 0x12 | 0x15 => self.build_files_list(layout),
             0x10 | 0x13 | 0x16 => self.build_files_detail(layout),
@@ -1181,7 +1206,7 @@ impl Journal {
                 7 => u.missions || all || self.missions_available(None),
                 8 => u.minigames || all || self.minigames_available(None),
                 9 => u.limits || all || self.data.limit_counts.iter().any(|&n| n > 0),
-                10 => u.synthesis || all,
+                10 => u.synthesis || all || self.synthesis_any(),
                 _ => true,
             })
             .collect()
@@ -1343,6 +1368,8 @@ impl Journal {
                     | lists::MISSIONS_COLLECTION
                     | lists::MINIGAMES_NOTES
                     | lists::MINIGAMES_COLLECTION => self.list_page(layout, &pad, &mut sounds),
+                    story::STATE => self.story_page(layout, &pad, &mut sounds),
+                    synthesis::STATE => self.synthesis_page(layout, &pad, &mut sounds),
                     7 | 9 | 0x1a | 0x22 => self.treasure_page(layout, &pad, &mut sounds),
                     0xf | 0x12 | 0x15 => self.files_list(layout, &pad, &mut sounds),
                     0x10 | 0x13 | 0x16 => self.files_detail(layout, &pad, &mut sounds),
@@ -1503,7 +1530,8 @@ impl Journal {
                     let (label, _, state) = table[o];
                     if matches!(
                         state,
-                        4 | 6
+                        3 | 4
+                            | 6
                             | 0xc
                             | 0x28
                             | 0xe
@@ -1519,6 +1547,7 @@ impl Journal {
                             | 0xb
                             | 0x23
                             | 0x24
+                            | 0x27
                     ) {
                         self.enter_category(seq, state, label, k);
                     }
@@ -1690,6 +1719,21 @@ impl Journal {
         c.sort_unstable();
         a.sort_unstable();
         (c, a)
+    }
+
+    /// The seen Synthesis Notes lines (save+0x4d78).
+    pub fn seen_synthesis(&self) -> Vec<u8> {
+        let mut s: Vec<u8> = self.synthesis.seen.iter().copied().collect();
+        s.sort_unstable();
+        s
+    }
+
+    /// The seen `stor` rows to carry to the next opening (save+0x4c38 +
+    /// 0xac).
+    pub fn seen_story(&self) -> Vec<u16> {
+        let mut s: Vec<u16> = self.story.seen.iter().copied().collect();
+        s.sort_unstable();
+        s
     }
 
     /// The seen `ques` and `mini` rows to carry to the next opening

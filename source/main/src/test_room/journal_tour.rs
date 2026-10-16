@@ -12,6 +12,7 @@ const CANCEL: u64 = 0x8;
 const UP: u64 = 0x10;
 const DOWN: u64 = 0x20;
 const R1: u64 = 0x4000;
+const L1: u64 = 0x8000;
 const R2: u64 = 0x1_0000;
 
 /// Use counters given to the first limits (record order).
@@ -19,8 +20,18 @@ pub const LIMIT_COUNTS: [u16; 4] = [12, 3, 7, 21];
 /// Story flags set for the tour: 0x4837 shows everything, 0x8b0 makes the
 /// Mail Delivery mission rows available.
 pub const STORY_FLAGS: [u16; 2] = [0x4837, 0x8b0];
-pub const CAPTURES: [u64; 8] = [560, 880, 1000, 1240, 1620, 1740, 2020, 2300];
-pub const END: u64 = 2400;
+/// The Moogle seen at level 3 with some materials, lists and recipes.
+pub const SYNTHESIS: super::journal::Synthesis = super::journal::Synthesis {
+    moogle_seen: true,
+    level: 2,
+    materials: 17,
+    collections: 4,
+    recipes: 9,
+};
+pub const CAPTURES: [u64; 11] = [
+    560, 880, 1000, 1240, 1620, 1740, 2020, 2300, 2820, 2960, 3440,
+];
+pub const END: u64 = 3500;
 
 /// The minigame records (state, value) by record index: Mail Delivery
 /// (0xe) a time of 0'52"30, Grandstander (0xf) a score, record 0 a round
@@ -67,6 +78,21 @@ pub fn tour(inventory: &Inventory) -> Tour {
     for k in 0..6 {
         inputs.push((2080 + 20 * k, DOWN));
     }
+    // Back to Collection, L1 to Notes and its Story row.
+    inputs.push((2400, CANCEL));
+    inputs.push((2480, L1));
+    inputs.push((2640, DOWN));
+    inputs.push((2700, DECIDE));
+    for k in 0..4 {
+        inputs.push((2860 + 20 * k, DOWN));
+    }
+    // Back to Notes, R1 to Collection and its Synthesis Notes row.
+    inputs.push((3000, CANCEL));
+    inputs.push((3100, R1));
+    for k in 0..3 {
+        inputs.push((3220 + 20 * k, DOWN));
+    }
+    inputs.push((3320, DECIDE));
     Tour {
         inputs,
         captures: CAPTURES.to_vec(),

@@ -75,6 +75,57 @@ pub(super) fn frame_time(frames: u32) -> (u32, u32, u32, u32) {
     )
 }
 
+/// FUN_14033c630 over the save's story flags, menu flags and minigame
+/// records.
+fn quest_status(
+    q: &data::journal_table::Quest,
+    show_all: bool,
+    story: impl Fn(u16) -> bool,
+    menu: impl Fn(u16) -> bool,
+    record: impl Fn(u16) -> (u8, u32),
+) -> u8 {
+    let hidden = if show_all { 3 } else { 0 };
+    let f = q.flags;
+    let available = if f & 1 != 0 {
+        story(q.available)
+    } else {
+        menu(q.available)
+    };
+    if !available {
+        return hidden;
+    }
+    let (state, value) = record(q.record);
+    if f & 4 != 0 && state == 0 {
+        return hidden;
+    }
+    if f & 0x10 != 0 {
+        return if story(q.done) { 2 } else { 1 };
+    }
+    if f & 0x20 != 0 {
+        return if menu(q.done) { 2 } else { 1 };
+    }
+    if f & 0x1000 != 0 {
+        return (state != 0) as u8 + 1;
+    }
+    if f & 0x2000 != 0 {
+        return if state != 0 && state != 1 { 2 } else { 1 };
+    }
+    let mut r = 1;
+    if state != 0 && state != 1 {
+        let mut v = value;
+        if state == TIME {
+            let (h, m, s, cs) = frame_time(v);
+            v = (h * 60 + m) * 60 + s + (cs != 0) as u32;
+        }
+        if f & 0x100 != 0 {
+            r = if (q.threshold as u32) < v { 1 } else { 2 };
+        } else if f & 0x200 != 0 {
+            r = if q.threshold as u32 <= v { 2 } else { 1 };
+        }
+    }
+    r
+}
+
 impl Journal {
     fn record(&self, index: u16) -> (u8, u32) {
         self.data
@@ -91,47 +142,13 @@ impl Journal {
 
     /// FUN_14033c630: 0 hidden, 1 open, 2 done, 3 only through show-all.
     pub(super) fn quest_status(&self, q: &data::journal_table::Quest) -> u8 {
-        let all = self.show_all();
-        let hidden = if all { 3 } else { 0 };
-        let f = q.flags;
-        let available = if f & 1 != 0 {
-            self.flag(q.available)
-        } else {
-            self.menu_flag(q.available)
-        };
-        if !available {
-            return hidden;
-        }
-        let (state, value) = self.record(q.record);
-        if f & 4 != 0 && state == 0 {
-            return hidden;
-        }
-        if f & 0x10 != 0 {
-            return if self.flag(q.done) { 2 } else { 1 };
-        }
-        if f & 0x20 != 0 {
-            return if self.menu_flag(q.done) { 2 } else { 1 };
-        }
-        if f & 0x1000 != 0 {
-            return (state != 0) as u8 + 1;
-        }
-        if f & 0x2000 != 0 {
-            return if state != 0 && state != 1 { 2 } else { 1 };
-        }
-        let mut r = 1;
-        if state != 0 && state != 1 {
-            let mut v = value;
-            if state == TIME {
-                let (h, m, s, cs) = frame_time(v);
-                v = (h * 60 + m) * 60 + s + (cs != 0) as u32;
-            }
-            if f & 0x100 != 0 {
-                r = if (q.threshold as u32) < v { 1 } else { 2 };
-            } else if f & 0x200 != 0 {
-                r = if q.threshold as u32 <= v { 2 } else { 1 };
-            }
-        }
-        r
+        quest_status(
+            q,
+            self.show_all(),
+            |f| self.flag(f),
+            |f| self.menu_flag(f),
+            |r| self.record(r),
+        )
     }
 
     /// FUN_14033d370: the Missions option shows (some row of the world,
@@ -435,5 +452,53 @@ impl Journal {
             _ => {}
         }
         moved
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use data::journal_table::Quest;
+
+    fn quest(flags: u16, threshold: u16) -> Quest {
+        Quest {
+            world: 0,
+            heading: 0,
+            text: 0,
+            flags,
+            available: 0x8b0,
+            record: 0xe,
+            threshold,
+            done: 0x109c,
+        }
+    }
+
+    #[test]
+    fn frames_split_into_the_clock_fields() {
+        assert_eq!(frame_time(3138), (0, 0, 52, 30));
+        assert_eq!(frame_time(216_000 + 3600 + 60), (1, 1, 1, 0));
+    }
+
+    #[test]
+    fn a_mission_is_hidden_open_or_done_by_its_flags_and_record() {
+        let all_on = |_: u16| true;
+        let off = |_: u16| false;
+        // Not available: hidden, or masked under show-all.
+        let q = quest(0x0145, 14);
+        assert_eq!(quest_status(&q, false, off, off, |_| (0, 0)), 0);
+        assert_eq!(quest_status(&q, true, off, off, |_| (0, 0)), 3);
+        // Needs a played record.
+        assert_eq!(quest_status(&q, false, all_on, off, |_| (0, 0)), 0);
+        // Time limit 14 s: 52 s is too slow, 12 s is done (state 4 = time).
+        assert_eq!(quest_status(&q, false, all_on, off, |_| (4, 52 * 60)), 1);
+        assert_eq!(quest_status(&q, false, all_on, off, |_| (4, 12 * 60)), 2);
+        // A score needs the threshold.
+        let s = quest(0x0245, 100);
+        assert_eq!(quest_status(&s, false, all_on, off, |_| (3, 99)), 1);
+        assert_eq!(quest_status(&s, false, all_on, off, |_| (3, 100)), 2);
+        // Completed by a story flag.
+        let d = quest(0x0011, 0);
+        assert_eq!(quest_status(&d, false, |f| f == 0x8b0, off, |_| (0, 0)), 1);
+        assert_eq!(quest_status(&d, false, all_on, off, |_| (0, 0)), 2);
     }
 }

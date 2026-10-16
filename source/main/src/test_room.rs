@@ -1576,6 +1576,7 @@ struct JournalSource {
     limits: Vec<data::journal_table::Limit>,
     quests: Vec<data::journal_table::Quest>,
     minigames: Vec<data::journal_table::Minigame>,
+    moogle_names: Vec<Vec<u8>>,
     treasures: Vec<data::journal_table::Treasure>,
     item_names: HashMap<u16, journal::TreasureItem>,
     opened_bits: Vec<u16>,
@@ -1636,7 +1637,7 @@ fn load_journal(
         ids.extend([w.names[0], w.alt_names[0], w.names[1], w.alt_names[1]].map(u32::from));
     }
     for s in &stories {
-        ids.extend([s.summary, s.objective].map(u32::from));
+        ids.extend([s.summary, s.objective, s.entry].map(u32::from));
     }
     ids.retain(|&i| i != 0);
     ids.sort_unstable();
@@ -1695,6 +1696,16 @@ fn load_journal(
         journal::NO_STORY,
         fake.into_iter().next().unwrap_or_default(),
     );
+    let moogle_names = hud::load_messages_optional(
+        source,
+        &sys.index,
+        sys.ordinal,
+        sys.name_hash,
+        &journal::MOOGLE_NAMES,
+    )?
+    .into_iter()
+    .map(Option::unwrap_or_default)
+    .collect();
     Ok(JournalSource {
         book,
         curtain,
@@ -1708,6 +1719,7 @@ fn load_journal(
         limits,
         quests,
         minigames,
+        moogle_names,
         treasures,
         item_names,
         opened_bits: j.opened_bits.clone(),
@@ -8927,6 +8939,8 @@ struct CampRes {
     seen_limits: Vec<u16>,
     seen_quests: Vec<u16>,
     seen_minigames: Vec<u16>,
+    seen_story: Vec<u16>,
+    seen_synthesis: Vec<u8>,
     picture_sheets: HashMap<u16, Option<usize>>,
     notice_sheets: HashMap<String, usize>,
     /// The menus' language code (`menu/<lang>/` notice and photo files).
@@ -9660,6 +9674,16 @@ fn camp_tick(
                     menu_flags: Vec::new(),
                     seen_quests: c.seen_quests.clone(),
                     seen_minigames: c.seen_minigames.clone(),
+                    seen_story: c.seen_story.clone(),
+                    // No synthesis yet [test-room value]; the tour gives
+                    // the Moogle and some finds.
+                    synthesis: if game.journal_tour {
+                        journal_tour::SYNTHESIS
+                    } else {
+                        journal::Synthesis::default()
+                    },
+                    moogle_names: j.moogle_names.clone(),
+                    seen_synthesis: c.seen_synthesis.clone(),
                 };
                 let (opened, s) = Journal::open(&j.book.layout, data);
                 game.event(serde_json::json!({"event":"journal_open","tick":tick,
@@ -9688,6 +9712,8 @@ fn camp_tick(
             (c.seen_chars, c.seen_albums) = open.seen();
             c.seen_limits = open.seen_limits();
             (c.seen_quests, c.seen_minigames) = open.seen_lists();
+            c.seen_story = open.seen_story();
+            c.seen_synthesis = open.seen_synthesis();
             c.journal = None;
             game.event(serde_json::json!({"event":"journal_close","tick":tick}));
             // FUN_140304ea0: the camp is rebuilt (its open sound) and the
@@ -10911,6 +10937,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             seen_limits: Vec::new(),
             seen_quests: Vec::new(),
             seen_minigames: Vec::new(),
+            seen_story: Vec::new(),
+            seen_synthesis: Vec::new(),
             picture_sheets: HashMap::new(),
             notice_sheets: HashMap::new(),
             lang: settings.loaded_or("us"),
