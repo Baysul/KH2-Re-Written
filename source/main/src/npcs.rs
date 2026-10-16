@@ -674,6 +674,11 @@ pub struct FieldNpc {
     pub entity: usize,
     /// false while a zone-spawned NPC is away (hidden).
     pub alive: bool,
+    /// The alpha factor (sys+0xa08) and its rate per tick (+0xa0c), and
+    /// whether the NPC is leaving (sys+0x9b8 bit 4).
+    pub fade: f32,
+    fade_rate: f32,
+    leaving: bool,
     zones: Vec<NpcZone>,
     actions: Vec<Action>,
     irq: Irq,
@@ -699,6 +704,53 @@ pub struct FieldNpc {
     cooldown: f32,
     current_zone: Option<usize>,
     act: Act,
+}
+
+/// Ticks of a townsperson's pop-in and pop-out fade (DAT_140623bb4).
+const POP_FADE_TICKS: f32 = 10.;
+/// Weights (FUN_1403b5e00, objentry +0x50): Sora 100, a townsperson 500
+/// [look-02 §2.2].
+const SORA_WEIGHT: f32 = 100.;
+const NPC_WEIGHT: f32 = 500.;
+
+/// FUN_14040ad70 / FUN_1403c90b0 for Sora (`a`, an ellipsoid of radius,
+/// height and centre height) against a townsperson (`b`): the displacement
+/// the townsperson takes and the one Sora takes (scene x, z), or None when
+/// the ellipsoids do not touch. A movable townsperson takes 1/6 and Sora
+/// 5/6 of the separation; an immovable one (talking or fixed) none, and
+/// Sora all of it.
+pub fn push(
+    sora: Vec3,
+    sora_shape: [f32; 3],
+    npc: Vec3,
+    npc_shape: [f32; 3],
+    movable: bool,
+) -> Option<([f32; 2], [f32; 2])> {
+    // Both shapes are [radius, height, centre height].
+    let ca = sora + Vec3::Y * sora_shape[2];
+    let cb = npc + Vec3::Y * npc_shape[2];
+    let (ra, ha) = (sora_shape[0], sora_shape[1]);
+    let (rb, hb) = (npc_shape[0], npc_shape[1]);
+    let d = cb - ca;
+    let q = Vec3::new(d.x / (ra + rb), d.y / (ha + hb), d.z / (ra + rb));
+    if q.length_squared() >= 1. {
+        return None;
+    }
+    let s = q.x * q.x + q.z * q.z;
+    let big = ra + rb + 5.;
+    let sep = if s <= 0. {
+        [big, 0.]
+    } else {
+        let f = ((1. - q.y * q.y).abs() / s).sqrt() - 1.;
+        [q.x * f * big, q.z * f * big]
+    };
+    if movable {
+        let c = sep.map(|v| v * SORA_WEIGHT / (SORA_WEIGHT + NPC_WEIGHT));
+        let back = c.map(|v| -v * NPC_WEIGHT / SORA_WEIGHT);
+        Some((c, back))
+    } else {
+        Some(([0.; 2], sep.map(|v| -v)))
+    }
 }
 
 /// Turn rate per tick on the path (0.087266 × 2.0 = 10°).
@@ -790,6 +842,9 @@ impl FieldNpc {
             serial: entity.serial,
             entity: entity_index,
             alive: true,
+            fade: 1.,
+            fade_rate: 0.,
+            leaving: false,
             zones: Vec::new(),
             actions: Vec::new(),
             irq: Irq::NONE,
@@ -1242,6 +1297,53 @@ impl FieldNpc {
 const MEET_TIME: (f32, f32) = (360., 720.);
 
 impl FieldNpc {
+    /// FUN_1403b7810(sys+0xa08, 0, 1, 10): a zone-spawned townsperson
+    /// fades in over ten ticks.
+    pub fn pop_in(&mut self) {
+        self.fade = 0.;
+        self.fade_rate = 1. / POP_FADE_TICKS;
+    }
+
+    /// FUN_140416270: after five ticks outside its zone the townsperson
+    /// fades out over ten (alpha 1 to 0) and is released at zero.
+    pub fn pop_out(&mut self) -> bool {
+        if self.leaving {
+            return false;
+        }
+        self.leaving = true;
+        self.fade = 1.;
+        self.fade_rate = -1. / POP_FADE_TICKS;
+        true
+    }
+
+    /// FUN_1403b77c0 at the end of the NPC's tick; a leaving NPC whose
+    /// alpha reached zero is destroyed (FUN_1403b4700).
+    pub fn tick_fade(&mut self) -> bool {
+        let was_alive = self.alive;
+        if self.fade_rate != 0. {
+            self.fade += self.fade_rate;
+            if self.fade > 0. {
+                if self.fade >= 1. {
+                    self.fade = 1.;
+                    self.fade_rate = 0.;
+                }
+            } else {
+                self.fade = 0.;
+                self.fade_rate = 0.;
+            }
+        }
+        if self.leaving && self.fade <= 0. {
+            self.alive = false;
+        }
+        was_alive && !self.alive
+    }
+
+    /// FUN_1403ba7d0: a townsperson in a talk or a fixed one does not move
+    /// when pushed.
+    pub fn immovable(&self, talking: bool) -> bool {
+        talking || matches!(self.act, Act::Fixed(_))
+    }
+
     /// FUN_140417fd0: the record with zone 0 naming `other` as partner.
     fn meet_entry(&self, other: u32) -> Option<Action> {
         self.actions
@@ -1444,6 +1546,45 @@ pub fn update_meets(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_movable_townsperson_takes_a_sixth_and_sora_five_sixths() {
+        // Sora's ellipsoid (r 35, h 55, centre 85) against a townsperson
+        // (r 34, h 60, centre 80) 40 units in front of him.
+        let (c, back) = super::push(
+            Vec3::ZERO,
+            [35., 55., 85.],
+            Vec3::new(0., 0., 40.),
+            [34., 60., 80.],
+            true,
+        )
+        .expect("touching");
+        assert!(c[0].abs() < 1e-3 && c[1] > 0.);
+        // Sora takes five times the townsperson's share, the other way.
+        assert!((back[1] + 5. * c[1]).abs() < 1e-3);
+        // An immovable townsperson does not move; Sora takes it all.
+        let (c, back) = super::push(
+            Vec3::ZERO,
+            [35., 55., 85.],
+            Vec3::new(0., 0., 40.),
+            [34., 60., 80.],
+            false,
+        )
+        .expect("touching");
+        assert_eq!(c, [0., 0.]);
+        assert!(back[1] < -5.);
+        // Out of reach: no push.
+        assert!(
+            super::push(
+                Vec3::ZERO,
+                [35., 55., 85.],
+                Vec3::new(0., 0., 100.),
+                [34., 60., 80.],
+                true
+            )
+            .is_none()
+        );
+    }
+
     use super::*;
 
     fn square(looped: bool) -> Route {
@@ -1517,6 +1658,9 @@ mod tests {
             serial: 0,
             entity: 0,
             alive: true,
+            fade: 1.,
+            fade_rate: 0.,
+            leaving: false,
             zones: Vec::new(),
             actions: Vec::new(),
             irq: Irq::NONE,
@@ -1695,5 +1839,28 @@ mod meet_tests {
         ];
         update_meets(&mut npcs, |_| [115., 90., 90.], far, &mut Lcg(5));
         assert_eq!(npcs[0].irq.kind, IrqKind::None);
+    }
+
+    #[test]
+    fn a_townsperson_fades_in_and_out_over_ten_ticks() {
+        let mut n = npc(0, Vec3::ZERO, 0);
+        n.pop_in();
+        for _ in 0..5 {
+            n.tick_fade();
+        }
+        assert!((n.fade - 0.5).abs() < 1e-5);
+        for _ in 0..5 {
+            n.tick_fade();
+        }
+        assert_eq!(n.fade, 1.);
+        assert!(n.alive);
+        n.pop_out();
+        for _ in 0..9 {
+            n.tick_fade();
+        }
+        assert!(n.alive && n.fade > 0.);
+        n.tick_fade();
+        assert_eq!(n.fade, 0.);
+        assert!(!n.alive && n.leaving);
     }
 }
