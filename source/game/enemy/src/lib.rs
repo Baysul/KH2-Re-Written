@@ -6,6 +6,8 @@
 //! the engine services the scripts call.
 
 pub mod act;
+pub mod env;
+pub mod object;
 pub mod script;
 pub mod sysobj;
 pub mod trap_table;

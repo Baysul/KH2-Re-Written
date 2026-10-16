@@ -77,6 +77,8 @@ pub struct Manager {
     pub priority: u16,
     pub flags: u32,
     pub has_table: bool,
+    /// +0x108: the script's AI object (the first argument of its act traps).
+    pub ai_object: u32,
 }
 
 impl Default for Manager {
@@ -90,6 +92,7 @@ impl Default for Manager {
             priority: 0,
             flags: 0,
             has_table: false,
+            ai_object: 0,
         }
     }
 }

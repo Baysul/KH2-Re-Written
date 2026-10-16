@@ -106,8 +106,20 @@ pub enum Fault {
     CodeOutside(i32),
 }
 
+/// A script routine a trap asked to run right away on a throw-away thread
+/// (FUN_1403e2000), after the trap returns and before its result is pushed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Callback {
+    pub entry: u16,
+    pub args: Vec<Slot>,
+}
+
 /// Everything the interpreter needs from the engine.
 pub trait Host {
+    /// Callbacks the trap that just ran queued, in order.
+    fn take_callbacks(&mut self) -> Vec<Callback> {
+        Vec::new()
+    }
     /// `DAT_140717480`: 1.0 at 60 fps and normal speed.
     fn frame_time(&self) -> f32 {
         1.0
@@ -246,14 +258,25 @@ pub struct Thread {
 impl Thread {
     /// A thread starting at word `entry`, with `args` pushed first-to-last.
     pub fn new(inst: &Instance, slot: u32, entry: i32, args: &[Slot]) -> Self {
-        let s = inst.stack_bytes as usize;
+        Self::with_sizes(inst.stack_bytes, inst.temp_bytes, slot, entry, args)
+    }
+
+    /// As [`Thread::new`] from the program's declared stack and temp sizes.
+    pub fn with_sizes(
+        stack_bytes: u32,
+        temp_bytes: u32,
+        slot: u32,
+        entry: i32,
+        args: &[Slot],
+    ) -> Self {
+        let s = stack_bytes as usize;
         let mut t = Self {
             pc: entry,
             slot,
             frame: vec![0; s * 2 + 0x100],
             fp: 0,
             eval: Vec::new(),
-            eval_capacity: (inst.temp_bytes as usize * 2 + 0x100) / 8,
+            eval_capacity: (temp_bytes as usize * 2 + 0x100) / 8,
         };
         // FUN_14041b320: sixteen bytes of zeroed, untagged locals.
         let tag_at = (s & !3) as u32;
@@ -296,6 +319,13 @@ enum Loc {
     Scratch,
     Extern,
     Bad,
+}
+
+impl<'a> Memory<'a> {
+    /// A view of one thread's memory (traps receive it from the interpreter).
+    pub fn new(inst: &'a mut Instance, th: &'a mut Thread) -> Self {
+        Self { inst, th }
+    }
 }
 
 impl Memory<'_> {
@@ -434,6 +464,10 @@ fn hd_curve(x: f32) -> f32 {
     let root = (x * 8.0 + 1.0).sqrt();
     (root - 1.0) * 0.5 * 0.35 + ((x + x) / (x + 1.0)) * 0.65
 }
+
+/// Frame slot of throw-away callback threads, and their instruction budget.
+const CALLBACK_THREAD: u32 = 15;
+const CALLBACK_BUDGET: u64 = 1_000_000;
 
 /// Run `th` until it halts, exits, ends or faults, executing at most `budget`
 /// instructions.
@@ -668,6 +702,10 @@ fn step(
             }
             let mut mem = Memory { inst, th };
             host.trap(&mut mem, table, index, &mut args)?;
+            for cb in host.take_callbacks() {
+                let mut temp = Thread::new(inst, CALLBACK_THREAD, i32::from(cb.entry), &cb.args);
+                run(inst, &mut temp, host, CALLBACK_BUDGET);
+            }
             if flags & 0x4000_0000 != 0 {
                 push(th, args[0])?;
             }

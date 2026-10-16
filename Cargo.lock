@@ -1848,6 +1848,9 @@ dependencies = [
 [[package]]
 name = "enemy"
 version = "0.1.2"
+dependencies = [
+ "player",
+]
 
 [[package]]
 name = "equivalent"

@@ -5,7 +5,8 @@
 //! with a [`Ctx`]: the object whose script called it plus the world.
 
 use crate::act;
-use crate::script::{self, Exit, Fault, Host, Instance, Memory, Slot, Thread};
+use crate::env::Env;
+use crate::script::{self, Callback, Exit, Fault, Host, Instance, Memory, Slot, Thread};
 use crate::sysobj::Sysobj;
 use std::collections::HashMap;
 
@@ -23,7 +24,7 @@ impl Default for Lcg {
 }
 
 impl Lcg {
-    pub fn next(&mut self) -> u32 {
+    pub fn step(&mut self) -> u32 {
         self.0 = self.0.wrapping_mul(0x10dcd);
         self.0
     }
@@ -35,15 +36,68 @@ pub struct Object {
     pub sys: Sysobj,
     pub acts: act::Manager,
     pub script: ScriptSpace,
+    /// Callbacks traps queued for the interpreter to run (see [`Host::take_callbacks`]).
+    pub pending: Vec<Callback>,
+}
+
+impl Object {
+    /// An object with an empty script (tests and tools).
+    pub fn bare(id: ObjId) -> Self {
+        Self {
+            id,
+            sys: Sysobj::bare(),
+            acts: act::Manager::default(),
+            pending: Vec::new(),
+            script: ScriptSpace {
+                instance: Instance::placeholder(),
+                stack_bytes: 0,
+                temp_bytes: 0,
+                main: None,
+                main_ended: false,
+                act_thread: None,
+                act_generation: 0,
+                faults: Vec::new(),
+            },
+        }
+    }
 }
 
 /// The object's script instance and its threads.
 pub struct ScriptSpace {
     pub instance: Instance,
-    /// The persistent threads (OBJ_MAIN and friends), in creation order.
-    pub threads: Vec<Thread>,
-    /// The running act's thread.
+    pub stack_bytes: u32,
+    pub temp_bytes: u32,
+    /// The persistent main thread (OBJ_MAIN) and whether it has ended.
+    pub main: Option<Thread>,
+    pub main_ended: bool,
+    /// The running act thread.
     pub act_thread: Option<Thread>,
+    /// Counts act thread replacements, so a run can tell its thread was
+    /// discarded while it executed.
+    pub act_generation: u32,
+    /// Faults the interpreter reported (`pc` of the thread, fault), newest last.
+    pub faults: Vec<(i32, Fault)>,
+}
+
+/// Side effects the presentation layer or other systems must carry out.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    EffectStart {
+        object: ObjId,
+        effect: i32,
+        arguments: [i32; 2],
+        handle: u32,
+    },
+    ScatterPrize {
+        object: ObjId,
+        count: i32,
+    },
+    EffectDeadBlock {
+        object: ObjId,
+        handle: u32,
+    },
+    /// A service the executable provides that this build does not translate yet.
+    Unsupported(&'static str),
 }
 
 /// Everything shared between objects.
@@ -58,6 +112,13 @@ pub struct World {
     static_words: Vec<u32>,
     /// Traps a script called that nothing implements yet.
     pub missing: Vec<(u16, u16)>,
+    pub events: Vec<Event>,
+    /// Keep running when a script calls a trap with no translation (the call
+    /// returns zero and is listed in `missing`). Development aid.
+    pub tolerate_missing: bool,
+    next_effect: u32,
+    /// Copies of target records (`trap_target_dup`), by slot.
+    pub target_dups: Vec<Option<crate::sysobj::Target>>,
 }
 
 impl Default for World {
@@ -69,11 +130,36 @@ impl Default for World {
             statics: HashMap::new(),
             static_words: Vec::new(),
             missing: Vec::new(),
+            events: Vec::new(),
+            tolerate_missing: false,
+            next_effect: 0,
+            target_dups: Vec::new(),
         }
     }
 }
 
 impl World {
+    /// `trap_memory_alloc`: a zeroed block in the shared static area.
+    pub fn alloc(&mut self, bytes: u32) -> u32 {
+        let words = bytes.div_ceil(4).max(1) as usize;
+        let at = self.static_words.len() as u32 * 4;
+        self.static_words.extend(std::iter::repeat_n(0, words));
+        script::EXTERN_SEGMENT + STATIC_BASE + at
+    }
+
+    /// A fresh handle for an effect the host will create.
+    pub fn next_effect_handle(&mut self) -> u32 {
+        self.next_effect += 1;
+        EFFECT_HANDLES + self.next_effect * 16
+    }
+
+    /// The static cell if some trap already allocated it.
+    pub fn static_lookup(&self, table: u16, index: u16, slot: u16) -> Option<u32> {
+        self.statics
+            .get(&(table, index, slot))
+            .map(|at| script::EXTERN_SEGMENT + STATIC_BASE + at)
+    }
+
     /// The handle of a four-word static cell owned by `(table, index, slot)`;
     /// the first use allocates it zeroed.
     pub fn static_cell(&mut self, table: u16, index: u16, slot: u16) -> u32 {
@@ -109,8 +195,22 @@ impl World {
 const STATIC_BASE: u32 = 0;
 pub const OBJECT_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0100_0000;
 
+/// Sora's handle (the player is not one of the script-driven objects).
+pub const PLAYER_HANDLE: u32 = script::EXTERN_SEGMENT + 0x00f0_0000;
+/// Effect handles scripts keep, and copies of target records.
+pub const EFFECT_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0200_0000;
+pub const TARGET_DUP_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0300_0000;
+/// The engine object's target record (sys+0xbf8) is this far into its handle range.
+pub const TARGET_RECORD_OFFSET: u32 = 0x800;
+
 pub fn object_handle(id: ObjId) -> u32 {
     OBJECT_HANDLES + id * 0x1000
+}
+
+/// A word inside an object's handle range: the object and its field offset.
+pub fn object_field(address: u32) -> Option<(ObjId, u32)> {
+    let o = address.checked_sub(OBJECT_HANDLES)?;
+    (o < 0x0100_0000).then_some((o / 0x1000, o % 0x1000))
 }
 
 pub fn object_from_handle(handle: u32) -> Option<ObjId> {
@@ -122,9 +222,43 @@ pub fn object_from_handle(handle: u32) -> Option<ObjId> {
 pub struct Ctx<'a> {
     pub world: &'a mut World,
     pub me: &'a mut Object,
+    pub env: &'a dyn Env,
 }
 
 impl Ctx<'_> {
+    /// The object with this id: the calling object or another in the world.
+    pub fn object(&mut self, id: ObjId) -> Result<&mut Object, Fault> {
+        if id == self.me.id {
+            return Ok(self.me);
+        }
+        self.world
+            .objects
+            .get_mut(id as usize)
+            .and_then(|o| o.as_deref_mut())
+            .ok_or(Fault::Memory(object_handle(id)))
+    }
+
+    /// An engine-object argument (the trap received the handle itself).
+    pub fn sys_of(&self, handle: u32) -> Result<ObjId, Fault> {
+        object_from_handle(handle).ok_or(Fault::Memory(handle))
+    }
+
+    /// An AI-object argument that may name Sora: the word at +4 is either an
+    /// engine object or the player.
+    pub fn sys_ref_ai(&self, memory: &Memory<'_>, ai: u32) -> Result<SysRef, Fault> {
+        let handle = self.read_u32(memory, ai + 4).ok_or(Fault::Memory(ai))?;
+        if handle == PLAYER_HANDLE {
+            return Ok(SysRef::Player);
+        }
+        self.sys_of(handle).map(SysRef::Object)
+    }
+
+    /// An AI-object argument: the engine object handle is the word at +4.
+    pub fn sys_of_ai(&self, memory: &Memory<'_>, ai: u32) -> Result<ObjId, Fault> {
+        let handle = self.read_u32(memory, ai + 4).ok_or(Fault::Memory(ai))?;
+        self.sys_of(handle)
+    }
+
     /// Read a 32-bit cell a script handle names: script memory first, then the
     /// static result cells.
     pub fn read_u32(&self, memory: &Memory<'_>, handle: u32) -> Option<u32> {
@@ -146,6 +280,13 @@ impl Ctx<'_> {
     }
 }
 
+/// What a script-held object reference names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SysRef {
+    Player,
+    Object(ObjId),
+}
+
 pub type TrapFn = fn(&mut Ctx<'_>, &mut Memory<'_>, &mut [Slot; 16]) -> Result<(), Fault>;
 
 /// The script [`Host`] for one object's thread: resolves traps through the
@@ -161,11 +302,45 @@ impl Host for Machine<'_> {
         self.ctx.world.frame_time
     }
 
+    fn take_callbacks(&mut self) -> Vec<Callback> {
+        std::mem::take(&mut self.ctx.me.pending)
+    }
+
+    fn patch_gate(&self) -> f32 {
+        self.ctx
+            .world
+            .static_lookup(1, 0, 1)
+            .and_then(|cell| self.ctx.world.static_read(cell + 12))
+            .map_or(0.0, f32::from_bits)
+    }
+
     fn peek(&self, address: u32) -> Option<u32> {
+        if let Some((id, offset)) = object_field(address) {
+            if id == self.ctx.me.id {
+                return self.ctx.me.sys.peek_word(offset);
+            }
+            return self
+                .ctx
+                .world
+                .objects
+                .get(id as usize)?
+                .as_deref()?
+                .sys
+                .peek_word(offset);
+        }
         self.ctx.world.static_read(address)
     }
 
     fn poke(&mut self, address: u32, value: u32) -> bool {
+        if let Some((id, offset)) = object_field(address) {
+            if id == self.ctx.me.id {
+                return self.ctx.me.sys.poke_word(offset, value);
+            }
+            return match self.ctx.world.objects.get_mut(id as usize) {
+                Some(Some(o)) => o.sys.poke_word(offset, value),
+                _ => false,
+            };
+        }
         self.ctx.world.static_write(address, value)
     }
 
@@ -197,15 +372,23 @@ impl Host for Machine<'_> {
 }
 
 /// Run one thread of `obj`'s script to its next yield.
-pub fn run_thread(world: &mut World, obj: &mut Object, thread: &mut Thread) -> Exit {
+pub fn run_thread(world: &mut World, env: &dyn Env, obj: &mut Object, thread: &mut Thread) -> Exit {
     let mut instance = std::mem::replace(&mut obj.script.instance, Instance::placeholder());
+    let world_tolerates = world.tolerate_missing;
     let exit = {
         let mut machine = Machine {
-            ctx: Ctx { world, me: obj },
-            tolerate_missing: false,
+            ctx: Ctx {
+                world,
+                me: obj,
+                env,
+            },
+            tolerate_missing: world_tolerates,
         };
         script::run(&mut instance, thread, &mut machine, 1_000_000)
     };
     obj.script.instance = instance;
+    if let Exit::Fault(f) = exit {
+        obj.script.faults.push((thread.pc, f));
+    }
     exit
 }
