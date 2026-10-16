@@ -235,6 +235,8 @@ pub struct Sysobj {
     /// "reaction executed" flag (+0x18 bit 0).
     pub entry_group: u16,
     pub damage_exec: bool,
+    /// The element of the attack being handled (`damage_element`).
+    pub damage_element: u8,
     /// +0x2a8: the motion playback speed scripts set (`obj_motion_speed`).
     pub motion_speed: f32,
     /// The attack parameter id of the hit being handled (the damage record's
@@ -348,6 +350,7 @@ impl Sysobj {
             velocity: [0.; 4],
             entry_group: 0,
             damage_exec: false,
+            damage_element: 0,
             motion_speed: 1.,
             damage_param_id: 0,
             pending_fly: None,
@@ -835,6 +838,26 @@ impl Sysobj {
             _ => return false,
         }
         true
+    }
+
+    /// `obj_jump_direct`: enter the jump mode now.
+    pub fn jump_now(&mut self, direction: Vec3, height: f32, speed: f32) {
+        self.pending_mode = 0;
+        self.pending_jump = None;
+        self.start_jump(direction, height, speed);
+    }
+
+    /// `obj_blow` (FUN_1403d3e50): knocked away with this velocity.
+    pub fn blow_now(&mut self, velocity: Vec3) {
+        self.blow = Some(actor_physics::Blow::new(velocity, &self.sstm));
+        self.knock = None;
+        self.jump = None;
+        self.fly = None;
+        self.steer = None;
+        self.pending_fly = None;
+        self.sampler.reset();
+        self.airborne = true;
+        self.reaction = Reaction::Blow { back: false };
     }
 
     /// FUN_140418800: set routine option flag `index`.

@@ -18,7 +18,52 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 114) => search_by_entry,
         (1, 177) => set_path,
         (1, 222) => get_entry_id,
+        (0, 14) => progress_set_flag,
+        (0, 49) => effect_is_alive,
         (1, 0) => sysobj_appear,
+        (1, 24) => area_area,
+        (1, 32) => message_open,
+        (1, 33) => message_close,
+        (1, 41) => signal_call,
+        (1, 48) => message_is_end,
+        (1, 76) => motion_unhook,
+        (1, 93) => sysobj_party,
+        (1, 102) => obj_detach,
+        (1, 125) => tex_fade_start,
+        (1, 129) => obj_blow,
+        (1, 155) => add_hp,
+        (1, 166) => target_attack,
+        (1, 167) => act_start_pri,
+        (1, 191) => lockon_target,
+        (1, 214) => obj_hook_stop,
+        (1, 217) => set_pos_trans,
+        (1, 221) => can_decide_command,
+        (1, 227) => jump_direct,
+        (1, 292) => search_by_unit_arg,
+        (1, 295) => camera_reset,
+        (1, 305) => camera_eye,
+        (1, 306) => camera_at,
+        (1, 328) => dead_mark,
+        (2, 1) => exec_damage_blow,
+        (2, 2) => exec_damage_small,
+        (2, 3) => exec_damage_hitback,
+        (2, 6) => is_damage_motion,
+        (2, 7) => damage_reaction,
+        (2, 77) => vacuum_create,
+        (2, 78) => vacuum_destroy,
+        (2, 79..=84) => vacuum_set,
+        (2, 85) => damage_element,
+        (2, 86) => damage_get_hitback,
+        (2, 87) => exec_damage_large,
+        (2, 91) => damage_reaction_type,
+        (2, 92) => damage_is_finish,
+        (4, 29) => mission_count,
+        (4, 40) => mission_timer,
+        (5, 3) => path_dir,
+        (6, 2) => player_get_form,
+        (6, 3) => searcher_init,
+        (6, 53) => bghit_is_hit,
+        (6, 55) => bghit_get_kind,
         (1, 1) => set_rot,
         (1, 18) => obj_attach,
         (1, 21) => effect_start,
@@ -729,6 +774,205 @@ presentation_traps! {
     command_override = "command_override";
     light_fadeout = "light_fadeout";
     screen_whitein = "func_screen_whitein";
+}
+
+macro_rules! recorded_traps {
+    ($($name:ident = $label:literal;)*) => {$(
+        /// A service this build does not provide. [U] The call is recorded and
+        /// does nothing else.
+        fn $name(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
+            ctx.world.events.push(Event::Unsupported($label));
+            Ok(())
+        }
+    )*};
+}
+
+recorded_traps! {
+    obj_detach = "obj_detach";
+    obj_hook_stop = "obj_hook_stop";
+    motion_unhook = "obj_motion_unhook";
+    tex_fade_start = "obj_tex_fade_start";
+    search_by_unit_arg = "obj_search_by_unit_arg";
+    dead_mark = "obj_dead_mark";
+    set_pos_trans = "obj_set_pos_trans";
+    vacuum_destroy = "vacuum_destroy";
+    vacuum_set = "vacuum_set";
+    camera_reset = "camera_reset";
+    signal_call = "signal_call";
+    searcher_init = "target_searcher_init";
+    progress_set_flag = "progress_set_flag";
+    message_open = "message_open";
+    message_close = "message_close";
+}
+
+macro_rules! constant_int_traps {
+    ($($name:ident = $value:literal, $label:literal;)*) => {$(
+        /// A query whose source this build does not have. [U] Returns the
+        /// stated constant.
+        fn $name(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+            let _ = $label;
+            args[0] = Slot::int($value);
+            Ok(())
+        }
+    )*};
+}
+
+constant_int_traps! {
+    message_is_end = 1, "method_message_is_end";
+    bghit_is_hit = 0, "bghit_is_hit";
+    bghit_get_kind = 0, "bghit_get_kind";
+    mission_count = 0, "mission_get_count";
+    mission_timer = 0, "mission_get_timer_second";
+    can_decide_command = 0, "obj_can_decide_command";
+    add_hp = 0, "obj_add_hp";
+}
+
+unsupported_vector_traps! {
+    camera_eye = (1, 305, "camera_eye");
+    camera_at = (1, 306, "camera_at");
+    path_dir = (5, 3, "get_path_dir");
+    lockon_target = (1, 191, "obj_lockon_target");
+    target_attack = (1, 166, "target_attack");
+}
+
+/// 2:77 FUN_140433200: create a vacuum (a pull toward a point). [U] Recorded;
+/// the script gets a handle.
+fn vacuum_create(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    ctx.world.events.push(Event::Unsupported("vacuum_create"));
+    let handle = ctx.world.next_magic_handle();
+    args[0] = Slot::address(handle);
+    Ok(())
+}
+
+/// 0:49 FUN_14041e1f0 -> FUN_1402be790: the effect still plays.
+fn effect_is_alive(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let alive = ctx.env.effect_active(args[0].value);
+    args[0] = Slot::int(alive as i32);
+    Ok(())
+}
+
+/// 1:24 FUN_14042e350: the current area number.
+fn area_area(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    args[0] = Slot::int(ctx.env.area_number());
+    Ok(())
+}
+
+/// 6:2 FUN_14053dc10: Sora's current drive form.
+fn player_get_form(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    args[0] = Slot::int(ctx.env.player_form());
+    Ok(())
+}
+
+/// 1:93 FUN_14042fa10: a party member's object. Only Sora (member 0) exists
+/// here.
+fn sysobj_party(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let h = if args[0].as_int() == 0 {
+        crate::world::PLAYER_HANDLE
+    } else {
+        0
+    };
+    args[0] = Slot::address(h);
+    Ok(())
+}
+
+/// 1:167 FUN_14042c7d0 -> FUN_1403caa90: start an act unless the running one
+/// outranks it.
+fn act_start_pri(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let handle = args[1].value;
+    let name = m.string(handle, 128).ok_or(Fault::Memory(handle))?;
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let obj = ctx.object(id)?;
+    let actions = obj.acts.start_if_not_outranked(&name);
+    obj.apply_actions(None, actions);
+    Ok(())
+}
+
+/// 1:227 FUN_14042cd40: a jump through the mode's own entry, leaving at once
+/// (no take-off event).
+fn jump_direct(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let v = read_sanitized(ctx, m, args[1].value)?;
+    ctx.object(id)?.sys.jump_now([v[0], 0., v[2]], v[1], v[3]);
+    Ok(())
+}
+
+/// 1:129 FUN_14042b550 -> FUN_1403d3e50: knock the object away with this
+/// velocity.
+fn obj_blow(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let v = read_sanitized(ctx, m, args[1].value)?;
+    ctx.object(id)?.sys.blow_now([v[0], v[1], v[2]]);
+    Ok(())
+}
+
+/// 2:7 FUN_140431f10: the damage record's reaction byte (+0x26).
+fn damage_reaction(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = crate::world::object_field(args[0].value).map_or(0, |(id, _)| id);
+    let r = ctx.object(id)?.sys.damage_reaction;
+    args[0] = Slot::int((r & 0xff) as i32);
+    Ok(())
+}
+
+/// 2:85 FUN_140432170: the element of the attack that hit.
+fn damage_element(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = crate::world::object_field(args[0].value).map_or(0, |(id, _)| id);
+    let e = ctx.object(id)?.sys.damage_element;
+    args[0] = Slot::int(i32::from(e));
+    Ok(())
+}
+
+/// 2:86 FUN_1404321a0: the hit-back amount of the attack. [U] Reads 0.
+fn damage_get_hitback(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    args[0] = Slot::float(0.);
+    Ok(())
+}
+
+/// 2:91 FUN_1404321d0: the reaction class of the damage record.
+fn damage_reaction_type(
+    ctx: &mut Ctx<'_>,
+    _: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = crate::world::object_field(args[0].value).map_or(0, |(id, _)| id);
+    let r = ctx.object(id)?.sys.damage_reaction;
+    args[0] = Slot::int(player::combat::reaction_class(r as u8) as i32);
+    Ok(())
+}
+
+/// 2:92 FUN_1404321f0: the hit was the finishing one.
+fn damage_is_finish(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = crate::world::object_field(args[0].value).map_or(0, |(id, _)| id);
+    let dead = ctx.object(id)?.sys.hp <= 0;
+    args[0] = Slot::int(dead as i32);
+    Ok(())
+}
+
+/// 2:6 FUN_140431d50 -> FUN_1403d4880: a damage reaction is playing.
+fn is_damage_motion(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let playing = ctx.object(id)?.sys.reaction != crate::sysobj::Reaction::None;
+    args[0] = Slot::int(playing as i32);
+    Ok(())
+}
+
+macro_rules! exec_damage_traps {
+    ($($name:ident = $label:literal;)*) => {$(
+        /// The script performs a damage reaction itself. [U] The engine's
+        /// reaction already ran when the hit was taken; the call is recorded.
+        fn $name(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+            let id = ctx.sys_of_ai(m, args[0].value)?;
+            ctx.object(id)?.sys.damage_exec = true;
+            ctx.world.events.push(Event::Unsupported($label));
+            Ok(())
+        }
+    )*};
+}
+
+exec_damage_traps! {
+    exec_damage_blow = "enemy_exec_damage_blow";
+    exec_damage_small = "enemy_exec_damage_small";
+    exec_damage_hitback = "enemy_exec_damage_hitback";
+    exec_damage_large = "enemy_exec_damage_large";
 }
 
 #[cfg(test)]

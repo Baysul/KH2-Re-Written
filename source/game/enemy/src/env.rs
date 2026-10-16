@@ -54,6 +54,14 @@ pub trait Env {
     fn clips(&self, model: u32) -> &dyn Clips;
     /// Sora.
     fn player_position(&self) -> Vec3;
+    /// Sora's drive form (`player_get_form`), 0 for none.
+    fn player_form(&self) -> i32 {
+        0
+    }
+    /// The current area number (`area_area`).
+    fn area_number(&self) -> i32 {
+        0
+    }
     /// Whether the map blocks the line between two points (`bghit_check_line`).
     fn line_blocked(&self, _from: Vec3, _to: Vec3) -> bool {
         false
