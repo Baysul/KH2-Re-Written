@@ -75,6 +75,8 @@ mod enemy_combat;
 mod enemy_gallery;
 mod enemy_target;
 mod enemy_tour;
+mod gear;
+mod gear_tour;
 mod item_room;
 mod magic_room;
 mod party_room;
@@ -797,6 +799,9 @@ struct Game {
     ability_source: AbilitySource,
     /// Current equipment feeding the battle ability rebuild, separate from decoded data.
     equipment: pause_menu::items::Equipment,
+    /// What that equipment adds to Sora's Strength, Magic, Defense, AP and
+    /// resists (FUN_1403c1d90); the level and record numbers excluded.
+    gear: player::equipment_stats::Totals,
     /// The member's 80 ability slots persist even when no camp UI is loaded.
     ability_slots: Vec<u16>,
     ability_tour: Option<ability_inventory::Tour>,
@@ -870,6 +875,8 @@ struct Game {
     blend_from: Option<(Vec<Vec3>, Transform, u64)>,
     display_hand: Transform,
     weapon_indices: Vec<Vec<u32>>,
+    /// The same for slot 1's Keyblade (the form's own).
+    weapon2_indices: Vec<Vec<u32>>,
     weapon_display: Vec<Vec3>,
     shown_action: Option<(Action, u64)>,
     action_started: u64,
@@ -1221,6 +1228,10 @@ struct AbilitySource {
     rates: abilities::Rates,
     items: HashMap<u16, (u16, bool)>,
     equipment_abilities: HashMap<u16, u16>,
+    /// Each equipment item's stat row (FUN_1403e3ef0) by item id.
+    rows: HashMap<u16, player::equipment_stats::Row>,
+    /// The Keyblades, armor and accessories the development room owns.
+    owned: Vec<u16>,
     inventory: ability_inventory::Inventory,
 }
 
@@ -1267,6 +1278,17 @@ impl AbilitySource {
             &self.rates,
         );
         a
+    }
+
+    /// What the equipment adds to the status totals (FUN_1403c1d90 through
+    /// FUN_1403c1190): the member weapons, the linked form weapon, armor and
+    /// accessories, in that order.
+    fn gear(
+        &self,
+        equipment: &pause_menu::items::Equipment,
+        form_weapon: Option<u16>,
+    ) -> player::equipment_stats::Totals {
+        gear::totals(&self.rows, equipment, form_weapon)
     }
 }
 
@@ -1327,6 +1349,8 @@ mod ability_source_tests {
                 (1001, abilities::item::COMBO_PLUS),
                 (1002, abilities::item::FINISHING_PLUS),
             ]),
+            rows: HashMap::new(),
+            owned: Vec::new(),
             inventory: ability_inventory::Inventory {
                 slots: vec![0; 80],
                 ap: 0,
@@ -1643,11 +1667,16 @@ const ROOM_STOCK: [(u16, u8); 9] = [
     (0x58, 3),
 ];
 
+/// Armor and accessory slots of the development room [test-room values: the
+/// slots a new save gains are not decoded; four of each lets armor and
+/// accessories stack].
+const ROOM_GEAR_SLOTS: usize = 4;
+
 fn room_equipment() -> pause_menu::items::Equipment {
     pause_menu::items::Equipment {
         weapon: KINGDOM_KEY,
-        armor: vec![0],
-        accessories: vec![0],
+        armor: vec![0; ROOM_GEAR_SLOTS],
+        accessories: vec![0; ROOM_GEAR_SLOTS],
         items: ROOM_ITEM_SLOTS.to_vec(),
         originals: ROOM_ITEM_SLOTS.to_vec(),
         ..Default::default()
@@ -1909,7 +1938,9 @@ struct EnemyRuntime {
     clips: EnemyClips,
     body: Vec<(usize, Vec3, f32, bool)>,
     targets: Vec<(usize, Vec3, f32, f32)>,
-    blade: HashMap<u8, Vec<(Vec3, f32)>>,
+    /// Each hand's Keyblade attack spheres by collision group: offset,
+    /// radius.
+    blade: [character_kit::Blade; 2],
     /// Every ATKP step row by (id, sub-table); FUN_1403eb230 picks one per
     /// hit count. Spell rows are added when a spell first hits.
     steps: HashMap<(u16, u8), Vec<data::battle_tables::Attack>>,
@@ -2185,14 +2216,14 @@ fn load_camp_source(
     let plrp = bar_entry(battle, b"plrp")?;
     let lv = data::battle_tables::player_level(lvup, 1, 1)?;
     let byte = |at: usize| plrp.get(8 + at).copied().unwrap_or(0) as i32;
-    // Sora at level 1 (LVUP row + PLRP id 0, Kingdom Key +3 Str /
-    // +1 Mag as in the combat setup) [test-room values].
+    // Sora at level 1 (LVUP row + PLRP id 0) [test-room values]; the
+    // equipment's share is added from `Game::gear`.
     let numbers = SoraNumbers {
         level: 1,
         next_exp: lv.exp,
         ap: lv.ap as i32 + byte(5) + ROOM_EXTRA_AP,
-        strength: lv.strength as i32 + byte(6) + 3,
-        magic: lv.magic as i32 + byte(7) + 1,
+        strength: lv.strength as i32 + byte(6),
+        magic: lv.magic as i32 + byte(7),
         defense: lv.defense as i32 + byte(8),
     };
     let (abilities, weapon_ability) = load_camp_abilities(system, |ids| {
@@ -2220,8 +2251,15 @@ fn load_camp_source(
     };
     let mut eq = msg(&EQUIP_MESSAGES[..21])?.into_iter();
     let mut take = || eq.next().unwrap_or_default();
+    // 0x845f Master and 0x8461 Final label the other two form weapons.
+    let mut form_labels = msg(&[0x845f, 0x8461])?.into_iter();
     let equip_texts = pause_menu::equip::EquipTexts {
         sections: [take(), take(), take(), take(), take()],
+        form_labels: [
+            Vec::new(),
+            form_labels.next().unwrap_or_default(),
+            form_labels.next().unwrap_or_default(),
+        ],
         none: take(),
         no_items: take(),
         unequip_help: [take(), take(), take()],
@@ -2249,6 +2287,7 @@ fn load_camp_source(
             defense: s.defense,
             ap: s.ap,
             resists: s.resists,
+            other_resists: [s.resist[0], s.resist[5], s.resist[6]],
         })
         .collect();
     // Party help (party-spec §11).
@@ -2483,6 +2522,8 @@ fn load(
             rates,
             items,
             equipment_abilities,
+            rows: gear::rows(&table, &stats),
+            owned: gear::owned(&table),
             inventory: ability_inventory::load(&table, &battle)?,
         }
     };
@@ -2620,6 +2661,8 @@ fn load(
             form: 0,
             actor,
             weapon,
+            weapon2: None,
+            blades: Default::default(),
             weapon_joint,
             second_joint: None,
             motion_set: selection.clone(),
@@ -2644,6 +2687,7 @@ fn load(
         &battle,
         &objects,
         weapon_joint,
+        &config.player_object_name,
         selection,
         spell_ids,
         config.enemy.is_some(),
@@ -3331,16 +3375,15 @@ fn load_enemy(
         row.hp,
         row.defense,
     );
-    // Sora at level 1: LVUP row + PLRP (id 0, char 1, Str byte 6) +
-    // Kingdom Key item status +3 Str / +1 Mag (03system item row 80,
-    // combat-01; test-room constant).
+    // Sora at level 1: LVUP row + PLRP (id 0, char 1, Str byte 6); the
+    // equipment's stat rows are added by `Game::refresh_gear`.
     let lv = battle_tables::player_level(bar_entry(battle, b"lvup")?, 1, 1)?;
     let plrp = bar_entry(battle, b"plrp")?;
     let plrp_str = plrp.get(8 + 6).copied().unwrap_or(0) as i32;
     let plrp_mag = plrp.get(8 + 7).copied().unwrap_or(0) as i32;
     let sora = combat::AttackerStats {
-        strength: lv.strength as i32 + plrp_str + 3,
-        magic: lv.magic as i32 + plrp_mag + 1,
+        strength: lv.strength as i32 + plrp_str,
+        magic: lv.magic as i32 + plrp_mag,
         max: 99999,
         min: 1,
         ..combat::AttackerStats::default()
@@ -4895,7 +4938,7 @@ fn setup(
     game.display = pose;
     // Base Sora's model and Keyblade, respawned on a revert.
     if let Some(d) = game.drive.as_mut() {
-        d.models.insert(0, (actor, weapon));
+        d.models.insert(0, (actor, weapon, None));
     }
     // Effect quads: one mesh per blend (GS ALPHA 0x44 blend, 0x48 add).
     if let Some(atlas) = startup.effect_atlas.take() {
@@ -5305,7 +5348,11 @@ fn simulate(
     } else if game.enemy_tour {
         (Vec2::ZERO, false, false)
     } else if let Some(tour) = &game.ability_tour {
-        (Vec2::ZERO, tick == tour.close + 60, false)
+        (
+            Vec2::ZERO,
+            tick == tour.close + 60,
+            tour.attacks.contains(&tick),
+        )
     } else if game.autoplay.is_some() {
         if game.autoplay_end == AUTOPLAY_TALK_END {
             // The talk room's unattended run stands still.
@@ -7063,8 +7110,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
             if (frame as u32) < start || frame as u32 > end {
                 continue;
             }
-            let spheres = rt
-                .blade
+            let spheres = rt.blade[hand]
                 .get(&group)
                 .into_iter()
                 .flatten()
@@ -8458,6 +8504,8 @@ struct CampRes {
     /// Sora's equipment [test-room values]: the Kingdom Key, one empty
     /// armor and accessory slot, two empty item slots.
     equipment: pause_menu::items::Equipment,
+    /// The equipment last logged from the open menu.
+    logged_equipment: Option<pause_menu::items::Equipment>,
     /// The menu chain past the camp: the journal and the curtain between.
     journal_source: Option<JournalSource>,
     journal: Option<Journal>,
@@ -8777,6 +8825,7 @@ fn camp_tick(
         controller::MODE_FIELD
     };
     // Level-ups change the Status numbers and teach abilities.
+    let gear = game.gear;
     if let Some(rt) = game.enemy.as_mut()
         && rt.numbers_dirty
     {
@@ -8785,9 +8834,9 @@ fn camp_tick(
             let n = &mut c.source.numbers;
             n.level = rt.level;
             n.next_exp = row.exp.saturating_sub(rt.exp_total);
-            n.strength = rt.sora.strength;
-            n.magic = rt.sora.magic;
-            n.defense = rt.sora_target.defense;
+            n.strength = rt.sora.strength - i32::from(gear.strength);
+            n.magic = rt.sora.magic - i32::from(gear.magic);
+            n.defense = rt.sora_target.defense - i32::from(gear.defense);
         }
         for id in rt.learned.drain(..) {
             if !c.ability_slots.iter().any(|&s| s & 0x7fff == id)
@@ -8853,6 +8902,35 @@ fn camp_tick(
     };
     let panels_again = panels.clone();
     // Status values are built when the camp opens (FUN_140354340).
+    let gear = game.gear;
+    let form_weapon = game.form_weapon();
+    // Equip's form rows: the owned Valor, Master and Final Forms and the
+    // Keyblade each holds (FUN_1402fc630).
+    let form_slots: Vec<(u8, u16)> = game
+        .drive
+        .as_ref()
+        .map(|d| {
+            [
+                player::forms::VALOR,
+                player::forms::MASTER,
+                player::forms::FINAL,
+            ]
+            .into_iter()
+            .filter(|&f| d.forms.owned[f as usize])
+            .map(|f| (f, d.forms.record(f).map_or(0, |r| r.keyblade)))
+            .collect()
+        })
+        .unwrap_or_default();
+    let form_abilities: Vec<u16> = form_slots
+        .iter()
+        .map(|s| {
+            game.ability_source
+                .equipment_abilities
+                .get(&s.1)
+                .copied()
+                .unwrap_or(0)
+        })
+        .collect();
     let camp_data = |c: &CampRes,
                      panels: pause_menu::Panels,
                      battle_items: Option<&item_room::ItemRt>,
@@ -8860,17 +8938,26 @@ fn camp_tick(
      -> pause_menu::Data {
         // The battle's item slots and stock are the live ones.
         let mut equipment = c.equipment.clone();
+        equipment.form_ids = form_slots.iter().map(|s| s.0).collect();
+        equipment.forms = form_slots.iter().map(|s| s.1).collect();
         let mut counts = c.stock.clone();
         if let Some(it) = battle_items {
             equipment.items = it.slots.clone();
             equipment.originals = it.originals.clone();
             counts = it.stock.clone();
         }
-        let n = c.source.numbers;
+        // Level and record numbers plus what the equipment adds (stats
+        // +0x188..+0x18e, resists +0x1a8..).
+        let mut n = c.source.numbers;
+        n.strength += i32::from(gear.strength);
+        n.magic += i32::from(gear.magic);
+        n.defense += i32::from(gear.defense);
+        n.ap += i32::from(gear.ap);
         let sora_abilities = pause_menu::abilities::MemberAbilities {
             slots: c.ability_slots.clone(),
             ap_max: n.ap,
             weapon_ability: c.source.weapon_ability,
+            form_weapon_abilities: form_abilities.clone(),
         };
         let ap_used = pause_menu::abilities::used(&pause_menu::abilities::entries(
             &c.source.items.table,
@@ -8887,6 +8974,7 @@ fn camp_tick(
                 10 => format!("{}", n.strength),
                 11 => format!("{}", n.magic),
                 12 => format!("{}", n.defense),
+                13..=16 => format!("{}%", 100 - i32::from(gear.resist[bit - 12])),
                 _ => "0%".into(),
             }
         };
@@ -8930,8 +9018,20 @@ fn camp_tick(
                     strength: n.strength,
                     magic: n.magic,
                     defense: n.defense,
-                    resists: [100; 4],
+                    resists: [
+                        gear.resist[1],
+                        gear.resist[2],
+                        gear.resist[3],
+                        gear.resist[4],
+                    ],
                 }],
+                bases: vec![player::equipment_stats::Totals::start(
+                    c.source.numbers.strength as u16,
+                    c.source.numbers.magic as u16,
+                    c.source.numbers.defense as u16,
+                    c.source.numbers.ap as u16,
+                )],
+                form_weapons: vec![form_weapon.unwrap_or(0)],
                 texts: c.source.equip_texts.clone(),
             },
             customize: pause_menu::customize::CustomizeData {
@@ -8970,6 +9070,23 @@ fn camp_tick(
         if let Some(s) = &menu.data.settings {
             settings.current.clone_from(s);
         }
+        // Each equipment change in the open menu, with the totals the
+        // Equip screen then shows.
+        let shown = menu.data.items.equipment.first().cloned();
+        if shown != c.logged_equipment {
+            if let Some(e) = &shown {
+                let totals = menu.data.equip.totals.first().copied().unwrap_or_default();
+                let gg = game.gear;
+                game.event(serde_json::json!({"event":"menu_equipment","weapon":e.weapon,
+                    "forms":e.forms,"armor":e.armor,"accessories":e.accessories,
+                    "ap":totals.ap,"strength":totals.strength,"magic":totals.magic,
+                    "defense":totals.defense,"resists":totals.resists,
+                    "weapon_ability":menu.data.abilities.members.first().map(|m| m.weapon_ability),
+                    "tick":tick,"level_base":[c.source.numbers.strength,c.source.numbers.magic,c.source.numbers.defense],
+                    "game_gear":[gg.strength,gg.magic,gg.defense]}));
+            }
+            c.logged_equipment = shown;
+        }
         if menu.journal.is_some()
             && c.curtain.is_none()
             && let Some(j) = &c.journal_source
@@ -8993,7 +9110,24 @@ fn camp_tick(
             if let Some(e) = menu.data.items.equipment.first() {
                 c.equipment = e.clone();
             }
+            // The Equip menu's form weapons (FUN_1402fc7c0) and the member's
+            // Keyblade: a change replaces the weapon objects.
+            let previous_weapon = game.equipment.weapon;
             game.equipment = c.equipment.clone();
+            if let Some(d) = game.drive.as_mut() {
+                let mut changed = c.equipment.weapon != previous_weapon;
+                for (&f, &id) in c.equipment.form_ids.iter().zip(&c.equipment.forms) {
+                    if let Some(r) = d.forms.record_mut(f)
+                        && r.keyblade != id
+                    {
+                        r.keyblade = id;
+                        changed |= d.active && d.form == f;
+                    }
+                }
+                if changed {
+                    d.keyblades_changed(c.equipment.weapon);
+                }
+            }
             c.source.weapon_ability = game
                 .ability_source
                 .equipment_abilities
@@ -9553,7 +9687,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     }
     let started = Instant::now();
     if args.len() < 3 {
-        return Err("usage: room <Steam-root> <manifest> <test-room-config> [--log new.jsonl] [--frames N] [--autoplay <new-capture-dir> | --ability-tour <new-capture-dir> | --enemy-tour <new-capture-dir>] [--enemy-audit <new-private-report.json>] [--gamepad] [--show-collision] [--basic-fk]".into());
+        return Err("usage: room <Steam-root> <manifest> <test-room-config> [--log new.jsonl] [--frames N] [--autoplay <new-capture-dir> | --ability-tour <new-capture-dir> | --gear-tour <new-capture-dir> | --enemy-tour <new-capture-dir>] [--enemy-audit <new-private-report.json>] [--gamepad] [--show-collision] [--basic-fk]".into());
     }
     let mut log_path = None;
     let mut limit = None;
@@ -9561,6 +9695,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut show_collision = false;
     let mut basic_fk = false;
     let mut ability_tour = false;
+    let mut gear_tour = false;
+    let mut gear_tour_quick = false;
     let mut enemy_tour = false;
     let mut enemy_battle_tour = false;
     let mut enemy_audit = None;
@@ -9601,6 +9737,17 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("enemy combat tour capture directory absent")?,
+                );
+            }
+            Some(flag @ ("--gear-tour" | "--gear-tour-quick")) if autoplay.is_none() => {
+                ability_tour = true;
+                gear_tour = true;
+                gear_tour_quick = flag == "--gear-tour-quick";
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("gear tour capture directory absent")?,
                 );
             }
             Some("--ability-tour") if autoplay.is_none() => {
@@ -9728,10 +9875,16 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             .camp
             .as_ref()
             .ok_or("ability tour requires camp assets")?;
-        Some(ability_inventory::Tour::new(
-            &camp.items.table,
-            &loaded.abilities.inventory,
-        ))
+        Some(if gear_tour {
+            gear_tour::tour(
+                &camp.items.table,
+                &loaded.abilities.owned,
+                loaded.abilities.inventory.slots.clone(),
+                gear_tour_quick,
+            )
+        } else {
+            ability_inventory::Tour::new(&camp.items.table, &loaded.abilities.inventory)
+        })
     } else {
         None
     };
@@ -9775,9 +9928,12 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     if let Some(h) = &loaded.hud {
         player.mp = magic::Mp::new(h.stats.1);
     }
+    // The room's stock with every Keyblade, armor and accessory it owns.
+    let owned_stock = gear::with_owned_equipment(room_stock(), &loaded.abilities.owned);
     let mut game = Game {
         ability_source: loaded.abilities,
         equipment,
+        gear: player::equipment_stats::Totals::start(0, 0, 0, 0),
         ability_slots,
         ability_tour: tour,
         enemy_tour,
@@ -9842,7 +9998,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 src,
                 ROOM_ITEM_SLOTS.to_vec(),
                 ROOM_ITEM_SLOTS.to_vec(),
-                room_stock(),
+                owned_stock,
             )
         }),
         magic: loaded.magic.map(|src| {
@@ -9862,6 +10018,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         blend_from: None,
         display_hand: Transform::IDENTITY,
         weapon_indices: Vec::new(),
+        weapon2_indices: Vec::new(),
         weapon_display: Vec::new(),
         shown_action: None,
         action_started: 0,
@@ -9879,6 +10036,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         autoplay_end,
     };
     game.event(loaded.summary);
+    game.refresh_gear();
     game.event(serde_json::json!({"event":"ability_inventory","slots":game.ability_slots,
         "ap_budget":game.ability_source.inventory.ap,"growth_tiers":game.ability_source.inventory.growth}));
     let mut drive_fx = drive_fx::DriveFx::default();
@@ -10060,7 +10218,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             clips: e.clips,
             body: e.body,
             targets: e.targets,
-            blade: e.blade,
+            blade: [e.blade.clone(), e.blade],
             steps: e.steps,
             atkp: e.atkp,
             difficulty: e.difficulty,
@@ -10098,6 +10256,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             sora_invulnerable: 0.,
             sound_tick: None,
         });
+        // The combat numbers start without the equipment's share: add it.
+        game.gear = player::equipment_stats::Totals::start(0, 0, 0, 0);
+        game.refresh_gear();
     }
     let rig = CameraRig {
         camera: FollowCamera::new(
@@ -10159,11 +10320,12 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             icon_sheet: 0,
             glyph: 0,
             keyboard_last: true,
-            stock: room_stock(),
+            stock: gear::with_owned_equipment(room_stock(), &game.ability_source.owned),
             seen: Vec::new(),
             shortcuts: ROOM_SHORTCUTS,
             no_charge: 0,
             equipment: room_equipment(),
+            logged_equipment: None,
             ability_slots: game.ability_slots.clone(),
             journal_source: loaded.journal,
             journal: None,

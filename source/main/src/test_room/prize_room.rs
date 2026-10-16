@@ -95,7 +95,10 @@ fn kill(
     let low = rt.sora_hp * 2 <= rt.sora_target.max_hp;
     let boost = low.then_some(player.abilities.experience_boost as u32);
     let exp = enemy_prizes::kill_exp(enemy_exp, level_exp, critical, boost);
-    grant_exp(rt, exp, log, tick);
+    // FUN_1403ed110: No Experience (ability bit 116) takes the kill's EXP.
+    if !player.abilities.has(abilities::bit::NO_EXPERIENCE) {
+        grant_exp(rt, exp, log, tick);
+    }
     // FUN_1403dc170: counts scaled by Jackpot, munny converted by Drive
     // Converter, three item rolls with Lucky Lucky.
     let ab = &player.abilities;
