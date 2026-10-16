@@ -38,6 +38,9 @@ pub enum Anchor {
     /// its own translation, rotation and scale in engine world space
     /// (FUN_1402c7010); it belongs to the element's background group.
     Map { index: usize },
+    /// The equipped weapon: a trail element (BonePos pair) follows the
+    /// blade bone.
+    Weapon,
 }
 
 /// A start request that names its anchor (Sora's own use [`FxRequest`]).
@@ -99,6 +102,8 @@ struct Running {
     owner: u8,
     /// The element, when it follows the room enemy's object.
     enemy_element: Option<object_effect::Element>,
+    /// The BonePos pair a swing trail follows on the weapon's blade bone.
+    trail: Option<object_effect::BonePos>,
     /// The background group a map element belongs to.
     group: Option<u8>,
     /// The element's sound, stopped with the element (map beds loop).
@@ -263,6 +268,7 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
                 (bind, world)
             }
             Anchor::Map { .. } => (None, local),
+            Anchor::Weapon => (None, ::effect::math::IDENTITY),
             Anchor::World { at, pitch, yaw } => (
                 None,
                 ::effect::instance_matrix(to_world(at.to_array()), [pitch, yaw, 0.], element.scale),
@@ -313,6 +319,8 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
                 bind,
                 owner: req.owner,
                 enemy_element,
+                trail: (matches!(anchor, Anchor::Weapon) && element.flags & 0x10000 != 0)
+                    .then_some(element.bone_pos),
                 group: matches!(anchor, Anchor::Map { .. }).then_some(element.group),
                 sound_id: sound.filter(|_| matches!(anchor, Anchor::Map { .. })),
                 sound: sound.filter(|_| wait > 0.),
@@ -342,6 +350,9 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
         }
         if let (Some(element), Some((position, yaw))) = (&r.enemy_element, enemy_at) {
             r.instance.world = super::bound_world(position, yaw, element);
+        }
+        if let Some(bone) = &r.trail {
+            r.instance.trail = super::weapon_trail::points(&game, bone);
         }
         let q = r.instance.frame(&view, &mut fx.rng);
         for &k in &r.instance.unsupported {
@@ -390,13 +401,16 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
                     layer,
                 })
                 .or_default();
-            let colour = [
-                q.colour[0].clamp(0., 1.99).powf(2.2),
-                q.colour[1].clamp(0., 1.99).powf(2.2),
-                q.colour[2].clamp(0., 1.99).powf(2.2),
-                q.colour[3].clamp(0., 1.),
-            ];
+            let grade = |c: [f32; 4]| {
+                [
+                    c[0].clamp(0., 1.99).powf(2.2),
+                    c[1].clamp(0., 1.99).powf(2.2),
+                    c[2].clamp(0., 1.99).powf(2.2),
+                    c[3].clamp(0., 1.),
+                ]
+            };
             for i in [0, 1, 2, 0, 2, 3] {
+                let colour = grade(q.corner_colours.map_or(q.colour, |c| c[i]));
                 batch.positions.push(scene(q.corners[i]));
                 batch
                     .uvs

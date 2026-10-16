@@ -80,6 +80,7 @@ mod magic_room;
 mod party_room;
 mod prize_room;
 mod settings_room;
+mod weapon_trail;
 
 fn player_object_default() -> String {
     "P_EX100".into()
@@ -499,6 +500,8 @@ struct ClipPoses {
     /// (start, end, ATKP id, collision group), in clip ticks; then slot 1's.
     hits: Vec<(u32, u32, u16, u8)>,
     hits2: Vec<(u32, u32, u16, u8)>,
+    /// Trail windows (the weapon motion's range trigger 12), in clip ticks.
+    trails: Vec<(u32, u32)>,
     /// The actor motion's own range-10 windows (the drive motions' ATKP
     /// 124 / 125), on the object's attack shapes.
     actor_hits: Vec<(u32, u32, u16, u8)>,
@@ -897,6 +900,10 @@ struct Game {
     effect_queue: Vec<EffectRequest>,
     /// Elements to start next tick at a place other than Sora's own.
     fx_queue: Vec<drive_fx::Placed>,
+    /// Weapon trail: the action tick and clip frame last scanned, and the
+    /// calibrated bone length.
+    trail_scan: Option<(u64, u32)>,
+    trail_length: Option<f32>,
     /// Map effect groups to end (None = all of them).
     fx_clear_map: Vec<Option<u8>>,
     /// The area's map effects still to be started (a new area).
@@ -6030,6 +6037,7 @@ fn bound_world(
 /// and keeps the quads they drew.
 fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effects>) {
     let tick = game.tick;
+    weapon_trail::tick(&mut game, fx.weapon.as_ref());
     let view = game_view(rig.camera.eye, rig.camera.look_at);
     for request in std::mem::take(&mut game.effect_queue) {
         let (pax, element, world, label, bound) = match request {
@@ -10021,6 +10029,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         sound_frame: None,
         effect_queue: Vec::new(),
         fx_queue: Vec::new(),
+        trail_scan: None,
+        trail_length: None,
         fx_clear_map: Vec::new(),
         map_fx_pending: true,
         sound_stops: Vec::new(),

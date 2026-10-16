@@ -86,6 +86,7 @@ const MATRIX_LOOP_ZXY: u32 = 234;
 /// Whether the table record has an update function (+8).
 pub(crate) fn has_update(kind: u32) -> bool {
     !crate::extra::without_update(kind)
+        && kind != crate::shipoly::KIND
         && !matches!(
             kind,
             KE_TH_RES8
@@ -114,6 +115,7 @@ pub(crate) fn has_draw(kind: u32) -> bool {
                 | models::DRAW_MDL_LOOP_Z
                 | models::SNO_MDL_DTT_NORM
                 | crate::tail::KIND
+                | crate::shipoly::KIND
                 | crate::thunder::KIND
                 | crate::ribbon::KIND
         )
@@ -183,6 +185,7 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
         MEGA_BIRTH_MODEL => crate::mega_model::create(p, part, ctx),
         crate::ribbon::KIND => crate::ribbon::create(p, part, ctx),
         crate::tail::KIND => crate::tail::create(p, part, ctx),
+        crate::shipoly::KIND => crate::shipoly::create(p, part),
         crate::thunder::KIND => crate::thunder::create(p, part, ctx),
         models::VT_MIME
         | models::DRAW_MDL_TS3
@@ -289,6 +292,7 @@ pub(crate) fn destroy(p: &Program, part: &mut Part, ctx: &mut Ctx) {
         MEGA_BIRTH => crate::mega_birth::destroy(p, part, ctx),
         MEGA_BIRTH_MODEL => crate::mega_model::destroy(p, part, ctx),
         crate::ribbon::KIND => crate::ribbon::destroy(p, part, ctx),
+        crate::shipoly::KIND => crate::shipoly::destroy(p, part),
         _ => {}
     }
 }
@@ -442,6 +446,7 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
         MEGA_BIRTH_MODEL => crate::mega_model::draw(p, cursor, part, ctx),
         crate::ribbon::KIND => crate::ribbon::draw(p, cursor, part, ctx),
         crate::tail::KIND => crate::tail::draw(p, cursor, part, ctx),
+        crate::shipoly::KIND => crate::shipoly::draw(p, cursor, part, ctx),
         crate::thunder::KIND => crate::thunder::draw(p, cursor, part, ctx),
         k if crate::extra::draws(k) => crate::extra::draw(p, cursor, part, ctx),
         models::VT_MIME
@@ -765,6 +770,7 @@ pub(crate) fn emit_sprites(ctx: &mut Ctx, anim: usize, index: usize, m: &Mat, pa
             uv,
             colour,
             blend: s.colour[4],
+            corner_colours: None,
             tbp,
             tex0,
         });
