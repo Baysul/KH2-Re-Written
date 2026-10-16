@@ -16,6 +16,7 @@ mod programs;
 mod ribbon;
 mod shipoly;
 mod tail;
+mod tail2;
 mod thunder;
 
 use data::object_effect::{Dpd, Program, i32_at, u32_at};
