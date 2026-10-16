@@ -244,6 +244,15 @@ impl Abilities {
         }
     }
 
+    /// Takes a bit away (a room's switch; the executable never clears one
+    /// alone).
+    pub fn clear(&mut self, bit: u16) {
+        let word = (bit >> 5) as usize;
+        if word < self.bits.len() {
+            self.bits[word] &= !(1 << (bit & 31));
+        }
+    }
+
     /// FUN_140401730: one ability item (id) with its bit (item +4).
     pub fn add(&mut self, item: u16, bit: u16, sstm: &Rates) {
         match item {
@@ -348,6 +357,16 @@ mod tests {
         put16(&mut r, 0x134, 50);
         put16(&mut r, 0x14c, 20);
         Rates::read(&r).unwrap()
+    }
+
+    #[test]
+    fn a_cleared_bit_leaves_its_neighbours() {
+        let mut a = Abilities::default();
+        a.set(bit::MAGIC_LOCK_ON);
+        a.set(bit::MAGIC_LOCK_ON + 1);
+        a.clear(bit::MAGIC_LOCK_ON);
+        assert!(!a.has(bit::MAGIC_LOCK_ON));
+        assert!(a.has(bit::MAGIC_LOCK_ON + 1));
     }
 
     #[test]

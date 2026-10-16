@@ -66,7 +66,7 @@ Built (all in the test room, against the one Shadow):
 - The jump is variable: letting go of Jump cuts the rise short. Square starts Upper Slash, Finishing Leap and Horizontal Slash mid-combo, and Retaliating Slash out of a blow (T105).
 
 Unfinished:
-- Spells show the effects of their own effect files since T136 (the old stand-in shapes appear only with F1); no voices play.
+- Spells show the effects of their own effect files since T136 (the old stand-in shapes appear only with F1); no voices play. Cure asks which party member to heal; Donald casts Fire, Blizzard, Thunder and Cure on his own (Magic stat, MP and MP Charge, his own effects); Magic Lock-On picks a target for a cast made without one.
 - Prize sprites, the heal effect and item treasure boxes are drawn and picked up (T161); their physics, the box flight and pickup message are not.
 - Level-up panels, the level-up effect and bonus-level HP/MP/Drive growth are built (T160); the EXP popup and encounter bonus ids are not.
 - Game over: Sora's death event, the Continue / Load Game list over his lying pose and Continue's reload are built (T140); Load Game, the other game-over modes and the Drive-form KO are not.

@@ -130,7 +130,18 @@ struct Frames {
     bones: Option<HashMap<usize, Mat4>>,
     body_lift: f32,
     heal_lift: f32,
-    members: Vec<(Vec3, f32)>,
+    members: Vec<MemberFrame>,
+}
+
+/// A party member's frame of this tick: origin, facing, the staff's top as
+/// a bone matrix (model space) and the heights of its type-1 and type-9
+/// collision centres.
+struct MemberFrame {
+    pos: Vec3,
+    yaw: f32,
+    staff: Option<Mat4>,
+    body_lift: f32,
+    heal_lift: f32,
 }
 
 impl Frames {
@@ -169,7 +180,22 @@ impl Frames {
         let members = game
             .party
             .iter()
-            .map(|m| (Vec3::from_array(m.follower.position), m.follower.yaw))
+            .map(|m| {
+                let data = m.kind.motions.get(&m.follower.motion());
+                // A motion without its own weapon pose keeps the idle one.
+                let staff = data
+                    .filter(|d| !d.staff.is_empty())
+                    .map(|d| (d, d.frame_of(m.follower.tick)))
+                    .or_else(|| m.kind.motions.get(&0).map(|d| (d, 0)))
+                    .and_then(|(d, f)| d.staff.get(f).copied());
+                MemberFrame {
+                    pos: Vec3::from_array(m.follower.position),
+                    yaw: m.follower.yaw,
+                    staff,
+                    body_lift: m.kind.body_lift,
+                    heal_lift: m.kind.heal_lift,
+                }
+            })
             .collect();
         Frames {
             root,
@@ -184,23 +210,33 @@ impl Frames {
 
     /// The bound object's bone matrix (FUN_1403b50f0), in the scene space.
     fn bone(&self, anchor: Anchor, bone: i16) -> Mat4 {
-        let root = match anchor {
-            Anchor::Caster | Anchor::Party(0) => self.root,
-            Anchor::Party(i) => match self.members.get(i - 1) {
-                Some(&(p, yaw)) => Mat4::from_rotation_translation(Quat::from_rotation_y(yaw), p),
-                None => self.root,
-            },
+        let member = match anchor {
+            Anchor::Party(i) if i > 0 => self.members.get(i - 1),
+            _ => None,
         };
+        let root = match member {
+            Some(m) => Mat4::from_rotation_translation(Quat::from_rotation_y(m.yaw), m.pos),
+            None => self.root,
+        };
+        let (body_lift, heal_lift) = member.map_or((self.body_lift, self.heal_lift), |m| {
+            (m.body_lift, m.heal_lift)
+        });
         let own = matches!(anchor, Anchor::Caster | Anchor::Party(0));
         match bone {
             0x4000 => root,
-            0x4001 => root * Mat4::from_translation(Vec3::new(0., self.body_lift, 0.)),
-            0x4009 => root * Mat4::from_translation(Vec3::new(0., self.heal_lift, 0.)),
+            0x4001 => root * Mat4::from_translation(Vec3::new(0., body_lift, 0.)),
+            0x4009 => root * Mat4::from_translation(Vec3::new(0., heal_lift, 0.)),
             0x4003 | 0x4004 if own => match self.hand {
                 Some(h) => root * h * Mat4::from_translation(self.tip),
-                None => root * Mat4::from_translation(Vec3::new(0., self.body_lift, 0.)),
+                None => root * Mat4::from_translation(Vec3::new(0., body_lift, 0.)),
             },
-            0x4003..=0x4009 => root * Mat4::from_translation(Vec3::new(0., self.body_lift, 0.)),
+            // A party member's weapon slot 0 top (FUN_1403b5450): the
+            // staff's bone 2 with its top vertex.
+            0x4003 | 0x4004 => match member.and_then(|m| m.staff) {
+                Some(staff) => root * staff,
+                None => root * Mat4::from_translation(Vec3::new(0., body_lift, 0.)),
+            },
+            0x4003..=0x4009 => root * Mat4::from_translation(Vec3::new(0., body_lift, 0.)),
             b if b >= 0 && own => match self.bones.as_ref().and_then(|m| m.get(&(b as usize))) {
                 // The bone read through FUN_1401a7af0 negates its y and z
                 // columns.
@@ -774,7 +810,13 @@ mod tests {
             bones: None,
             body_lift: 70.,
             heal_lift: 90.,
-            members: vec![(Vec3::new(-200., 0., 0.), 0.)],
+            members: vec![MemberFrame {
+                pos: Vec3::new(-200., 0., 0.),
+                yaw: 0.,
+                staff: None,
+                body_lift: 70.,
+                heal_lift: 90.,
+            }],
         }
     }
 

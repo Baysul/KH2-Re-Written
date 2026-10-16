@@ -513,6 +513,8 @@ enum State {
         done: bool,
         leaf: f32,
         leaf_centre: Vec3,
+        /// The chosen target's party slot (S[44]; 0 = Sora).
+        target: usize,
     },
     Magnet {
         centre: Vec3,
@@ -694,6 +696,7 @@ impl Spell {
                 done: false,
                 leaf: 0.,
                 leaf_centre: ctx.caster_centre,
+                target: 0,
             },
             MAGNET => State::Magnet {
                 centre: ctx.caster,
@@ -750,6 +753,15 @@ impl Spell {
         self
     }
 
+    /// Cure's chosen target (the party slot picked in the target menu;
+    /// Sora, slot 0, from a shortcut).
+    pub fn with_target(mut self, slot: usize) -> Self {
+        if let State::Cure { target, .. } = &mut self.state {
+            *target = slot;
+        }
+        self
+    }
+
     /// Leaf Bracer (TR20 of Cure on oneself, ability 114): 60 ticks of
     /// invulnerability and an ATKP 1247 super guard (r 100) at the caster's
     /// TARGET centre, from the cast's start.
@@ -767,6 +779,7 @@ impl Spell {
                 done: true,
                 leaf: 60.,
                 leaf_centre: ctx.caster_centre,
+                target: 0,
             },
             finished: false,
             cast_key: cast_key(serial),
@@ -1194,34 +1207,37 @@ impl Spell {
                 done,
                 leaf,
                 leaf_centre,
+                target,
             } => {
                 if !*done {
                     *done = true;
                     release_effect(&mut out, fk(1), 1);
-                    // The heal centre is the target (Sora himself here):
-                    // `obj_apply_bone_matrix(target, 0x4001, origin)`.
-                    let heal = ctx.body_centre;
+                    // The heal centre is the chosen target's body centre:
+                    // `obj_apply_bone_matrix(S[44], 0x4001, origin)`.
+                    let chosen = ctx.party.get(*target).copied().unwrap_or(ctx.caster);
+                    let lift = ctx.body_centre[1] - ctx.caster[1];
+                    let heal = [chosen[0], chosen[1] + lift, chosen[2]];
                     out.fx.push(Fx::Start {
                         key: fk(2),
                         id: 2,
                         bound: None,
                         at: Some(heal),
                     });
-                    let centre = ctx.party.first().copied().unwrap_or(ctx.caster);
                     for (i, p) in ctx.party.iter().enumerate() {
-                        let d = [p[0] - centre[0], p[2] - centre[2]];
+                        let d = [p[0] - heal[0], p[2] - heal[2]];
                         if len2(d) >= row.f(14) {
                             continue;
                         }
                         // The chosen target (708) and the others (709).
+                        let own = i == *target;
                         out.fx.push(Fx::Start {
                             key: fk(3 + i as u8),
-                            id: if i == 0 { 3 } else { 4 },
+                            id: if own { 3 } else { 4 },
                             bound: Some(Anchor::Party(i)),
                             at: None,
                         });
                         out.strikes.push(Strike {
-                            atkp: if i == 0 { 708 } else { 709 },
+                            atkp: if own { 708 } else { 709 },
                             sub,
                             party: i,
                         });

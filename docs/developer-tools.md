@@ -54,7 +54,7 @@ The bounded selection names source identity and each index/ordinal/name hash plu
 KH2RW.exe room '<selected-install-root>' '<manifest>' '<test-room-config>' --log '<new-log.jsonl>' --magic-tour '<new-empty-capture-dir>' [--magic-form 5]
 ```
 
-An unattended run: each spell on the ground and in the air, cast presses at several distances after an attack, a cast after two attacks (the finisher) and an attack after a cast, with Sora invincible and an enemy that stays in front. `--magic-form` casts in a Drive form (2 Wisdom, 4 Master, 5 Final). The log has `cast`, `cast_refused`, `spell_release`, `spell_effect` and `spell_effect_unsupported` events; captures follow each cast. Both outputs stay outside Git. See [T136](tasks/T136-magic-effects-and-combos.md).
+An unattended run: each spell on the ground and in the air, cast presses at several distances after an attack, a cast after two attacks (the finisher) and an attack after a cast, with Sora invincible and an enemy that stays in front. `--magic-form` casts in a Drive form (2 Wisdom, 4 Master, 5 Final). The log has `cast`, `cast_refused`, `spell_release`, `spell_effect` and `spell_effect_unsupported` events; captures follow each cast. After Sora's casts the tour orders Donald's four spells (`party_cast_order`, `party_cast`, `party_release`, `party_hit`, `party_heal`), lets the party AI cast on its own, and probes Magic Lock-On with the enemy 1400 ahead (`magic_lock_on`). Both outputs stay outside Git. See [T136](tasks/T136-magic-effects-and-combos.md).
 
 ## Research notes
 

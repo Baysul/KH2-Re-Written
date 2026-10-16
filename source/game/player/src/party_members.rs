@@ -8,6 +8,11 @@
 //! (`DAT_14071d760` is filled at run time) and is a test-room value. The
 //! friend AI keeps no combo chain: each decision picks one eligible record
 //! at random, never the same one three times in a row.
+//!
+//! Donald's four spells are records too (57-60, `FUN_1401cc650` /
+//! `FUN_1401cc1a0`): they need the think loop's random MP-scaled permit
+//! (`FUN_1401b53b0`) and an MP bar that is not charging, and play the act of
+//! `party_spell`.
 
 use crate::{Body, Vec3, World};
 
@@ -38,6 +43,16 @@ pub enum Gait {
     Run,
 }
 
+/// The spells of Donald's `p_ex020` acts (`fire`, `blizzard`, `thunder`,
+/// `cure`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Spell {
+    Fire,
+    Blizzard,
+    Thunder,
+    Cure,
+}
+
 /// One action parameter entry (record of 0x80 bytes): the attack's motion
 /// and its range window (FUN_1401b2880).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,6 +67,13 @@ pub struct Record {
     pub high: f32,
     /// Air records jump first (+0x20 ≠ 0); not played yet.
     pub air: bool,
+    /// MP cost (+8); 255 starts an MP Charge.
+    pub cost: u8,
+    /// The act this record starts instead of a weapon motion.
+    pub spell: Option<Spell>,
+    /// Cure: a member is healed while its HP is below this share of its
+    /// maximum (+0x3c).
+    pub heal_below: f32,
 }
 
 const fn ground(id: u8, motion: u16, far: f32) -> Record {
@@ -63,11 +85,44 @@ const fn ground(id: u8, motion: u16, far: f32) -> Record {
         low: -150.,
         high: 100.,
         air: false,
+        cost: 0,
+        spell: None,
+        heal_below: 0.,
     }
 }
 
-/// Donald's ground attack records (resource at 0x14071d850).
-pub const DONALD: [Record; 2] = [ground(0, 151, 200.), ground(1, 152, 180.)];
+/// A spell record: the act's motion, its range window (distances and the
+/// Y-down height window negated into `low`/`high`) and MP cost.
+const fn spell(id: u8, spell: Spell, motion: u16, window: [f32; 4], cost: u8) -> Record {
+    Record {
+        id,
+        motion,
+        near: window[0],
+        far: window[1],
+        low: window[2],
+        high: window[3],
+        air: false,
+        cost,
+        spell: Some(spell),
+        heal_below: 0.,
+    }
+}
+
+/// Donald's records (resource at 0x14071d850): the two ground attacks and
+/// the spells 57-60 (Fire 0-350, Blizzard 250-750, Thunder 0-500 with
+/// their height windows; Cure costs 255 and heals below 0.4 of the HP).
+/// The act motions are 192 (Fire, Thunder, Cure) and 191 (Blizzard).
+pub const DONALD: [Record; 6] = [
+    ground(0, 151, 200.),
+    ground(1, 152, 180.),
+    spell(57, Spell::Fire, 192, [0., 350., -200., 100.], 10),
+    spell(58, Spell::Blizzard, 191, [250., 750., -150., 100.], 10),
+    spell(59, Spell::Thunder, 192, [0., 500., -1000., 500.], 10),
+    Record {
+        heal_below: 0.4,
+        ..spell(60, Spell::Cure, 192, [0., 0., 0., 0.], 255)
+    },
+];
 /// Goofy's ground attack records (personality 1).
 pub const GOOFY: [Record; 2] = [ground(4, 151, 220.), ground(5, 152, 300.)];
 
@@ -84,6 +139,10 @@ pub struct Attack {
     pub record: u8,
     pub motion: u16,
     pub tick: u32,
+    /// The spell this attack is the cast of.
+    pub spell: Option<Spell>,
+    /// Cure: the party slot healed (0 Sora, 1 Donald, 2 Goofy).
+    pub heal: u8,
 }
 
 /// A party member that follows the leader and fights.
@@ -100,6 +159,9 @@ pub struct Follower {
     /// The last three chosen records (obj+0xed0..0xee0).
     history: [u8; 3],
     seed: u32,
+    /// The think loop's spell permit (obj+0xe18 bit 5), rolled each
+    /// decision.
+    pub permit: bool,
 }
 
 fn wrap(a: f32) -> f32 {
@@ -119,6 +181,15 @@ pub struct Scene<'a, W: World> {
     pub length: &'a dyn Fn(u16) -> Option<u32>,
     /// Root-motion displacement of a motion at a tick (model space).
     pub root: &'a dyn Fn(u16, u32) -> Vec3,
+    /// A spell act is still running (the act manager's lock, obj+0x4a8):
+    /// no new decision.
+    pub busy: bool,
+    /// The AI may choose spells (the tour orders its casts instead).
+    pub spells: bool,
+    /// This member's MP: current, maximum and whether an MP Charge runs.
+    pub mp: Option<(i32, i32, bool)>,
+    /// HP and maximum HP of Sora, Donald and Goofy (None: absent).
+    pub hp: [Option<(i32, i32)>; 3],
 }
 
 impl Follower {
@@ -133,6 +204,7 @@ impl Follower {
             attack: None,
             history: [255; 3],
             seed: 0x1234_5678 ^ (slot as u32 * 0x9e37_79b9),
+            permit: false,
         }
     }
 
@@ -171,6 +243,12 @@ impl Follower {
         if r.air {
             return false;
         }
+        // Cure's record reads 0-0 as a range, which the original's check
+        // would turn into "touching the enemy"; the cast waits on the
+        // heal target instead [U: the record's flags were not decoded].
+        if r.spell == Some(Spell::Cure) {
+            return true;
+        }
         let dx = t.position[0] - self.position[0];
         let dz = t.position[2] - self.position[2];
         let d = dx.hypot(dz);
@@ -183,13 +261,61 @@ impl Follower {
             && front
     }
 
+    /// Partner-in-need (obj+0xf78, FUN_1401b53b0): Sora when his HP is at
+    /// most a quarter of the maximum, else the other member under it.
+    fn partner_in_need(&self, hp: &[Option<(i32, i32)>; 3]) -> Option<usize> {
+        let own = self.slot as usize + 1;
+        [0, 3 - own]
+            .into_iter()
+            .find(|&i| hp[i].is_some_and(|(cur, max)| cur * 4 <= max))
+    }
+
+    /// FUN_1401cc1a0: the member Cure heals: the partner-in-need, else
+    /// the first of itself, Sora and the other member whose HP is under
+    /// `max × ratio` (FUN_1401b3310 truncates the product).
+    pub fn heal_target(&self, ratio: f32, hp: &[Option<(i32, i32)>; 3]) -> Option<usize> {
+        if let Some(i) = self.partner_in_need(hp) {
+            return Some(i);
+        }
+        let own = self.slot as usize + 1;
+        [own, 0, 3 - own]
+            .into_iter()
+            .find(|&i| hp[i].is_some_and(|(cur, max)| cur < (max as f32 * ratio) as i32))
+    }
+
+    /// The spell gate of FUN_1401b2880: a record with a cost needs the
+    /// permit and an MP bar that is not charging; Cure also a member to
+    /// heal.
+    fn spell_ready<W: World>(&self, r: &Record, scene: &Scene<W>) -> bool {
+        let Some(spell) = r.spell else { return true };
+        if !scene.spells {
+            return false;
+        }
+        if let Some((_, _, charging)) = scene.mp
+            && r.cost >= 1
+            && !(self.permit && !charging)
+        {
+            return false;
+        }
+        spell != Spell::Cure || self.heal_target(r.heal_below, &scene.hp).is_some()
+    }
+
     /// FUN_1401b1d40 over the attack records: the random pick among the
     /// eligible ones, skipping a record chosen three times running.
-    fn choose(&mut self, records: &[Record], t: &Target) -> Option<Record> {
+    fn choose<W: World>(
+        &mut self,
+        records: &[Record],
+        t: &Target,
+        scene: &Scene<W>,
+    ) -> Option<Record> {
         let candidates: Vec<Record> = records
             .iter()
             .copied()
-            .filter(|r| self.eligible(r, t))
+            .filter(|r| {
+                (scene.length)(r.motion).is_some()
+                    && self.eligible(r, t)
+                    && self.spell_ready(r, scene)
+            })
             .collect();
         if candidates.is_empty() {
             return None;
@@ -202,6 +328,27 @@ impl Follower {
         }
         self.history = [self.history[1], self.history[2], pick.id];
         Some(pick)
+    }
+
+    /// Starts a record's motion toward the target (FUN_1401b7d30 for an
+    /// attack, FUN_1403caa90 for a spell act).
+    pub fn begin(&mut self, r: &Record, t: &Target, heal: u8) {
+        let to = [
+            t.position[0] - self.position[0],
+            t.position[2] - self.position[2],
+        ];
+        if to[0].hypot(to[1]) > 1e-3 {
+            self.yaw = to[0].atan2(to[1]);
+        }
+        self.attack = Some(Attack {
+            record: r.id,
+            motion: r.motion,
+            tick: 0,
+            spell: r.spell,
+            heal,
+        });
+        self.gait = Gait::Stand;
+        self.tick = 0;
     }
 
     /// One tick: finish or continue an attack, else choose one against the
@@ -225,25 +372,28 @@ impl Follower {
             }
             return;
         }
+        // A running spell act holds the member where it stands.
+        if scene.busy {
+            self.gait = Gait::Stand;
+            self.tick += 1;
+            return;
+        }
+        // The think loop's spell permit: MP share scaled (FUN_1401b53b0).
+        if let Some((cur, max, _)) = scene.mp {
+            let p = (cur as f32 / max.max(1) as f32) * 0.75 + 0.25;
+            self.permit = self.rand(20001) as f32 / 20000. <= p;
+        }
         // Decide: an eligible attack starts at once (FUN_1401b1d40).
         if let Some(t) = scene.target
-            && let Some(r) = self.choose(records, &t)
+            && let Some(r) = self.choose(records, &t, scene)
             && (scene.length)(r.motion).is_some()
         {
-            let to = [
-                t.position[0] - self.position[0],
-                t.position[2] - self.position[2],
-            ];
-            if to[0].hypot(to[1]) > 1e-3 {
-                self.yaw = to[0].atan2(to[1]);
-            }
-            self.attack = Some(Attack {
-                record: r.id,
-                motion: r.motion,
-                tick: 0,
-            });
-            self.gait = Gait::Stand;
-            self.tick = 0;
+            let heal = if r.spell == Some(Spell::Cure) {
+                self.heal_target(r.heal_below, &scene.hp).unwrap_or(0) as u8
+            } else {
+                0
+            };
+            self.begin(&r, &t, heal);
             return;
         }
         // Movement: toward the target in a fight, else behind the leader.
@@ -327,6 +477,10 @@ mod tests {
             body: BODY,
             length: &length,
             root: &no_root,
+            busy: false,
+            spells: false,
+            mp: None,
+            hp: [None; 3],
         }
     }
 
@@ -398,5 +552,109 @@ mod tests {
                 .all(|w| !(w[0] == w[1] && w[1] == w[2] && w[2] == w[3]))
         );
         assert!(chosen.contains(&0) && chosen.contains(&1));
+    }
+
+    fn spell_length(m: u16) -> Option<u32> {
+        matches!(m, 151 | 152 | 191 | 192).then_some(60)
+    }
+
+    fn spell_scene<'a>(
+        t: Option<Target>,
+        world: &'a Flat,
+        mp: (i32, i32, bool),
+        hp: [Option<(i32, i32)>; 3],
+    ) -> Scene<'a, Flat> {
+        Scene {
+            leader: [0.; 3],
+            leader_yaw: 0.,
+            target: t,
+            world,
+            body: BODY,
+            length: &spell_length,
+            root: &no_root,
+            busy: false,
+            spells: true,
+            mp: Some(mp),
+            hp,
+        }
+    }
+
+    #[test]
+    fn spells_need_the_permit_and_an_mp_bar_that_is_not_charging() {
+        let t = Target {
+            position: [0., 0., 300.],
+            radius: 40.,
+        };
+        // Full MP: the permit odds are 1; the member casts something.
+        let mut f = Follower::spawn([0., 0., 100.], 0., 0);
+        let mut spells = 0;
+        for _ in 0..4000 {
+            f.tick(
+                &DONALD,
+                &spell_scene(Some(t), &Flat, (100, 100, false), [Some((20, 20)); 3]),
+            );
+            if f.attack.is_some_and(|a| a.spell.is_some() && a.tick == 0) {
+                spells += 1;
+            }
+        }
+        assert!(spells > 5, "{spells}");
+        // An MP Charge running: no spell is ever chosen.
+        let mut f = Follower::spawn([0., 0., 100.], 0., 0);
+        for _ in 0..4000 {
+            f.tick(
+                &DONALD,
+                &spell_scene(Some(t), &Flat, (0, 100, true), [Some((20, 20)); 3]),
+            );
+            assert!(f.attack.is_none_or(|a| a.spell.is_none()));
+        }
+    }
+
+    #[test]
+    fn blizzard_waits_for_distance_and_fire_for_the_enemy_to_be_near() {
+        // At 600 only Blizzard (250-750) is in range.
+        let mut f = Follower::spawn([0., 0., 0.], 0., 0);
+        f.permit = true;
+        let t = Target {
+            position: [0., 0., 600.],
+            radius: 40.,
+        };
+        let scene = spell_scene(Some(t), &Flat, (100, 100, false), [Some((20, 20)); 3]);
+        let ready: Vec<u8> = DONALD
+            .iter()
+            .filter(|r| f.eligible(r, &t) && f.spell_ready(r, &scene))
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ready, vec![58]);
+    }
+
+    #[test]
+    fn cure_heals_the_partner_in_need_then_itself_then_sora_then_the_other_member() {
+        let f = Follower::spawn([0.; 3], 0., 0); // Donald: party slot 1
+        // Sora at a quarter of his HP is the partner in need, whoever else
+        // is hurt.
+        assert_eq!(
+            f.heal_target(0.4, &[Some((5, 20)), Some((1, 20)), Some((1, 20))]),
+            Some(0)
+        );
+        // Else Donald himself under 0.4 (8 of 20).
+        assert_eq!(
+            f.heal_target(0.4, &[Some((20, 20)), Some((7, 20)), Some((20, 20))]),
+            Some(1)
+        );
+        // Goofy at a quarter is the partner in need before Donald's 0.4.
+        assert_eq!(
+            f.heal_target(0.4, &[Some((20, 20)), Some((7, 20)), Some((5, 20))]),
+            Some(2)
+        );
+        // Nobody under 0.4: no heal.
+        assert_eq!(
+            f.heal_target(0.4, &[Some((20, 20)), Some((20, 20)), Some((20, 20))]),
+            None
+        );
+        // Sora alone under 0.4 but above a quarter (7 of 20).
+        assert_eq!(
+            f.heal_target(0.4, &[Some((7, 20)), Some((20, 20)), Some((20, 20))]),
+            Some(0)
+        );
     }
 }

@@ -21,6 +21,7 @@ pub mod growth;
 pub mod limit_form;
 pub mod magic;
 pub mod party_members;
+pub mod party_spell;
 pub mod ptya;
 pub mod shadow;
 pub mod soldier;

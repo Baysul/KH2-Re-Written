@@ -15,6 +15,9 @@ const WORLD: u8 = 2;
 /// Attack-instance keys of spell volumes live above the weapon windows'
 /// `(action_started << 7) | hand << 5 | window` ids.
 pub const KEY_BASE: u64 = 1 << 62;
+/// The key of the party list's first name in `MagicSource::names` (Sora,
+/// Donald, Goofy follow it).
+pub const MEMBER_NAMES: u16 = 0xf000;
 /// Sound id of the "cannot" cue (system bank 5, command-01 §6.3).
 const SE_ERROR: u32 = 5;
 
@@ -191,6 +194,8 @@ pub struct CastFx {
     pub magic_type: u8,
     pub level: u8,
     pub pax: Option<Arc<object_effect::Pax>>,
+    /// Cure's chosen party slot.
+    pub target: usize,
 }
 
 impl MagicRt {
@@ -293,6 +298,7 @@ pub fn request(game: &mut Game, magic_type: u8, tick: u64) -> bool {
         fx_calls,
         magic_tour,
         voices,
+        cure_target,
         ..
     } = game;
     let Some(m) = magic.as_mut() else {
@@ -320,8 +326,10 @@ pub fn request(game: &mut Game, magic_type: u8, tick: u64) -> bool {
         sound_queue.push((SE_ERROR, "magic_denied"));
         return false;
     }
-    // Cure on a shortcut targets Sora himself.
-    let target_is_self = magic_type == magic::CURE;
+    // Cure on a shortcut targets Sora himself; from the menu, the member
+    // picked in the target list.
+    let cure_target = std::mem::take(cure_target);
+    let target_is_self = magic_type == magic::CURE && cure_target == 0;
     // obj+0xde0: the Drive form picks the variant row (Wisdom +10, Master
     // +20, Final +30).
     let form = drive.as_ref().map_or(0, |d| d.form);
@@ -372,6 +380,7 @@ pub fn request(game: &mut Game, magic_type: u8, tick: u64) -> bool {
         magic_type,
         level: rec.level,
         pax,
+        target: cure_target,
     });
     // Leaf Bracer (ability 114): Cure on oneself gives 60 ticks of
     // invulnerability and a super guard from the cast's start.
@@ -432,6 +441,7 @@ pub fn tick(game: &mut Game, tick: u64) {
             fx_live,
             magic_tour,
             clips,
+            party: members,
             ..
         } = game;
         let Some(m) = magic.as_mut() else { return };
@@ -454,6 +464,12 @@ pub fn tick(game: &mut Game, tick: u64) {
                     w
                 }).collect::<Vec<_>>()}));
         }
+        // The party members start hurt so Cure has something to heal.
+        if *magic_tour && tick == 1 {
+            for member in members.iter_mut() {
+                member.hp = member.max_hp / 2;
+            }
+        }
         // The tour's enemy takes every hit and stays.
         if *magic_tour && let Some(rt) = enemy.as_mut() {
             rt.enemy.hp = rt.enemy.hp.max(500);
@@ -462,7 +478,17 @@ pub fn tick(game: &mut Game, tick: u64) {
         let facing = [player.yaw.sin(), player.yaw.cos()];
         let action = player.action;
         let centre = [pos[0], pos[1] + m.src.target_lift, pos[2]];
-        let party = [pos];
+        // Party members' origins (a member a Drive form absorbed is out of
+        // range).
+        let party_pos: Vec<[f32; 3]> = std::iter::once(pos)
+            .chain(members.iter().map(|m| {
+                if m.stored {
+                    [f32::INFINITY; 3]
+                } else {
+                    m.follower.position
+                }
+            }))
+            .collect();
         // The locked target's TARGET centre: the enemy while it can be hit.
         let target = *selected_target;
         let ground = |from: [f32; 3], max: f32| -> Option<[f32; 3]> {
@@ -489,7 +515,7 @@ pub fn tick(game: &mut Game, tick: u64) {
                 airborne,
                 casting,
                 target,
-                party: &party,
+                party: &party_pos,
                 ground: &ground,
                 bg_hit: &bg,
                 barrier,
@@ -500,12 +526,12 @@ pub fn tick(game: &mut Game, tick: u64) {
         m.feedback.reflected = m.reflected.iter().map(|(&k, &c)| (k, c)).collect();
         m.feedback.fx = fx_live.iter().map(|(&k, &v)| (k, v)).collect();
         if let Some(r) = player.take_released() {
-            let (cast_serial, pax) = match m.cast.as_mut() {
+            let (cast_serial, pax, cure_slot) = match m.cast.as_mut() {
                 Some(c) => {
                     c.released = true;
-                    (c.serial, c.pax.clone())
+                    (c.serial, c.pax.clone(), c.target)
                 }
-                None => (0, None),
+                None => (0, None, 0),
             };
             m.serial += 1;
             if let Some(p) = &pax {
@@ -520,7 +546,8 @@ pub fn tick(game: &mut Game, tick: u64) {
                 .unwrap_or_default();
             let c = ctx(r.airborne, true, m.barrier, m.barrier_count);
             let spell = Spell::new(m.serial, r.magic_type, r.level, r.row, row, r.form, &c)
-                .with_cast(magic::cast_key(cast_serial), r.volley);
+                .with_cast(magic::cast_key(cast_serial), r.volley)
+                .with_target(cure_slot);
             m.spells.push(spell);
             // The release's sounds are the effect elements' own (trigger 21
             // starts them).
@@ -594,17 +621,25 @@ pub fn tick(game: &mut Game, tick: u64) {
             // attack_strike on the party: Cure's heal is an ATKP Type 6 row
             // (Power x Magic + 99) / 100, added to HP and clamped.
             for st in strikes {
-                if st.party != 0 || !ensure_attack_rows(rt, st.atkp, st.sub) {
+                if !ensure_attack_rows(rt, st.atkp, st.sub) {
                     continue;
                 }
                 let attack = params_of(&rt.steps[&(st.atkp, st.sub)][0]);
                 let full = combat::TargetState::full(rt.sora_target.max_hp);
                 let heal = combat::damage_with(&rt.sora, &attack, &rt.sora_target, &full);
-                rt.sora_hp = (rt.sora_hp + heal).min(rt.sora_target.max_hp);
-                events.push(
-                    serde_json::json!({"event":"heal","tick":tick,"atkp":st.atkp,
-                    "sub":st.sub,"amount":heal,"sora_hp":rt.sora_hp}),
-                );
+                if st.party == 0 {
+                    rt.sora_hp = (rt.sora_hp + heal).min(rt.sora_target.max_hp);
+                    events.push(
+                        serde_json::json!({"event":"heal","tick":tick,"atkp":st.atkp,
+                        "sub":st.sub,"amount":heal,"sora_hp":rt.sora_hp}),
+                    );
+                } else if let Some(member) = members.get_mut(st.party - 1) {
+                    member.hp = (member.hp + heal).min(member.max_hp);
+                    events.push(
+                        serde_json::json!({"event":"heal","tick":tick,"atkp":st.atkp,
+                        "sub":st.sub,"amount":heal,"member":member.kind.name,"hp":member.hp}),
+                    );
+                }
             }
         }
     }

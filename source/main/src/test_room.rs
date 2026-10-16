@@ -887,7 +887,13 @@ struct Game {
     /// The spell scripts' effect calls of this tick and the effects' state
     /// after the last effect update (`spell_fx`).
     fx_calls: Vec<spell_fx::Call>,
+    /// The party's AI may cast (Donald's spells).
+    party_spells: bool,
     fx_live: HashMap<u64, magic::FxLive>,
+    /// The party slot the Magic menu's Cure target list picked (0 Sora)
+    /// and the Magic row Cure was chosen from, while that list is open.
+    cure_target: usize,
+    cure_pick: Option<usize>,
     /// Donald and Goofy, following Sora.
     party: Vec<party_room::MemberRt>,
     items: Option<item_room::ItemRt>,
@@ -3122,6 +3128,8 @@ fn load(
                 .iter()
                 .filter_map(|r| m.commands.get(&r.command).map(|c| (r.command, c.name)))
                 .collect();
+            // The party list's names (message 0x851e + the character id).
+            wanted.extend((0..3).map(|i| (magic_room::MEMBER_NAMES + i, 0x51f + i as u32)));
             // The item commands (execute 3) for the Items submenu.
             wanted.extend(
                 m.commands
@@ -3268,6 +3276,7 @@ fn load(
                 let mut kinds = Vec::new();
                 if let Ok(mut library) = data::path_lookup::Library::open(source) {
                     let lvup = bar_entry(&battle, b"lvup").unwrap_or(&[]);
+                    let plrp = bar_entry(&battle, b"plrp").unwrap_or(&[]);
                     for (name, character, records) in [
                         ("P_EX020", 2, &player::party_members::DONALD[..]),
                         ("P_EX030", 3, &player::party_members::GOOFY[..]),
@@ -3277,6 +3286,7 @@ fn load(
                             &mut library,
                             &system,
                             lvup,
+                            plrp,
                             name,
                             character,
                             records,
@@ -3453,11 +3463,16 @@ fn load_enemy(
                 )
             })
             .collect();
-        let bone_list: Vec<usize> = body
+        // The bones of the HIT shapes, the claws and the TARGET shapes (the
+        // lock-on and the party's spells read the last).
+        let mut bone_list: Vec<usize> = body
             .iter()
             .map(|b| b.0)
             .chain(claws.values().flatten().map(|c| c.0))
+            .chain(targets.iter().map(|t| t.0))
             .collect();
+        bone_list.sort_unstable();
+        bone_list.dedup();
         for offset in 0..=clip.end {
             let (pose, evaluated) = model
                 .skinning
@@ -5765,10 +5780,72 @@ fn simulate(
                     .and_then(|it| it.menu_slots.get(index).copied());
             }
             Decision::ExecuteSub { row: 1, index } => {
+                // A spell whose command opens a submenu (Cure, submenu 4)
+                // first asks for the party member (FUN_1403f22e0).
+                let picked = game.magic.as_ref().and_then(|mg| {
+                    let t = *mg.menu_types.get(index)?;
+                    let cmd = mg.src.commands.get(&mg.current(t)?.command)?;
+                    Some((t, cmd.submenu))
+                });
+                match picked {
+                    Some((_, 4)) if !game.party.is_empty() => {
+                        let mg = game.magic.as_ref().expect("magic");
+                        let name = |id: u16| mg.src.names.get(&id).cloned().unwrap_or_default();
+                        let mut items = vec![Item {
+                            label: name(magic_room::MEMBER_NAMES),
+                            icon: 0,
+                            colour: 0,
+                        }];
+                        for (i, member) in game.party.iter().enumerate() {
+                            items.push(Item {
+                                label: name(magic_room::MEMBER_NAMES + 1 + i as u16),
+                                icon: 0,
+                                colour: if member.stored || member.hp <= 0 {
+                                    5
+                                } else {
+                                    0
+                                },
+                            });
+                        }
+                        game.cure_pick = Some(index);
+                        m.menu.open_sub(4, items);
+                    }
+                    _ => {
+                        menu_cast = game
+                            .magic
+                            .as_ref()
+                            .and_then(|mg| mg.menu_types.get(index).copied());
+                    }
+                }
+            }
+            // The party list: the picked member is the Cure's target.
+            Decision::ExecuteSub { row: 0, index } if game.cure_pick.is_some() => {
+                let pick = game.cure_pick.take();
                 menu_cast = game
                     .magic
                     .as_ref()
-                    .and_then(|mg| mg.menu_types.get(index).copied());
+                    .and_then(|mg| mg.menu_types.get(pick?).copied());
+                game.cure_target = index;
+            }
+            // Backing out of the list returns to the Magic list.
+            Decision::Closed if game.cure_pick.take().is_some() => {
+                let mp = game.player.mp;
+                if let Some(mg) = game.magic.as_mut() {
+                    let list = mg.menu_list(&mp);
+                    let items = list
+                        .iter()
+                        .map(|&(t, colour)| {
+                            let cmd = mg.current(t).map(|r| r.command).unwrap_or(0);
+                            Item {
+                                label: mg.src.names.get(&cmd).cloned().unwrap_or_default(),
+                                icon: mg.src.commands.get(&cmd).map_or(0, |c| c.icon),
+                                colour,
+                            }
+                        })
+                        .collect();
+                    mg.menu_types = list.iter().map(|l| l.0).collect();
+                    m.menu.open_sub(1, items);
+                }
             }
             Decision::Open(3) => {
                 let gauge = game.player.drive;
@@ -5904,7 +5981,14 @@ fn simulate(
         }
     }
     if game.magic_tour {
+        // The Magic Lock-On probes switch the ability the tick before.
+        match magic_tour::lock_on(tick, game.magic_shift) {
+            Some(true) => game.player.abilities.set(abilities::bit::MAGIC_LOCK_ON),
+            Some(false) => game.player.abilities.clear(abilities::bit::MAGIC_LOCK_ON),
+            None => {}
+        }
         cast = magic_tour::cast(tick, game.magic_shift);
+        game.cure_target = magic_tour::cure_target(tick, game.magic_shift);
     }
     if game.autoplay.is_some()
         && !game.enemy_battle_tour
@@ -6090,6 +6174,13 @@ fn simulate(
     }
     combat_tick(&mut game, tick);
     prize_room::tick(&mut game, tick);
+    if game.magic_tour
+        && let Some((spell, heal)) = magic_tour::party_cast(tick, game.magic_shift)
+    {
+        let ordered = party_room::order_cast(&mut game, 0, spell, heal);
+        game.event(serde_json::json!({"event":"party_cast_order","tick":tick,
+            "spell":format!("{spell:?}"),"heal":heal,"ordered":ordered}));
+    }
     party_room::tick(&mut game, tick);
     // Drive: requests, the form change, the form gauge (after the player
     // tick, like FUN_1403a92c0 / FUN_140404a40).
@@ -7458,7 +7549,12 @@ fn combat_tick(game: &mut Game, tick: u64) {
     if autoplay.is_some() && !*enemy_battle_tour && place {
         // Unattended runs place the target just ahead of Sora.
         let f = Vec3::new(player.yaw.sin(), 0., player.yaw.cos());
-        let at = Vec3::from_array(player.position) + f * 110.;
+        let distance = if *magic_tour {
+            magic_tour::place_distance(tick, *magic_shift)
+        } else {
+            110.
+        };
+        let at = Vec3::from_array(player.position) + f * distance;
         rt.enemy.position = at.to_array();
         rt.enemy.spawn = at.to_array();
     }
@@ -10488,6 +10584,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             .into_iter()
             .enumerate()
             .map(|(i, kind)| party_room::MemberRt {
+                hp: kind.hp,
+                max_hp: kind.hp,
+                mp: player::magic::Mp::new(kind.mp),
                 kind,
                 follower: player::party_members::Follower::spawn(
                     loaded.spawn.to_array(),
@@ -10496,6 +10595,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 ),
                 started: 0,
                 stored: false,
+                cast: None,
+                casts: 0,
+                armed: false,
+                forced: None,
             })
             .collect(),
         items: loaded.items.map(|src| {
@@ -10528,7 +10631,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         weapon_pax_changed: false,
         weapon_display: Vec::new(),
         fx_calls: Vec::new(),
+        party_spells: true,
         fx_live: HashMap::new(),
+        cure_target: 0,
+        cure_pick: None,
         shown_action: None,
         action_started: 0,
         exit_code: None,

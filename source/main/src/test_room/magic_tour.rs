@@ -4,8 +4,10 @@
 //! distance after an attack, a cast after two attacks (the finisher), and an
 //! attack pressed after a cast that hit. Sora is invincible, the enemy
 //! stands in front of him and takes every hit. The run's log carries a
-//! `cast` / `cast_refused` event for each press.
+//! `cast` / `cast_refused` event for each press. After Sora's casts, Donald
+//! casts each of his four spells on order, then the party's AI runs free.
 use player::magic;
+use player::party_members::Spell;
 
 /// Ticks of the tour: the six spells on the ground, then in the air.
 const GROUND: [(u64, u8); 6] = [
@@ -36,7 +38,55 @@ const SECOND_ATTACK: u64 = 30;
 const AFTER: [u64; 3] = [62, 70, 78];
 const AFTER_START: u64 = 4000;
 const AFTER_SPACING: u64 = 200;
-pub const END: u64 = 4700;
+/// Cure on Donald, then on Goofy (the party list's picks).
+const PARTY_CURES: [(u64, usize); 2] = [(4650, 1), (4800, 2)];
+/// Donald's four spells on order, then the party's AI casting on its own.
+const PARTY_CASTS: [(u64, Spell, u8); 4] = [
+    (5050, Spell::Fire, 0),
+    (5250, Spell::Thunder, 0),
+    (5450, Spell::Blizzard, 0),
+    (5650, Spell::Cure, 2),
+];
+/// The AI's own casts run from here to the end.
+pub const FREE_PARTY: u64 = 5900;
+/// Magic Lock-On: Fire pressed with the enemy beyond the automatic
+/// target's range, with the ability (first) and without it (second).
+const LOCK: [(u64, bool); 2] = [(7500, true), (7700, false)];
+const LOCK_DISTANCE: f32 = 1400.;
+pub const END: u64 = 7900;
+
+/// The party slot Cure targets when it is cast this tick (0 = Sora).
+pub fn cure_target(tick: u64, shift: u64) -> usize {
+    let Some(tick) = tick.checked_sub(shift) else {
+        return 0;
+    };
+    PARTY_CURES.iter().find(|c| c.0 == tick).map_or(0, |c| c.1)
+}
+
+/// Donald's ordered cast this tick, with the party slot Cure heals.
+pub fn party_cast(tick: u64, shift: u64) -> Option<(Spell, u8)> {
+    let tick = tick.checked_sub(shift)?;
+    PARTY_CASTS.iter().find(|c| c.0 == tick).map(|c| (c.1, c.2))
+}
+
+/// Whether Magic Lock-On is on from this tick on, when a probe changes it.
+pub fn lock_on(tick: u64, shift: u64) -> Option<bool> {
+    let tick = tick.checked_sub(shift)?;
+    LOCK.iter().find(|l| l.0 == tick + 1).map(|l| l.1)
+}
+
+/// How far ahead of Sora the enemy is put back this tick.
+pub fn place_distance(tick: u64, shift: u64) -> f32 {
+    let far = tick
+        .checked_sub(shift)
+        .is_some_and(|t| LOCK.iter().any(|l| l.0 == t + 2));
+    if far { LOCK_DISTANCE } else { 110. }
+}
+
+/// The party's AI may cast spells.
+pub fn free_party(tick: u64, shift: u64) -> bool {
+    tick.checked_sub(shift).is_some_and(|t| t >= FREE_PARTY)
+}
 
 fn probe_base(i: usize) -> u64 {
     PROBE_START + i as u64 * PROBE_SPACING
@@ -59,6 +109,12 @@ pub fn cast(tick: u64, shift: u64) -> Option<u8> {
         }
     }
     let at = |base: u64, k: u64| base + k == tick;
+    if PARTY_CURES.iter().any(|c| c.0 == tick) {
+        return Some(magic::CURE);
+    }
+    if LOCK.iter().any(|l| l.0 == tick) {
+        return Some(magic::FIRE);
+    }
     if PROBES
         .iter()
         .enumerate()
@@ -86,7 +142,10 @@ pub fn place(tick: u64, shift: u64) -> bool {
         .chain(AIR_JUMPS)
         .chain((0..PROBES.len()).map(probe_base))
         .chain((0..FINISH.len()).map(finish_base))
-        .chain((0..AFTER.len()).map(after_base));
+        .chain((0..AFTER.len()).map(after_base))
+        .chain(PARTY_CURES.iter().map(|c| c.0))
+        .chain(PARTY_CASTS.iter().map(|c| c.0))
+        .chain(LOCK.iter().map(|l| l.0));
     tick == 60 || starts.into_iter().any(|b| b == tick + 2)
 }
 
@@ -123,6 +182,14 @@ pub fn captures(shift: u64) -> Vec<u64> {
     for (i, k) in AFTER.iter().enumerate() {
         at.push(after_base(i) + k + 16);
     }
+    at.extend(PARTY_CURES.iter().flat_map(|c| [c.0 + 20, c.0 + 40]));
+    at.extend(
+        PARTY_CASTS
+            .iter()
+            .flat_map(|c| [c.0 + 20, c.0 + 50, c.0 + 80, c.0 + 100, c.0 + 130]),
+    );
+    at.extend((0..8).map(|i| FREE_PARTY + 100 + i * 120));
+    at.extend(LOCK.iter().flat_map(|l| [l.0 + 14, l.0 + 40]));
     at.sort_unstable();
     at.dedup();
     at.iter().map(|t| t + shift).collect()
