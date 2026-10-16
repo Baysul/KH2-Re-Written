@@ -1,4 +1,4 @@
-# T132 — VFX and SFX pass: hit sparks, item and prize effects, map effects, effect VM, swing trail
+# T150 — VFX and SFX pass: hit sparks, item and prize effects, map effects, effect VM, swing trail
 
 Owner Claude, 2026-10-16. Gate: P22 (field and combat presentation), PROGRESS only. Source: Steam build 15194255 through the session-validated source (`source-manifest-02`). Private evidence: `research/playable-room-20261008/vfxsfx-01/` (decompiles of FUN_14040dd70, FUN_14040d810, the ppp program table at 0x140779a00, FUN_1404d1960/d11e0/d1d00/d1480, FUN_1402c5f70; `effect-census.tsv`).
 
