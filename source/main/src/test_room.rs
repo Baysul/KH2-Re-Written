@@ -75,6 +75,7 @@ mod enemy_catalog;
 mod enemy_combat;
 mod enemy_gallery;
 mod enemy_motion_fx;
+mod enemy_script;
 mod enemy_target;
 mod enemy_tour;
 mod game_over;
@@ -318,6 +319,8 @@ enum EffectRequest {
     /// A battle enemy's motion frame trigger 1: element `id` of its own
     /// container, bound to the actor.
     ActorElement { object: u32, actor: u64, id: u16 },
+    /// The same element placed at a point by a script (`obj_effect_start_pos`).
+    ActorElementAt { object: u32, id: u16, at: Vec3 },
     /// The enemy's `dead` act: effect_start_bind(obj, 2).
     EnemyDead,
     /// A system (00effect) element at a point, unrotated
@@ -6426,6 +6429,27 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
                         owner: 0xfa,
                     },
                     anchor: drive_fx::Anchor::Actor(actor),
+                });
+                continue;
+            }
+            EffectRequest::ActorElementAt { object, id, at } => {
+                let pax = if object == 0 {
+                    fx.enemy.clone()
+                } else {
+                    fx.enemy_paxes.get(&object).cloned()
+                };
+                let Some(pax) = pax else { continue };
+                game.fx_queue.push(drive_fx::Placed {
+                    req: drive_fx::FxRequest {
+                        pax,
+                        id,
+                        owner: 0xfa,
+                    },
+                    anchor: drive_fx::Anchor::World {
+                        at,
+                        pitch: 0.,
+                        yaw: 0.,
+                    },
                 });
                 continue;
             }

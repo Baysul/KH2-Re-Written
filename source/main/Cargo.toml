@@ -15,6 +15,7 @@ collision = { path = "../game/collision" }
 event = { path = "../game/event" }
 data = { path = "../data" }
 player = { path = "../game/player" }
+enemy = { path = "../game/enemy" }
 save = { path = "../game/save" }
 validation = { path = "../../validation" }
 skate_source = { path = "../extras/skateboard/source" }

@@ -28,6 +28,21 @@ impl ContactState {
     }
 }
 
+/// Something of an enemy that can hit Sora this frame: a motion attack window
+/// or an attack object its script placed. Shapes are (kind, ordinal, centre,
+/// radius, the previous centre to sweep from).
+struct Candidate {
+    window: usize,
+    atkp: u16,
+    sub: u8,
+    script_slot: Option<usize>,
+    shapes: Vec<(u8, usize, Vec3, f32, Option<Vec3>)>,
+}
+
+/// Script attack objects use window numbers from here up so they never collide
+/// with a motion window's.
+const SCRIPT_WINDOW: usize = 0x1000;
+
 #[derive(Clone)]
 struct Volume {
     key: u64,
@@ -444,17 +459,53 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         let facing = Vec3::new(battle.brain.yaw().sin(), 0., battle.brain.yaw().cos());
         let toward = ((sora_at - at) * Vec3::new(1., 0., 1.)).normalize_or_zero();
         let mut incoming = None;
-        for (window, w) in battle
+        // The motion's attack windows, then the attack objects the script placed.
+        let mut candidates: Vec<Candidate> = battle
             .windows
             .iter()
             .enumerate()
             .filter(|(_, w)| w.active(battle.frame))
-        {
+            .map(|(window, w)| Candidate {
+                window,
+                atkp: w.id,
+                sub: 0,
+                script_slot: None,
+                shapes: battle
+                    .pose
+                    .attacks
+                    .get(&w.group)
+                    .into_iter()
+                    .flatten()
+                    .map(|s| (s.shape, s.ordinal, s.centre, s.radius, None))
+                    .collect(),
+            })
+            .collect();
+        for a in battle.brain.script_attacks() {
+            let (Ok(id), Ok(sub)) = (u16::try_from(a.id), u8::try_from(a.extra.max(0))) else {
+                continue;
+            };
+            candidates.push(Candidate {
+                window: SCRIPT_WINDOW + a.serial as usize,
+                atkp: id,
+                sub,
+                script_slot: Some(a.slot),
+                shapes: vec![(
+                    3,
+                    0,
+                    Vec3::from_array(a.position),
+                    a.radius,
+                    a.previous.map(Vec3::from_array),
+                )],
+            });
+        }
+        for cand in &candidates {
+            let (window, w_id) = (cand.window, cand.atkp);
             if battle.brain.serial() != battle.serial || battle.error.is_some() {
                 break;
             }
-            let rows = match battle.assets.attack_steps(w.id, 0) {
+            let rows = match battle.assets.attack_steps(cand.atkp, cand.sub) {
                 Ok(rows) => rows,
+                Err(_) if cand.script_slot.is_some() => continue,
                 Err(error) => {
                     battle.error = Some(error.clone());
                     actor.error = Some(error);
@@ -470,11 +521,11 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 continue;
             }
             let mut blocked = false;
-            for shape in battle.pose.attacks.get(&w.group).into_iter().flatten() {
+            for &(shape_kind, ordinal, centre, radius, forced_prior) in &cand.shapes {
                 if blocked {
                     break;
                 }
-                if shape.shape != 3 {
+                if shape_kind != 3 {
                     let error = "native non-sphere melee attack sweep is unqualified".to_string();
                     battle.error = Some(error.clone());
                     actor.error = Some(error);
@@ -483,12 +534,9 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 let prior = battle
                     .contacts
                     .previous
-                    .insert((battle.serial, window, shape.ordinal), shape.centre);
-                for c in combat::swept(
-                    shape.centre.to_array(),
-                    prior.map(|p| p.to_array()),
-                    shape.radius,
-                ) {
+                    .insert((battle.serial, window, ordinal), centre);
+                let prior = forced_prior.or(prior);
+                for c in combat::swept(centre.to_array(), prior.map(|p| p.to_array()), radius) {
                     let centre = Vec3::from_array(c);
                     let mut reflected = false;
                     for guard in volumes.iter().filter(|v| v.guard) {
@@ -499,7 +547,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                         for &(guard_at, guard_radius, _, _) in &guard.centres {
                             if !combat::spheres_overlap(
                                 c,
-                                shape.radius,
+                                radius,
                                 guard_at.to_array(),
                                 guard_radius,
                             ) {
@@ -551,7 +599,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                             }
                             event(
                                 log,
-                                serde_json::json!({"event":"gallery_guard","tick":tick,"actor":actor.id,"atkp":w.id,"guard_atkp":guard.atkp}),
+                                serde_json::json!({"event":"gallery_guard","tick":tick,"actor":actor.id,"atkp":w_id,"guard_atkp":guard.atkp}),
                             );
                             break;
                         }
@@ -566,18 +614,35 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                     if incoming.is_none()
                         && *hero_hit_tick != Some(tick)
                         && let Some(&(body, body_radius, high)) =
-                            sora_body.iter().find(|(body, radius, _)| {
-                                combat::spheres_overlap(c, shape.radius, body.to_array(), *radius)
+                            sora_body.iter().find(|(body, body_r, _)| {
+                                combat::spheres_overlap(c, radius, body.to_array(), *body_r)
                             })
                     {
-                        incoming =
-                            Some((ids, rows.clone(), high, w.id, (centre, body, body_radius)));
+                        incoming = Some((
+                            ids,
+                            rows.clone(),
+                            high,
+                            w_id,
+                            (centre, body, body_radius),
+                            cand.script_slot,
+                        ));
                     }
                 }
             }
         }
-        if let Some(((aid, group), rows, high, atkp, (claw_at, body_at, body_radius))) = incoming {
+        if let Some((
+            (aid, group),
+            rows,
+            high,
+            atkp,
+            (claw_at, body_at, body_radius),
+            script_slot,
+        )) = incoming
+        {
             *hero_hit_tick = Some(tick);
+            if let Some(slot) = script_slot {
+                battle.brain.mark_script_attack(slot);
+            }
             if rt.sora_invulnerable > 0. || player.range_invulnerable(clips) || cheats.invincible {
                 rt.sora_record.hit(aid, group, false, |_| (0, 0));
                 event(

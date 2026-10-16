@@ -3,6 +3,7 @@ members = [
     "source/main",
     "source/visual",
     "source/game/player",
+    "source/game/enemy",
     "source/game/area",
     "source/game/collision",
     "source/game/event",
