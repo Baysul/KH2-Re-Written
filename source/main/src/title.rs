@@ -843,7 +843,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         &new_game::message_ids(),
     )?);
     let backend = if autoplay.is_some() {
-        save_files::FileBackend::in_memory(save_files::synthetic_container())
+        match std::env::var_os("KH2RW_TEST_SAVE") {
+            Some(path) => save_files::FileBackend::from_test_file(Path::new(&path))?,
+            None => save_files::FileBackend::in_memory(save_files::synthetic_container()),
+        }
     } else {
         save_files::FileBackend::open(&crate::launcher::data_dir(), Path::new(&args[0]))?
     };

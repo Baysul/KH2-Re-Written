@@ -22,6 +22,7 @@ const TABLE: usize = 0x10;
 const DATA: usize = TABLE + ENTRY_COUNT * ENTRY_BYTES;
 const NAME_BYTES: usize = 0x40;
 const CHUNK: &[u8; 4] = b"sqEX";
+const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 /// The text chunk every file the original writes carries (FUN_140144520).
 const AUTHOR: &[u8] = b"Author\0SQUARE CO.,LTD. / created by Somnium";
 
@@ -153,32 +154,65 @@ impl Container {
 
     /// Reads a container file, decrypting its header with `key`.
     pub fn open(png: &[u8], key: &[u8; 16], sbox: &Sbox) -> Result<Self, Error> {
-        if png.get(..8) != Some(b"\x89PNG\r\n\x1a\n") {
+        Self::open_masked(png, &cipher::mask(key, sbox))
+    }
+
+    /// The header mask of a container file written for any account, found
+    /// without its Steam id: the unused parts of the first entry are zeros,
+    /// so the most common 16-byte block of the masked head is the mask.
+    pub fn recover_mask(png: &[u8]) -> Option<[u8; 16]> {
+        let payload = Self::chunk(png).ok()?.2;
+        let mut best: Option<([u8; 16], usize)> = None;
+        for i in 2..16 {
+            let block: [u8; 16] = payload[i * 16..i * 16 + 16].try_into().ok()?;
+            let n = (2..16)
+                .filter(|&j| payload[j * 16..j * 16 + 16] == block)
+                .count();
+            if best.is_none_or(|(_, c)| n > c) {
+                best = Some((block, n));
+            }
+        }
+        best.filter(|&(_, n)| n >= 4).map(|(b, _)| b)
+    }
+
+    /// The `sqEX` chunk: where it starts and ends in the file and its data.
+    fn chunk(png: &[u8]) -> Result<(usize, usize, &[u8]), Error> {
+        if png.get(..8) != Some(&PNG_SIGNATURE[..]) {
             return Err(Error::NotPng);
         }
         let mut at = 8;
         while at + 12 <= png.len() {
             let len = u32::from_be_bytes([png[at], png[at + 1], png[at + 2], png[at + 3]]) as usize;
-            let kind = &png[at + 4..at + 8];
             let end = at + 12 + len;
             if end > png.len() {
                 return Err(Error::NotPng);
             }
-            if kind == CHUNK {
+            if &png[at + 4..at + 8] == CHUNK {
                 if len != PAYLOAD_BYTES {
                     return Err(Error::WrongChunkSize(len));
                 }
-                let mut payload = png[at + 8..at + 8 + len].to_vec();
-                cipher::apply(&mut payload, &cipher::mask(key, sbox));
-                return Ok(Self {
-                    before: png[..at].to_vec(),
-                    after: png[end..].to_vec(),
-                    payload,
-                });
+                return Ok((at, end, &png[at + 8..at + 8 + len]));
             }
             at = end;
         }
         Err(Error::NoCardChunk)
+    }
+
+    /// Reads a container file with its header mask already known.
+    pub fn open_masked(png: &[u8], mask: &[u8; 16]) -> Result<Self, Error> {
+        let (at, end, data) = Self::chunk(png)?;
+        let mut payload = data.to_vec();
+        cipher::apply(&mut payload, mask);
+        Ok(Self {
+            before: png[..at].to_vec(),
+            after: png[end..].to_vec(),
+            payload,
+        })
+    }
+
+    /// The key stored in the decrypted first block (the account's key).
+    pub fn stored_key(&self) -> [u8; 16] {
+        self.payload[..16].try_into().expect("16 bytes")
     }
 
     /// Whether the decrypted first block equals the key: false means the
@@ -328,6 +362,20 @@ mod tests {
                 .unwrap()
                 .key_matches(&wrong)
         );
+    }
+
+    #[test]
+    fn the_mask_is_recovered_from_a_file_without_its_steam_id() {
+        let key = key_from_steam_id(555);
+        let sbox = aes_sbox();
+        let mut c = Container::empty(&key);
+        c.write("BISLPM-66675FM-00", &[1, 2, 3], 7).unwrap();
+        let png = c.to_png(&key, &sbox);
+        let mask = Container::recover_mask(&png).unwrap();
+        assert_eq!(mask, cipher::mask(&key, &sbox));
+        let back = Container::open_masked(&png, &mask).unwrap();
+        assert_eq!(back.stored_key(), key);
+        assert_eq!(back.read("BISLPM-66675FM-00").unwrap().1, [1, 2, 3]);
     }
 
     #[test]

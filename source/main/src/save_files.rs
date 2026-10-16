@@ -32,6 +32,14 @@ impl FileBackend {
         }
     }
 
+    /// A save container file of any account, read without its Steam id and
+    /// kept in memory (unattended checks with a supplied file).
+    pub fn from_test_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let png = std::fs::read(path)?;
+        let mask = Container::recover_mask(&png).ok_or("no header mask found in the file")?;
+        Ok(Self::in_memory(Container::open_masked(&png, &mask)?))
+    }
+
     /// The rewrite's own container under `data_dir/saves`. When it does not
     /// exist yet, the original game's file for the same Steam account is
     /// read (never written) as the starting point.
