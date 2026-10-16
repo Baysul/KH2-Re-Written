@@ -38,6 +38,25 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
     })
 }
 
+/// The executable's vectors have +Y pointing down (scripts name (0, 1, 0)
+/// `down`, test for landing with `wished.y > 0`, and probe the ground in the
+/// +Y direction); the engine here keeps +Y up. Vectors that cross the script
+/// boundary as positions, directions or displacements are flipped there.
+pub(crate) fn native(mut v: Vec4) -> Vec4 {
+    v[1] = -v[1];
+    v
+}
+
+/// [`read_sanitized`] for a position, direction or displacement: the script's
+/// +Y-down vector as the engine's +Y-up one.
+pub(crate) fn read_native(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    handle: u32,
+) -> Result<Vec4, Fault> {
+    read_sanitized(ctx, m, handle).map(native)
+}
+
 /// Read a vector, zeroing NaN lanes in the source first (as the traps do).
 pub(crate) fn read_sanitized(
     ctx: &mut Ctx<'_>,

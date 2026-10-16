@@ -134,3 +134,61 @@ fn starting_a_motion_clears_the_end_pulse_of_the_previous_one() {
     assert!(s.motion_start(5, 0., &ThirtyTicks));
     assert!(!s.motion_ended(), "a new motion has not ended yet");
 }
+
+/// Run a trap on object 0 (a bare object) whose AI struct is at work word 0
+/// and whose first argument vector lives at word 8.
+fn run(
+    f: crate::world::TrapFn,
+    obj: &mut Object,
+    world: &mut World,
+    vec: [f32; 4],
+    extra: Slot,
+) -> Slot {
+    let mut header = vec![0u8; 44];
+    header[..4].copy_from_slice(b"test");
+    header[16..20].copy_from_slice(&64u32.to_le_bytes());
+    header[20..24].copy_from_slice(&64u32.to_le_bytes());
+    header[24..28].copy_from_slice(&64u32.to_le_bytes());
+    let mut inst = crate::script::Instance::new(0, &header).unwrap();
+    let mut th = crate::script::Thread::new(&inst, 0, 0, &[]);
+    let base = inst.work_base();
+    let mut memory = Memory::new(&mut inst, &mut th);
+    // The AI struct: word 1 holds the engine object's handle.
+    memory.write_u32(base + 4, crate::world::object_handle(obj.id));
+    for (k, v) in vec.iter().enumerate() {
+        memory.write_f32(base + 32 + 4 * k as u32, *v);
+    }
+    let mut args = [Slot::default(); 16];
+    args[0] = Slot::address(base);
+    args[1] = Slot::address(base + 32);
+    args[2] = extra;
+    let mut ctx = Ctx {
+        world,
+        me: obj,
+        env: &NullEnv,
+    };
+    f(&mut ctx, &mut memory, &mut args).unwrap();
+    args[0]
+}
+
+#[test]
+fn script_vectors_have_y_down_and_the_engine_has_y_up() {
+    let mut world = World::default();
+    let mut obj = Object::bare(0);
+    // A script asks to move down at speed 3: direction (0, 1, 0), speed 3.
+    let move_it = crate::traps::lookup(1, 111).unwrap();
+    run(
+        move_it,
+        &mut obj,
+        &mut world,
+        [0., 1., 0., 0.],
+        Slot::float(3.),
+    );
+    assert_eq!(obj.sys.move_direction, [0., -1., 0.]);
+    assert_eq!(obj.sys.move_speed, 3.);
+    // The engine fell by 2 this tick; the script reads +2 (down).
+    obj.sys.wished = [0., -2., 0.];
+    let wished = crate::traps::lookup(1, 64).unwrap();
+    let r = run(wished, &mut obj, &mut world, [0.; 4], Slot::default());
+    assert_eq!(world.static_read(r.value + 4), Some(2.0f32.to_bits()));
+}

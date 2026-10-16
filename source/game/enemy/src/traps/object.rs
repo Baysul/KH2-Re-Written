@@ -6,7 +6,7 @@
 //! Each function cites the executable function it translates. Engine services
 //! the executable reaches that are not translated yet are marked [U].
 
-use super::math::{read_sanitized, wrap_angle};
+use super::math::{read_native, read_sanitized, wrap_angle};
 use crate::act::Entry;
 use crate::script::{Fault, Memory, Slot};
 use crate::sysobj::PendingFly;
@@ -372,7 +372,7 @@ fn is_jump(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(),
 /// mode 5 with the velocity `normalize(v.xyz) * v.w`.
 fn fly(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let v = read_sanitized(ctx, m, args[1].value)?;
+    let v = read_native(ctx, m, args[1].value)?;
     let inertia = args[2].as_float();
     ctx.object(id)?
         .sys
@@ -393,14 +393,14 @@ fn is_air(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), 
 fn get_moved(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let v = ctx.object(id)?.sys.moved;
-    own_vector(ctx, m, 62, v, args)
+    own_vector(ctx, m, 62, [v[0], -v[1], v[2]], args)
 }
 
 /// 1:64 FUN_14042f160: a copy of +0xa28.
 fn get_wish_movement(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let v = ctx.object(id)?.sys.wished;
-    own_vector(ctx, m, 64, v, args)
+    own_vector(ctx, m, 64, [v[0], -v[1], v[2]], args)
 }
 
 /// 1:65 FUN_14042f220: flag 0x4000000 asks the engine to start a fall.
@@ -561,7 +561,7 @@ fn appear_way(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<
 fn set_movement(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let handle = args[1].value;
     let speed = args[2].as_float();
-    let v = read_sanitized(ctx, m, handle)?;
+    let v = read_native(ctx, m, handle)?;
     let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     let unit = if len != 0.0 {
         let inv = 1.0 / len;
@@ -609,7 +609,7 @@ fn position(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<()
         .static_lookup(1, 0, 1)
         .and_then(|c| ctx.world.static_read(c + 12));
     let w = w.map_or(1.0, f32::from_bits);
-    shared_vector(ctx, m, [p[0], p[1], p[2], w], args)
+    shared_vector(ctx, m, [p[0], -p[1], p[2], w], args)
 }
 
 /// 1:168 FUN_14042cf50: `obj_flyjump`, a jump that waits for the motion's
@@ -676,7 +676,7 @@ fn sysobj_is_player(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> R
 /// 1:89 FUN_14042f8d0 -> FUN_1403b9a70: a second movement request vector
 /// (+0xa58 direction, +0xa64 speed) that no translated consumer reads yet.
 fn move_request(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let v = read_sanitized(ctx, m, args[1].value)?;
+    let v = read_native(ctx, m, args[1].value)?;
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let sys = &mut ctx.object(id)?.sys;
     sys.request_direction = [v[0], v[1], v[2]];
@@ -687,7 +687,7 @@ fn move_request(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
 /// 1:119 FUN_1404302a0 -> FUN_1403b7f10: the ground probe ahead of the
 /// object (0 level, 1 higher, 2 lower, 3 no ground).
 fn check_step(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let v = read_sanitized(ctx, m, args[1].value)?;
+    let v = read_native(ctx, m, args[1].value)?;
     let (up, down) = (args[2].as_float(), args[3].as_float());
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let position = ctx.object(id)?.sys.position;
@@ -794,7 +794,7 @@ fn step_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<()
         SysRef::Player => ctx.env.player_position(),
         SysRef::Object(id) => ctx.object(id)?.sys.position,
     };
-    shared_vector(ctx, m, [p[0], p[1], p[2], p[1]], args)
+    shared_vector(ctx, m, [p[0], -p[1], p[2], -p[1]], args)
 }
 
 /// 1:150 FUN_14042d1e0: attack range `n` (1-based, `+0x2ac` bits).

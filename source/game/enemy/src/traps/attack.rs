@@ -1,7 +1,7 @@
 //! Table 2 traps on attack objects (`YS::ATTACK`), see [`crate::attack`]. An
 //! attack handle is `ATTACK_HANDLES + 0x100 * index`.
 
-use super::math::read_sanitized;
+use super::math::{native, read_native};
 use crate::attack::{Attack, flag};
 use crate::script::{Fault, Memory, Slot};
 use crate::world::{ATTACK_HANDLES, Ctx, Event, TrapFn, object_handle};
@@ -94,7 +94,7 @@ fn set_radius(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<
 
 /// 2:12 FUN_140432330 -> FUN_140437a80.
 fn set_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let v = read_sanitized(ctx, m, args[1].value)?;
+    let v = read_native(ctx, m, args[1].value)?;
     let frame = ctx.world.frame_time;
     if let Some(a) = attack(ctx, args[0].value) {
         a.set_position(v, frame);
@@ -184,8 +184,8 @@ fn is_strike(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(
 
 /// 2:19 FUN_1404329e0 -> FUN_140437a40.
 fn set_line(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let end = read_sanitized(ctx, m, args[2].value)?;
-    let start = read_sanitized(ctx, m, args[1].value)?;
+    let end = read_native(ctx, m, args[2].value)?;
+    let start = read_native(ctx, m, args[1].value)?;
     if let Some(a) = attack(ctx, args[0].value) {
         a.set_line(start, end);
     }
@@ -243,7 +243,7 @@ fn set_reflect_callback(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> 
 
 /// 2:42 FUN_140432650: where the attack hit the map (+0xb4).
 fn hit_bg_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let v = attack(ctx, args[0].value).map_or([0.; 4], |a| a.hit_position);
+    let v = native(attack(ctx, args[0].value).map_or([0.; 4], |a| a.hit_position));
     let cell = ctx.world.static_cell(2, 42, 0);
     for (k, lane) in v.iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);

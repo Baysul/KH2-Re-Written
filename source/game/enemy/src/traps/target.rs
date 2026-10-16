@@ -114,7 +114,7 @@ fn target_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<
     let t = record(ctx, args[0].value)?;
     let p = target_point(ctx, t).unwrap_or([0.; 3]);
     let cell = ctx.world.static_cell(1, 0, 1);
-    for (k, lane) in [p[0], p[1], p[2], 1.0].iter().enumerate() {
+    for (k, lane) in [p[0], -p[1], p[2], 1.0].iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);

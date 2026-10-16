@@ -1,7 +1,7 @@
 //! Small state traps: setters and getters on fields of the engine object that
 //! scripts use directly, and the services recorded as unsupported.
 
-use super::math::read_sanitized;
+use super::math::{read_native, read_sanitized};
 use crate::script::{Fault, Memory, Slot};
 use crate::sysobj::Vec3;
 use crate::world::{Ctx, Event, TrapFn, object_handle};
@@ -315,7 +315,7 @@ fn touch_zone(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<
 
 /// 1:148 FUN_14042b800 -> FUN_1403b64d0: place the object (w = 1).
 fn set_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let v = read_sanitized(ctx, m, args[1].value)?;
+    let v = read_native(ctx, m, args[1].value)?;
     let id = ctx.sys_of_ai(m, args[0].value)?;
     ctx.object(id)?.sys.position = [v[0], v[1], v[2]];
     Ok(())
@@ -451,14 +451,14 @@ fn set_rtn_time(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
     Ok(())
 }
 
-/// 1:99 FUN_14042fb50 -> FUN_1403b87e0: minus the depth of the object below
-/// the ground at its position (0 above it).
+/// 1:99 FUN_14042fb50 -> FUN_1403b87e0: minus the height of the object above
+/// the ground at its position (0 on it).
 fn float_height(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let p = ctx.object(id)?.sys.position;
     let floor = ctx.env.floor(p[0], p[2], p[1]).unwrap_or(p[1]);
-    let below = (floor - p[1]).max(0.);
-    args[0] = Slot::float(-below);
+    let above = (p[1] - floor).max(0.);
+    args[0] = Slot::float(-above);
     Ok(())
 }
 
@@ -640,7 +640,7 @@ fn effect_start(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
 /// 1:22 FUN_14042d4b0 -> FUN_1403b66c0: start an effect at a position.
 fn effect_start_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let v = read_sanitized(ctx, m, args[2].value)?;
+    let v = read_native(ctx, m, args[2].value)?;
     let (e, a, b) = (args[1].as_int(), args[3].as_int(), args[4].as_int());
     let handle = start_effect(ctx, id, e, [a, b], Some([v[0], v[1], v[2]]), false, None);
     args[0] = Slot::address(handle);
@@ -668,7 +668,7 @@ fn obj_target_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Res
     let t = ctx.object(id)?.sys.target;
     let p = super::target::target_point(ctx, t).unwrap_or([0.; 3]);
     let cell = ctx.world.static_cell(1, 88, 0);
-    for (k, lane) in [p[0], p[1], p[2], 1.0].iter().enumerate() {
+    for (k, lane) in [p[0], -p[1], p[2], 1.0].iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);
@@ -747,7 +747,7 @@ fn damage_orig_reaction(
 /// 6:9 FUN_14053e3e0 -> FUN_1403bdd90: the distance from a target record's
 /// position to a point.
 fn target_dist(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let v = read_sanitized(ctx, m, args[1].value)?;
+    let v = read_native(ctx, m, args[1].value)?;
     let p = super::target::record_point(ctx, args[0].value).unwrap_or([0.; 3]);
     let d = [p[0] - v[0], p[1] - v[1], p[2] - v[2]];
     args[0] = Slot::float((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt());
@@ -757,11 +757,11 @@ fn target_dist(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result
 /// 6:51 FUN_14053eb70 -> FUN_14040c2b0: the map blocks the line.
 fn bghit_check_line(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let a: Vec3 = {
-        let v = read_sanitized(ctx, m, args[0].value)?;
+        let v = read_native(ctx, m, args[0].value)?;
         [v[0], v[1], v[2]]
     };
     let b: Vec3 = {
-        let v = read_sanitized(ctx, m, args[1].value)?;
+        let v = read_native(ctx, m, args[1].value)?;
         [v[0], v[1], v[2]]
     };
     let hit = ctx.env.line_blocked(a, b);
@@ -919,7 +919,7 @@ fn jump_direct(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result
 /// velocity.
 fn obj_blow(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let v = read_sanitized(ctx, m, args[1].value)?;
+    let v = read_native(ctx, m, args[1].value)?;
     ctx.object(id)?.sys.blow_now([v[0], v[1], v[2]]);
     Ok(())
 }
@@ -1024,7 +1024,7 @@ fn bg_show(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(),
 /// 1:153 FUN_14042b880 -> FUN_1403b6100: place the object where it will not
 /// be interpolated from.
 fn reset_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let v = read_sanitized(ctx, m, args[1].value)?;
+    let v = read_native(ctx, m, args[1].value)?;
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let sys = &mut ctx.object(id)?.sys;
     sys.position = [v[0], v[1], v[2]];
@@ -1036,14 +1036,15 @@ fn reset_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(
 /// segment from `pos` up by `reach`. The hit point replaces `out`, otherwise
 /// `out` becomes `pos`.
 fn bg_ground_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let p = read_sanitized(ctx, m, args[0].value)?;
+    let p = read_native(ctx, m, args[0].value)?;
     let out = args[1].value;
     let reach = args[2].as_float();
     let from = [p[0], p[1], p[2]];
-    let to = [p[0], p[1] + reach, p[2]];
+    // The probe runs along the script's +Y, which is down for the engine.
+    let to = [p[0], p[1] - reach, p[2]];
     let hit = ctx.env.line_hit(from, to);
     let at = hit.unwrap_or(from);
-    for (k, lane) in [at[0], at[1], at[2], 1.0].iter().enumerate() {
+    for (k, lane) in [at[0], -at[1], at[2], 1.0].iter().enumerate() {
         ctx.write_f32(m, out + 4 * k as u32, *lane);
     }
     args[0] = Slot::int(hit.is_some() as i32);
