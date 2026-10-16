@@ -84,6 +84,8 @@ pub struct FormSources {
     pub item_names: HashMap<u16, Vec<u8>>,
     pub gauge_up: Vec<u8>,
     pub sora_title: Vec<u8>,
+    /// Sora's level-up and bonus-level panel texts and the `bons` table.
+    pub growth: super::level_growth::Texts,
     pub drive_label: Vec<u8>,
     pub revert_label: Vec<u8>,
     /// 00effect's PAX (the form level-up's element 16) and the resident
@@ -182,6 +184,10 @@ impl FormSources {
             item_names: HashMap::new(),
             gauge_up: Vec::new(),
             sora_title: Vec::new(),
+            growth: super::level_growth::Texts {
+                bons: bar_entry(battle, b"bons")?.to_vec(),
+                ..Default::default()
+            },
             drive_label: Vec::new(),
             system_pax: None,
             texcommon: None,
@@ -1621,6 +1627,7 @@ pub fn level_panels(src: &FormSources, up: &forms::LevelUp) -> Vec<visual::level
         .cloned()
         .unwrap_or_default();
     let mut out = vec![visual::level_up::Entry {
+        kind: visual::level_up::Kind::Form,
         form: up.form,
         level: up.level,
         title,
@@ -1634,6 +1641,7 @@ pub fn level_panels(src: &FormSources, up: &forms::LevelUp) -> Vec<visual::level
         .collect();
     if let Some(first) = sora.first() {
         out.push(visual::level_up::Entry {
+            kind: visual::level_up::Kind::Form,
             form: 0,
             level: up.level,
             title: src.sora_title.clone(),

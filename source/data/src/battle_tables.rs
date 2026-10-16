@@ -269,6 +269,54 @@ pub fn prize(przt: &[u8], id: u16) -> io::Result<Prize> {
     }
 }
 
+/// One `bons` row: what a bonus level gives a character (`FUN_1403edf90`).
+/// Rows are 0x10 bytes after u32 version, u32 count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bonus {
+    /// +0: the bonus id a battle's record or an enemy names.
+    pub id: u8,
+    /// +1: the character the row is for (1 Sora, 2 Donald, 3 Goofy).
+    pub character: u8,
+    /// +2 / +3: Maximum HP and MP gained (halved for the party on Critical).
+    pub hp: u8,
+    pub mp: u8,
+    /// +4: Drive gauge bars gained (the gauge stops at 9).
+    pub drive: u8,
+    /// +5 / +6 / +7: Item, Accessory and Armor slots gained.
+    pub item_slots: u8,
+    pub accessory_slots: u8,
+    pub armor_slots: u8,
+    /// +8 / +0xa: abilities learned.
+    pub abilities: [u16; 2],
+}
+
+/// Every row of bonus `id` in table order (`FUN_1403edca0` walks the rows
+/// that follow the first match).
+pub fn bonus_rows(bons: &[u8], id: u8) -> io::Result<Vec<Bonus>> {
+    let count = u32_at(bons, 4)? as usize;
+    let mut out = Vec::new();
+    for k in 0..count {
+        let r = 8 + k * 0x10;
+        let rec = bons
+            .get(r..r + 0x10)
+            .ok_or_else(|| invalid("BONS truncated"))?;
+        if rec[0] == id {
+            out.push(Bonus {
+                id: rec[0],
+                character: rec[1],
+                hp: rec[2],
+                mp: rec[3],
+                drive: rec[4],
+                item_slots: rec[5],
+                accessory_slots: rec[6],
+                armor_slots: rec[7],
+                abilities: [u16_at(rec, 8)?, u16_at(rec, 10)?],
+            });
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayerLevel {
     /// EXP of the row (u32 at +0; the Status "Next LV" subtracts the
@@ -481,5 +529,24 @@ mod tests {
         lvup[12..16].copy_from_slice(&8u32.to_le_bytes());
         lvup[32 + 4 + 4] = 2;
         assert_eq!(player_level(&lvup, 1, 1).unwrap().strength, 2);
+    }
+
+    #[test]
+    fn bonus_rows_by_id() {
+        let mut t = vec![2, 0, 0, 0, 3, 0, 0, 0];
+        for (id, ch, hp) in [(2u8, 1u8, 5u8), (2, 2, 3), (3, 1, 9)] {
+            let mut r = [0u8; 16];
+            r[0] = id;
+            r[1] = ch;
+            r[2] = hp;
+            r[8] = 0x11;
+            t.extend(r);
+        }
+        let rows = bonus_rows(&t, 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].character, rows[0].hp), (1, 5));
+        assert_eq!(rows[1].abilities, [0x11, 0]);
+        assert!(bonus_rows(&t, 9).unwrap().is_empty());
+        assert!(bonus_rows(&t[..t.len() - 1], 3).is_err());
     }
 }

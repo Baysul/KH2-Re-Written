@@ -67,6 +67,7 @@ enum Action {
     Restore,
     KnockOut,
     LevelUp,
+    Bonus,
     Invincible,
     Scan,
     Defeat,
@@ -276,6 +277,18 @@ fn set_stock(game: &mut Game, camp: Option<&mut CampRes>, id: u16, n: u8) {
     }
 }
 
+/// The next bonus level Sora has a row in and has not taken.
+fn next_bonus(game: &Game) -> Option<u8> {
+    let rt = game.enemy.as_ref()?;
+    let bons = &game.drive.as_ref()?.src.growth.bons;
+    let count = u32::from_le_bytes(bons.get(4..8)?.try_into().ok()?) as usize;
+    (0..count)
+        .filter_map(|k| bons.get(8 + k * 16..8 + k * 16 + 16))
+        .filter(|r| r[1] == 1 && !rt.bonus_taken.contains(&r[0]))
+        .map(|r| r[0])
+        .min()
+}
+
 fn on_off(on: bool) -> Vec<u8> {
     text(if on { "On" } else { "Off" })
 }
@@ -316,6 +329,10 @@ fn rows(
                     Action::Page(Page::Forms),
                     game.drive.is_some(),
                 ),
+                Row {
+                    value: next_bonus(game).map_or_else(Vec::new, |id| text(&format!("#{id}"))),
+                    ..row("Bonus level", Action::Bonus, next_bonus(game).is_some())
+                },
                 row("Growth levels", Action::Page(Page::Growth), true),
                 row("Summon enemies", Action::Page(Page::Enemies), true),
                 Row {
@@ -736,6 +753,15 @@ fn act(
             let need = next.saturating_sub(rt.exp_total).max(1);
             prize_room::grant_exp(rt, need, log, tick);
             Some(format!("Level {}", rt.level))
+        }
+        Action::Bonus => {
+            // A battle's bonus level (FUN_1403edca0): the next one Sora has
+            // a row in.
+            let id = next_bonus(game)?;
+            let bons = game.drive.as_ref()?.src.growth.bons.clone();
+            let Game { enemy, player, .. } = game;
+            super::level_growth::apply_bonus(enemy.as_mut()?, player, &bons, id).ok()?;
+            Some(format!("Bonus level {id}"))
         }
         Action::Invincible => {
             game.cheats.invincible = !game.cheats.invincible;
