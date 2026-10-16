@@ -166,6 +166,8 @@ pub struct World {
     /// `teamwork_alloc` blocks by key (DAT_142ae75d0).
     pub teamwork: HashMap<i32, u32>,
     next_magic: u32,
+    /// The stand-in traps reach when a script names Sora (see [`PLAYER_OBJECT`]).
+    pub player_proxy: Option<Box<Object>>,
     /// The attack objects scripts created (`attack_new`), by slot.
     pub attacks: Vec<Option<crate::attack::Attack>>,
     /// `attack_new_combo_group`'s counter (DAT_142a24afc).
@@ -189,6 +191,7 @@ impl Default for World {
             target_dups: Vec::new(),
             teamwork: HashMap::new(),
             next_magic: 0,
+            player_proxy: Some(Box::new(Object::bare(PLAYER_OBJECT))),
             attacks: Vec::new(),
             combo_group: 0,
             lockon_ratio: 0.,
@@ -269,7 +272,15 @@ pub const TARGET_DUP_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0300_0000;
 /// The engine object's target record (sys+0xbf8) is this far into its handle range.
 pub const TARGET_RECORD_OFFSET: u32 = 0x800;
 
+/// The id the player proxy answers to. Sora is not a script-driven object, but
+/// scripts call the same traps on her as on any object; those reach a stand-in
+/// whose position and heading follow the host's player.
+pub const PLAYER_OBJECT: ObjId = 0x00ff_ffff;
+
 pub fn object_handle(id: ObjId) -> u32 {
+    if id == PLAYER_OBJECT {
+        return PLAYER_HANDLE;
+    }
     OBJECT_HANDLES + id * 0x1000
 }
 
@@ -311,6 +322,15 @@ impl Ctx<'_> {
         if id == self.me.id {
             return Ok(self.me);
         }
+        if id == PLAYER_OBJECT {
+            let proxy = self
+                .world
+                .player_proxy
+                .get_or_insert_with(|| Box::new(Object::bare(PLAYER_OBJECT)));
+            proxy.sys.position = self.env.player_position();
+            proxy.sys.yaw = self.env.player_yaw();
+            return Ok(proxy);
+        }
         self.world
             .objects
             .get_mut(id as usize)
@@ -320,6 +340,9 @@ impl Ctx<'_> {
 
     /// An engine-object argument (the trap received the handle itself).
     pub fn sys_of(&self, handle: u32) -> Result<ObjId, Fault> {
+        if handle == PLAYER_HANDLE {
+            return Ok(PLAYER_OBJECT);
+        }
         object_from_handle(handle).ok_or(Fault::Memory(handle))
     }
 
@@ -395,6 +418,9 @@ impl Host for Machine<'_> {
     }
 
     fn peek(&self, address: u32) -> Option<u32> {
+        if let Some(offset) = address.checked_sub(PLAYER_HANDLE).filter(|o| *o < 0x1000) {
+            return self.ctx.world.player_proxy.as_ref()?.sys.peek_word(offset);
+        }
         if let Some((id, offset)) = object_field(address) {
             if (TARGET_RECORD_OFFSET..TARGET_RECORD_OFFSET + 16).contains(&offset) {
                 let sys = if id == self.ctx.me.id {
@@ -423,6 +449,14 @@ impl Host for Machine<'_> {
     }
 
     fn poke(&mut self, address: u32, value: u32) -> bool {
+        if let Some(offset) = address.checked_sub(PLAYER_HANDLE).filter(|o| *o < 0x1000) {
+            return self
+                .ctx
+                .world
+                .player_proxy
+                .as_mut()
+                .is_some_and(|p| p.sys.poke_word(offset, value));
+        }
         if let Some((id, offset)) = object_field(address) {
             if id == self.ctx.me.id {
                 return self.ctx.me.sys.poke_word(offset, value);

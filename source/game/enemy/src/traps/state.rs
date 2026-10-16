@@ -19,6 +19,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 222) => get_entry_id,
         (1, 18) => obj_attach,
         (1, 59) => is_fly,
+        (1, 83) => apply_bone_matrix,
         (1, 99) => float_height,
         (1, 100) => jump_height_to_uptime,
         (1, 107) => motion_speed,
@@ -43,7 +44,12 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 213) => obj_part,
         (1, 218) => set_unit_arg,
         (1, 247) => bg_random_pos,
+        (1, 248) => bg_random_pos_air,
         (1, 250) => set_lockon_ratio,
+        (1, 252) => camera_apply_pos,
+        (1, 269) => lightcycle_movement,
+        (5, 14) => path_point_pos,
+        (6, 24) => bg_press,
         (1, 262) => voice,
         (4, 4) => mission_information,
         (4, 12) => mission_gauge_ratio,
@@ -449,6 +455,43 @@ fn damage_attack_param_id(
     let v = ctx.object(id).map_or(0, |o| o.sys.damage_param_id);
     args[0] = Slot::int(v as i32);
     Ok(())
+}
+
+/// A trap that returns a vector this build cannot compute. Records the call
+/// and hands back a zero vector in the trap's own cell. [U]
+fn unsupported_vector(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+    table: u16,
+    index: u16,
+    name: &'static str,
+) -> Result<(), Fault> {
+    ctx.world.events.push(Event::Unsupported(name));
+    let cell = ctx.world.static_cell(table, index, 0);
+    for k in 0..3 {
+        ctx.write_f32(m, cell + 4 * k, 0.);
+    }
+    ctx.write_f32(m, cell + 12, 1.);
+    args[0] = Slot::address(cell);
+    Ok(())
+}
+
+macro_rules! unsupported_vector_traps {
+    ($($name:ident = ($table:literal, $index:literal, $label:literal);)*) => {$(
+        fn $name(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+            unsupported_vector(ctx, m, args, $table, $index, $label)
+        }
+    )*};
+}
+
+unsupported_vector_traps! {
+    apply_bone_matrix = (1, 83, "obj_apply_bone_matrix");
+    bg_random_pos_air = (1, 248, "bg_get_random_pos_air");
+    camera_apply_pos = (1, 252, "camera_apply_pos");
+    lightcycle_movement = (1, 269, "obj_get_lightcycle_movement");
+    path_point_pos = (5, 14, "get_path_point_pos");
+    bg_press = (6, 24, "obj_get_bg_press");
 }
 
 #[cfg(test)]
