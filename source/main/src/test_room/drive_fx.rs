@@ -38,6 +38,8 @@ pub enum Anchor {
     /// its own translation, rotation and scale in engine world space
     /// (FUN_1402c7010); it belongs to the element's background group.
     Map { index: usize },
+    /// A battle enemy (by gallery actor id): a bound element follows it.
+    Actor(u64),
     /// The equipped weapon: a trail element (BonePos pair) follows the
     /// blade bone.
     Weapon,
@@ -102,6 +104,8 @@ struct Running {
     owner: u8,
     /// The element, when it follows the room enemy's object.
     enemy_element: Option<object_effect::Element>,
+    /// The battle actor an element follows, with the element.
+    actor_element: Option<(u64, object_effect::Element)>,
     /// The BonePos pair a swing trail follows on the weapon's blade bone.
     trail: Option<object_effect::BonePos>,
     /// The background group a map element belongs to.
@@ -264,6 +268,7 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
         };
         let local = ::effect::instance_matrix(element.translation, element.rotation, element.scale);
         let mut enemy_element = None;
+        let mut actor_element = None;
         let (bind, world) = match anchor {
             Anchor::Sora => {
                 let bind = (element.flags & 1 != 0).then_some(Bind {
@@ -278,6 +283,24 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
             }
             Anchor::Map { .. } => (None, local),
             Anchor::Weapon => (None, ::effect::math::IDENTITY),
+            Anchor::Actor(id) => {
+                let Some(&(position, yaw)) = game.actor_poses.get(&id) else {
+                    continue;
+                };
+                let position = position.to_array();
+                if element.flags & 1 != 0 {
+                    actor_element = Some((id, element.clone()));
+                    (None, super::bound_world(position, yaw, element))
+                } else {
+                    (
+                        None,
+                        ::effect::math::mul(
+                            &::effect::instance_matrix(to_world(position), [0., -yaw, 0.], [1.; 3]),
+                            &local,
+                        ),
+                    )
+                }
+            }
             Anchor::World { at, pitch, yaw } => (
                 None,
                 ::effect::instance_matrix(to_world(at.to_array()), [pitch, yaw, 0.], element.scale),
@@ -328,6 +351,7 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
                 bind,
                 owner: req.owner,
                 enemy_element,
+                actor_element,
                 trail: (matches!(anchor, Anchor::Weapon) && element.flags & 0x10000 != 0)
                     .then_some(element.bone_pos),
                 group: matches!(anchor, Anchor::Map { .. }).then_some(element.group),
@@ -356,6 +380,11 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
     for r in fx.running.iter_mut() {
         if let Some(b) = &r.bind {
             r.instance.world = bound_world(root, bones, b);
+        }
+        if let Some((id, element)) = &r.actor_element
+            && let Some(&(position, yaw)) = game.actor_poses.get(id)
+        {
+            r.instance.world = super::bound_world(position.to_array(), yaw, element);
         }
         if let (Some(element), Some((position, yaw))) = (&r.enemy_element, enemy_at) {
             r.instance.world = super::bound_world(position, yaw, element);

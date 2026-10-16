@@ -73,6 +73,7 @@ mod enemy_battle_tour;
 mod enemy_catalog;
 mod enemy_combat;
 mod enemy_gallery;
+mod enemy_motion_fx;
 mod enemy_target;
 mod enemy_tour;
 mod game_over;
@@ -313,6 +314,9 @@ enum EffectRequest {
         contact: Vec3,
         direction: Vec3,
     },
+    /// A battle enemy's motion frame trigger 1: element `id` of its own
+    /// container, bound to the actor.
+    ActorElement { object: u32, actor: u64, id: u16 },
     /// The enemy's `dead` act: effect_start_bind(obj, 2).
     EnemyDead,
     /// A system (00effect) element at a point, unrotated
@@ -830,6 +834,8 @@ struct Game {
     growth_tour: bool,
     /// The unattended `--prize-tour` (prize sprites and the heal effect).
     prize_tour: bool,
+    /// The unattended `--badge-tour` (an item pickup, then the camp's NEW! badges).
+    badge_tour: bool,
     hero_hit_tick: Option<u64>,
     enemy_incoming_hits: u64,
     enemy_outgoing_hits: u64,
@@ -903,6 +909,10 @@ struct Game {
     weapon_indices: Vec<Vec<u32>>,
     /// The same for slot 1's Keyblade (the form's own).
     weapon2_indices: Vec<Vec<u32>>,
+    /// The equipped Keyblade's own effects once a kit was built for it (None:
+    /// the room's default), and whether the effect sources must take it.
+    weapon_pax: Option<Arc<object_effect::Pax>>,
+    weapon_pax_changed: bool,
     weapon_display: Vec<Vec3>,
     shown_action: Option<(Action, u64)>,
     action_started: u64,
@@ -917,6 +927,10 @@ struct Game {
     effect_queue: Vec<EffectRequest>,
     /// Elements to start next tick at a place other than Sora's own.
     fx_queue: Vec<drive_fx::Placed>,
+    /// Battle actors' scene position and yaw this tick, and the motion
+    /// serial and frame their triggers were last scanned at.
+    actor_poses: HashMap<u64, (Vec3, f32)>,
+    actor_scan: HashMap<u64, (u64, f32)>,
     /// Weapon trail: the action tick and clip frame last scanned, and the
     /// calibrated bone length.
     trail_scan: Option<(u64, u32)>,
@@ -2733,6 +2747,7 @@ fn load(
             weapon,
             weapon2: None,
             blades: Default::default(),
+            weapon_pax: None,
             weapon_joint,
             second_joint: None,
             motion_set: selection.clone(),
@@ -6155,6 +6170,11 @@ fn bound_world(
 /// and keeps the quads they drew.
 fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effects>) {
     let tick = game.tick;
+    if std::mem::take(&mut game.weapon_pax_changed)
+        && let Some(pax) = game.weapon_pax.clone()
+    {
+        fx.weapon = Some(pax);
+    }
     weapon_trail::tick(&mut game, fx.weapon.as_ref());
     let view = game_view(rig.camera.eye, rig.camera.look_at);
     for request in std::mem::take(&mut game.effect_queue) {
@@ -6225,6 +6245,23 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
                         pitch: (-d[1]).atan2((d[0] * d[0] + d[2] * d[2]).sqrt()),
                         yaw: d[0].atan2(d[2]),
                     },
+                });
+                continue;
+            }
+            EffectRequest::ActorElement { object, actor, id } => {
+                let pax = if object == 0 {
+                    fx.enemy.clone()
+                } else {
+                    fx.enemy_paxes.get(&object).cloned()
+                };
+                let Some(pax) = pax else { continue };
+                game.fx_queue.push(drive_fx::Placed {
+                    req: drive_fx::FxRequest {
+                        pax,
+                        id,
+                        owner: 0xfa,
+                    },
+                    anchor: drive_fx::Anchor::Actor(actor),
                 });
                 continue;
             }
@@ -7071,7 +7108,7 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
     if game.growth_tour {
         level_growth::tour(&mut game);
     }
-    if game.prize_tour {
+    if game.prize_tour || game.badge_tour {
         prize_room::tour(&mut game);
     }
     // Level-ups and bonus levels queue theirs (FUN_1403eda60 / FUN_1403edb20)
@@ -8702,8 +8739,11 @@ fn finish(
                 "motion_choice":a.motion_choice,"frame":a.frame,"error":a.error})).collect::<Vec<_>>(),
             "installed_comparison":"NOT RUN"}));
     }
+    // The badge tour (its Sora has the unattended run's extra ability) has
+    // no ability verdict.
     if autoplay_done
         && game.exit_code.is_none()
+        && !game.badge_tour
         && let Some(tour) = &game.ability_tour
     {
         let expected = game
@@ -8760,6 +8800,8 @@ struct CampRes {
     /// stock list's seen marks.
     stock: std::collections::BTreeMap<u16, u8>,
     seen: Vec<u16>,
+    /// The items the room starts with (never NEW!).
+    starting: Vec<u16>,
     /// Sora's 80 ability slots, seeded from the installed development catalog.
     ability_slots: Vec<u16>,
     /// Shortcut command ids (save+0x36f8; empty in a new save [test-room
@@ -9215,6 +9257,11 @@ fn camp_tick(
             equipment.originals = it.originals.clone();
             counts = it.stock.clone();
         }
+        // The camp's "new" bits (FUN_140369520): what the stock holds now
+        // that the save has not marked seen. The room's starting stock
+        // never shows NEW! [I: the new-game save's seen bits are not
+        // decoded].
+        let new_items = pause_menu::items::new_items(&counts, &c.seen, &c.starting);
         // Level and record numbers plus what the equipment adds (stats
         // +0x188..+0x18e, resists +0x1a8..).
         let mut n = c.source.numbers;
@@ -9273,6 +9320,7 @@ fn camp_tick(
                 counts,
                 equipment: vec![equipment],
                 seen: c.seen.clone(),
+                new_items,
                 ..c.source.items.clone()
             },
             abilities: pause_menu::abilities::AbilitiesData {
@@ -9970,6 +10018,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut enemy_battle_tour = false;
     let mut growth_tour = false;
     let mut prize_tour = false;
+    let mut badge_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
     let mut options = args[3..].iter();
@@ -10029,6 +10078,16 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("game over tour capture directory absent")?,
+                );
+            }
+            Some("--badge-tour") if autoplay.is_none() => {
+                ability_tour = true;
+                badge_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("badge tour capture directory absent")?,
                 );
             }
             Some("--prize-tour") if autoplay.is_none() => {
@@ -10174,7 +10233,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             .camp
             .as_ref()
             .ok_or("ability tour requires camp assets")?;
-        Some(if gear_tour {
+        Some(if badge_tour {
+            prize_room::badge_tour(&loaded.abilities.inventory)
+        } else if gear_tour {
             gear_tour::tour(
                 &camp.items.table,
                 &loaded.abilities.owned,
@@ -10251,6 +10312,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         enemy_battle_tour,
         growth_tour,
         prize_tour,
+        badge_tour,
         hero_hit_tick: None,
         enemy_incoming_hits: 0,
         enemy_outgoing_hits: 0,
@@ -10334,6 +10396,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         display_hand: Transform::IDENTITY,
         weapon_indices: Vec::new(),
         weapon2_indices: Vec::new(),
+        weapon_pax: None,
+        weapon_pax_changed: false,
         weapon_display: Vec::new(),
         shown_action: None,
         action_started: 0,
@@ -10345,6 +10409,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         sound_frame: None,
         effect_queue: Vec::new(),
         fx_queue: Vec::new(),
+        actor_poses: HashMap::new(),
+        actor_scan: HashMap::new(),
         trail_scan: None,
         trail_length: None,
         fx_clear_map: Vec::new(),
@@ -10655,6 +10721,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             glyph: 0,
             keyboard_last: true,
             stock: gear::with_owned_equipment(room_stock(), &game.ability_source.owned),
+            starting: gear::with_owned_equipment(room_stock(), &game.ability_source.owned)
+                .into_keys()
+                .collect(),
             seen: Vec::new(),
             shortcuts: ROOM_SHORTCUTS,
             no_charge: 0,
