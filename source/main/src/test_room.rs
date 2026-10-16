@@ -79,6 +79,7 @@ mod game_over;
 mod gear;
 mod gear_tour;
 mod item_room;
+mod level_growth;
 mod magic_room;
 mod party_room;
 mod prize_room;
@@ -824,6 +825,8 @@ struct Game {
     ability_tour: Option<ability_inventory::Tour>,
     enemy_tour: bool,
     enemy_battle_tour: bool,
+    /// The unattended `--growth-tour` (level-up and bonus panels).
+    growth_tour: bool,
     hero_hit_tick: Option<u64>,
     enemy_incoming_hits: u64,
     enemy_outgoing_hits: u64,
@@ -962,7 +965,7 @@ struct Hud {
     image: Handle<Image>,
     updated: bool,
     /// The form level-up panels (sprite priority 9000, after the gauge).
-    panels: visual::level_up::FormPanels,
+    panels: visual::level_up::Panels,
 }
 
 /// The original's default follow camera, ticked with the simulation in the
@@ -2050,6 +2053,11 @@ struct EnemyRuntime {
     learned: Vec<u16>,
     /// Status numbers changed (level-up): the camp refreshes them.
     numbers_dirty: bool,
+    /// Level-up and bonus panels waiting for the HUD, whether the level-up
+    /// effect is due, and the bonus levels taken.
+    panels: Vec<level_growth::Panel>,
+    level_effect: bool,
+    bonus_taken: Vec<u8>,
     /// Last frame's attack sphere centres by (window instance, sphere).
     previous: HashMap<(u64, usize), Vec3>,
     indices: Vec<Vec<u32>>,
@@ -2801,6 +2809,14 @@ fn load(
             let mut items: Vec<u16> = drive_room::FORM_ITEMS.to_vec();
             items.extend(player::forms::GROWTH_ITEMS.iter().flatten());
             items.extend(f.fmlv.iter().map(|r| r.ability).filter(|&a| a != 0));
+            // Sora's level rows and bonus levels teach abilities (types
+            // 0x12..=0x14): their names are panel lines.
+            items.extend(
+                table
+                    .iter()
+                    .filter(|r| (0x12..=0x14).contains(&r.kind))
+                    .map(|r| r.id),
+            );
             items.sort_unstable();
             items.dedup();
             let rows: Vec<_> = items
@@ -2809,6 +2825,9 @@ fn load(
                 .collect();
             let mut ids: Vec<u32> = rows.iter().map(|r| r.name as u32).collect();
             ids.extend([0x43f2, 0x51f]);
+            ids.extend(level_growth::STAT_MESSAGES);
+            ids.extend(level_growth::BONUS_MESSAGES);
+            ids.extend(level_growth::NAME_MESSAGES);
             let texts = hud::load_messages_optional(
                 source,
                 &menu.messages.index,
@@ -2824,6 +2843,16 @@ fn load(
             let n = rows.len();
             f.gauge_up = texts.get(n).cloned().flatten().unwrap_or_default();
             f.sora_title = texts.get(n + 1).cloned().flatten().unwrap_or_default();
+            let text = |k: usize| texts.get(k).cloned().flatten().unwrap_or_default();
+            for (i, t) in f.growth.stat.iter_mut().enumerate() {
+                *t = text(n + 2 + i);
+            }
+            for (i, t) in f.growth.bonus.iter_mut().enumerate() {
+                *t = text(n + 6 + i);
+            }
+            for (i, t) in f.growth.names.iter_mut().enumerate() {
+                *t = text(n + 12 + i);
+            }
             Some(f)
         }
         (f, _) => f,
@@ -7059,6 +7088,28 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
             }
         }
     }
+    if game.growth_tour {
+        level_growth::tour(&mut game);
+    }
+    // Level-ups and bonus levels queue theirs (FUN_1403eda60 / FUN_1403edb20)
+    // and the first level of a kill starts the level-up effect
+    // (FUN_1403ecf30: system element 15 on Sora).
+    if let Some(rt) = game.enemy.as_mut() {
+        let waiting = std::mem::take(&mut rt.panels);
+        let effect = std::mem::take(&mut rt.level_effect);
+        if let Some(d) = game.drive.as_mut() {
+            if effect && let Some(p) = d.src.system_pax.clone() {
+                d.fx_requests.push(drive_fx::FxRequest {
+                    pax: p,
+                    id: 15,
+                    owner: 0xff,
+                });
+            }
+            for e in level_growth::entries(&d.src, &waiting) {
+                hud.panels.push(e);
+            }
+        }
+    }
     let Hud { sheets, panels, .. } = &mut *hud;
     panels.update(&sheets[0].sequence);
     hud.updated = true;
@@ -9972,6 +10023,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut gear_tour_quick = false;
     let mut enemy_tour = false;
     let mut enemy_battle_tour = false;
+    let mut growth_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
     let mut options = args[3..].iter();
@@ -10031,6 +10083,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("game over tour capture directory absent")?,
+                );
+            }
+            Some("--growth-tour") if autoplay.is_none() => {
+                growth_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("growth tour capture directory absent")?,
                 );
             }
             Some("--ability-tour") if autoplay.is_none() => {
@@ -10171,7 +10232,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let captures = if game_over_tour {
+    let captures = if growth_tour {
+        level_growth::CAPTURES.to_vec()
+    } else if game_over_tour {
         game_over::CAPTURES.to_vec()
     } else if enemy_battle_tour {
         enemy_battle_tour::CAPTURES.to_vec()
@@ -10188,7 +10251,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 }
             })
     };
-    let autoplay_end = if game_over_tour {
+    let autoplay_end = if growth_tour {
+        level_growth::END
+    } else if game_over_tour {
         game_over::END
     } else if enemy_battle_tour {
         enemy_battle_tour::END
@@ -10225,6 +10290,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         ability_tour: tour,
         enemy_tour,
         enemy_battle_tour,
+        growth_tour,
         hero_hit_tick: None,
         enemy_incoming_hits: 0,
         enemy_outgoing_hits: 0,
@@ -10549,6 +10615,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             was_dead: false,
             learned: Vec::new(),
             numbers_dirty: false,
+            panels: Vec::new(),
+            level_effect: false,
+            bonus_taken: Vec::new(),
             previous: HashMap::new(),
             indices: Vec::new(),
             hit_sounds: e.hit_sounds,
