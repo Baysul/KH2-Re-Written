@@ -974,6 +974,32 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
             }
             stats.constraints_applied += 1;
         }
+        // A position constraint moves the joint; its translation channels
+        // then read as the solved local offset (an expression reading them
+        // sees the constrained position).
+        if constraints
+            .iter()
+            .any(|c| c.constrained == j && c.temporary_active && c.kind == 0)
+            && !aims
+            && !aimed_at
+            && !solved_end[j]
+        {
+            let (pr, pt, ps) = match parents[j] {
+                p if p < 0 => (IDENTITY, [0.; 3], [1.; 3]),
+                p => {
+                    let w = world[p as usize];
+                    (w.rotation, w.translation, w.scale)
+                }
+            };
+            let t = rotate(qconj(pr), sub(world[j].translation, pt));
+            locals[j].translation = std::array::from_fn(|k| {
+                if ps[k].abs() > 1e-6 {
+                    t[k] / ps[k]
+                } else {
+                    t[k]
+                }
+            });
+        }
         // Flag 64: a joint whose rotation a constraint set rewrites its
         // rotation channels from the solved matrix (FUN_1401d3b80, bit 0x16
         // after the orientation branch), so later expressions read them.
