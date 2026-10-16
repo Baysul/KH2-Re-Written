@@ -7,7 +7,7 @@
 
 use crate::script::{Fault, Memory, Slot};
 use crate::sysobj::Pool;
-use crate::world::{Ctx, OBJECT_HANDLES, TrapFn, object_handle};
+use crate::world::{Ctx, OBJECT_HANDLES, PLAYER_HANDLE, PLAYER_OBJECT, TrapFn, object_handle};
 
 type Args = [Slot; 16];
 
@@ -34,6 +34,9 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
 }
 
 fn owner(handle: u32) -> Result<u32, Fault> {
+    if handle == PLAYER_HANDLE + SHEET_OFFSET {
+        return Ok(PLAYER_OBJECT);
+    }
     let o = handle
         .checked_sub(OBJECT_HANDLES)
         .filter(|o| o % 0x1000 == SHEET_OFFSET)
