@@ -157,7 +157,7 @@ pub fn grant_exp(rt: &mut EnemyRuntime, exp: u32, log: &mut Option<std::fs::File
         rt.panels.push(super::level_growth::Panel {
             kind: visual::level_up::Kind::Level,
             character: 0,
-            level: l as u8,
+            level: l,
             lines: super::level_growth::level_lines(&old, &new, critical, 0),
         });
         rt.level_effect = true;
