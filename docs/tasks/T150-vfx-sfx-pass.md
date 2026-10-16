@@ -18,6 +18,9 @@ Owner Claude, 2026-10-16. Gate: P22 (field and combat presentation), PROGRESS on
 
 - Battle enemies' own motion triggers: frame trigger 8 plays its sound (e.g. 201020, 214021..23, 200022 in the combat tour) and frame trigger 1 starts the enemy's PAX element bound to the actor (`enemy_motion_fx.rs`, `Anchor::Actor`). No unsupported effect program in that run.
 
+- Mega-model effects: the per-slot colour accumulator (key +0x101) and the spawn-time world-matrix snapshot (key +0x106) are modelled (FUN_1404bd910, FUN_1404be590, FUN_1404bdd50). Census: hidden installed effects 643 -> 501; the rest are the magic work's four programs (433), the lens-flare family (118, needs a depth read-back the exe does from the GPU), ribbon pair and object-space modes (40), RyjMatrixWorldXYZ (20).
+- Held on this branch (not merged), by the owner's request to merge only finished work.
+
 ## Checks
 PASS fmt, clippy (warnings denied), `cargo test --workspace --locked` for the first batch; effect crate tests and clippy PASS for the later batches. PASS unattended arena run (hit sparks 201016/17, item 100..103, prize 11/12/15/16, trail element 10 drawn). NOT RUN: listening or capture comparison with the installed game.
 
