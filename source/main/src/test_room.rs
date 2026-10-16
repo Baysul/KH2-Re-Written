@@ -73,6 +73,7 @@ mod enemy_battle_tour;
 mod enemy_catalog;
 mod enemy_combat;
 mod enemy_gallery;
+mod enemy_motion_fx;
 mod enemy_target;
 mod enemy_tour;
 mod game_over;
@@ -313,6 +314,9 @@ enum EffectRequest {
         contact: Vec3,
         direction: Vec3,
     },
+    /// A battle enemy's motion frame trigger 1: element `id` of its own
+    /// container, bound to the actor.
+    ActorElement { object: u32, actor: u64, id: u16 },
     /// The enemy's `dead` act: effect_start_bind(obj, 2).
     EnemyDead,
     /// A system (00effect) element at a point, unrotated
@@ -917,6 +921,10 @@ struct Game {
     effect_queue: Vec<EffectRequest>,
     /// Elements to start next tick at a place other than Sora's own.
     fx_queue: Vec<drive_fx::Placed>,
+    /// Battle actors' scene position and yaw this tick, and the motion
+    /// serial and frame their triggers were last scanned at.
+    actor_poses: HashMap<u64, (Vec3, f32)>,
+    actor_scan: HashMap<u64, (u64, f32)>,
     /// Weapon trail: the action tick and clip frame last scanned, and the
     /// calibrated bone length.
     trail_scan: Option<(u64, u32)>,
@@ -6228,6 +6236,23 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
                 });
                 continue;
             }
+            EffectRequest::ActorElement { object, actor, id } => {
+                let pax = if object == 0 {
+                    fx.enemy.clone()
+                } else {
+                    fx.enemy_paxes.get(&object).cloned()
+                };
+                let Some(pax) = pax else { continue };
+                game.fx_queue.push(drive_fx::Placed {
+                    req: drive_fx::FxRequest {
+                        pax,
+                        id,
+                        owner: 0xfa,
+                    },
+                    anchor: drive_fx::Anchor::Actor(actor),
+                });
+                continue;
+            }
             EffectRequest::EnemyDead => {
                 // effect_start_bind(obj, 2): the enemy's own element 2,
                 // bound to its object, with its own sound.
@@ -10345,6 +10370,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         sound_frame: None,
         effect_queue: Vec::new(),
         fx_queue: Vec::new(),
+        actor_poses: HashMap::new(),
+        actor_scan: HashMap::new(),
         trail_scan: None,
         trail_length: None,
         fx_clear_map: Vec::new(),
