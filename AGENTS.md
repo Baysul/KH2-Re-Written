@@ -16,5 +16,5 @@ Read `docs/fidelity-contract.md`, `docs/milestones.md`, `docs/unknowns.md`, and 
 
 - Read `docs/folder-guide.md` for the current layout and historical-name map.
 - Use familiar nouns and descriptive snake_case names. Owned packages use `player`, `area`, `effect`, `audio` rather than `_sim`, `_vm` or `_out` suffixes. Preserve established format names and upstream attribution.
-- Put gameplay in `game/`, display/menu code in `visual/`, effect execution in `effect/`, application wiring in `main/`, readers in `data/`, validation in `source/`, and mixing/output in `audio/`. Add folders/packages only for working code; do not scaffold empty systems.
+- Put gameplay in `source/game/`, display/menu code in `source/visual/`, effect execution in `source/visual/effect/`, application wiring in `source/main/`, readers in `source/data/`, validation in `validation/`, and mixing/output in `source/audio/`. Add folders/packages only for working code; do not scaffold empty systems.
 - Update imports, Cargo paths, assets/shaders, scripts, ignore rules and current guides together with moves. Historical records retain original command/path spellings; their index links the migration guide.

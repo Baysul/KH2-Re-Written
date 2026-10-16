@@ -21,7 +21,7 @@ established.
 | HUD, gauges or level-up panels | `source/visual/src/hud.rs`, `gauge.rs`, `level_up.rs` |
 | Rooms, scenery or 2D drawing | `source/visual/src/room.rs`, `scenery.rs`, `overlay.rs` |
 | Keyboard/controller mapping | [source/visual/src/input.rs](../source/visual/src/input.rs), [controller.rs](../source/visual/src/controller.rs) |
-| Particle/model effects | [source/effect/src/](../source/effect/src/) |
+| Particle/model effects | [source/visual/effect/src/](../source/visual/effect/src/) |
 | Mixing and Windows sound output | [source/audio/src/](../source/audio/src/) |
 | Which sounds a scene requests | `source/visual/src/sound.rs`, `footsteps.rs`, `spell_sound.rs` |
 | Reading a game file format | [source/data/src/](../source/data/src/); descriptive model, motion, room and table prefixes |
@@ -52,10 +52,10 @@ than its implementation technique. Avoid owned package suffixes `_sim`, `_vm`,
 `_out`, unexplained initials and catch-all `misc` or `utils` files. Established
 format names and upstream package names may stay for research and attribution.
 
-Keep rules in `source/game/`, presentation in `source/visual/`, effect execution in `source/effect/`,
+Keep rules in `source/game/`, presentation in `source/visual/`, effect execution in `source/visual/effect/`,
 application wiring in `source/main/`, decoding in `source/data/`, validation in `validation/`, and
 mixing/output in `source/audio/`. An effect-file reader belongs in `source/data/`, running that
-effect belongs in `source/effect/`, and drawing its output belongs in `source/visual/`.
+effect belongs in `source/visual/effect/`, and drawing its output belongs in `source/visual/`.
 
 Add a subfolder when several files form a clear feature. Add a package only when
 working code needs an independently checked boundary. Do not scaffold empty

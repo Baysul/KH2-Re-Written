@@ -6,7 +6,7 @@ members = [
     "source/game/area",
     "source/game/collision",
     "source/game/event",
-    "source/effect",
+    "source/visual/effect",
     "source/audio",
     "source/data",
     "validation",

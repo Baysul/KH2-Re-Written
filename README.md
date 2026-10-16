@@ -35,7 +35,7 @@ Whole-game 1:1 coverage is **unmeasured** until the complete function and behavi
 ## Find your way around
 
 Start with the [folder guide](docs/folder-guide.md) for common edits and naming rules.
-`source/game/` holds gameplay, `source/visual/` holds rendering and menus, `source/effect/` runs effects,
+`source/game/` holds gameplay, `source/visual/` holds rendering and menus, `source/visual/effect/` runs effects,
 and `source/main/` holds the launcher and application. `source/data/` reads game formats,
 `validation/` validates the installation, and `source/audio/` handles sound output.
 Each main folder has a short README. See [ARCHITECTURE.md](ARCHITECTURE.md)

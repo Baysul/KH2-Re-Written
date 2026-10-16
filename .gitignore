@@ -27,8 +27,8 @@
 !/source/data/src/**/*.rs
 !/source/audio/Cargo.toml
 !/source/audio/src/**/*.rs
-!/source/effect/Cargo.toml
-!/source/effect/src/**/*.rs
+!/source/visual/effect/Cargo.toml
+!/source/visual/effect/src/**/*.rs
 !/source/game/*/Cargo.toml
 !/source/game/*/src/**/*.rs
 !/source/extras/skateboard/source/Cargo.toml
@@ -46,7 +46,7 @@
 !/validation/README.md
 !/source/data/README.md
 !/source/audio/README.md
-!/source/effect/README.md
+!/source/visual/effect/README.md
 !/source/extras/README.md
 # Preserve the optional extension's source attribution, license and name dictionary.
 !/source/extras/skateboard/engine/README.md

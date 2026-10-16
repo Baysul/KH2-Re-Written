@@ -9,7 +9,7 @@ rust-version.workspace = true
 [dependencies]
 visual = { path = "../visual" }
 audio = { path = "../audio" }
-effect = { path = "../effect" }
+effect = { path = "../visual/effect" }
 area = { path = "../game/area" }
 collision = { path = "../game/collision" }
 event = { path = "../game/event" }

@@ -11,9 +11,12 @@ read, no gameplay admission, no game data touched.
 1. Moved `data/`, `effect/`, `audio/` and `extras/` into `source/` with `git mv`.
    The `validation/` folder and the root `tools/`, `docs/` and `target/` stay where
    they are.
+1a. Moved the effect crate again, to `source/visual/effect`, because it draws
+   what the game produces. `audio`, `data` and `extras` stay under `source/`.
+   AGENTS.md's placement rules now name the new folders.
 2. Rewrote path dependencies with a script that resolves each path against its
    pre-move location and writes it relative to the new one. Updated the workspace
-   members (`source/effect`, `source/audio`, `source/data`, and the three
+   members (`source/visual/effect`, `source/audio`, `source/data`, and the three
    `source/extras/skateboard/...` packages). The lockfile is unchanged, because
    workspace members have no paths in it.
 3. Updated the default-deny `.gitignore` allowlist to the new paths.

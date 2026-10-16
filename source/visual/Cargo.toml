@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 audio = { path = "../audio" }
-effect = { path = "../effect" }
+effect = { path = "effect" }
 data = { path = "../data" }
 player = { path = "../game/player" }
 validation = { path = "../../validation" }

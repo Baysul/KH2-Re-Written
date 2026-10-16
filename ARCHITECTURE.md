@@ -19,7 +19,7 @@ a glossary and the old-to-new name table.
 | `source/game/collision/` | Movement against room geometry | `collision` |
 | `source/game/event/` | Cutscene timeline and camera state | `event` |
 | `source/visual/` | Rendering, menus, HUD, controller input and scene presentation | `visual` |
-| `source/effect/` | Particle and model effect execution | `effect` |
+| `source/visual/effect/` | Particle and model effect execution | `effect` |
 | `source/audio/` | Mixing and Windows sound output | `audio` |
 | `source/data/` | Bounded readers for game packages, models, motion, images, text and sound | `data` |
 | `validation/` | Selected-install validation, hashing and manifest tools | `validation` |
