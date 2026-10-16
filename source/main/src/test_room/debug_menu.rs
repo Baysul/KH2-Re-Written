@@ -65,6 +65,7 @@ enum Page {
 enum Action {
     Page(Page),
     Restore,
+    KnockOut,
     LevelUp,
     Invincible,
     Scan,
@@ -305,6 +306,7 @@ fn rows(
                     game.items.is_some() || camp.is_some(),
                 ),
                 row("Restore HP, MP and Drive", Action::Restore, true),
+                row("Knock Sora out", Action::KnockOut, rt.is_some()),
                 Row {
                     value: level.map_or_else(Vec::new, |(l, _)| text(&format!("Lv {l}"))),
                     ..row("Level up", Action::LevelUp, level.is_some_and(|l| l.1))
@@ -712,6 +714,19 @@ fn act(
                 game.player.drive.refill();
             }
             Some("HP, MP and Drive restored".into())
+        }
+        Action::KnockOut => {
+            // Sora's HP reaches 0: the DEAD motion and the game over.
+            let Game {
+                player,
+                clips,
+                enemy,
+                ..
+            } = game;
+            enemy.as_mut()?.sora_hp = 0;
+            player.die(clips);
+            menu.open = false;
+            None
         }
         Action::LevelUp => {
             let tick = game.tick;
