@@ -124,6 +124,10 @@ fn audit_motion(bones: &[model_skeleton::BoneRecord], m: &motion::InterpolatedMo
                 "index": half(b, 0), "parent": half(b, 4), "flags": u32::from_le_bytes([b[12], b[13], b[14], b[15]])})).collect::<Vec<_>>(),
             "bones": bones.iter().enumerate().map(|(i, b)| json!({
                 "i": i, "parent": b.header_i32[1], "len": f32::from_bits(b.transform_bits[3])})).collect::<Vec<_>>(),
+            "curves": m.forward_curves.iter().map(|c| ("f", c)).chain(m.inverse_curves.iter().map(|c| ("i", c))).map(|(k, c)| json!({
+                "kind": k, "joint": c.joint_id, "channel": c.channel & 15, "pre": (c.channel >> 4) & 3, "post": (c.channel >> 6) & 3,
+                "keys": c.key_count, "start": c.key_start,
+                "samples": ([0f32, 20., 30., 32., 34., 36., 40., 50., 70.].iter().map(|&f| motion_eval::sample_curve(m, c, f).ok().flatten()).collect::<Vec<_>>())})).collect::<Vec<_>>(),
             "effectors": m.external_effectors.bytes.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)).collect::<Vec<_>>(),
             "nodes": m.expression_nodes.bytes.as_chunks::<12>().0.iter().map(|b| json!({
                 "type": b[0] as i8, "global": b[1], "element": half(b, 2),
