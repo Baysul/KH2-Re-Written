@@ -130,6 +130,10 @@ pub enum Event {
         target: u32,
         arguments: [i32; 2],
     },
+    /// `obj_dead`: the object finished dying and is removed.
+    ObjectDead {
+        object: ObjId,
+    },
     /// `obj_voice`: the object plays a voice line.
     Voice {
         object: ObjId,

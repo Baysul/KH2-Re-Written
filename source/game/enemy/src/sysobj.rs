@@ -73,7 +73,6 @@ pub struct PendingFly {
 /// steering step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Steer {
-    pub velocity: Vec3,
     /// +0x108: the share of the velocity kept each step.
     pub inertia: f32,
 }
@@ -230,6 +229,13 @@ pub struct Sysobj {
     /// the routine time parameters (`set_rtn_time_param`; word 7 is `touch_zone`).
     pub rtn_flags: Vec<u32>,
     pub rtn_time: [u32; 9],
+    /// +0x20: the steering velocity (four lanes; mode 5 moves by it).
+    pub velocity: [f32; 4],
+    /// +0x2a8: the motion playback speed scripts set (`obj_motion_speed`).
+    pub motion_speed: f32,
+    /// The attack parameter id of the hit being handled (the damage record's
+    /// attack, `damage_attack_param_id`).
+    pub damage_param_id: u32,
     /// +0x3c: the fourth lane of the scale vector.
     pub scale_w: f32,
     pub(crate) pending_fly: Option<PendingFly>,
@@ -335,6 +341,9 @@ impl Sysobj {
             rtn_flags: Vec::new(),
             rtn_time: [0; 9],
             scale_w: 1.,
+            velocity: [0.; 4],
+            motion_speed: 1.,
+            damage_param_id: 0,
             pending_fly: None,
             fly: None,
             steer: None,
@@ -569,19 +578,20 @@ impl Sysobj {
     /// FUN_140421c80: one step of physics mode 5. Like every mode routine it
     /// runs every `PHYSICS_STEP` frames (FUN_1403b89a0) and its displacement is
     /// spread over them.
-    fn update_steer(&mut self, mut steer: Steer, env: &dyn Env) {
+    fn update_steer(&mut self, steer: Steer, env: &dyn Env) {
         if self.sampler.due(self.move_speed) {
             let dt = actor_physics::PHYSICS_STEP;
             // FUN_1403b7ad0: toward the request keeping `inertia` of the
             // velocity, or the velocity scaled by `inertia` without one.
-            steer.velocity = if self.move_speed > 0. {
+            let v = self.velocity;
+            let v3 = if self.move_speed > 0. {
                 let target = self.move_direction.map(|c| c * self.move_speed);
-                [0, 1, 2]
-                    .map(|k| target[k] * (1. - steer.inertia) + steer.velocity[k] * steer.inertia)
+                [0, 1, 2].map(|k| target[k] * (1. - steer.inertia) + v[k] * steer.inertia)
             } else {
-                steer.velocity.map(|c| c * steer.inertia)
+                [v[0], v[1], v[2]].map(|c| c * steer.inertia)
             };
-            let step = steer.velocity.map(|c| c * dt);
+            self.velocity = [v3[0], v3[1], v3[2], v[3]];
+            let step = v3.map(|c| c * dt);
             self.steer_moving = step[0] * step[0] + step[1] * step[1] + step[2] * step[2] > 1.0e-4;
             self.sampler.store(step);
         }
@@ -597,16 +607,17 @@ impl Sysobj {
             + direction[1] * direction[1]
             + direction[2] * direction[2])
             .sqrt();
-        let velocity = if len != 0. {
+        let v = if len != 0. {
             direction.map(|c| c / len * speed)
         } else {
             direction.map(|c| c * speed)
         };
+        self.velocity = [v[0], v[1], v[2], speed * speed];
         self.jump = None;
         self.fly = None;
         self.pending_fly = None;
         self.pending_mode = 0;
-        self.steer = Some(Steer { velocity, inertia });
+        self.steer = Some(Steer { inertia });
         self.sampler.reset();
         self.airborne = true;
     }
@@ -796,6 +807,9 @@ impl Sysobj {
             0x34 => Some(self.scale[1].to_bits()),
             0x38 => Some(self.scale[2].to_bits()),
             0x3c => Some(self.scale_w.to_bits()),
+            0x20..=0x2c if offset % 4 == 0 => {
+                Some(self.velocity[((offset - 0x20) / 4) as usize].to_bits())
+            }
             0x134 => Some(self.turn_rate.to_bits()),
             _ => None,
         }
@@ -808,6 +822,9 @@ impl Sysobj {
             0x34 => self.scale[1] = f32::from_bits(value),
             0x38 => self.scale[2] = f32::from_bits(value),
             0x3c => self.scale_w = f32::from_bits(value),
+            0x20..=0x2c if offset % 4 == 0 => {
+                self.velocity[((offset - 0x20) / 4) as usize] = f32::from_bits(value)
+            }
             0x134 => self.turn_rate = f32::from_bits(value),
             _ => return false,
         }

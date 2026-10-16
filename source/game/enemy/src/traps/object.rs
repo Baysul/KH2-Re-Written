@@ -781,8 +781,10 @@ fn is_exist(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<()
 /// 1:98 FUN_14042fae0: the position with w = the step height (FUN_1403b87e0).
 /// [U] Taken to be the current height, its value when nothing is probed.
 fn step_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let id = ctx.sys_of_ai(m, args[0].value)?;
-    let p = ctx.object(id)?.sys.position;
+    let p = match ctx.sys_ref_ai(m, args[0].value)? {
+        SysRef::Player => ctx.env.player_position(),
+        SysRef::Object(id) => ctx.object(id)?.sys.position,
+    };
     shared_vector(ctx, m, [p[0], p[1], p[2], p[1]], args)
 }
 

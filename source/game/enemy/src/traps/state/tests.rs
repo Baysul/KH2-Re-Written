@@ -24,8 +24,7 @@ fn obj_fly_normalises_the_direction_and_decays_without_a_request() {
     assert!(s.is_fly());
     // The first run happens on the next frame; it keeps half the velocity.
     s.end_tick(&NullEnv);
-    let step = s.steer.unwrap().velocity;
-    assert_eq!(step, [1.5, 2., 0.]);
+    assert_eq!(&s.velocity[..3], [1.5, 2., 0.]);
     // The displacement of the two-frame span is spread over its frames.
     assert_eq!(s.moved, [1.5, 2., 0.]);
     assert!(s.steer_moving);
@@ -39,7 +38,7 @@ fn obj_fly_follows_a_move_request_with_its_inertia() {
     s.move_speed = 4.;
     s.end_tick(&NullEnv);
     // target (0, 0, 4) * 0.25 + (10, 0, 0) * 0.75
-    assert_eq!(s.steer.unwrap().velocity, [7.5, 0., 1.]);
+    assert_eq!(&s.velocity[..3], [7.5, 0., 1.]);
 }
 
 #[test]

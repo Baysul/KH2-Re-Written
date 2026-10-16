@@ -17,7 +17,17 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 114) => search_by_entry,
         (1, 177) => set_path,
         (1, 222) => get_entry_id,
+        (1, 18) => obj_attach,
         (1, 59) => is_fly,
+        (1, 99) => float_height,
+        (1, 100) => jump_height_to_uptime,
+        (1, 107) => motion_speed,
+        (1, 112) => obj_hook,
+        (1, 140) => target_is_exist,
+        (1, 179) => set_fall_motion,
+        (1, 180) => set_land_motion,
+        (1, 209) => obj_dead,
+        (2, 45) => damage_attack_param_id,
         (1, 75) => motion_hook,
         (1, 77) => motion_is_hook,
         (1, 85) | (1, 86) => texanm,
@@ -347,6 +357,97 @@ fn set_rtn_time(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
             .ok_or(Fault::Memory(args[1].value))?;
     }
     ctx.object(id)?.sys.rtn_time = words;
+    Ok(())
+}
+
+/// 1:99 FUN_14042fb50 -> FUN_1403b87e0: minus the depth of the object below
+/// the ground at its position (0 above it).
+fn float_height(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let p = ctx.object(id)?.sys.position;
+    let floor = ctx.env.floor(p[0], p[2], p[1]).unwrap_or(p[1]);
+    let below = (floor - p[1]).max(0.);
+    args[0] = Slot::float(-below);
+    Ok(())
+}
+
+/// 1:100 FUN_14042fbc0 -> FUN_1403b73f0: the time a jump of this apex height
+/// takes to reach it, sqrt(|2h / g|).
+fn jump_height_to_uptime(
+    _: &mut Ctx<'_>,
+    _: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let h = args[0].as_float();
+    args[0] = Slot::float(((h + h) / player::actor_physics::G).abs().sqrt());
+    Ok(())
+}
+
+/// 1:107 FUN_14042fce0: +0x2a8.
+fn motion_speed(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    ctx.object(id)?.sys.motion_speed = args[1].as_float();
+    Ok(())
+}
+
+/// 1:179 and 1:180 FUN_14042ce00 / FUN_14042ce30: the fall and land motions
+/// of the current jump (+0x118, +0x11c).
+fn set_fall_motion(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let slot = args[1].as_int().max(0) as usize;
+    let motions = ctx.object(id)?.sys.jump_motions.get_or_insert((0, 0));
+    motions.0 = slot;
+    Ok(())
+}
+
+fn set_land_motion(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let slot = args[1].as_int().max(0) as usize;
+    let motions = ctx.object(id)?.sys.jump_motions.get_or_insert((0, 0));
+    motions.1 = slot;
+    Ok(())
+}
+
+/// 1:112 FUN_14042ca20: start a magic thread bound to the object as a hook.
+/// [U] Recorded; the script gets nothing.
+fn obj_hook(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
+    ctx.world.events.push(Event::Unsupported("obj_hook"));
+    Ok(())
+}
+
+/// 1:18 FUN_14042c550 -> FUN_1403d9fe0: attach one object to another (a grab).
+/// [U] Recorded.
+fn obj_attach(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
+    ctx.world.events.push(Event::Unsupported("obj_attach"));
+    Ok(())
+}
+
+/// 1:140 FUN_140430440 -> FUN_1403bde30: the target record names something
+/// that still exists.
+fn target_is_exist(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let alive = super::target::record_exists(ctx, args[0].value);
+    args[0] = Slot::int(alive as i32);
+    Ok(())
+}
+
+/// 1:209 FUN_14042dcf0 -> FUN_1403d3f10: the object is finished and removed.
+fn obj_dead(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    ctx.object(id)?.sys.gone = true;
+    ctx.world.events.push(Event::ObjectDead { object: id });
+    Ok(())
+}
+
+/// 2:45 FUN_1404320a0: the attack parameter id of the hit being handled.
+fn damage_attack_param_id(
+    ctx: &mut Ctx<'_>,
+    _: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let handle = args[0].value;
+    let id = crate::world::object_field(handle).map_or(0, |(id, _)| id);
+    let v = ctx.object(id).map_or(0, |o| o.sys.damage_param_id);
+    args[0] = Slot::int(v as i32);
     Ok(())
 }
 

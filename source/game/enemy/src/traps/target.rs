@@ -76,6 +76,15 @@ fn set_record(ctx: &mut Ctx<'_>, handle: u32, t: Target) -> Result<(), Fault> {
     Ok(())
 }
 
+/// Whether the record at `handle` names something that still exists
+/// (FUN_1403bde30): Sora, or a target the host can still place.
+pub(super) fn record_exists(ctx: &mut Ctx<'_>, handle: u32) -> bool {
+    let Ok(t) = record(ctx, handle) else {
+        return false;
+    };
+    t.id != 0 && (t.id == PLAYER_TARGET || ctx.env.target_position(t.id).is_some())
+}
+
 /// 1:120 FUN_140430350 -> FUN_1403bdde0: the centre of the target's TARGET
 /// shape, in the shared result vector.
 fn target_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
