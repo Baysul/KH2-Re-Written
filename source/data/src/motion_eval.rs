@@ -645,6 +645,37 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
     for (at, &j) in order.iter().enumerate() {
         order_pos[j] = at;
     }
+    // Flag 128: an aim chain's target joint comes from the motion's external
+    // effector list, taken in joint order, instead of the next joint index.
+    let effectors: Vec<usize> = m
+        .external_effectors
+        .bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter_map(|b| usize::try_from(i16::from_le_bytes(*b)).ok())
+        .collect();
+    let mut aim_target = vec![None::<usize>; total];
+    let mut taken = 0;
+    for &j in &order {
+        if flags[j] & 3 == 1 {
+            aim_target[j] = if flags[j] & 128 != 0 {
+                let t = effectors.get(taken).copied();
+                taken += 1;
+                t
+            } else {
+                Some(j + 1)
+            };
+        } else if flags[j] & 128 != 0 {
+            taken += 1;
+        }
+    }
+    let mut aimed_by = vec![false; total];
+    for t in aim_target.iter().flatten() {
+        if *t < total {
+            aimed_by[*t] = true;
+        }
+    }
     for &j in &order {
         // Expressions override this joint's local channels first.
         for &(joint, channel, node) in &expressions {
@@ -681,8 +712,13 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
         // constraint on itself, rolled by its own animated X rotation. Its
         // position stays forward kinematics; its own position constraint
         // is the previous joint's target (FUN_1401d3b80, ik branch 0x10000).
-        let aims = flags[j] & 3 == 1 && flags[j] & 128 == 0;
-        let aimed_at = j > 0 && flags[j - 1] & 131 == 1;
+        let aims = aim_target[j].is_some();
+        let aimed_at = aimed_by[j];
+        // A rotation-flag joint with no translation flag keeps its own
+        // rotation in character space.
+        if flags[j] & 12 == 8 {
+            world[j].rotation = from_euler(locals[j].rotation);
+        }
         if aimed_at && flags[j] & 8 != 0 {
             // The end of an aim chain with the rotation flag keeps its own
             // rotation in character space.
@@ -691,7 +727,7 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
         if aims
             && let Some(target) = constraints
                 .iter()
-                .find(|c| c.constrained == j + 1 && c.temporary_active && c.kind == 0)
+                .find(|c| Some(c.constrained) == aim_target[j] && c.temporary_active && c.kind == 0)
                 .map(|c| world[c.source].translation)
         {
             let (pr, pt, ps) = if parent < 0 {
@@ -820,7 +856,7 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
             match c.kind {
                 // The position constraint of an aiming joint, and of the
                 // joint an aiming joint points at, is that aim's target.
-                0 if aims || aimed_at => {}
+                0 if (aims && flags[j] & 128 == 0) || aimed_at => {}
                 0 if solved_end[j] => {
                     if flags[j] & 8 != 0 {
                         // The end joint keeps its own rotation in character

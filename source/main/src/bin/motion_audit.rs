@@ -124,6 +124,7 @@ fn audit_motion(bones: &[model_skeleton::BoneRecord], m: &motion::InterpolatedMo
                 "index": half(b, 0), "parent": half(b, 4), "flags": u32::from_le_bytes([b[12], b[13], b[14], b[15]])})).collect::<Vec<_>>(),
             "bones": bones.iter().enumerate().map(|(i, b)| json!({
                 "i": i, "parent": b.header_i32[1], "len": f32::from_bits(b.transform_bits[3])})).collect::<Vec<_>>(),
+            "effectors": m.external_effectors.bytes.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)).collect::<Vec<_>>(),
             "nodes": m.expression_nodes.bytes.as_chunks::<12>().0.iter().map(|b| json!({
                 "type": b[0] as i8, "global": b[1], "element": half(b, 2),
                 "value": f32::from_le_bytes([b[4], b[5], b[6], b[7]]), "car": half(b, 8), "cdr": half(b, 10)})).collect::<Vec<_>>(),
