@@ -99,6 +99,20 @@ pub enum Event {
         words: [u32; 2],
         vector: Option<[f32; 3]>,
     },
+    /// A motion event whose engine routine another subsystem owns (sound,
+    /// effects, camera, physics modes).
+    MotionEvent {
+        object: ObjId,
+        range: bool,
+        kind: u8,
+        params: Vec<u16>,
+    },
+    /// Frame event 1: an effect or sound with this id started.
+    MotionEffect {
+        object: ObjId,
+        id: u16,
+        handle: u32,
+    },
     EffectDeadBlock {
         object: ObjId,
         handle: u32,

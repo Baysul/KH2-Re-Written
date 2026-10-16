@@ -8,6 +8,7 @@
 pub mod act;
 pub mod damage;
 pub mod env;
+pub mod motion;
 pub mod object;
 pub mod script;
 pub mod sysobj;

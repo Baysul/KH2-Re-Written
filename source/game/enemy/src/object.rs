@@ -5,9 +5,10 @@
 
 use crate::act::{self, Action};
 use crate::env::Env;
+use crate::motion::Effect;
 use crate::script::{Callback, Instance, Slot, Thread};
 use crate::sysobj::Sysobj;
-use crate::world::{ObjId, Object, ScriptSpace, World, object_handle, run_thread};
+use crate::world::{Event, ObjId, Object, ScriptSpace, World, object_handle, run_thread};
 
 /// Script trigger keys (OBJ_INIT, OBJ_MAIN, OBJ_DAMAGE, OBJ_FALL ...).
 pub const INIT: i32 = 0;
@@ -16,6 +17,9 @@ pub const DAMAGE: i32 = 6;
 pub const FALL: i32 = 13;
 pub const LAND: i32 = 14;
 pub const ATTACK: i32 = 15;
+/// Triggers the motion events fire: frame event 1 (effect or sound) and 7.
+pub const EVENT_EFFECT: i32 = 16;
+pub const EVENT_SCRIPT: i32 = 17;
 
 /// Frame slots of the object's threads (see [`crate::script`]).
 const MAIN_SLOT: u32 = 0;
@@ -175,7 +179,7 @@ impl Object {
                 continue;
             }
             if flags & act::GATED != 0 {
-                if self.sys.air_blocked() || self.sys.no_control(env) {
+                if self.sys.air_blocked() || self.sys.no_control() {
                     return;
                 }
                 self.acts.flags &= !act::GATED;
@@ -200,10 +204,76 @@ impl Object {
         }
     }
 
-    /// One frame: the script, then the engine's motion and physics.
+    /// One frame, in the executable's order: the motion clock and its events,
+    /// the script (main thread, then acts), then root motion and physics.
     pub fn tick(&mut self, world: &mut World, env: &dyn Env) {
+        self.sys.begin_tick(env);
+        self.carry_out_motion_effects(world, env);
         self.tick_script(world, env);
-        let no_control = self.sys.no_control(env);
-        self.sys.tick(env, no_control);
+        self.sys.end_tick(env);
+    }
+
+    /// What the motion events asked for: take-off, and the script triggers
+    /// 0x10 (`id`, effect handle) and 0x11 (`p0`, `p1`).
+    pub fn carry_out_motion_effects(&mut self, world: &mut World, env: &dyn Env) {
+        let effects = std::mem::take(&mut self.sys.effects);
+        for effect in effects {
+            match effect {
+                Effect::Takeoff => self.sys.take_off(env),
+                Effect::EffectOrSound { id } => {
+                    let handle = world.next_effect_handle();
+                    world.events.push(Event::MotionEffect {
+                        object: self.id,
+                        id,
+                        handle,
+                    });
+                    self.fire(
+                        world,
+                        env,
+                        EVENT_EFFECT,
+                        &[
+                            Slot::address(object_handle(self.id)),
+                            Slot::int(i32::from(id)),
+                            Slot::address(handle),
+                        ],
+                    );
+                }
+                Effect::ScriptEvent { p0, p1 } => self.fire(
+                    world,
+                    env,
+                    EVENT_SCRIPT,
+                    &[
+                        Slot::address(object_handle(self.id)),
+                        Slot::int(i32::from(p0)),
+                        Slot::int(i32::from(p1)),
+                    ],
+                ),
+                Effect::SetSpeed { value } => self.sys.event_speed = f32::from(value) * 0.01,
+                Effect::SetParameter { value } => self.sys.event_parameter = u32::from(value),
+                Effect::PatternBit { word, bit } => {
+                    if word == 0 {
+                        self.sys.pattern_a |= 1 << bit;
+                    } else {
+                        self.sys.pattern_b |= 1 << bit;
+                    }
+                }
+                Effect::Revenge => {
+                    // [U] The revenge gauge compare (+0xd48 / +0xd4c) is not modeled.
+                    world
+                        .events
+                        .push(Event::Unsupported("motion event revenge"));
+                }
+                Effect::Other {
+                    range,
+                    kind,
+                    params,
+                } => world.events.push(Event::MotionEvent {
+                    object: self.id,
+                    range,
+                    kind,
+                    params,
+                }),
+            }
+        }
     }
 }

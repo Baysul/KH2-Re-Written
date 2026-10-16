@@ -256,9 +256,7 @@ fn motion_frame_start(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) ->
 /// 1:14 FUN_14042b440: bit 1 of +0x18c.
 fn motion_is_end(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of(args[0].value)?;
-    let env = ctx.env;
-    let obj = ctx.object(id)?;
-    let ended = obj.sys.motion_ended(env.clips(obj.sys.model));
+    let ended = ctx.object(id)?.sys.motion_ended();
     int(args, ended as i32);
     Ok(())
 }
@@ -461,8 +459,7 @@ fn motion_is_no_control(
     args: &mut Args,
 ) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let env = ctx.env;
-    let blocked = ctx.object(id)?.sys.no_control(env);
+    let blocked = ctx.object(id)?.sys.no_control();
     int(args, blocked as i32);
     Ok(())
 }
@@ -774,20 +771,15 @@ fn step_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<()
 fn motion_check_range(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let n = args[1].as_int();
-    let env = ctx.env;
-    let sys = &ctx.object(id)?.sys;
-    let active = u8::try_from(n)
-        .ok()
-        .and_then(|n| {
-            env.clips(sys.model)
-                .range(sys.motion.slot, sys.motion.tick, n)
-        })
-        .unwrap_or(false);
-    int(args, active as i32);
+    let bits = ctx.object(id)?.sys.motion.flags.ranges;
+    int(
+        args,
+        (bits & (1u8.wrapping_shl(n.wrapping_sub(1) as u32 & 31)) != 0) as i32,
+    );
     Ok(())
 }
 
-/// 1:151 FUN_14042d230: motion trigger `n` (1-based, `+0x2ad` bits).
+/// 1:151 FUN_14042d230: motion trigger pulse `n` (1-based, `+0x2ad` bits).
 fn motion_check_trigger(
     ctx: &mut Ctx<'_>,
     m: &mut Memory<'_>,
@@ -795,16 +787,11 @@ fn motion_check_trigger(
 ) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let n = args[1].as_int();
-    let env = ctx.env;
-    let sys = &ctx.object(id)?.sys;
-    let fired = u8::try_from(n)
-        .ok()
-        .and_then(|n| {
-            env.clips(sys.model)
-                .trigger(sys.motion.slot, sys.motion.tick, n)
-        })
-        .unwrap_or(false);
-    int(args, fired as i32);
+    let bits = ctx.object(id)?.sys.motion.flags.pulses;
+    int(
+        args,
+        (bits & (1u8.wrapping_shl(n.wrapping_sub(1) as u32 & 31)) != 0) as i32,
+    );
     Ok(())
 }
 

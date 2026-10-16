@@ -16,24 +16,8 @@ pub trait Clips {
     fn advance(&self, _slot: usize, tick: u32) -> u32 {
         tick.saturating_add(1)
     }
-    /// Event range `range` (an attack window index) is active at `tick`.
-    fn range(&self, slot: usize, tick: u32, range: u8) -> Option<bool>;
-    /// A take-off event fires at `tick` (fly jumps).
-    fn takeoff(&self, _slot: usize, _tick: u32) -> Option<bool> {
-        None
-    }
-    /// A motion trigger `n` (1-based) fired at `tick` (`+0x2ad` bits).
-    fn trigger(&self, _slot: usize, _tick: u32, _n: u8) -> Option<bool> {
-        None
-    }
-    /// The clip holds the actor out of control at `tick` (`+0x18c` bit 9).
-    fn no_control(&self, _slot: usize, _tick: u32) -> Option<bool> {
-        None
-    }
-    /// A gravity-freezing range is active at `tick`.
-    fn gravity_frozen(&self, _slot: usize, _tick: u32) -> Option<bool> {
-        None
-    }
+    /// The clip's trigger tables (`None` = the slot has none).
+    fn events(&self, slot: usize) -> Option<&crate::motion::MotionEvents>;
     /// The clip finished on the step that produced `tick` (the end pulse).
     fn ended(&self, slot: usize, tick: u32) -> bool {
         tick >= self.length(slot)
@@ -124,7 +108,7 @@ impl Clips for NoClips {
     fn root_delta(&self, _: usize, _: u32) -> Vec3 {
         [0.; 3]
     }
-    fn range(&self, _: usize, _: u32, _: u8) -> Option<bool> {
+    fn events(&self, _: usize) -> Option<&crate::motion::MotionEvents> {
         None
     }
 }

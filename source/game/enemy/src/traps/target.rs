@@ -151,8 +151,7 @@ fn enemy_is_no_control(
     args: &mut Args,
 ) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let env = ctx.env;
-    let blocked = ctx.object(id)?.sys.no_control(env);
+    let blocked = ctx.object(id)?.sys.no_control();
     args[0] = Slot::int(blocked as i32);
     Ok(())
 }

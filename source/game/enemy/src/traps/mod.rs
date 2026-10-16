@@ -7,6 +7,7 @@ use crate::world::TrapFn;
 
 pub mod math;
 pub mod object;
+pub mod sheet;
 pub mod system;
 pub mod target;
 
@@ -15,4 +16,5 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         .or_else(|| object::lookup(table, index))
         .or_else(|| target::lookup(table, index))
         .or_else(|| system::lookup(table, index))
+        .or_else(|| sheet::lookup(table, index))
 }

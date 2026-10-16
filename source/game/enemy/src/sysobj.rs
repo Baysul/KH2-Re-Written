@@ -7,6 +7,7 @@
 //! offsets in comments are the executable's.
 
 use crate::env::{Clips, Env};
+use crate::motion::{self, Effect, Flags};
 use player::{actor_physics, combat};
 
 pub type Vec3 = [f32; 3];
@@ -22,6 +23,14 @@ pub fn wrap(a: f32) -> f32 {
     crate::traps::math::wrap_angle(a)
 }
 
+/// One HP pool of the battle sheet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pool {
+    pub hp: i32,
+    pub max: i32,
+    pub min: i32,
+}
+
 /// +0x158: the motion player.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Motion {
@@ -35,6 +44,10 @@ pub struct Motion {
     pub blend: f32,
     blend_elapsed: u32,
     blend_duration: u32,
+    /// +0x34.. : the event flags (see [`crate::motion`]).
+    pub flags: Flags,
+    /// Root displacement of this tick's clock step, in model space.
+    pub root_step: Vec3,
 }
 
 /// Reaction states the engine holds between a hit and returning to the script.
@@ -165,6 +178,12 @@ pub struct Sysobj {
     pub motion_queue: Vec<(usize, f32)>,
     /// +0xd10: enabled attack/behaviour patterns.
     pub pattern_mask: u32,
+    /// Pool 0's HP floor (sheet +8) and the pools above it (host-provided).
+    pub min_hp: i32,
+    pub extra_pools: Vec<Pool>,
+    /// +0x1c4 / +0x1c8: prize range and hit-back addition set by scripts.
+    pub prize_range: i32,
+    pub hitback_addition: i32,
     /// The battle parameter sheet (ENMP) number the script bound.
     pub sheet: i32,
     /// +0x8c8 bit 6: sunk and slithering (Shadow).
@@ -174,6 +193,19 @@ pub struct Sysobj {
     /// `obj_set_movement`'s `+0x118/+0x11c`: the fall and land motions of the
     /// current jump.
     pub jump_motions: Option<(usize, usize)>,
+    /// +0x648: the physics mode the next take-off event (frame event 0) enters
+    /// (1 jump, 3 fly).
+    pub pending_mode: u8,
+    /// The jump a pending mode 1 launches: direction, height, speed.
+    pub(crate) pending_jump: Option<(Vec3, f32, f32)>,
+    /// Effects the motion events asked for this tick, for the object to carry out.
+    pub effects: Vec<Effect>,
+    /// Range event 0x18 (+0x108) and 0x19/0x1a (+0x638) values, and the
+    /// pattern words range events 0x24/0x25 set (+0xd14 / +0xd18).
+    pub event_speed: f32,
+    pub event_parameter: u32,
+    pub pattern_a: u32,
+    pub pattern_b: u32,
     pub(crate) pending_fly: Option<PendingFly>,
     pub(crate) fly: Option<Fly>,
     /// A plain jump (FUN_1403cbb00): the arc and its horizontal velocity.
@@ -251,10 +283,21 @@ impl Sysobj {
             request_speed: 0.,
             motion_queue: Vec::new(),
             pattern_mask: 0,
+            min_hp: 0,
+            extra_pools: Vec::new(),
+            prize_range: 0,
+            hitback_addition: 0,
             sheet: 0,
             shadow_move: false,
             turn_rate: 0.,
             jump_motions: None,
+            pending_mode: 0,
+            pending_jump: None,
+            effects: Vec::new(),
+            event_speed: 0.,
+            event_parameter: 0,
+            pattern_a: 0,
+            pattern_b: 0,
             pending_fly: None,
             fly: None,
             jump: None,
@@ -279,6 +322,7 @@ impl Sysobj {
         m.blend = if blend <= 2. { 0. } else { blend };
         m.blend_duration = m.blend as u32;
         m.blend_elapsed = 0;
+        m.root_step = [0.; 3];
         true
     }
 
@@ -291,8 +335,8 @@ impl Sysobj {
     }
 
     /// +0x18c bit 1 (the motion ended on this tick's step).
-    pub fn motion_ended(&self, clips: &dyn Clips) -> bool {
-        clips.ended(self.motion.slot, self.motion.tick)
+    pub fn motion_ended(&self) -> bool {
+        self.motion.flags.word & motion::flag::ENDED != 0
     }
 
     /// Hit-stun suspension (FUN_1403ca7c0): a damage (10..=39) or reflect
@@ -332,14 +376,122 @@ impl Sysobj {
         self.moved = sub(self.position, from);
     }
 
-    /// One tick of engine work after the script ran: heading, root motion,
-    /// physics and the motion clock.
-    pub fn tick(&mut self, env: &dyn Env, no_control: bool) {
+    /// The start of a frame (FUN_1403c6740): advance the motion clock, fire the
+    /// frame events it passed, reset and re-evaluate the range flags. Runs
+    /// before the script.
+    pub fn begin_tick(&mut self, env: &dyn Env) {
         if self.gone {
             return;
         }
         let clips = env.clips(self.model);
-        let old_serial = self.motion.serial;
+        let m = &mut self.motion;
+        m.flags.pulses = 0;
+        m.root_step = [0.; 3];
+        if m.flags.word & motion::flag::PAUSED != 0 {
+            return;
+        }
+        m.flags.word &= !0x102;
+        if clips.length(m.slot) == 0 {
+            return;
+        }
+        let old = m.tick;
+        let mut stepped = false;
+        if m.blend > 0. {
+            m.blend_elapsed = if m.blend_elapsed == 0 {
+                2
+            } else {
+                m.blend_elapsed.saturating_add(1)
+            };
+            if m.blend_elapsed >= m.blend_duration {
+                m.tick = m.blend_elapsed - m.blend_duration;
+                m.blend = 0.;
+                m.blend_elapsed = 0;
+                stepped = true;
+            } else {
+                m.blend = (m.blend_duration - m.blend_elapsed) as f32;
+            }
+        } else {
+            m.tick = clips.advance(m.slot, m.tick);
+            m.root_step = clips.root_delta(m.slot, old);
+            stepped = true;
+        }
+        if stepped {
+            if clips.ended(m.slot, m.tick) {
+                m.flags.word |= motion::flag::ENDED;
+            }
+            self.dispatch_frame_events(clips);
+        }
+        self.dispatch_ranges(clips);
+    }
+
+    /// Frame events whose frame the clock just passed.
+    fn dispatch_frame_events(&mut self, clips: &dyn Clips) {
+        let slot = self.motion.slot;
+        let (t, duration, loop_top) =
+            (self.motion.tick, clips.length(slot), clips.loop_start(slot));
+        let Some(events) = clips.events(slot) else {
+            return;
+        };
+        for e in &events.frames {
+            if motion::frame_event_fires(e.frame, t, duration, loop_top) {
+                self.motion.flags.frame_event(e, slot, &mut self.effects);
+            }
+        }
+    }
+
+    /// FUN_14040e5c0 / FUN_14040e740: reset, then the ranges the clock is in.
+    fn dispatch_ranges(&mut self, clips: &dyn Clips) {
+        let slot = self.motion.slot;
+        self.motion.flags.reset();
+        let clock =
+            motion::native_clock(self.motion.tick, clips.length(slot), clips.loop_start(slot));
+        let Some(events) = clips.events(slot) else {
+            return;
+        };
+        for e in &events.ranges {
+            if u32::from(e.start) <= clock && (e.end == u16::MAX || clock < u32::from(e.end)) {
+                self.motion.flags.range_event(e, slot, &mut self.effects);
+            }
+        }
+    }
+
+    /// Take-off (frame event 0): enter the physics mode a script asked for.
+    pub fn take_off(&mut self, env: &dyn Env) {
+        match self.pending_mode {
+            1 => {
+                if let Some((direction, height, speed)) = self.pending_jump.take() {
+                    self.start_jump(direction, height, speed);
+                }
+            }
+            3 => {
+                if let Some(launch) = self.pending_fly.take() {
+                    let floor = env.floor(self.position[0], self.position[2], self.position[1]);
+                    self.fly = Some(Fly {
+                        arc: actor_physics::Arc::launch(self.position[1], launch.height),
+                        velocity: [
+                            launch.direction[0] * launch.speed,
+                            launch.direction[2] * launch.speed,
+                        ],
+                        initial_height: floor.map_or(0., |f| (self.position[1] - f).max(0.)),
+                        original_airborne: self.airborne,
+                        fall_started: false,
+                    });
+                    self.airborne = true;
+                    self.sampler.reset();
+                }
+            }
+            _ => {}
+        }
+        self.pending_mode = 0;
+    }
+
+    /// The rest of a frame after the script: heading, root motion, physics.
+    pub fn end_tick(&mut self, env: &dyn Env) {
+        if self.gone {
+            return;
+        }
+        let clips = env.clips(self.model);
+        let no_control = self.motion.flags.word & motion::flag::NO_CONTROL != 0;
         let reacting = self.reaction != Reaction::None && self.hp > 0;
         if reacting {
             self.update_reaction(clips, env);
@@ -352,34 +504,12 @@ impl Sysobj {
             let step = self.turn_rate.max(0.) * 2.;
             self.yaw = wrap(self.yaw + delta.clamp(-step, step));
         }
-        if self.pending_fly.is_some()
-            && clips.takeoff(self.motion.slot, self.motion.tick) == Some(true)
-        {
-            let launch = self.pending_fly.take().expect("pending launch");
-            let floor = env.floor(self.position[0], self.position[2], self.position[1]);
-            self.fly = Some(Fly {
-                arc: actor_physics::Arc::launch(self.position[1], launch.height),
-                velocity: [
-                    launch.direction[0] * launch.speed,
-                    launch.direction[2] * launch.speed,
-                ],
-                initial_height: floor.map_or(0., |f| (self.position[1] - f).max(0.)),
-                original_airborne: self.airborne,
-                fall_started: false,
-            });
-            self.airborne = true;
-            self.sampler.reset();
-        }
         if self.fly.is_some() {
-            self.update_fly(clips, env, old_serial);
+            self.update_fly(clips, env);
         } else if let Some((arc, velocity)) = self.jump {
             self.update_jump(arc, velocity, env);
         } else if !reacting {
-            let root = if old_serial == self.motion.serial {
-                clips.root_delta(self.motion.slot, self.motion.tick)
-            } else {
-                [0.; 3]
-            };
+            let root = self.motion.root_step;
             let (sin, cos) = self.yaw.sin_cos();
             let wished = if self.move_speed != 0. {
                 self.move_direction.map(|v| v * self.move_speed)
@@ -391,38 +521,6 @@ impl Sysobj {
                 ]
             };
             self.apply_movement(wished, env);
-        }
-        self.advance_motion(clips, old_serial);
-        // A queued motion starts when the playing clip has ended.
-        if self.motion.serial == old_serial
-            && clips.ended(self.motion.slot, self.motion.tick)
-            && !self.motion_queue.is_empty()
-        {
-            let (slot, blend) = self.motion_queue.remove(0);
-            self.motion_start(slot, blend, clips);
-        }
-    }
-
-    fn advance_motion(&mut self, clips: &dyn Clips, old_serial: u64) {
-        let m = &mut self.motion;
-        if m.serial != old_serial {
-            return;
-        }
-        if m.blend > 0. {
-            m.blend_elapsed = if m.blend_elapsed == 0 {
-                2
-            } else {
-                m.blend_elapsed.saturating_add(1)
-            };
-            if m.blend_elapsed >= m.blend_duration {
-                m.tick = m.blend_elapsed - m.blend_duration;
-                m.blend = 0.;
-                m.blend_elapsed = 0;
-            } else {
-                m.blend = (m.blend_duration - m.blend_elapsed) as f32;
-            }
-        } else {
-            m.tick = clips.advance(m.slot, m.tick);
         }
     }
 
@@ -454,9 +552,8 @@ impl Sysobj {
         }
     }
 
-    fn update_fly(&mut self, clips: &dyn Clips, env: &dyn Env, old_serial: u64) {
+    fn update_fly(&mut self, clips: &dyn Clips, env: &dyn Env) {
         let mut fly = self.fly.expect("active fly jump");
-        let slot = self.motion.slot;
         if !fly.fall_started && fly.arc.falling_motion() && self.reaction == Reaction::None {
             if !self.motion_start(155 + 1, actor_physics::MOTION_BLEND, clips) {
                 return;
@@ -473,9 +570,7 @@ impl Sysobj {
             self.motion_start(155 + 2, 0., clips);
             return;
         }
-        let frozen = clips
-            .gravity_frozen(slot, self.motion.tick)
-            .unwrap_or(false);
+        let frozen = self.gravity_frozen();
         if self.sampler.due(self.move_speed) {
             let dt = actor_physics::PHYSICS_STEP;
             let dy = fly
@@ -491,11 +586,7 @@ impl Sysobj {
             self.sampler
                 .store([fly.velocity[0] * dt, dy, fly.velocity[1] * dt]);
         }
-        let root = if old_serial == self.motion.serial {
-            clips.root_delta(self.motion.slot, self.motion.tick)
-        } else {
-            [0.; 3]
-        };
+        let root = self.motion.root_step;
         let (sin, cos) = self.yaw.sin_cos();
         let root = [
             root[0] * cos + root[2] * sin,
@@ -548,9 +639,17 @@ impl Sysobj {
         }
     }
 
-    /// FUN_1403cbb00 (`method_obj_jump`): leave the ground now. `height` is
-    /// the Y-up apex height, `speed` the horizontal speed along `direction`.
+    /// FUN_1403cbb00 (`method_obj_jump`): arm a jump. The object leaves the
+    /// ground when the playing motion's take-off event (frame event 0) fires
+    /// (`+0x648` = 1). `height` is the Y-up apex height, `speed` the
+    /// horizontal speed along `direction`.
     pub fn launch_jump(&mut self, direction: Vec3, height: f32, speed: f32) {
+        self.pending_mode = 1;
+        self.pending_jump = Some((direction, height, speed));
+    }
+
+    /// Enter the jump physics mode now.
+    fn start_jump(&mut self, direction: Vec3, height: f32, speed: f32) {
         let len = hlen(direction);
         let dir = if len > 0. {
             [direction[0] / len, direction[2] / len]
@@ -565,17 +664,26 @@ impl Sysobj {
         self.airborne = true;
     }
 
+    /// Arc frozen by a gravity range (`+0x18c & 0x1000020` or bit 6).
+    pub fn gravity_frozen(&self) -> bool {
+        let w = self.motion.flags.word;
+        w & (motion::flag::GRAVITY_FROZEN | motion::flag::GRAVITY_FROZEN_2) != 0
+            || w & motion::flag::HOLD != 0
+    }
+
     /// FUN_1403ba9a0: true while the object is airborne or in a special state;
     /// an act first run waits for it to clear.
     pub fn air_blocked(&self) -> bool {
-        self.is_jump() || self.flags >> 23 & 1 != 0
+        self.is_jump()
+            || self.motion.flags.word
+                & (motion::flag::GRAVITY_FROZEN | motion::flag::GRAVITY_FROZEN_2)
+                != 0
+            || self.flags >> 23 & 1 != 0
     }
 
     /// +0x18c bit 9: the playing clip holds the actor out of control.
-    pub fn no_control(&self, env: &dyn Env) -> bool {
-        env.clips(self.model)
-            .no_control(self.motion.slot, self.motion.tick)
-            .unwrap_or(false)
+    pub fn no_control(&self) -> bool {
+        self.motion.flags.word & motion::flag::NO_CONTROL != 0
     }
 
     /// Physics mode entry for a fall (FUN_1403b8150): the parabola continues
@@ -610,6 +718,45 @@ impl Sysobj {
             _ => return false,
         }
         true
+    }
+
+    /// Pool `index` of the battle sheet (0 is the object's HP).
+    pub fn pool(&self, index: usize) -> Option<Pool> {
+        if index == 0 {
+            Some(Pool {
+                hp: self.hp,
+                max: self.stats.max_hp,
+                min: self.min_hp,
+            })
+        } else {
+            self.extra_pools.get(index - 1).copied()
+        }
+    }
+
+    pub fn set_pool_min(&mut self, index: usize, value: i32) {
+        if index == 0 {
+            self.min_hp = value;
+        } else if let Some(p) = self.extra_pools.get_mut(index - 1) {
+            p.min = value;
+        }
+    }
+
+    /// FUN_140431140: a value under the floor lands on the floor, one over the
+    /// maximum on the maximum.
+    pub fn set_pool_hp(&mut self, index: usize, value: i32) {
+        let Some(p) = self.pool(index) else {
+            return;
+        };
+        let hp = if value < p.min {
+            p.min
+        } else {
+            value.min(p.max)
+        };
+        if index == 0 {
+            self.hp = hp;
+        } else if let Some(p) = self.extra_pools.get_mut(index - 1) {
+            p.hp = hp;
+        }
     }
 
     /// `trap_obj_idle`: back to the ground physics mode (FUN_1403b4da0 mode 0).

@@ -221,6 +221,8 @@ pub(super) struct Clip {
     fps: f32,
     roots: Vec<[f32; 3]>,
     windows: Vec<AttackWindow>,
+    /// The clip's trigger tables as the enemy engine reads them.
+    events: enemy::motion::MotionEvents,
 }
 fn native_clock(t: u32, duration: u32, loop_top: u32) -> u32 {
     if t < duration {
@@ -303,14 +305,8 @@ impl enemy::env::Clips for Clips {
     fn advance(&self, slot: usize, tick: u32) -> u32 {
         dusk::Clips::advance(self, slot, tick)
     }
-    fn range(&self, slot: usize, tick: u32, range: u8) -> Option<bool> {
-        dusk::Clips::range(self, slot, tick, range)
-    }
-    fn takeoff(&self, slot: usize, tick: u32) -> Option<bool> {
-        dusk::Clips::takeoff(self, slot, tick)
-    }
-    fn gravity_frozen(&self, slot: usize, tick: u32) -> Option<bool> {
-        dusk::Clips::gravity_frozen(self, slot, tick)
+    fn events(&self, slot: usize) -> Option<&enemy::motion::MotionEvents> {
+        self.0.get(&slot).map(|c| &c.events)
     }
     fn ended(&self, slot: usize, tick: u32) -> bool {
         dusk::Clips::ended(self, slot, tick)
@@ -592,6 +588,29 @@ impl BattleActor {
                 roots.push(pose.root_translation);
             }
             let windows = assets.windows(&motion)?;
+            let events = enemy::motion::MotionEvents {
+                ranges: motion
+                    .triggers
+                    .iter()
+                    .flat_map(|t| &t.records.ranges)
+                    .map(|r| enemy::motion::RangeEvent {
+                        start: r.start_frame as u16,
+                        end: r.end_frame as u16,
+                        kind: r.trigger,
+                        params: r.parameters.iter().map(|&v| v as u16).collect(),
+                    })
+                    .collect(),
+                frames: motion
+                    .triggers
+                    .iter()
+                    .flat_map(|t| &t.records.frames)
+                    .map(|f| enemy::motion::FrameEvent {
+                        frame: f.frame as u16,
+                        kind: f.trigger,
+                        params: f.parameters.iter().map(|&v| v as u16).collect(),
+                    })
+                    .collect(),
+            };
             clips.insert(
                 m.slot,
                 Clip {
@@ -603,6 +622,7 @@ impl BattleActor {
                     fps,
                     roots,
                     windows,
+                    events,
                 },
             );
         }
