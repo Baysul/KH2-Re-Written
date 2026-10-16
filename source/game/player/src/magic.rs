@@ -305,11 +305,66 @@ pub struct Strike {
     pub party: usize,
 }
 
+/// The object an effect element is bound to (`pax_start_bind`'s `obj`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Anchor {
+    /// The caster (Sora).
+    Caster,
+    /// A party member by slot (0 = Sora).
+    Party(usize),
+}
+
+/// A script's effect call on the spell's PAX (the `.mag` file's effect
+/// container): `pax_start` / `pax_start_bind` and the `effect_*` traps
+/// 0x14041df80.. (`FUN_1402c6b30`, `FUN_14041e000`..`FUN_14041e270`).
+/// Positions and directions are the simulation's Y-up space; `key` names
+/// the effect handle the script keeps.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Fx {
+    /// Element `id`; `bound` is `pax_start_bind`'s object (None for
+    /// `pax_start`), `at` an `effect_set_pos` made right after.
+    Start {
+        key: u64,
+        id: u16,
+        bound: Option<Anchor>,
+        at: Option<Vec3>,
+    },
+    /// `effect_set_pos`.
+    Pos(u64, Vec3),
+    /// `effect_set_dir` (the facing as an Euler pair, FUN_1403b7710).
+    Dir(u64, Vec3),
+    /// `effect_set_scale` (uniform).
+    Scale(u64, f32),
+    /// `effect_fadeout(e, frames, 1)`.
+    Fade(u64, f32),
+    /// `effect_kill`.
+    Kill(u64),
+    /// `effect_loop_end`.
+    LoopEnd(u64),
+}
+
+/// What the effect system knows of a script's effect handle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FxLive {
+    /// `effect_is_alive`.
+    pub alive: bool,
+    /// `effect_pos`, in the simulation's space.
+    pub pos: Vec3,
+    /// False when no effect runs for the handle (no PAX, no element): the
+    /// scripts then keep their own timers.
+    pub tracked: bool,
+}
+
 /// One tick's output of a spell.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Output {
     pub volumes: Vec<Volume>,
     pub strikes: Vec<Strike>,
+    /// Effect calls of this tick, in script order.
+    pub fx: Vec<Fx>,
+    /// Reflect's shared block after this tick (T[4] and T[8]).
+    pub barrier: Option<Option<u64>>,
+    pub barrier_count: Option<u32>,
     /// Ticks of invulnerability to give the caster (Leaf Bracer).
     pub invulnerable: Option<f32>,
     /// Knock-slide of the caster away from its facing (Blizzard's
@@ -325,6 +380,8 @@ pub struct Context<'a> {
     pub facing: [f32; 2],
     /// The caster's TARGET shape centre (blizzard start).
     pub caster_centre: Vec3,
+    /// The caster's body centre (bone 0x4001), where Cure's heal effect sits.
+    pub body_centre: Vec3,
     pub airborne: bool,
     /// The caster is still in the cast motion (spells wait on it).
     pub casting: bool,
@@ -336,6 +393,11 @@ pub struct Context<'a> {
     pub ground: &'a dyn Fn(Vec3, f32) -> Option<Vec3>,
     /// A volume path ended on the background.
     pub bg_hit: &'a dyn Fn(Vec3, f32) -> bool,
+    /// Reflect's shared block (`teamwork_alloc(0x10002)`): the handle of the
+    /// barrier in force (T[4]) and the clashes carried by replaced
+    /// barriers (T[8]).
+    pub barrier: Option<u64>,
+    pub barrier_count: u32,
 }
 
 /// Feedback from the previous tick's collisions.
@@ -345,9 +407,22 @@ pub struct Feedback {
     pub hit: Vec<u64>,
     /// Clash counts of guard volumes by key (obj+0xb0).
     pub reflected: Vec<(u64, u32)>,
+    /// The effect handles' state after the last effect update.
+    pub fx: Vec<(u64, FxLive)>,
 }
 
 impl Feedback {
+    fn live(&self, key: u64) -> Option<FxLive> {
+        self.fx.iter().find(|f| f.0 == key).map(|f| f.1)
+    }
+    /// `effect_is_alive` of a handle, None when no effect runs for it.
+    fn alive(&self, key: u64) -> Option<bool> {
+        self.live(key).filter(|l| l.tracked).map(|l| l.alive)
+    }
+    /// `effect_pos` of a handle, None when no effect runs for it.
+    fn pos(&self, key: u64) -> Option<Vec3> {
+        self.live(key).filter(|l| l.tracked).map(|l| l.pos)
+    }
     fn was_hit(&self, key: u64) -> bool {
         self.hit.contains(&key)
     }
@@ -361,6 +436,34 @@ impl Feedback {
 
 fn len2(v: [f32; 2]) -> f32 {
     v[0].hypot(v[1])
+}
+
+/// `vector_homing` (FUN_14041d3d0 / FUN_1403b7200): turns `dir` toward
+/// `want` about their cross product by the angle between them, at most
+/// `rate` radians [the scale DAT_140717480 is taken as 1]. Opposite
+/// vectors (no axis) stay put.
+pub fn vector_homing(dir: Vec3, want: Vec3, rate: f32) -> Vec3 {
+    let (d, w) = (norm(dir), norm(want));
+    let dot = (d[0] * w[0] + d[1] * w[1] + d[2] * w[2]).clamp(-1., 1.);
+    let angle = dot.acos().min(rate);
+    let axis = [
+        d[1] * w[2] - d[2] * w[1],
+        d[2] * w[0] - d[0] * w[2],
+        d[0] * w[1] - d[1] * w[0],
+    ];
+    let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    if len < 1e-6 || angle < 1e-6 {
+        return d;
+    }
+    let k = axis.map(|c| c / len);
+    let (s, c) = angle.sin_cos();
+    let kd = k[0] * d[0] + k[1] * d[1] + k[2] * d[2];
+    let kxd = [
+        k[1] * d[2] - k[2] * d[1],
+        k[2] * d[0] - k[0] * d[2],
+        k[0] * d[1] - k[1] * d[0],
+    ];
+    norm([0, 1, 2].map(|i| d[i] * c + kxd[i] * s + k[i] * kd * (1. - c)))
 }
 
 fn norm(v: Vec3) -> Vec3 {
@@ -410,6 +513,10 @@ pub struct Spell {
     airborne: bool,
     state: State,
     finished: bool,
+    /// The cast effect's handle (S[28]) and this release's index within the
+    /// cast (Blizzard's counter S[44]).
+    cast_key: u64,
+    volley: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -417,24 +524,33 @@ enum State {
     Fire {
         left: f32,
         rings: u8,
+        ring: u64,
     },
     Blizzard {
         shards: Vec<Shard>,
         released: bool,
+        /// The release effects the shards start from (`a`, `b`).
+        from: [Option<u64>; 2],
     },
     Thunder {
         bolts: Vec<Bolt>,
         queue: Vec<(f32, Vec3, f32)>,
+        started: u64,
     },
     Cure {
         done: bool,
         leaf: f32,
         leaf_centre: Vec3,
+        /// The chosen target's party slot (S[44]; 0 = Sora).
+        target: usize,
     },
     Magnet {
         centre: Vec3,
         life: f32,
         placed: bool,
+        /// The sphere effect (S[36]) and the ticks since it started.
+        sphere: Option<(u64, f32)>,
+        ended: Option<f32>,
     },
     Reflect {
         barrier: f32,
@@ -442,16 +558,23 @@ enum State {
         count: u32,
         seen: u32,
         counter: Option<Counter>,
+        key: u64,
+        flash: Option<u64>,
+        flashes: u64,
+        started: bool,
     },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct Shard {
     key: u64,
+    /// The shard effect's handle (p[64]).
+    fx: u64,
     pos: Vec3,
     dir: Vec3,
     life: f32,
     fade: f32,
+    fading: bool,
     pierce: bool,
     rate: f32,
     radius: f32,
@@ -478,6 +601,88 @@ struct Counter {
     centre: Vec3,
 }
 
+/// `bg_get_random_pos_air` (FUN_1403f4080 → FUN_1403f44a0), without the
+/// background test: a radius drawn between the limits, an angle in one of
+/// eight π/4 sectors taken in the order 0, 2, 4, 6, 1, 3, 5, 7 plus a draw
+/// inside the sector, and a height draw. The draws are the script RNG's
+/// multipliers (`DAT_140783ca0 · 0x10dcd`, 2^-32 scaled); the stream is the
+/// spell's own, not the shared one, and the sector counter starts at 0 for
+/// each spell (the exe's counter is global) [I].
+#[derive(Clone, Debug, PartialEq)]
+pub struct RandomAir {
+    state: u32,
+    sector: u32,
+}
+
+impl RandomAir {
+    pub fn new(seed: u64) -> Self {
+        RandomAir {
+            state: (seed as u32).wrapping_mul(0x9e37_79b1) | 1,
+            sector: 0,
+        }
+    }
+
+    pub fn next(&mut self, centre: Vec3, r0: f32, r1: f32, y0: f32, y1: f32) -> Vec3 {
+        const UNIT: f32 = 2.328_306_4e-10;
+        let u1 = self.state.wrapping_mul(0x10dcd);
+        self.state = self.state.wrapping_mul(0x1c58_7629);
+        let radius = u1 as f32 * UNIT * (r1 - r0) + r0;
+        let k = self.sector;
+        let v = (k >> 2 & 1) | k.wrapping_mul(2);
+        let angle = v as f32 * std::f32::consts::FRAC_PI_4
+            + self.state as f32 * UNIT * std::f32::consts::FRAC_PI_4;
+        self.sector = (k + 1) & 7;
+        self.state = self.state.wrapping_mul(0x10dcd);
+        let y = self.state as f32 * UNIT * (y1 - y0) + y0;
+        [
+            centre[0] + angle.sin() * radius,
+            centre[1] + y,
+            centre[2] + angle.cos() * radius,
+        ]
+    }
+}
+
+/// The slot of an effect handle among a spell's keys (the volume keys use
+/// slots below 0x80).
+fn fx_key(serial: u64, slot: u8) -> u64 {
+    serial << 8 | 0x80 | (slot & 0x7f) as u64
+}
+
+/// The cast effect's handle (`S[28]`) of the cast with `serial`.
+pub fn cast_key(serial: u64) -> u64 {
+    serial << 8 | 0xf0
+}
+
+/// Trigger 20 of the spell programs: the effect started with the cast
+/// motion (`pax_start_bind(pax, castPax, S, 1, 0)`). `idx` is the variant
+/// index (form × 10 + level and finisher terms).
+pub fn cast_effects(magic_type: u8, idx: usize, key: u64) -> Vec<Fx> {
+    let form = idx / 10;
+    let id = match magic_type {
+        // Wisdom and Final have no cast effect.
+        FIRE if form == 1 || form == 3 => None,
+        FIRE | BLIZZARD | THUNDER | CURE | MAGNET => Some(0),
+        _ => None,
+    };
+    id.map(|id| Fx::Start {
+        key,
+        id,
+        bound: Some(Anchor::Caster),
+        at: None,
+    })
+    .into_iter()
+    .collect()
+}
+
+/// TR20's variant index: Master has no finisher row, Reflect never does.
+fn script_index(magic_type: u8, idx: usize) -> usize {
+    match magic_type {
+        FIRE | BLIZZARD | THUNDER if idx / 10 == 2 => idx / 2 * 2,
+        REFLECT => idx / 2 * 2,
+        _ => idx,
+    }
+}
+
 impl Spell {
     /// Releases a spell: trigger 21 of the program with the `magi` row.
     /// `ctx` is the state at the release tick.
@@ -490,9 +695,8 @@ impl Spell {
         form: u8,
         ctx: &Context,
     ) -> Spell {
-        let (airborne, wisdom, master, fin) =
-            (ctx.airborne, idx / 10 == 1, idx / 10 == 2, idx / 10 == 3);
-        let odd = idx & 1 == 1;
+        let idx = script_index(magic_type, idx);
+        let (airborne, wisdom, fin) = (ctx.airborne, idx / 10 == 1, idx / 10 == 3);
         let state = match magic_type {
             FIRE => {
                 // Duration f2; the HD patch turns 44 into 42 at 60 fps.
@@ -500,29 +704,34 @@ impl Spell {
                 if left == 44. && ctx.dt < 2. {
                     left = 42.;
                 }
-                let _ = (wisdom, master, odd, fin);
                 State::Fire {
                     left,
                     rings: if fin { 2 } else { 1 },
+                    ring: fx_key(serial, 2),
                 }
             }
             BLIZZARD => State::Blizzard {
                 shards: Vec::new(),
                 released: false,
+                from: [None; 2],
             },
             THUNDER => State::Thunder {
                 bolts: Vec::new(),
                 queue: Vec::new(),
+                started: 0,
             },
             CURE => State::Cure {
                 done: false,
                 leaf: 0.,
                 leaf_centre: ctx.caster_centre,
+                target: 0,
             },
             MAGNET => State::Magnet {
                 centre: ctx.caster,
                 life: 16. + row.f(16) + row.f(17),
                 placed: false,
+                sphere: None,
+                ended: None,
             },
             _ => {
                 // Barrier centre offsets (Y-up), rotated by the facing at
@@ -541,6 +750,10 @@ impl Spell {
                     count: 0,
                     seen: 0,
                     counter: None,
+                    key: fx_key(serial, 1),
+                    flash: None,
+                    flashes: 0,
+                    started: false,
                 }
             }
         };
@@ -555,7 +768,26 @@ impl Spell {
             airborne,
             state,
             finished: false,
+            cast_key: cast_key(serial),
+            volley: 0,
         }
+    }
+
+    /// The cast this release belongs to: its effect handle and the index
+    /// of the release among the cast's releases (Blizzard's S[44]).
+    pub fn with_cast(mut self, cast_key: u64, volley: u32) -> Self {
+        self.cast_key = cast_key;
+        self.volley = volley;
+        self
+    }
+
+    /// Cure's chosen target (the party slot picked in the target menu;
+    /// Sora, slot 0, from a shortcut).
+    pub fn with_target(mut self, slot: usize) -> Self {
+        if let State::Cure { target, .. } = &mut self.state {
+            *target = slot;
+        }
+        self
     }
 
     /// Leaf Bracer (TR20 of Cure on oneself, ability 114): 60 ticks of
@@ -575,8 +807,11 @@ impl Spell {
                 done: true,
                 leaf: 60.,
                 leaf_centre: ctx.caster_centre,
+                target: 0,
             },
             finished: false,
+            cast_key: cast_key(serial),
+            volley: 0,
         }
     }
 
@@ -600,96 +835,188 @@ impl Spell {
         let idx = self.idx;
         let row = self.row;
         let sub = idx as u8;
+        let serial = self.serial;
+        let cast_fx = self.cast_key;
+        let volley = self.volley;
+        let airborne_now = self.airborne;
+        let level = self.level;
         let facing = [ctx.facing[0], 0., ctx.facing[1]];
         let first = self.age == 0.;
+        let fk = |slot: u8| fx_key(serial, slot);
+        let (wis, master, fin, odd) = (idx / 10 == 1, idx / 10 == 2, idx / 10 == 3, idx & 1 == 1);
+        // `rel(i)`: end the cast effect's loop, start element `i` bound.
+        let release_effect = |out: &mut Output, key: u64, id: u16| {
+            out.fx.push(Fx::LoopEnd(cast_fx));
+            out.fx.push(Fx::Start {
+                key,
+                id,
+                bound: Some(Anchor::Caster),
+                at: None,
+            });
+        };
         match &mut self.state {
-            State::Fire { .. } if first => {
-                // TR21: the release flash and ring effect, then `halt`.
-            }
-            State::Fire { left, rings } => {
-                let lift = fire_lift(self.level, self.airborne);
-                let centre = [ctx.caster[0], ctx.caster[1] + lift, ctx.caster[2]];
-                let (r, h) = (row.f(0), row.f(1));
-                if *left > 0. {
-                    out.volumes.push(Volume {
-                        key: key0,
-                        atkp: 502,
-                        sub,
-                        centre,
-                        radius: if idx % 10 == 1 && idx / 10 == 3 {
-                            450.
-                        } else {
-                            r
-                        },
-                        height: h,
-                        previous: None,
-                        moving: None,
-                        role: Role::Damage,
+            State::Fire { left, rings, ring } => {
+                if first {
+                    // TR21: the release flash, the ring (standing / in the
+                    // air), the extra ball and Final's own effects, then
+                    // `halt`.
+                    if !fin {
+                        release_effect(&mut out, fk(1), 1);
+                    }
+                    out.fx.push(Fx::Start {
+                        key: *ring,
+                        id: if airborne_now { 5 } else { 2 },
+                        bound: Some(Anchor::Caster),
+                        at: None,
                     });
-                    if *rings > 1 {
+                    if (wis && odd) || master || (fin && odd) {
+                        out.fx.push(Fx::Start {
+                            key: fk(3),
+                            id: if airborne_now { 7 } else { 6 },
+                            bound: Some(Anchor::Caster),
+                            at: None,
+                        });
+                    }
+                    if fin {
+                        let more: &[u16] = if odd { &[11, 12] } else { &[8, 9] };
+                        for (n, &id) in [10u16].iter().chain(more).enumerate() {
+                            out.fx.push(Fx::Start {
+                                key: fk(4 + n as u8),
+                                id,
+                                bound: Some(Anchor::Caster),
+                                at: None,
+                            });
+                        }
+                    }
+                } else {
+                    let lift = fire_lift(level, airborne_now);
+                    let own = [ctx.caster[0], ctx.caster[1] + lift, ctx.caster[2]];
+                    let centre = fb.pos(*ring).unwrap_or(own);
+                    let (r, h) = (row.f(0), row.f(1));
+                    if *left > 0. {
                         out.volumes.push(Volume {
-                            key: key0 + 1,
+                            key: key0,
                             atkp: 502,
                             sub,
                             centre,
-                            radius: r - 30.,
-                            height: h - 30.,
+                            radius: if idx % 10 == 1 && idx / 10 == 3 {
+                                450.
+                            } else {
+                                r
+                            },
+                            height: h,
                             previous: None,
                             moving: None,
                             role: Role::Damage,
                         });
+                        if *rings > 1 {
+                            out.volumes.push(Volume {
+                                key: key0 + 1,
+                                atkp: 502,
+                                sub,
+                                centre,
+                                radius: r - 30.,
+                                height: h - 30.,
+                                previous: None,
+                                moving: None,
+                                role: Role::Damage,
+                            });
+                        }
+                        *left -= dt;
+                    } else {
+                        self.finished = true;
                     }
-                    *left -= dt;
-                } else {
-                    self.finished = true;
                 }
             }
-            State::Blizzard { shards, released } => {
+            State::Blizzard {
+                shards,
+                released,
+                from,
+            } => {
+                if first {
+                    // TR21: mode 0 releases element 1, mode 1 element 7 and
+                    // mode 2 both; Final's finisher alternates by volley.
+                    let mode = if fin {
+                        if odd {
+                            match volley {
+                                1 | 3 => 1,
+                                4 => 2,
+                                _ => 0,
+                            }
+                        } else {
+                            2
+                        }
+                    } else {
+                        0
+                    };
+                    match mode {
+                        0 => {
+                            release_effect(&mut out, fk(1), 1);
+                            from[0] = Some(fk(1));
+                        }
+                        1 => {
+                            release_effect(&mut out, fk(1), 7);
+                            from[0] = Some(fk(1));
+                        }
+                        _ => {
+                            release_effect(&mut out, fk(1), 1);
+                            release_effect(&mut out, fk(2), 7);
+                            *from = [Some(fk(1)), Some(fk(2))];
+                        }
+                    }
+                }
                 // TR21 releases the cast effect, `halt`s once, then recoils
                 // the caster and starts the shards (section 4.2).
                 if self.age >= 1. && !*released {
                     *released = true;
                     out.recoil = Some(row.f(7));
                     let d = norm(facing);
-                    let wis = idx / 10 == 1;
-                    let master = idx / 10 == 2;
-                    let fin = idx / 10 == 3;
-                    let odd = idx & 1 == 1;
-                    // (direction, pierces, homing factor)
-                    let mut dirs: Vec<(Vec3, bool, f32)> = Vec::new();
+                    // (direction, pierces, homing factor, release effect)
+                    let mut dirs: Vec<(Vec3, bool, f32, usize)> = Vec::new();
                     if wis && odd {
-                        dirs.push((d, false, 0.5));
+                        dirs.push((d, false, 0.5, 0));
                         for (a, k) in [(0.610865, 1.0), (1.22173, 2.0)] {
-                            dirs.push((rot_y(d, a), false, k));
-                            dirs.push((rot_y(d, -a), false, k));
+                            dirs.push((rot_y(d, a), false, k, 0));
+                            dirs.push((rot_y(d, -a), false, k, 0));
                         }
                     } else if master {
-                        dirs.push((d, false, 1.0));
+                        dirs.push((d, false, 1.0, 0));
                         for y in [-0.96, 0.96] {
-                            dirs.push(([d[0], y, d[2]], false, 1.0));
+                            dirs.push(([d[0], y, d[2]], false, 1.0, 0));
                         }
                         for y in [0.4, -0.4] {
                             let v = [d[0], y, d[2]];
-                            dirs.push((rot_y(v, std::f32::consts::FRAC_PI_4), false, 1.0));
-                            dirs.push((rot_y(v, -std::f32::consts::FRAC_PI_4), false, 1.0));
+                            dirs.push((rot_y(v, std::f32::consts::FRAC_PI_4), false, 1.0, 0));
+                            dirs.push((rot_y(v, -std::f32::consts::FRAC_PI_4), false, 1.0, 0));
                         }
                     } else {
-                        dirs.push((d, true, 1.0));
-                        // Final: even rows twin; odd rows by the cast
-                        // counter S[44], which is not kept here.
-                        if fin && !odd {
-                            dirs.push((d, true, 1.0));
+                        dirs.push((d, true, 1.0, 0));
+                        // Final: the second release effect starts its own
+                        // shard.
+                        if from[1].is_some() {
+                            dirs.push((d, true, 1.0, 1));
                         }
                     }
-                    // The shards start at the caster's TARGET shape centre
-                    // (PAX element 1, bone 0x4003 [I: the type 3 entry]).
-                    for (i, (dir, pierce, k)) in dirs.into_iter().enumerate() {
+                    // The shards start at the release effect's position
+                    // (PAX element 1, bone 0x4003, the Keyblade's top).
+                    for (i, (dir, pierce, k, source)) in dirs.into_iter().enumerate() {
+                        let from_fx = from[source].and_then(|s| fb.pos(s));
+                        let pos = from_fx.unwrap_or(ctx.caster_centre);
+                        let sfx = fk(0x10 + i as u8);
+                        out.fx.push(Fx::Start {
+                            key: sfx,
+                            id: 2,
+                            bound: None,
+                            at: Some(pos),
+                        });
                         shards.push(Shard {
                             key: key0 + 1 + i as u64,
-                            pos: ctx.caster_centre,
+                            fx: sfx,
+                            pos,
                             dir: norm(dir),
                             life: row.f(4) - 12.,
                             fade: 12.,
+                            fading: false,
                             pierce,
                             rate: row.f(3) * k,
                             radius: row.f(6),
@@ -703,16 +1030,20 @@ impl Spell {
                     if s.dead {
                         continue;
                     }
-                    // Hit / reflect / background end the shard before it
-                    // moves again (loop head).
-                    if fb.was_hit(s.key) && !s.pierce || fb.reflects(s.key) > 0 {
+                    // The loop runs while the effect lives; hit / reflect /
+                    // background end the shard before it moves again.
+                    let gone = fb.alive(s.fx) == Some(false) && !first;
+                    if gone
+                        || fb.was_hit(s.key) && !s.pierce
+                        || fb.reflects(s.key) > 0
+                        || (ctx.bg_hit)(s.pos, s.radius)
+                    {
                         s.dead = true;
+                        out.fx.push(Fx::Kill(s.fx));
                         continue;
                     }
-                    if (ctx.bg_hit)(s.pos, s.radius) {
-                        s.dead = true;
-                        continue;
-                    }
+                    out.fx.push(Fx::Dir(s.fx, s.dir));
+                    out.fx.push(Fx::Pos(s.fx, s.pos));
                     out.volumes.push(Volume {
                         key: s.key,
                         atkp: 248,
@@ -733,25 +1064,21 @@ impl Spell {
                     if let Some(t) = ctx.target
                         && s.rate > 0.
                     {
-                        let want = norm([t[0] - s.pos[0], t[1] - s.pos[1], t[2] - s.pos[2]]);
-                        let dot = (s.dir[0] * want[0] + s.dir[1] * want[1] + s.dir[2] * want[2])
-                            .clamp(-1., 1.);
-                        let angle = dot.acos();
-                        let step = (s.rate * dt).min(angle);
-                        if angle > 1e-6 {
-                            let k = step / angle;
-                            let v = [
-                                s.dir[0] + (want[0] - s.dir[0]) * k,
-                                s.dir[1] + (want[1] - s.dir[1]) * k,
-                                s.dir[2] + (want[2] - s.dir[2]) * k,
-                            ];
-                            s.dir = norm(v);
-                        }
+                        s.dir = vector_homing(
+                            s.dir,
+                            [t[0] - s.pos[0], t[1] - s.pos[1], t[2] - s.pos[2]],
+                            s.rate * dt,
+                        );
                     }
                     s.pos = add(s.pos, scale(s.dir, s.speed * dt));
                     if s.life > 0. {
                         s.life -= dt;
-                    } else {
+                        if s.life <= 0. {
+                            out.fx.push(Fx::Fade(s.fx, 12.));
+                            s.fading = true;
+                        }
+                    } else if fb.alive(s.fx).is_none() {
+                        // No effect runs: the fade is a plain timer.
                         s.fade -= dt;
                         if s.fade <= 0. {
                             s.dead = true;
@@ -763,12 +1090,13 @@ impl Spell {
                     self.finished = true;
                 }
             }
-            State::Thunder { bolts, queue } => {
+            State::Thunder {
+                bolts,
+                queue,
+                started,
+            } => {
                 if first {
-                    let wis = idx / 10 == 1;
-                    let master = idx / 10 == 2;
-                    let fin = idx / 10 == 3;
-                    let odd = idx & 1 == 1;
+                    release_effect(&mut out, fk(1), 1);
                     let origin = ctx.caster;
                     let dir = norm(facing);
                     let (p, raise) = match ctx.target {
@@ -800,10 +1128,12 @@ impl Spell {
                     if fin {
                         let r = 2.5 * row.f(9);
                         let n = if odd { 8 } else { 3 };
+                        // bg_get_random_pos_air(P, 0.4R, R, −0.1R, 0.1R) per
+                        // bolt: the draws of FUN_1403f4080 on a generator
+                        // of the script RNG's kind, seeded by the cast.
+                        let mut rng = RandomAir::new(serial);
                         for k in 1..n {
-                            // bg_get_random_pos_air [U]: a fixed ring.
-                            let a = k as f32 * std::f32::consts::TAU / n as f32;
-                            let q = [p[0] + a.cos() * r * 0.7, p[1], p[2] + a.sin() * r * 0.7];
+                            let q = rng.next(p, 0.4 * r, r, -0.1 * r, 0.1 * r);
                             queue.push((at + 8. * k as f32, q, 330.));
                         }
                     }
@@ -818,16 +1148,16 @@ impl Spell {
                 }
                 // Start bolts whose time has come.
                 let age = self.age;
-                let mut started = Vec::new();
+                let mut begun = Vec::new();
                 queue.retain(|&(t, pos, raise)| {
                     if t <= age {
-                        started.push((pos, raise));
+                        begun.push((pos, raise));
                         false
                     } else {
                         true
                     }
                 });
-                for (pos, raise) in started {
+                for (pos, raise) in begun {
                     // The strike point: ground within f8 below, else air.
                     let from = [pos[0], pos[1] + raise, pos[2]];
                     let mut at = pos;
@@ -838,9 +1168,17 @@ impl Spell {
                         at = g;
                         atkp = 250;
                     }
+                    // pax_start(pax, ground ? 2 : 3) at the strike point.
+                    out.fx.push(Fx::Start {
+                        key: fk(0x10 + (*started as u8 & 0x3f)),
+                        id: if atkp == 250 { 2 } else { 3 },
+                        bound: None,
+                        at: Some(at),
+                    });
+                    *started += 1;
                     let n = bolts.len() as u64;
                     bolts.push(Bolt {
-                        key: self.serial << 8 | (1 + n * 2),
+                        key: serial << 8 | (1 + n * 2),
                         pos: at,
                         column: [at[0], at[1] + row.f(10), at[2]],
                         atkp,
@@ -848,7 +1186,6 @@ impl Spell {
                         live: row.f(13),
                     });
                 }
-                let serial = self.serial;
                 for b in bolts.iter_mut() {
                     if b.wait > 0. {
                         b.wait -= dt;
@@ -889,18 +1226,37 @@ impl Spell {
                 done,
                 leaf,
                 leaf_centre,
+                target,
             } => {
                 if !*done {
                     *done = true;
-                    // The heal centre is the target (Sora himself here).
-                    let centre = ctx.party.first().copied().unwrap_or(ctx.caster);
+                    release_effect(&mut out, fk(1), 1);
+                    // The heal centre is the chosen target's body centre:
+                    // `obj_apply_bone_matrix(S[44], 0x4001, origin)`.
+                    let chosen = ctx.party.get(*target).copied().unwrap_or(ctx.caster);
+                    let lift = ctx.body_centre[1] - ctx.caster[1];
+                    let heal = [chosen[0], chosen[1] + lift, chosen[2]];
+                    out.fx.push(Fx::Start {
+                        key: fk(2),
+                        id: 2,
+                        bound: None,
+                        at: Some(heal),
+                    });
                     for (i, p) in ctx.party.iter().enumerate() {
-                        let d = [p[0] - centre[0], p[2] - centre[2]];
+                        let d = [p[0] - heal[0], p[2] - heal[2]];
                         if len2(d) >= row.f(14) {
                             continue;
                         }
+                        // The chosen target (708) and the others (709).
+                        let own = i == *target;
+                        out.fx.push(Fx::Start {
+                            key: fk(3 + i as u8),
+                            id: if own { 3 } else { 4 },
+                            bound: Some(Anchor::Party(i)),
+                            at: None,
+                        });
                         out.strikes.push(Strike {
-                            atkp: if i == 0 { 708 } else { 709 },
+                            atkp: if own { 708 } else { 709 },
                             sub,
                             party: i,
                         });
@@ -934,11 +1290,14 @@ impl Spell {
                 centre,
                 life,
                 placed,
+                sphere,
+                ended,
             } => {
                 if !*placed {
                     *placed = true;
-                    // P: the target, else the caster; lowered to
-                    // f15 above the ground below it.
+                    release_effect(&mut out, fk(1), 1);
+                    // P: the target, else the release effect's position;
+                    // lowered to f15 above the ground below it.
                     let mut p = ctx.target.unwrap_or(ctx.caster);
                     let f15 = row.f(15);
                     let q = [p[0], p[1] + f15, p[2]];
@@ -946,6 +1305,38 @@ impl Spell {
                         p = [g[0], g[1] + f15, g[2]];
                     }
                     *centre = p;
+                    // e2 = pax_start(pax, 2) at P.
+                    out.fx.push(Fx::Start {
+                        key: fk(2),
+                        id: 2,
+                        bound: None,
+                        at: Some(p),
+                    });
+                }
+                let f16 = row.f(16);
+                let shrink = row.f(18);
+                // After `wait 16`: the sphere (S[36]) at P, 1 above, grown
+                // by sin((t / f16 − 0.5) π) over f16 ticks.
+                if sphere.is_none() && self.age >= 16. {
+                    let at = [centre[0], centre[1] + 1., centre[2]];
+                    out.fx.push(Fx::Start {
+                        key: fk(3),
+                        id: 3,
+                        bound: None,
+                        at: Some(at),
+                    });
+                    *sphere = Some((fk(3), 0.));
+                }
+                if let Some((sk, t)) = sphere.as_mut()
+                    && ended.is_none()
+                {
+                    let s = if *t < f16 {
+                        (((*t / f16 - 0.5) * std::f32::consts::PI).sin() + 1.) / 2.
+                    } else {
+                        1.
+                    };
+                    out.fx.push(Fx::Scale(*sk, s));
+                    *t += dt;
                 }
                 if *life > 0. {
                     out.volumes.push(Volume {
@@ -973,6 +1364,28 @@ impl Spell {
                         });
                     }
                     *life -= dt;
+                    if *life <= 0. {
+                        // The hold ends: e4 at P and the sphere shrinks.
+                        out.fx.push(Fx::Start {
+                            key: fk(4),
+                            id: 4,
+                            bound: None,
+                            at: Some(*centre),
+                        });
+                        *ended = Some(shrink);
+                    }
+                } else if let Some(left) = ended.as_mut() {
+                    if let Some((sk, _)) = sphere {
+                        let s = (((*left / shrink.max(1.)) - 0.5) * std::f32::consts::PI).sin();
+                        out.fx.push(Fx::Scale(*sk, (s + 1.) / 2.));
+                        if *left <= 0. {
+                            out.fx.push(Fx::Kill(*sk));
+                        }
+                    }
+                    *left -= dt;
+                    if *left < 0. {
+                        self.finished = true;
+                    }
                 } else {
                     self.finished = true;
                 }
@@ -983,8 +1396,32 @@ impl Spell {
                 count,
                 seen,
                 counter,
+                key,
+                flash,
+                flashes,
+                started,
             } => {
-                if let Some(c) = counter {
+                let base: u16 = if airborne_now {
+                    2
+                } else if wis || fin {
+                    12
+                } else {
+                    0
+                };
+                if first {
+                    // TR21: a new barrier replaces the last one.
+                    if let Some(old) = ctx.barrier {
+                        out.fx.push(Fx::Kill(old));
+                    }
+                    out.fx.push(Fx::Start {
+                        key: *key,
+                        id: base,
+                        bound: Some(Anchor::Caster),
+                        at: None,
+                    });
+                    out.barrier = Some(Some(*key));
+                    *started = true;
+                } else if let Some(c) = counter {
                     // Counter phases A then B (§4.6).
                     let (a, b) = match c.tier {
                         1 => (
@@ -1022,7 +1459,7 @@ impl Spell {
                         }
                     }
                 } else {
-                    let centre = {
+                    let own = {
                         let o = *centre_offset;
                         let f = ctx.facing;
                         // The offset rotates with the caster's facing.
@@ -1032,15 +1469,35 @@ impl Spell {
                             ctx.caster[2] - o[0] * f[0] + o[2] * f[1],
                         ]
                     };
-                    let key = key0;
-                    let hits = fb.reflects(key);
+                    // The guard follows the barrier effect.
+                    let centre = fb.pos(*key).unwrap_or(own);
+                    let volume_key = key0;
+                    let hits = fb.reflects(volume_key);
                     if hits > *seen {
+                        // A new clash: the flash plays unless one still does.
+                        let flash_alive = flash.is_some_and(|f| fb.alive(f).unwrap_or(false));
+                        if !flash_alive {
+                            let fl = fk(0x20 + (*flashes as u8 & 0x1f));
+                            *flashes += 1;
+                            out.fx.push(Fx::Start {
+                                key: fl,
+                                id: base + 1,
+                                bound: Some(Anchor::Caster),
+                                at: None,
+                            });
+                            *flash = Some(fl);
+                        }
                         *seen = hits;
                     }
                     *count = *seen;
-                    if *barrier > 0. {
+                    // The barrier lasts as long as its effect.
+                    let alive = match fb.alive(*key) {
+                        Some(a) => a,
+                        None => *barrier > 0.,
+                    };
+                    if alive {
                         out.volumes.push(Volume {
-                            key,
+                            key: volume_key,
                             atkp: 573,
                             sub,
                             centre,
@@ -1051,24 +1508,45 @@ impl Spell {
                             role: Role::Guard,
                         });
                         *barrier -= dt;
-                    } else if *count == 0 {
-                        self.finished = true;
                     } else {
-                        let n = *count as i32;
-                        let tier = if n >= row.i(28) {
-                            3
-                        } else if n >= row.i(25) {
-                            2
+                        // T[8] += reflect_count; the last barrier of a
+                        // chain turns the total into a counter attack.
+                        let n = ctx.barrier_count + *count;
+                        let last = ctx.barrier == Some(*key) || ctx.barrier.is_none();
+                        out.barrier_count = Some(n);
+                        if !last || n == 0 {
+                            self.finished = true;
                         } else {
-                            1
-                        };
-                        *counter = Some(Counter {
-                            stage: 0,
-                            left: row.f(21),
-                            tier,
-                            centre,
-                        });
+                            out.barrier = Some(None);
+                            out.barrier_count = Some(0);
+                            let tier = if n as i32 >= row.i(28) {
+                                3
+                            } else if n as i32 >= row.i(25) {
+                                2
+                            } else {
+                                1
+                            };
+                            let f: u16 = if wis || master || fin { 10 } else { 0 };
+                            let id = match tier {
+                                1 => 4,
+                                2 => 5,
+                                _ => 6,
+                            } + f;
+                            out.fx.push(Fx::Start {
+                                key: fk(0x40),
+                                id,
+                                bound: Some(Anchor::Caster),
+                                at: None,
+                            });
+                            *counter = Some(Counter {
+                                stage: 0,
+                                left: row.f(21),
+                                tier,
+                                centre,
+                            });
+                        }
                     }
+                    let _ = started;
                 }
             }
         }
@@ -1120,12 +1598,15 @@ mod tests {
             caster: [0., 0., 0.],
             facing: [0., 1.],
             caster_centre: [0., 70., 0.],
+            body_centre: [0., 85., 0.],
             airborne: false,
             casting: true,
             target: None,
             party,
             ground,
             bg_hit: bg,
+            barrier: None,
+            barrier_count: 0,
         }
     }
 
@@ -1413,5 +1894,291 @@ mod tests {
         assert_eq!(counters.iter().filter(|c| c.0 == 668).count(), 6);
         assert_eq!(counters[0].1, 300.);
         assert!(s.finished());
+    }
+
+    fn starts(out: &Output) -> Vec<(u16, bool)> {
+        out.fx
+            .iter()
+            .filter_map(|f| match f {
+                Fx::Start { id, bound, .. } => Some((*id, bound.is_some())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_cast_starts_the_elements_cast_effect_except_in_wisdom_and_final_fire() {
+        let key = cast_key(9);
+        let id = |t: u8, idx: usize| match cast_effects(t, idx, key).as_slice() {
+            [
+                Fx::Start {
+                    id, bound, key: k, ..
+                },
+            ] => {
+                assert_eq!((*bound, *k), (Some(Anchor::Caster), key));
+                Some(*id)
+            }
+            [] => None,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(id(FIRE, 4), Some(0));
+        assert_eq!(id(FIRE, 11), None);
+        assert_eq!(id(FIRE, 34), None);
+        assert_eq!(id(FIRE, 24), Some(0));
+        for t in [BLIZZARD, THUNDER, CURE, MAGNET] {
+            assert_eq!(id(t, 2), Some(0));
+        }
+        assert_eq!(id(REFLECT, 2), None);
+    }
+
+    #[test]
+    fn fire_releases_its_flash_and_ring_then_waits_a_tick() {
+        let party = [[0., 0., 0.]];
+        let ground = floor;
+        let bg = |_: Vec3, _: f32| false;
+        let mut ctx = flat_ctx(&party, &ground, &bg);
+        let r = row(&[(0, 200.), (1, 80.), (2, 44.)]);
+        let mut s = Spell::new(1, FIRE, 1, 0, r, 0, &ctx).with_cast(cast_key(1), 0);
+        let first = s.tick(&ctx, &Feedback::default());
+        // Standing: cast loop ends, flash (1), ring (2); no volume yet.
+        assert!(first.fx.contains(&Fx::LoopEnd(cast_key(1))));
+        assert_eq!(starts(&first), vec![(1, true), (2, true)]);
+        assert!(first.volumes.is_empty());
+        // In the air the ring is element 5.
+        ctx.airborne = true;
+        let mut a = Spell::new(2, FIRE, 1, 0, r, 0, &ctx);
+        assert_eq!(
+            starts(&a.tick(&ctx, &Feedback::default())),
+            vec![(1, true), (5, true)]
+        );
+        // The Wisdom finisher (11) adds the extra ball, 6 standing.
+        ctx.airborne = false;
+        let mut w = Spell::new(3, FIRE, 1, 11, r, 2, &ctx);
+        assert_eq!(
+            starts(&w.tick(&ctx, &Feedback::default())),
+            vec![(1, true), (2, true), (6, true)]
+        );
+        // Final has no release flash; its non-finisher adds 10, 8 and 9.
+        let mut f = Spell::new(4, FIRE, 1, 30, r, 5, &ctx);
+        assert_eq!(
+            starts(&f.tick(&ctx, &Feedback::default())),
+            vec![(2, true), (10, true), (8, true), (9, true)]
+        );
+    }
+
+    #[test]
+    fn the_fire_ring_follows_its_effects_position() {
+        let party = [[0., 0., 0.]];
+        let ground = floor;
+        let bg = |_: Vec3, _: f32| false;
+        let ctx = flat_ctx(&party, &ground, &bg);
+        let r = row(&[(0, 200.), (1, 80.), (2, 44.)]);
+        let mut s = Spell::new(5, FIRE, 1, 0, r, 0, &ctx);
+        s.tick(&ctx, &Feedback::default());
+        let ring = fx_key(5, 2);
+        let mut fb = Feedback::default();
+        fb.fx.push((
+            ring,
+            FxLive {
+                alive: true,
+                pos: [3., 90., 4.],
+                tracked: true,
+            },
+        ));
+        assert_eq!(s.tick(&ctx, &fb).volumes[0].centre, [3., 90., 4.]);
+    }
+
+    #[test]
+    fn blizzard_shards_start_at_the_release_effect_and_end_with_their_effect() {
+        let party = [[0., 0., 0.]];
+        let ground = floor;
+        let bg = |_: Vec3, _: f32| false;
+        let ctx = flat_ctx(&party, &ground, &bg);
+        let r = row(&[(4, 30.), (5, 40.), (6, 80.), (7, 50.)]);
+        let mut s = Spell::new(6, BLIZZARD, 1, 0, r, 0, &ctx);
+        let first = s.tick(&ctx, &Feedback::default());
+        assert_eq!(starts(&first), vec![(1, true)]);
+        // The release effect sits at the Keyblade's top.
+        let mut fb = Feedback::default();
+        fb.fx.push((
+            fx_key(6, 1),
+            FxLive {
+                alive: true,
+                pos: [5., 55., 20.],
+                tracked: true,
+            },
+        ));
+        let second = s.tick(&ctx, &fb);
+        // Shard effect: element 2, unbound, at the release effect.
+        let shard = second
+            .fx
+            .iter()
+            .find_map(|f| match f {
+                Fx::Start {
+                    id: 2,
+                    bound: None,
+                    at,
+                    key,
+                } => Some((*key, *at)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(shard.1, Some([5., 55., 20.]));
+        assert_eq!(second.volumes[0].centre, [5., 55., 20.]);
+        // The shard lasts while its effect lives: it ends when it is dead.
+        fb.fx.push((
+            shard.0,
+            FxLive {
+                alive: false,
+                pos: [5., 55., 60.],
+                tracked: true,
+            },
+        ));
+        let third = s.tick(&ctx, &fb);
+        assert!(third.volumes.is_empty() && third.fx.contains(&Fx::Kill(shard.0)));
+        assert!(s.finished());
+    }
+
+    #[test]
+    fn final_form_blizzard_alternates_its_release_effects_by_volley() {
+        let party = [[0., 0., 0.]];
+        let ground = floor;
+        let bg = |_: Vec3, _: f32| false;
+        let ctx = flat_ctx(&party, &ground, &bg);
+        let r = row(&[(4, 30.), (5, 40.), (6, 80.), (7, 50.)]);
+        let ids = |idx: usize, volley: u32| {
+            let mut s = Spell::new(7, BLIZZARD, 1, idx, r, 5, &ctx).with_cast(cast_key(7), volley);
+            starts(&s.tick(&ctx, &Feedback::default()))
+                .into_iter()
+                .map(|s| s.0)
+                .collect::<Vec<_>>()
+        };
+        // Finisher (odd): volleys 1 and 3 use element 7, 4 both, others 1.
+        assert_eq!(ids(31, 0), vec![1]);
+        assert_eq!(ids(31, 1), vec![7]);
+        assert_eq!(ids(31, 4), vec![1, 7]);
+        // Not a finisher: both at once.
+        assert_eq!(ids(30, 0), vec![1, 7]);
+    }
+
+    #[test]
+    fn thunder_starts_its_bolt_effect_at_the_strike_point() {
+        let party = [[0., 0., 0.]];
+        let r = row(&[
+            (8, 150.),
+            (9, 170.),
+            (10, 340.),
+            (11, 30.),
+            (12, 6.),
+            (13, 10.),
+        ]);
+        let ground = floor;
+        let bg = |_: Vec3, _: f32| false;
+        let mut ctx = flat_ctx(&party, &ground, &bg);
+        ctx.target = Some([100., 50., 200.]);
+        let mut s = Spell::new(8, THUNDER, 1, 0, r, 0, &ctx);
+        let o = s.tick(&ctx, &Feedback::default());
+        // Release effect (1), then the ground-strike element (2) at the
+        // floor under the target.
+        let bolt =
+            o.fx.iter()
+                .find_map(|f| match f {
+                    Fx::Start {
+                        id,
+                        bound: None,
+                        at,
+                        ..
+                    } => Some((*id, *at)),
+                    _ => None,
+                })
+                .unwrap();
+        assert_eq!(bolt, (2, Some([100., 0., 200.])));
+        assert!(starts(&o).contains(&(1, true)));
+    }
+
+    #[test]
+    fn a_new_reflect_replaces_the_barrier_and_carries_the_clashes_of_the_old() {
+        let party = [[0., 0., 0.]];
+        let mut w = [0u32; 31];
+        let set = |w: &mut [u32; 31], i: usize, v: f32| w[i] = v.to_bits();
+        set(&mut w, 20, 110.);
+        set(&mut w, 21, 28.);
+        set(&mut w, 22, 6.);
+        set(&mut w, 23, 240.);
+        set(&mut w, 24, 150.);
+        w[25] = 5;
+        set(&mut w, 26, 300.);
+        set(&mut w, 27, 180.);
+        w[28] = 10;
+        let r = Row(w);
+        let ground = floor;
+        let bg = |_: Vec3, _: f32| false;
+        let mut ctx = flat_ctx(&party, &ground, &bg);
+        // A barrier is already up: the new cast kills it and registers its
+        // own handle.
+        ctx.barrier = Some(77);
+        let mut s = Spell::new(9, REFLECT, 1, 0, r, 0, &ctx);
+        let first = s.tick(&ctx, &Feedback::default());
+        assert!(first.fx.contains(&Fx::Kill(77)));
+        assert_eq!(starts(&first), vec![(0, true)]);
+        assert_eq!(first.barrier, Some(Some(fx_key(9, 1))));
+        // The barrier follows its effect and ends with it; the clashes are
+        // carried on when a newer barrier replaced this one.
+        ctx.barrier = Some(fx_key(10, 1));
+        let key = fx_key(9, 1);
+        let mut fb = Feedback {
+            reflected: vec![(9 << 8, 2)],
+            ..Default::default()
+        };
+        fb.fx.push((
+            key,
+            FxLive {
+                alive: true,
+                pos: [1., 2., 3.],
+                tracked: true,
+            },
+        ));
+        let o = s.tick(&ctx, &fb);
+        assert_eq!(o.volumes[0].centre, [1., 2., 3.]);
+        // The first clash starts the flash element (base + 1).
+        assert_eq!(starts(&o), vec![(1, true)]);
+        fb.fx[0].1.alive = false;
+        let o = s.tick(&ctx, &fb);
+        assert_eq!(o.barrier_count, Some(2));
+        assert!(s.finished());
+    }
+
+    #[test]
+    fn random_air_positions_stay_in_the_ring_and_cover_the_sectors() {
+        let mut rng = RandomAir::new(3);
+        let c = [100., 50., -20.];
+        let mut sectors = [false; 8];
+        for _ in 0..8 {
+            let p = rng.next(c, 100., 250., -25., 25.);
+            let (dx, dz) = (p[0] - c[0], p[2] - c[2]);
+            let d = dx.hypot(dz);
+            assert!((100. ..=250.).contains(&d), "{d}");
+            assert!((-25. ..=25.).contains(&(p[1] - c[1])));
+            let a = dx.atan2(dz).rem_euclid(std::f32::consts::TAU);
+            sectors[(a / std::f32::consts::FRAC_PI_4) as usize % 8] = true;
+        }
+        // Eight draws visit eight different sectors.
+        assert!(sectors.iter().all(|&s| s));
+    }
+
+    #[test]
+    fn homing_turns_about_the_cross_axis_by_at_most_the_rate() {
+        // A quarter turn wanted, 0.1 allowed: the heading turns 0.1 radians.
+        let v = vector_homing([1., 0., 0.], [0., 0., 1.], 0.1);
+        assert!((v[0] - 0.1f32.cos()).abs() < 1e-5 && (v[2] - 0.1f32.sin()).abs() < 1e-5);
+        // Less than the rate left: it lands on the target direction.
+        let v = vector_homing([1., 0., 0.], [0.99, 0., 0.01], 0.5);
+        assert!((v[2] / v[0] - 0.01 / 0.99).abs() < 1e-4);
+        // Nearly opposite: it still comes around.
+        let mut v = [1., 0., 0.];
+        for _ in 0..40 {
+            v = vector_homing(v, [-1., 0., 0.01], 0.1745);
+        }
+        assert!(v[0] < -0.99);
     }
 }
