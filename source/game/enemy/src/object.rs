@@ -5,7 +5,7 @@
 
 use crate::act::{self, Action};
 use crate::env::Env;
-use crate::script::{Callback, Exit, Instance, Slot, Thread};
+use crate::script::{Callback, Instance, Slot, Thread};
 use crate::sysobj::Sysobj;
 use crate::world::{ObjId, Object, ScriptSpace, World, object_handle, run_thread};
 
@@ -143,12 +143,12 @@ impl Object {
         let Some(mut main) = self.script.main.take() else {
             return;
         };
-        let exit = run_thread(world, env, self, &mut main);
-        if exit == Exit::Halt {
+        run_thread(world, env, self, &mut main);
+        if main.finished() {
+            self.script.main_ended = true;
+        } else {
             self.script.main = Some(main);
             self.tick_acts(world, env);
-        } else {
-            self.script.main_ended = true;
         }
     }
 
@@ -186,12 +186,13 @@ impl Object {
             }
             let generation = self.script.act_generation;
             let mut thread = self.script.act_thread.take().expect("act thread");
-            let exit = run_thread(world, env, self, &mut thread);
+            run_thread(world, env, self, &mut thread);
             let replaced = generation != self.script.act_generation;
-            if !replaced && exit == Exit::Halt {
+            let ended = thread.finished();
+            if !replaced && !ended {
                 self.script.act_thread = Some(thread);
             }
-            if exit != Exit::Halt && self.acts.flags & act::JUST_STARTED == 0 {
+            if ended && self.acts.flags & act::JUST_STARTED == 0 {
                 let mut actions = Vec::new();
                 self.acts.thread_ended(&mut actions);
                 self.apply_actions(Some((world, env)), actions);

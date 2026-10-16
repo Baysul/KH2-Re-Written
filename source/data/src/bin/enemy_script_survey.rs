@@ -1,9 +1,7 @@
 //! Private, source-bound survey of every object-model script (BAR type 3) and the
 //! native traps it can reach. A coverage denominator, not a behavior claim.
 use data::{
-    bar, bdscript, enemy_actions, objentry,
-    path_lookup::Library,
-    probe_source::ProbeSource,
+    bar, bdscript, enemy_actions, objentry, path_lookup::Library, probe_source::ProbeSource,
 };
 use serde_json::json;
 use std::{
@@ -83,10 +81,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             let actions = enemy_actions::inspect(body).ok();
             for t in &traps {
-                trap_users
-                    .entry(*t)
-                    .or_default()
-                    .insert(model_name.clone());
+                trap_users.entry(*t).or_default().insert(model_name.clone());
             }
             rows.push(json!({
                 "model":model_name,"objects":users,"bar_entry":index,

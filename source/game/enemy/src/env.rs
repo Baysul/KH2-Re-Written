@@ -22,6 +22,10 @@ pub trait Clips {
     fn takeoff(&self, _slot: usize, _tick: u32) -> Option<bool> {
         None
     }
+    /// A motion trigger `n` (1-based) fired at `tick` (`+0x2ad` bits).
+    fn trigger(&self, _slot: usize, _tick: u32, _n: u8) -> Option<bool> {
+        None
+    }
     /// The clip holds the actor out of control at `tick` (`+0x18c` bit 9).
     fn no_control(&self, _slot: usize, _tick: u32) -> Option<bool> {
         None

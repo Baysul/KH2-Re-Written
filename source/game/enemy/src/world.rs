@@ -92,6 +92,13 @@ pub enum Event {
         object: ObjId,
         count: i32,
     },
+    /// A command on an effect handle: the first operand slots, and the vector
+    /// the first one points at when it is readable.
+    EffectCommand {
+        handle: u32,
+        words: [u32; 2],
+        vector: Option<[f32; 3]>,
+    },
     EffectDeadBlock {
         object: ObjId,
         handle: u32,
@@ -384,7 +391,7 @@ pub fn run_thread(world: &mut World, env: &dyn Env, obj: &mut Object, thread: &m
             },
             tolerate_missing: world_tolerates,
         };
-        script::run(&mut instance, thread, &mut machine, 1_000_000)
+        script::tick_tree(&mut instance, thread, &mut machine, 1_000_000)
     };
     obj.script.instance = instance;
     if let Exit::Fault(f) = exit {

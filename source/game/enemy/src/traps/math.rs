@@ -17,6 +17,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         return None;
     }
     Some(match index {
+        0 | 1 | 2 | 24 | 25 | 26 | 60 => debug_noop,
         3 => frame_time,
         4 => vector_add,
         5 => vector_sub,
@@ -26,10 +27,13 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         16 => random_get,
         17 => random_getf,
         18 => random_range,
+        21 => vector_get_rot_xz,
+        23 => absf,
         35 => vector_scale,
         36 => vector_mul,
         42 => vector_atan_xz,
         43 => fix_rad,
+        45 => vector_addf,
         _ => return None,
     })
 }
@@ -76,6 +80,51 @@ fn return_vector(
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);
+    Ok(())
+}
+
+/// 0:0-2, 24-26 and 60 (puti, putf, puts, stput*, assert): empty in this build.
+fn debug_noop(_: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
+    Ok(())
+}
+
+/// 0:21 FUN_14041d1b0: the heading difference between two vectors,
+/// `wrap(atan2(b.x, b.z) - atan2(a.x, a.z))`.
+fn vector_get_rot_xz(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let a = read_vec(ctx, m, args[0].value)?;
+    let b = read_vec(ctx, m, args[1].value)?;
+    let from = b[0].atan2(b[2]);
+    let to = a[0].atan2(a[2]);
+    args[0] = Slot::float(wrap_angle(from - to));
+    Ok(())
+}
+
+/// 0:23 FUN_14041ca90: absolute value (through a double, sign bit cleared).
+fn absf(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    args[0] = Slot::float(args[0].as_float().abs());
+    Ok(())
+}
+
+/// 0:45 FUN_14041d2d0: add `normalize(dir) * speed * frame_time` to a vector
+/// (all four lanes; the normalised copy keeps its w).
+fn vector_addf(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let target = args[0].value;
+    let mut t = read_sanitized(ctx, m, target)?;
+    let d = read_sanitized(ctx, m, args[1].value)?;
+    let speed = args[2].as_float();
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    let mut unit = d;
+    if len != 0.0 {
+        let inv = 1.0 / len;
+        for lane in unit.iter_mut().take(3) {
+            *lane *= inv;
+        }
+    }
+    let dt = ctx.world.frame_time;
+    for k in 0..4 {
+        t[k] = unit[k].mul_add_free(speed, dt, t[k]);
+        ctx.write_f32(m, target + 4 * k as u32, t[k]);
+    }
     Ok(())
 }
 
@@ -250,6 +299,17 @@ fn fix_rad(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), F
     let a = args[0].as_float();
     args[0] = Slot::float(if a.is_finite() { wrap_angle(a) } else { 0.0 });
     Ok(())
+}
+
+/// Without fused operations: `((v * a) * b) + c` in f32, as the executable's
+/// scale-scale-add sequence computes it.
+trait MulAddFree {
+    fn mul_add_free(self, a: f32, b: f32, c: f32) -> f32;
+}
+impl MulAddFree for f32 {
+    fn mul_add_free(self, a: f32, b: f32, c: f32) -> f32 {
+        c + self * a * b
+    }
 }
 
 #[cfg(test)]

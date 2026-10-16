@@ -2564,6 +2564,7 @@ dependencies = [
  "collision",
  "data",
  "effect",
+ "enemy",
  "event",
  "fontdue",
  "image",

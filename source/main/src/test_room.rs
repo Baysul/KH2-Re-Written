@@ -73,6 +73,7 @@ mod enemy_battle_tour;
 mod enemy_catalog;
 mod enemy_combat;
 mod enemy_gallery;
+mod enemy_script;
 mod enemy_target;
 mod enemy_tour;
 mod item_room;

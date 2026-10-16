@@ -157,16 +157,6 @@ fn enemy_is_no_control(
     Ok(())
 }
 
-/// FUN_1403ce980: the reaction class of an attack's reaction value.
-pub fn reaction_class(reaction: u32) -> u32 {
-    match reaction {
-        1 | 0xc => 1,
-        3 | 6 | 8 | 10 | 0xd | 0x10 | 0x12 => 3,
-        4 | 7 | 9 | 0xb | 0xf | 0x11 => 4,
-        other => other,
-    }
-}
-
 /// 2:8 FUN_140431f70: the damage record's reaction byte (+0x26) is above class 1.
 fn damage_is_reaction(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let handle = args[0].value;
@@ -174,7 +164,7 @@ fn damage_is_reaction(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) ->
         .checked_sub(OBJECT_HANDLES)
         .ok_or(Fault::Memory(handle))?;
     let reaction = ctx.object(o / 0x1000)?.sys.damage_reaction;
-    args[0] = Slot::int((reaction_class(reaction) > 1) as i32);
+    args[0] = Slot::int((player::combat::reaction_class(reaction as u8) > 1) as i32);
     Ok(())
 }
 

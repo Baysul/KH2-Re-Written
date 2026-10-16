@@ -29,6 +29,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         10 => is_act_exec,
         11 => motion_start,
         12 => motion_change,
+        13 => motion_push,
         14 => motion_is_end,
         15 => motion_id,
         19 => fade_out,
@@ -46,14 +47,21 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         64 => get_wish_movement,
         65 => exec_fall,
         66 => exec_land,
+        29 => motion_capture,
+        63 => motion_is_in_loop,
         67 => motion_length,
         68 => motion_loop_top,
+        69 => motion_time,
         70 => set_flag,
         71 => reset_flag,
+        74 => idle,
         78 => motion_is_no_control,
         79 => set_dir,
         80 => turn_dir,
         87 => effect_start_bind,
+        90 => act_shout,
+        94 => is_exist,
+        98 => step_pos,
         92 => scatter_prize,
         104 => shadow_move_start,
         105 => shadow_move_end,
@@ -67,9 +75,14 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         133 => hide,
         134 => show,
         147 => position,
+        150 => motion_check_range,
+        151 => motion_check_trigger,
         168 => fly_jump,
         171 => status_no_leave,
         201 => direction,
+        211 => pattern_enable,
+        212 => pattern_disable,
+        238 => motion_capture_id,
         206 => status_force_leave,
         301 => tutorial_is_open,
         309 => sysobj_is_player,
@@ -674,5 +687,137 @@ fn sys_jump(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<()
     let up = args[1].as_float();
     let sys = &mut ctx.object(id)?.sys;
     sys.start_fall(up);
+    Ok(())
+}
+
+/// 1:13 FUN_14042b3f0 -> FUN_1403c8310: queue a motion behind the playing one.
+fn motion_push(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of(args[0].value)?;
+    let (slot, blend) = (args[1].as_int(), args[2].as_float());
+    ctx.object(id)?
+        .sys
+        .motion_queue
+        .push((slot.max(0) as usize, blend));
+    Ok(())
+}
+
+/// 1:29 FUN_14042d160 -> FUN_1403c6cc0: play a motion borrowed from another
+/// object (a grab). [U] Not translated; reports nothing captured.
+fn motion_capture(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    ctx.world.events.push(Event::Unsupported("motion_capture"));
+    int(args, 0);
+    Ok(())
+}
+
+/// 1:238 FUN_14042d3b0: the captured motion id (+0x184). [U] Always 0 until
+/// captures exist.
+fn motion_capture_id(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    int(args, 0);
+    Ok(())
+}
+
+/// 1:63 FUN_14042f120 -> FUN_1403c7e70: past the loop start and not blending.
+fn motion_is_in_loop(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let env = ctx.env;
+    let sys = &ctx.object(id)?.sys;
+    let looping = sys.motion.blend <= 0.0
+        && env
+            .clips(sys.model)
+            .in_loop(sys.motion.slot, sys.motion.tick);
+    int(args, looping as i32);
+    Ok(())
+}
+
+/// 1:69 FUN_14042f320: the motion clock (+0x19c).
+fn motion_time(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let tick = ctx.object(id)?.sys.motion.tick;
+    args[0] = Slot::float(tick as f32);
+    Ok(())
+}
+
+/// 1:74 FUN_14042d0e0: return to the ground physics mode.
+fn idle(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    ctx.object(id)?.sys.to_ground_mode();
+    Ok(())
+}
+
+/// 1:90 FUN_14042f960 -> FUN_1403cacd0: ask another object's act manager to
+/// start an act. [U] The cross-object shout queue is recorded only.
+fn act_shout(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
+    ctx.world.events.push(Event::Unsupported("act_shout"));
+    Ok(())
+}
+
+/// 1:94 FUN_14042b0e0: the object exists (and is not being removed).
+fn is_exist(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let h = args[0].value;
+    let exists = h == crate::world::PLAYER_HANDLE
+        || crate::world::object_from_handle(h)
+            .and_then(|id| ctx.object(id).ok())
+            .is_some_and(|o| !o.sys.gone);
+    int(args, exists as i32);
+    Ok(())
+}
+
+/// 1:98 FUN_14042fae0: the position with w = the step height (FUN_1403b87e0).
+/// [U] Taken to be the current height, its value when nothing is probed.
+fn step_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let p = ctx.object(id)?.sys.position;
+    shared_vector(ctx, m, [p[0], p[1], p[2], p[1]], args)
+}
+
+/// 1:150 FUN_14042d1e0: attack range `n` (1-based, `+0x2ac` bits).
+fn motion_check_range(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let n = args[1].as_int();
+    let env = ctx.env;
+    let sys = &ctx.object(id)?.sys;
+    let active = u8::try_from(n)
+        .ok()
+        .and_then(|n| {
+            env.clips(sys.model)
+                .range(sys.motion.slot, sys.motion.tick, n)
+        })
+        .unwrap_or(false);
+    int(args, active as i32);
+    Ok(())
+}
+
+/// 1:151 FUN_14042d230: motion trigger `n` (1-based, `+0x2ad` bits).
+fn motion_check_trigger(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let n = args[1].as_int();
+    let env = ctx.env;
+    let sys = &ctx.object(id)?.sys;
+    let fired = u8::try_from(n)
+        .ok()
+        .and_then(|n| {
+            env.clips(sys.model)
+                .trigger(sys.motion.slot, sys.motion.tick, n)
+        })
+        .unwrap_or(false);
+    int(args, fired as i32);
+    Ok(())
+}
+
+/// 1:211 FUN_14042ba50: enable pattern `n` (+0xd10 bit).
+fn pattern_enable(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    ctx.object(id)?.sys.pattern_mask |= 1 << (args[1].value & 31);
+    Ok(())
+}
+
+/// 1:212: disable pattern `n`.
+fn pattern_disable(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    ctx.object(id)?.sys.pattern_mask &= !(1 << (args[1].value & 31));
     Ok(())
 }

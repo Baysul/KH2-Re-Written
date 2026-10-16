@@ -15,14 +15,56 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         return None;
     }
     Some(match index {
+        9 => thread_start,
         15 => progress_check_flag,
         47 => memory_alloc,
         48 => memory_free,
         50 => effect_is_active,
         53 => effect_pos,
+        38 | 39 | 40 | 41 | 44 | 51 | 52 | 66 | 67 | 85 => effect_command,
         79 => effect_add_dead_block,
         _ => return None,
     })
+}
+
+/// 0:9 FUN_14041da20: start a child thread of the running thread. `kind`
+/// nonzero first ends the children already carrying those kind bits.
+fn thread_start(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let _ = ctx;
+    let (kind, entry, tag) = (args[0].value, args[1].as_int(), args[2].value);
+    if kind != 0 {
+        m.kill_children(kind, kind);
+    }
+    let argument = args[3];
+    let list: &[Slot] = if argument.value != 0 {
+        std::slice::from_ref(&argument)
+    } else {
+        &[]
+    };
+    let handle = m.spawn_child(kind, tag, entry, list);
+    args[0] = Slot::address(handle);
+    Ok(())
+}
+
+/// Effect commands on a handle `effect_start_bind` returned: position, scale,
+/// rotation, direction, loop end, kill, fade out, pause, colour. The effect
+/// system is the host's; the command and its operands are recorded.
+fn effect_command(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let handle = args[0].value;
+    let operand = [args[1], args[2]];
+    let vector = ctx.read_f32(m, operand[0].value).and_then(|x| {
+        Some([
+            x,
+            ctx.read_f32(m, operand[0].value + 4)?,
+            ctx.read_f32(m, operand[0].value + 8)?,
+        ])
+    });
+    ctx.world.events.push(Event::EffectCommand {
+        handle,
+        words: [operand[0].value, operand[1].value],
+        vector,
+    });
+    Ok(())
 }
 
 /// 0:15 FUN_14041db60 -> FUN_14039a980: a game progress flag.

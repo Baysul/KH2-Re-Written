@@ -30,6 +30,8 @@ pub const WORK_SEGMENT: u32 = 0x2000_0000;
 pub const FRAME_SEGMENT: u32 = 0x3000_0000;
 pub const SCRATCH: u32 = 0x5000_0000;
 pub const EXTERN_SEGMENT: u32 = 0x6000_0000;
+/// Handles of child threads (returned by `trap_thread_start`).
+pub const CHILD_THREADS: u32 = 0x6400_0000;
 
 /// One evaluation-stack cell.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -159,6 +161,7 @@ pub struct Instance {
     pub stack_bytes: u32,
     pub temp_bytes: u32,
     scratch: u32,
+    next_thread: u32,
 }
 
 /// Programs the executable's thread set-up (FUN_1403e1240) gives a 1024-byte
@@ -177,6 +180,7 @@ impl Instance {
             stack_bytes: 0,
             temp_bytes: 0,
             scratch: 0,
+            next_thread: 0,
         }
     }
 
@@ -203,6 +207,7 @@ impl Instance {
             stack_bytes,
             temp_bytes,
             scratch: 0,
+            next_thread: 0,
         })
     }
 
@@ -244,6 +249,18 @@ impl Instance {
     }
 }
 
+/// A thread started by `trap_thread_start` (FUN_1403e1e30), ticked after its
+/// parent every frame.
+#[derive(Clone, Debug)]
+pub struct Child {
+    /// +0x3c: the kind mask scripts use to replace or kill threads.
+    pub kind: u32,
+    /// +0x40: a caller-chosen word.
+    pub tag: u32,
+    pub handle: u32,
+    pub thread: Thread,
+}
+
 /// One script thread (FUN_1403e1240 / FUN_14041b320).
 #[derive(Clone, Debug)]
 pub struct Thread {
@@ -253,9 +270,17 @@ pub struct Thread {
     fp: u32,
     eval: Vec<Slot>,
     eval_capacity: usize,
+    /// The thread's own code has returned (halt resumes; anything else ends).
+    pub ended: bool,
+    pub children: Vec<Child>,
 }
 
 impl Thread {
+    /// FUN_1403e1c80's result: the thread has ended and no child remains.
+    pub fn finished(&self) -> bool {
+        self.ended && self.children.is_empty()
+    }
+
     /// A thread starting at word `entry`, with `args` pushed first-to-last.
     pub fn new(inst: &Instance, slot: u32, entry: i32, args: &[Slot]) -> Self {
         Self::with_sizes(inst.stack_bytes, inst.temp_bytes, slot, entry, args)
@@ -277,6 +302,8 @@ impl Thread {
             fp: 0,
             eval: Vec::new(),
             eval_capacity: (temp_bytes as usize * 2 + 0x100) / 8,
+            ended: false,
+            children: Vec::new(),
         };
         // FUN_14041b320: sixteen bytes of zeroed, untagged locals.
         let tag_at = (s & !3) as u32;
@@ -445,6 +472,33 @@ impl Memory<'_> {
     pub fn work_base(&self) -> u32 {
         self.inst.work_base()
     }
+
+    /// FUN_1403e1e30: start a child thread of the running thread. Returns its
+    /// handle.
+    pub fn spawn_child(&mut self, kind: u32, tag: u32, entry: i32, args: &[Slot]) -> u32 {
+        self.inst.next_thread += 1;
+        let handle = CHILD_THREADS + self.inst.next_thread * 16;
+        let slot = 3 + self.inst.next_thread % 12;
+        let thread = Thread::with_sizes(
+            self.inst.stack_bytes,
+            self.inst.temp_bytes,
+            slot,
+            entry,
+            args,
+        );
+        self.th.children.push(Child {
+            kind,
+            tag,
+            handle,
+            thread,
+        });
+        handle
+    }
+
+    /// FUN_1403e1f00: end the running thread's children whose kind matches.
+    pub fn kill_children(&mut self, mask: u32, value: u32) {
+        self.th.children.retain(|c| c.kind & mask != value);
+    }
     pub fn instance(&self) -> &Instance {
         self.inst
     }
@@ -487,6 +541,39 @@ pub fn run(inst: &mut Instance, th: &mut Thread, host: &mut dyn Host, budget: u6
             Err(fault) => return Exit::Fault(fault),
         }
     }
+}
+
+/// FUN_1403e1c80: run the thread once unless it has ended, then each child
+/// (recursively). True once the thread has ended and no child is left.
+pub fn tick_tree(inst: &mut Instance, th: &mut Thread, host: &mut dyn Host, budget: u64) -> Exit {
+    let mut result = Exit::Halt;
+    if !th.ended {
+        result = run(inst, th, host, budget);
+        if result != Exit::Halt {
+            th.ended = true;
+        }
+    }
+    let mut i = 0;
+    while i < th.children.len() {
+        let mut child = std::mem::replace(
+            &mut th.children[i],
+            Child {
+                kind: 0,
+                tag: 0,
+                handle: 0,
+                thread: Thread::with_sizes(0, 0, 0, 0, &[]),
+            },
+        );
+        tick_tree(inst, &mut child.thread, host, budget);
+        let done = child.thread.ended && child.thread.children.is_empty();
+        if done {
+            th.children.remove(i);
+        } else {
+            th.children[i] = child;
+            i += 1;
+        }
+    }
+    result
 }
 
 fn pop(th: &mut Thread) -> Result<Slot, Fault> {

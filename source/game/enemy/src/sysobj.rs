@@ -161,6 +161,10 @@ pub struct Sysobj {
     /// +0xa58/+0xa64: the second movement request (`trap_obj_move_request`).
     pub request_direction: Vec3,
     pub request_speed: f32,
+    /// `trap_sysobj_motion_push`: motions queued behind the playing one.
+    pub motion_queue: Vec<(usize, f32)>,
+    /// +0xd10: enabled attack/behaviour patterns.
+    pub pattern_mask: u32,
     /// The battle parameter sheet (ENMP) number the script bound.
     pub sheet: i32,
     /// +0x8c8 bit 6: sunk and slithering (Shadow).
@@ -245,6 +249,8 @@ impl Sysobj {
             damage_reaction: 0,
             request_direction: [0.; 3],
             request_speed: 0.,
+            motion_queue: Vec::new(),
+            pattern_mask: 0,
             sheet: 0,
             shadow_move: false,
             turn_rate: 0.,
@@ -387,6 +393,14 @@ impl Sysobj {
             self.apply_movement(wished, env);
         }
         self.advance_motion(clips, old_serial);
+        // A queued motion starts when the playing clip has ended.
+        if self.motion.serial == old_serial
+            && clips.ended(self.motion.slot, self.motion.tick)
+            && !self.motion_queue.is_empty()
+        {
+            let (slot, blend) = self.motion_queue.remove(0);
+            self.motion_start(slot, blend, clips);
+        }
     }
 
     fn advance_motion(&mut self, clips: &dyn Clips, old_serial: u64) {
@@ -596,6 +610,15 @@ impl Sysobj {
             _ => return false,
         }
         true
+    }
+
+    /// `trap_obj_idle`: back to the ground physics mode (FUN_1403b4da0 mode 0).
+    pub fn to_ground_mode(&mut self) {
+        self.jump = None;
+        self.fly = None;
+        self.pending_fly = None;
+        self.airborne = false;
+        self.sampler.reset();
     }
 
     /// `trap_obj_is_jump`: the physics state byte at +0xc bit 0.
