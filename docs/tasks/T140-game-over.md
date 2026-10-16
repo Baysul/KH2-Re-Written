@@ -1,4 +1,4 @@
-# T132 — Sora's game over
+# T140 — Sora's game over
 
 Owner Claude, 2026-10-16, requested by burba in the project chat (GitHub
 issue #19, game-over flow). Gate: development of the test room only; no final
