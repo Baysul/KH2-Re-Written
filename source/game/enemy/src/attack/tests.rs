@@ -78,3 +78,21 @@ fn a_timed_shape_keeps_the_attack_radius_for_unset_ends() {
     a.set_time(30., 0., 50.);
     assert_eq!(a.time, [0., 30., 10., 50.]);
 }
+
+#[test]
+fn a_timed_shape_grows_between_its_radii_and_the_team_mask_gates_targets() {
+    let mut a = Attack::new(None, 0, 0, 0, 2);
+    a.set_radius(10., 10.);
+    assert_eq!(a.current_radius(), 10.);
+    a.set_time(4., 10., 30.);
+    a.advance(1.);
+    assert_eq!(a.current_radius(), 15.);
+    for _ in 0..10 {
+        a.advance(1.);
+    }
+    assert_eq!(a.current_radius(), 30., "growth stops at the duration");
+    // Team 2 attacks: bit 2 and bit 0 are excluded.
+    assert!(a.can_hit_team(1));
+    assert!(!a.can_hit_team(2));
+    assert!(!a.can_hit_team(0));
+}

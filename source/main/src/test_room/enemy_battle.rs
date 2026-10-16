@@ -197,6 +197,19 @@ impl Brain {
             Self::Dusk(_) | Self::Soldier(_) => false,
         }
     }
+    /// The attack objects a script brain placed (none for the other brains).
+    pub fn script_attacks(&self) -> Vec<super::enemy_script::ScriptAttack> {
+        match self {
+            Self::Script(a) => a.attacks(),
+            _ => Vec::new(),
+        }
+    }
+    /// A script attack struck Sora.
+    pub fn mark_script_attack(&mut self, slot: usize) {
+        if let Self::Script(a) = self {
+            a.mark_attack_hit(slot);
+        }
+    }
     pub fn follow_capture(&mut self, volumes: &[player::magic::Volume]) {
         if let Self::Shadow(a) = self
             && let Some(h) = a.held

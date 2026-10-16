@@ -61,13 +61,15 @@ fn attack_new(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<
         Some(id) => ctx.object(id)?.sys.team,
         None => 0,
     };
-    let a = Attack::new(
+    let mut a = Attack::new(
         owner,
         args[1].as_int(),
         args[2].as_int(),
         args[3].as_int(),
         team,
     );
+    ctx.world.attack_serial += 1;
+    a.serial = ctx.world.attack_serial;
     let slot = ctx.world.attacks.iter().position(Option::is_none);
     let i = match slot {
         Some(i) => i,

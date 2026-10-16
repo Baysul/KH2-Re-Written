@@ -188,6 +188,8 @@ pub struct World {
     pub attacks: Vec<Option<crate::attack::Attack>>,
     /// `attack_new_combo_group`'s counter (DAT_142a24afc).
     pub combo_group: u32,
+    /// Attack objects created so far (`Attack::serial`).
+    pub attack_serial: u64,
     /// `status_set_lockon_ratio`: the lock-on ratio scripts last set.
     pub lockon_ratio: f32,
 }
@@ -212,6 +214,7 @@ impl Default for World {
             player_proxy: Some(Box::new(Object::bare(PLAYER_OBJECT))),
             attacks: Vec::new(),
             combo_group: 0,
+            attack_serial: 0,
             lockon_ratio: 0.,
         }
     }
@@ -253,6 +256,14 @@ impl World {
             self.bg_hidden &= !bit;
         } else {
             self.bg_hidden |= bit;
+        }
+    }
+
+    /// One frame for every attack object (timed shapes advance).
+    pub fn tick_attacks(&mut self) {
+        let frame_time = self.frame_time;
+        for a in self.attacks.iter_mut().flatten() {
+            a.advance(frame_time);
         }
     }
 

@@ -31,6 +31,9 @@ pub mod flag {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Attack {
+    /// Counts attacks created in the world, so a host can tell a new attack
+    /// from an old one that held the same slot.
+    pub serial: u64,
     /// The engine object that owns it (`None` when the script passed none).
     pub owner: Option<ObjId>,
     /// +0x18 and +0x1c: the attack parameter record's key.
@@ -76,6 +79,7 @@ impl Attack {
         team: i32,
     ) -> Self {
         let mut a = Self {
+            serial: 0,
             owner,
             param_id,
             param_extra,
@@ -148,6 +152,31 @@ impl Attack {
             if r0 > 0. { r0 } else { self.radius.0 },
             if r1 > 0. { r1 } else { self.radius.1 },
         ];
+    }
+
+    /// The radius now: a timed shape grows from its first to its second radius
+    /// over its duration, otherwise the attack's own first radius.
+    pub fn current_radius(&self) -> f32 {
+        let [elapsed, duration, r0, r1] = self.time;
+        if duration > 0. {
+            let t = (elapsed / duration).clamp(0., 1.);
+            r0 + (r1 - r0) * t
+        } else {
+            self.radius.0
+        }
+    }
+
+    /// One frame of a timed shape.
+    pub fn advance(&mut self, frame_time: f32) {
+        if self.time[1] > 0. {
+            self.time[0] += frame_time;
+        }
+    }
+
+    /// Whether the attack can hit a target of `team` (the team mask).
+    pub fn can_hit_team(&self, team: u8) -> bool {
+        1u32.checked_shl(u32::from(team))
+            .is_some_and(|b| u32::from(self.team_mask) & b != 0)
     }
 
     /// FUN_1403d1f20: struck anything (a target, the map or a guard).

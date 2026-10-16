@@ -60,6 +60,18 @@ impl Env for BrainEnv<'_> {
     }
 }
 
+/// An attack object a script placed, as the host sees it.
+#[derive(Clone, Copy, Debug)]
+pub struct ScriptAttack {
+    pub slot: usize,
+    pub serial: u64,
+    pub id: i32,
+    pub extra: i32,
+    pub position: Vec3,
+    pub previous: Option<Vec3>,
+    pub radius: f32,
+}
+
 pub struct ScriptBrain {
     world: EnemyWorld,
     object: Object,
@@ -152,8 +164,45 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
         };
         self.object.tick(&mut self.world, &env);
+        self.world.tick_attacks();
+        if self.object.sys.gone {
+            self.world.attacks.clear();
+        }
         rng.0 = self.world.rng.0;
         self.record_faults();
+    }
+
+    /// The attack objects the script has placed, for the host's hit tests.
+    pub fn attacks(&self) -> Vec<ScriptAttack> {
+        use enemy::attack::flag;
+        self.world
+            .attacks
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, a)| {
+                let a = a.as_ref()?;
+                if a.flags & flag::HAS_POSITION == 0 && a.flags & flag::LINE == 0 {
+                    return None;
+                }
+                let v = |p: [f32; 4]| [p[0], p[1], p[2]];
+                Some(ScriptAttack {
+                    slot,
+                    serial: a.serial,
+                    id: a.param_id,
+                    extra: a.param_extra,
+                    position: v(a.position),
+                    previous: Some(v(a.previous)),
+                    radius: a.current_radius(),
+                })
+            })
+            .collect()
+    }
+
+    /// An attack of the script struck something.
+    pub fn mark_attack_hit(&mut self, slot: usize) {
+        if let Some(Some(a)) = self.world.attacks.get_mut(slot) {
+            a.mark_hit(enemy::attack::flag::STRUCK);
+        }
     }
 
     fn record_faults(&mut self) {
