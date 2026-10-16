@@ -87,7 +87,7 @@ pub const SOUND_USE: u32 = 37;
 
 /// Struggle Sword / Wand / Hammer, hidden with menu flag 0x77
 /// (0x1405bbeb0).
-const STRUGGLE: [u16; 3] = [0x180, 0x1f5, 0x1f6];
+pub(super) const STRUGGLE: [u16; 3] = [0x180, 0x1f5, 0x1f6];
 /// Party-wide items (FUN_1403c4780) and the Drive items (FUN_140351390).
 const PARTY_WIDE: [u16; 4] = [5, 6, 7, 0x83];
 const DRIVE: [u16; 2] = [0x112, 0x113];
@@ -122,6 +122,8 @@ pub struct Equipment {
     /// The development room leaves this slot empty.
     pub secondary_weapon: u16,
     pub forms: Vec<u16>,
+    /// The form each `forms` entry is for (Valor 1, Master 4, Final 5).
+    pub form_ids: Vec<u8>,
     pub armor: Vec<u16>,
     pub accessories: Vec<u16>,
     pub items: Vec<u16>,

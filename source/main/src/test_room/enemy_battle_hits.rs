@@ -119,8 +119,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
             if frame < start as usize || frame >= end as usize || !ensure_attack_rows(rt, atkp, 0) {
                 continue;
             }
-            let centres = rt
-                .blade
+            let centres = rt.blade[hand]
                 .get(&group)
                 .into_iter()
                 .flatten()
@@ -251,7 +250,10 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 rt.difficulty == combat::Difficulty::Critical,
                 low.then_some(player.abilities.experience_boost as u32),
             );
-            super::prize_room::grant_exp(rt, exp, log, tick);
+            // FUN_1403ed110: No Experience (bit 116) takes the kill's EXP.
+            if !player.abilities.has(player::abilities::bit::NO_EXPERIENCE) {
+                super::prize_room::grant_exp(rt, exp, log, tick);
+            }
             if let Some(d) = drive.as_mut()
                 && d.active
             {
