@@ -4221,6 +4221,7 @@ dependencies = [
  "fontdue",
  "image",
  "player",
+ "save",
  "serde",
  "serde_json",
  "sha2",
