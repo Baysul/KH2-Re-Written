@@ -102,7 +102,7 @@ const CARD_PITCH: f32 = 72.;
 const CARD_ORIGIN_Y: f32 = 106.;
 const TEXT_SIZE: f32 = 15.;
 /// Centre of the message window (the talk window sits at 256, 336).
-const DIALOG_AT: [f32; 2] = [256., 190.];
+const DIALOG_AT: [f32; 2] = [256., 200.];
 const CARD_TEXT_SIZE: f32 = 13.;
 /// Card text slots (x, y, align) from table 0x1405bbbd0: level, munny,
 /// difficulty, place, time, message.
@@ -156,6 +156,8 @@ pub struct FileMenu {
     s4: Sprites,
     dialog_seq: Sequence,
     widths: Vec<u8>,
+    /// The message panel (x0, y0, x1, y1) while a dialog is up.
+    panel: Option<[f32; 4]>,
     help: Option<Id>,
     frames: u32,
 }
@@ -171,6 +173,8 @@ struct Card {
 pub struct Draw {
     pub art: Vec<(usize, Vec<Quad>)>,
     pub sheets: Vec<(Sheet, Vec<Quad>)>,
+    /// A translucent black panel to draw before `sheets[panel_at..]`.
+    pub panel: Option<(usize, [f32; 4])>,
 }
 
 impl FileMenu {
@@ -205,6 +209,7 @@ impl FileMenu {
             s4: Sprites::default(),
             dialog_seq: layout.sequences[0].clone(),
             widths,
+            panel: None,
             help: None,
             frames: 0,
         }
@@ -256,6 +261,7 @@ impl FileMenu {
             self.s4.kill(id);
         }
         self.dialog_key = None;
+        self.panel = None;
     }
 
     /// One frame: the player's presses in, the menu's events out.
@@ -582,25 +588,17 @@ impl FileMenu {
             Dialog::Info { message } | Dialog::Notice { message } => (message, false),
         };
         if message_id != 0 {
-            // The message window: the dialogue box groups (67 + 3t, t 0 for
-            // information, 2 for a question) fitted around the message
-            // (FUN_140193430), its lines drawn from a text-only sprite.
+            // The message window: a plain dark panel sized to the message
+            // (the original box groups of save.2ld are not identified yet),
+            // its lines drawn from a text-only sprite.
             let bytes = self.texts.message(message_id);
             let (w, h) = crate::dialogue::measure(&bytes, &self.widths);
-            let first = if ask { 73 } else { 67 };
-            for g in first..first + 3 {
-                self.dialog_seq.fit_nine_slice(g, w, h);
-            }
-            let id = self.s3.create(
-                &self.dialog_seq,
-                PRIO_DIALOG,
-                0,
-                first,
-                Some(first + 1),
-                None,
-            );
-            self.s3.get_mut(id).base = DIALOG_AT;
-            self.dialog.push(id);
+            self.panel = Some([
+                DIALOG_AT[0] - w as f32 / 2. - 16.,
+                DIALOG_AT[1] - h as f32 / 2. - 12.,
+                DIALOG_AT[0] + w as f32 / 2. + 16.,
+                DIALOG_AT[1] + h as f32 / 2. + 12.,
+            ]);
             let mut t = Self::text(bytes, TEXT_SIZE, 0);
             t.anim_colour = false;
             t.offset = [DIALOG_AT[0] - w as f32 / 2., DIALOG_AT[1] - h as f32 / 2.];
@@ -654,7 +652,8 @@ impl FileMenu {
         sheets.extend(self.s0.draw(&layout.sequences[0], font));
         sheets.extend(self.s2.draw(&layout.sequences[2], font));
         sheets.extend(self.s3.draw(&self.dialog_seq, font));
+        let panel = self.panel.map(|r| (sheets.len(), r));
         sheets.extend(self.s4.draw(&layout.sequences[2], font));
-        Draw { art, sheets }
+        Draw { art, sheets, panel }
     }
 }

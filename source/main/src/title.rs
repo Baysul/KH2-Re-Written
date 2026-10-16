@@ -380,7 +380,20 @@ fn tick(
         for (image, quads) in d.art {
             s.snapshot.push((f.sheets[image], quads));
         }
-        for (sheet, quads) in d.sheets {
+        for (i, (sheet, quads)) in d.sheets.into_iter().enumerate() {
+            if let Some((at, [x0, y0, x1, y1])) = d.panel
+                && at == i
+            {
+                s.snapshot.push((
+                    s.white,
+                    vec![Quad {
+                        corners: [[x0, y0], [x1, y0], [x0, y1], [x1, y1]],
+                        uv: [0, 0, 1, 1],
+                        colors: [[0., 0., 0., 0.8]; 4],
+                        blend: 0,
+                    }],
+                ));
+            }
             let slot = match sheet {
                 Sheet::Art(image) => f.sheets[image],
                 Sheet::Font => s.font_sheet,
