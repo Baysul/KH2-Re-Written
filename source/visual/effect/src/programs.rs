@@ -82,6 +82,8 @@ const DRAW_MATRIX_WORLD_WOOD: u32 = 123;
 const ANG_MOVE_LOOP: u32 = 211;
 const SCL_MOVE_LOOP: u32 = 212;
 const MATRIX_LOOP_ZXY: u32 = 234;
+/// pppMatrixLoopYXZ (FUN_1404c4d20): the same code as pppMatrixYXZ.
+const MATRIX_LOOP_YXZ: u32 = 232;
 
 /// Whether the table record has an update function (+8).
 pub(crate) fn has_update(kind: u32) -> bool {
@@ -112,6 +114,7 @@ pub(crate) fn has_draw(kind: u32) -> bool {
                 | models::DRAW_MDL3
                 | models::DRAW_MDL_TS3
                 | models::DRAW_MDL_SEMI3
+                | models::DRAW_MDL_LOOP
                 | models::DRAW_MDL_LOOP_Z
                 | models::SNO_MDL_DTT_NORM
                 | crate::tail::KIND
@@ -331,7 +334,7 @@ pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx)
         // FUN_1404c4460; pppMatrixLoop FUN_1404c4540 is the same code.
         MATRIX_XYZ | MATRIX_LOOP => matrix_from(p, part, ctx, math::rot_xyz),
         // FUN_1404c47e0 with FUN_1404e0150 (Rz·Rx·Ry).
-        MATRIX_YXZ => matrix_from(p, part, ctx, math::rot_yxz),
+        MATRIX_YXZ | MATRIX_LOOP_YXZ => matrix_from(p, part, ctx, math::rot_yxz),
         // FUN_1404c4fc0: identity with translation u0.
         MATRIX_LOC => {
             let u0 = use_val(ctx, p, 0);
@@ -432,9 +435,11 @@ pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx)
         | models::DRAW_MATRIX
         | models::DRAW_MATRIX_LOOP
         | models::DRAW_MDL_TS3
+        | models::DRAW_MDL_LOOP
         | models::DRAW_MDL_LOOP_Z
         | models::VERTEX_AP
-        | models::VERTEX_AP_LC => models::update(p, cursor, part, ctx),
+        | models::VERTEX_AP_LC
+        | models::VERTEX_AP_LC_LOOP => models::update(p, cursor, part, ctx),
         _ => {
             if !ctx.unsupported.contains(&p.kind) {
                 ctx.unsupported.push(p.kind);
@@ -458,6 +463,7 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
         | models::DRAW_MDL3
         | models::DRAW_MDL_TS3
         | models::DRAW_MDL_SEMI3
+        | models::DRAW_MDL_LOOP
         | models::DRAW_MDL_LOOP_Z
         | models::SNO_MDL_DTT_NORM => models::draw(p, cursor, part, ctx),
         _ => {
@@ -597,6 +603,22 @@ fn params_vec3(ctx: &Ctx, at: usize) -> [f32; 3] {
     [float(ctx, at), float(ctx, at + 4), float(ctx, at + 8)]
 }
 
+/// The basis `eda0..edd0` (FUN_1404c6ed0, FUN_1402c3310): the parent's y axis
+/// (edb0), the horizontal vector (y, −x, 0) perpendicular to it (eda0), their
+/// cross product (edc0) and the parent's translation (edd0). The cross
+/// product's operand order [I: FUN_140478db0 read as a × b].
+pub(crate) fn parent_basis(parent: &Mat) -> Mat {
+    let up = math::normalize([parent[1][0], parent[1][1], parent[1][2], 0.]);
+    let side = math::normalize([up[1], -up[0], 0., 0.]);
+    let third = math::normalize([
+        side[1] * up[2] - side[2] * up[1],
+        side[2] * up[0] - side[0] * up[2],
+        side[0] * up[1] - side[1] * up[0],
+        0.,
+    ]);
+    [side, up, third, parent[3]]
+}
+
 /// FUN_1404c7200: a model-view matrix into u0. Modes: 0 offset before
 /// view·world, 1 offset after it, 2 world then view with scaled offset.
 fn ke_z_crct(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
@@ -619,6 +641,15 @@ fn ke_z_crct(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
                 w[3][i] += ctx.scales[i] * offset[i];
             }
             math::mul(&ctx.view, &w)
+        }
+        // Mode 3: the parent basis eda0..edd0 of FUN_1404c6ed0 /
+        // FUN_1402c3310 in place of ed60, the offset added after.
+        3 => {
+            let mut w = math::mul(&parent_basis(&ctx.ed60), &m);
+            for i in 0..3 {
+                w[3][i] += offset[i];
+            }
+            w
         }
         mode => {
             if mode != 1 && !ctx.unsupported.contains(&(0x2000_0000 | mode as u32)) {

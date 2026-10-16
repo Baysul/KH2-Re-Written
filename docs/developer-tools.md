@@ -48,6 +48,14 @@ cargo run -p data --bin message_probe --locked -- '<selected-install-root>' '<pr
 
 The bounded selection names source identity and each index/ordinal/name hash plus a `message` or `font` research purpose. Message records retain encoded spans and hashes. Recognized localized RawBitmap records decode to indexed pixels, palettes and straight RGBA fingerprints. Glyph/Unicode mapping and in-game rendering remain unverified. An optional fifth argument names an existing private directory for new checkerboard font BMP previews, outside Steam and Git, with a 32 MiB aggregate cap. These are research assets and must not be distributed. See [T007 structure evidence](tasks/T007-message-font-structure.md), [T008 pixel evidence](tasks/T008-font-planes.md), and the [requested-tool prerequisite audit](research/tool-prerequisites.md).
 
+## Magic tour
+
+```powershell
+KH2RW.exe room '<selected-install-root>' '<manifest>' '<test-room-config>' --log '<new-log.jsonl>' --magic-tour '<new-empty-capture-dir>' [--magic-form 5]
+```
+
+An unattended run: each spell on the ground and in the air, cast presses at several distances after an attack, a cast after two attacks (the finisher) and an attack after a cast, with Sora invincible and an enemy that stays in front. `--magic-form` casts in a Drive form (2 Wisdom, 4 Master, 5 Final). The log has `cast`, `cast_refused`, `spell_release`, `spell_effect` and `spell_effect_unsupported` events; captures follow each cast. After Sora's casts the tour orders Donald's four spells (`party_cast_order`, `party_cast`, `party_release`, `party_hit`, `party_heal`), lets the party AI cast on its own, and probes Magic Lock-On with the enemy 1400 ahead (`magic_lock_on`). Both outputs stay outside Git. See [T136](tasks/T136-magic-effects-and-combos.md).
+
 ## Research notes
 
 - [Static managed research](research/managed-inspection.md): the pinned reader must pass an authored oracle before source-bound selections are inspected. Vendor bytes are parsed without execution. Findings and pseudocode stay private. This does not qualify native methods or enable gameplay.
