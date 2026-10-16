@@ -124,6 +124,12 @@ pub enum Event {
         arguments: [i32; 4],
         handle: u32,
     },
+    /// `attack_strike`: a script applied an attack to a target directly.
+    AttackStrike {
+        attack: u32,
+        target: u32,
+        arguments: [i32; 2],
+    },
     /// `obj_voice`: the object plays a voice line.
     Voice {
         object: ObjId,
@@ -156,6 +162,10 @@ pub struct World {
     /// `teamwork_alloc` blocks by key (DAT_142ae75d0).
     pub teamwork: HashMap<i32, u32>,
     next_magic: u32,
+    /// The attack objects scripts created (`attack_new`), by slot.
+    pub attacks: Vec<Option<crate::attack::Attack>>,
+    /// `attack_new_combo_group`'s counter (DAT_142a24afc).
+    pub combo_group: u32,
     /// `status_set_lockon_ratio`: the lock-on ratio scripts last set.
     pub lockon_ratio: f32,
 }
@@ -175,6 +185,8 @@ impl Default for World {
             target_dups: Vec::new(),
             teamwork: HashMap::new(),
             next_magic: 0,
+            attacks: Vec::new(),
+            combo_group: 0,
             lockon_ratio: 0.,
         }
     }
@@ -247,6 +259,7 @@ pub const OBJECT_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0100_0000;
 pub const PLAYER_HANDLE: u32 = script::EXTERN_SEGMENT + 0x00f0_0000;
 /// Effect handles scripts keep, and copies of target records.
 pub const EFFECT_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0200_0000;
+pub const ATTACK_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0700_0000;
 pub const MAGIC_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0500_0000;
 pub const TARGET_DUP_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0300_0000;
 /// The engine object's target record (sys+0xbf8) is this far into its handle range.

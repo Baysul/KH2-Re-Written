@@ -6,6 +6,7 @@
 //! the engine services the scripts call.
 
 pub mod act;
+pub mod attack;
 pub mod damage;
 pub mod env;
 pub mod motion;
