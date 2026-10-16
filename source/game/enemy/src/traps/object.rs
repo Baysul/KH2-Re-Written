@@ -508,6 +508,9 @@ fn effect_start_bind(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> 
         effect: a,
         arguments: [b, c],
         handle,
+        position: None,
+        bound: true,
+        other: None,
     });
     args[0] = Slot::address(handle);
     Ok(())

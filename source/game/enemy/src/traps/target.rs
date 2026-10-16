@@ -8,7 +8,7 @@
 //! translation fall back to Sora.
 
 use crate::script::{Fault, Memory, Slot};
-use crate::sysobj::Target;
+use crate::sysobj::{Target, Vec3};
 use crate::world::{
     Ctx, OBJECT_HANDLES, PLAYER_HANDLE, TARGET_DUP_HANDLES, TARGET_RECORD_OFFSET, TrapFn,
     object_handle,
@@ -18,6 +18,8 @@ type Args = [Slot; 16];
 
 /// Target id meaning Sora.
 pub const PLAYER_TARGET: u32 = u32::MAX;
+/// A target id with this bit names a script-driven object.
+pub const OBJECT_TARGET: u32 = 0x4000_0000;
 
 pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
     Some(match (table, index) {
@@ -63,7 +65,7 @@ fn record(ctx: &mut Ctx<'_>, handle: u32) -> Result<Target, Fault> {
     }
 }
 
-fn set_record(ctx: &mut Ctx<'_>, handle: u32, t: Target) -> Result<(), Fault> {
+pub(super) fn set_record(ctx: &mut Ctx<'_>, handle: u32, t: Target) -> Result<(), Fault> {
     match locate(handle).ok_or(Fault::Memory(handle))? {
         Slot3::Object(id) => ctx.object(id)?.sys.target = t,
         Slot3::Dup(i) => {
@@ -82,18 +84,35 @@ pub(super) fn record_exists(ctx: &mut Ctx<'_>, handle: u32) -> bool {
     let Ok(t) = record(ctx, handle) else {
         return false;
     };
-    t.id != 0 && (t.id == PLAYER_TARGET || ctx.env.target_position(t.id).is_some())
+    target_point(ctx, t).is_some()
+}
+
+/// Where a record's target is, if it still exists.
+pub(super) fn target_point(ctx: &mut Ctx<'_>, t: Target) -> Option<Vec3> {
+    if t.id == 0 {
+        return None;
+    }
+    if t.id == PLAYER_TARGET {
+        return Some(ctx.env.player_position());
+    }
+    if t.id & OBJECT_TARGET != 0 {
+        let o = ctx.object(t.id & !OBJECT_TARGET).ok()?;
+        return (!o.sys.gone).then_some(o.sys.position);
+    }
+    ctx.env.target_position(t.id)
+}
+
+/// The record handle's target position (`target_pos`), for other modules.
+pub(super) fn record_point(ctx: &mut Ctx<'_>, handle: u32) -> Option<Vec3> {
+    let t = record(ctx, handle).ok()?;
+    target_point(ctx, t)
 }
 
 /// 1:120 FUN_140430350 -> FUN_1403bdde0: the centre of the target's TARGET
 /// shape, in the shared result vector.
 fn target_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let t = record(ctx, args[0].value)?;
-    let p = if t.id == PLAYER_TARGET {
-        ctx.env.player_position()
-    } else {
-        ctx.env.target_position(t.id).unwrap_or([0.; 3])
-    };
+    let p = target_point(ctx, t).unwrap_or([0.; 3]);
     let cell = ctx.world.static_cell(1, 0, 1);
     for (k, lane) in [p[0], p[1], p[2], 1.0].iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
@@ -191,7 +210,7 @@ fn btlobj_target(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resu
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let sys = &ctx.object(id)?.sys;
     let (t, bit4) = (sys.target, true);
-    let valid = t.id != 0 && (t.id == PLAYER_TARGET || ctx.env.target_position(t.id).is_some());
+    let valid = target_point(ctx, t).is_some();
     if !valid && bit4 && t.kind != 3 {
         let found = search(ctx, 2, id)?;
         ctx.object(id)?.sys.target = found;

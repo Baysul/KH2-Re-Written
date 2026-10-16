@@ -231,6 +231,10 @@ pub struct Sysobj {
     pub rtn_time: [u32; 9],
     /// +0x20: the steering velocity (four lanes; mode 5 moves by it).
     pub velocity: [f32; 4],
+    /// The entry's unit group (`obj_unit_group`) and the damage record's
+    /// "reaction executed" flag (+0x18 bit 0).
+    pub entry_group: u16,
+    pub damage_exec: bool,
     /// +0x2a8: the motion playback speed scripts set (`obj_motion_speed`).
     pub motion_speed: f32,
     /// The attack parameter id of the hit being handled (the damage record's
@@ -342,6 +346,8 @@ impl Sysobj {
             rtn_time: [0; 9],
             scale_w: 1.,
             velocity: [0.; 4],
+            entry_group: 0,
+            damage_exec: false,
             motion_speed: 1.,
             damage_param_id: 0,
             pending_fly: None,
@@ -807,7 +813,7 @@ impl Sysobj {
             0x34 => Some(self.scale[1].to_bits()),
             0x38 => Some(self.scale[2].to_bits()),
             0x3c => Some(self.scale_w.to_bits()),
-            0x20..=0x2c if offset % 4 == 0 => {
+            0x20..=0x2c if offset.is_multiple_of(4) => {
                 Some(self.velocity[((offset - 0x20) / 4) as usize].to_bits())
             }
             0x134 => Some(self.turn_rate.to_bits()),
@@ -822,7 +828,7 @@ impl Sysobj {
             0x34 => self.scale[1] = f32::from_bits(value),
             0x38 => self.scale[2] = f32::from_bits(value),
             0x3c => self.scale_w = f32::from_bits(value),
-            0x20..=0x2c if offset % 4 == 0 => {
+            0x20..=0x2c if offset.is_multiple_of(4) => {
                 self.velocity[((offset - 0x20) / 4) as usize] = f32::from_bits(value)
             }
             0x134 => self.turn_rate = f32::from_bits(value),
@@ -854,6 +860,16 @@ impl Sysobj {
         self.fly.is_some()
             || self.steer.is_some()
             || self.motion.flags.word & motion::flag::HOLD != 0
+    }
+
+    /// FUN_1403f1fa0: enable collision shape `index` (bit in the first word of
+    /// its pair).
+    pub fn enable_collision(&mut self, index: u32) {
+        let w = (index >> 5) as usize;
+        if self.collision.len() <= w + 1 {
+            self.collision.resize(w + 2, 0);
+        }
+        self.collision[w] |= 1 << (index & 31);
     }
 
     /// FUN_1403f1f80: disable collision shape `index` (bit in the second word of

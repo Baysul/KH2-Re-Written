@@ -3,6 +3,7 @@
 
 use super::math::read_sanitized;
 use crate::script::{Fault, Memory, Slot};
+use crate::sysobj::Vec3;
 use crate::world::{Ctx, Event, TrapFn, object_handle};
 
 type Args = [Slot; 16];
@@ -17,7 +18,27 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 114) => search_by_entry,
         (1, 177) => set_path,
         (1, 222) => get_entry_id,
+        (1, 0) => sysobj_appear,
+        (1, 1) => set_rot,
         (1, 18) => obj_attach,
+        (1, 21) => effect_start,
+        (1, 22) => effect_start_pos,
+        (1, 52) => enable_collision,
+        (1, 88) => obj_target_pos,
+        (1, 130) => obj_cmp,
+        (1, 149) => effect_start_bind_other,
+        (1, 157) => obj_camera_start,
+        (1, 165) => command_override,
+        (1, 184) => light_fadeout,
+        (0, 32) => screen_whitein,
+        (1, 160) => target_set_obj,
+        (1, 170) => unit_group,
+        (1, 225) => is_star,
+        (2, 15) => damage_exec_reaction,
+        (2, 64) => damage_orig_reaction,
+        (6, 9) => target_dist,
+        (6, 51) => bghit_check_line,
+        (6, 54) => bghit_cross_pos,
         (1, 59) => is_fly,
         (1, 83) => apply_bone_matrix,
         (1, 99) => float_height,
@@ -492,6 +513,222 @@ unsupported_vector_traps! {
     lightcycle_movement = (1, 269, "obj_get_lightcycle_movement");
     path_point_pos = (5, 14, "get_path_point_pos");
     bg_press = (6, 24, "obj_get_bg_press");
+}
+
+/// 1:0 FUN_14042b130 -> FUN_1403df930: `sysobj_appear`, look up or make an
+/// object appear. [U] Recorded; the script gets a null object.
+fn sysobj_appear(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    ctx.world.events.push(Event::Unsupported("sysobj_appear"));
+    args[0] = Slot::address(0);
+    Ok(())
+}
+
+/// 1:1 FUN_14042bf60 -> FUN_1403b6560: set the heading; the wished heading
+/// follows it, so no turn is pending.
+fn set_rot(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let yaw = args[1].as_float();
+    let sys = &mut ctx.object(id)?.sys;
+    sys.yaw = yaw;
+    sys.wish_yaw = None;
+    Ok(())
+}
+
+/// 1:52 FUN_14042edb0 -> FUN_1403f1fa0.
+fn enable_collision(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    ctx.object(id)?.sys.enable_collision(args[1].value);
+    Ok(())
+}
+
+fn start_effect(
+    ctx: &mut Ctx<'_>,
+    object: u32,
+    effect: i32,
+    arguments: [i32; 2],
+    position: Option<[f32; 3]>,
+    bound: bool,
+    other: Option<u32>,
+) -> u32 {
+    let handle = ctx.world.next_effect_handle();
+    ctx.world.events.push(Event::EffectStart {
+        object,
+        effect,
+        arguments,
+        handle,
+        position,
+        bound,
+        other,
+    });
+    handle
+}
+
+/// 1:21 FUN_14042d440 -> FUN_1403b6630: start an effect at the object. [U]
+/// The effect system is the host's; the request is an event.
+fn effect_start(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let (e, a, b) = (args[1].as_int(), args[2].as_int(), args[3].as_int());
+    let handle = start_effect(ctx, id, e, [a, b], None, false, None);
+    args[0] = Slot::address(handle);
+    Ok(())
+}
+
+/// 1:22 FUN_14042d4b0 -> FUN_1403b66c0: start an effect at a position.
+fn effect_start_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let v = read_sanitized(ctx, m, args[2].value)?;
+    let (e, a, b) = (args[1].as_int(), args[3].as_int(), args[4].as_int());
+    let handle = start_effect(ctx, id, e, [a, b], Some([v[0], v[1], v[2]]), false, None);
+    args[0] = Slot::address(handle);
+    Ok(())
+}
+
+/// 1:149 FUN_14042d5c0 -> FUN_1403b6670: an effect bound to another object.
+fn effect_start_bind_other(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let other = ctx.sys_of_ai(m, args[2].value).ok();
+    let (e, a, b) = (args[1].as_int(), args[3].as_int(), args[4].as_int());
+    let handle = start_effect(ctx, id, e, [a, b], None, true, other);
+    args[0] = Slot::address(handle);
+    Ok(())
+}
+
+/// 1:88 FUN_14042f880 -> FUN_1403b5cb0: the position of the object's own
+/// target.
+fn obj_target_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let t = ctx.object(id)?.sys.target;
+    let p = super::target::target_point(ctx, t).unwrap_or([0.; 3]);
+    let cell = ctx.world.static_cell(1, 88, 0);
+    for (k, lane) in [p[0], p[1], p[2], 1.0].iter().enumerate() {
+        ctx.write_f32(m, cell + 4 * k as u32, *lane);
+    }
+    args[0] = Slot::address(cell);
+    Ok(())
+}
+
+/// 1:130 FUN_14042b5d0: the difference of two AI objects' engine objects
+/// (0 when they are the same, or either is missing).
+fn obj_cmp(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let (a, b) = (args[0].value, args[1].value);
+    let diff = if a != 0 && b != 0 {
+        let x = ctx.read_u32(m, a + 4).ok_or(Fault::Memory(a))?;
+        let y = ctx.read_u32(m, b + 4).ok_or(Fault::Memory(b))?;
+        x.wrapping_sub(y) as i32
+    } else {
+        0
+    };
+    args[0] = Slot::int(diff);
+    Ok(())
+}
+
+/// 1:160 FUN_140430470 -> FUN_1403bee60: point a target record at an object.
+fn target_set_obj(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let handle = args[0].value;
+    let t = match ctx.sys_ref_ai(m, args[1].value)? {
+        crate::world::SysRef::Player => crate::sysobj::Target {
+            id: super::target::PLAYER_TARGET,
+            kind: -1,
+        },
+        crate::world::SysRef::Object(id) => crate::sysobj::Target {
+            id: super::target::OBJECT_TARGET | id,
+            kind: -1,
+        },
+    };
+    super::target::set_record(ctx, handle, t)
+}
+
+/// 1:170 FUN_14042dac0: the entry's unit group.
+fn unit_group(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let g = ctx.object(id)?.sys.entry_group;
+    args[0] = Slot::int(i32::from(g));
+    Ok(())
+}
+
+/// 1:225 FUN_14042bcb0: a virtual query on the object's class (star
+/// membership). [U] Always 0.
+fn is_star(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    args[0] = Slot::int(0);
+    Ok(())
+}
+
+/// 2:15 FUN_140432050: the damage record's "reaction executed" bit.
+fn damage_exec_reaction(
+    ctx: &mut Ctx<'_>,
+    _: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = crate::world::object_field(args[0].value).map_or(0, |(id, _)| id);
+    ctx.object(id)?.sys.damage_exec = true;
+    Ok(())
+}
+
+/// 2:64 FUN_140431f40: the damage record's original reaction (+0x27).
+fn damage_orig_reaction(
+    ctx: &mut Ctx<'_>,
+    _: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = crate::world::object_field(args[0].value).map_or(0, |(id, _)| id);
+    let r = ctx.object(id)?.sys.damage_reaction;
+    args[0] = Slot::int(r as i32);
+    Ok(())
+}
+
+/// 6:9 FUN_14053e3e0 -> FUN_1403bdd90: the distance from a target record's
+/// position to a point.
+fn target_dist(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let v = read_sanitized(ctx, m, args[1].value)?;
+    let p = super::target::record_point(ctx, args[0].value).unwrap_or([0.; 3]);
+    let d = [p[0] - v[0], p[1] - v[1], p[2] - v[2]];
+    args[0] = Slot::float((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt());
+    Ok(())
+}
+
+/// 6:51 FUN_14053eb70 -> FUN_14040c2b0: the map blocks the line.
+fn bghit_check_line(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let a: Vec3 = {
+        let v = read_sanitized(ctx, m, args[0].value)?;
+        [v[0], v[1], v[2]]
+    };
+    let b: Vec3 = {
+        let v = read_sanitized(ctx, m, args[1].value)?;
+        [v[0], v[1], v[2]]
+    };
+    let hit = ctx.env.line_blocked(a, b);
+    args[0] = Slot::int(hit as i32);
+    Ok(())
+}
+
+/// 6:54 FUN_14053ed00: where the last line check crossed the map. [U] Zero.
+fn bghit_cross_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    unsupported_vector(ctx, m, args, 6, 54, "bghit_get_cross_pos")
+}
+
+macro_rules! presentation_traps {
+    ($($name:ident = $label:literal;)*) => {$(
+        /// A presentation request this build does not play. [U] Recorded with
+        /// the first operand words.
+        fn $name(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+            ctx.world.events.push(Event::Presentation {
+                name: $label,
+                words: [args[0].value, args[1].value, args[2].value],
+            });
+            Ok(())
+        }
+    )*};
+}
+
+presentation_traps! {
+    obj_camera_start = "obj_camera_start";
+    command_override = "command_override";
+    light_fadeout = "light_fadeout";
+    screen_whitein = "func_screen_whitein";
 }
 
 #[cfg(test)]

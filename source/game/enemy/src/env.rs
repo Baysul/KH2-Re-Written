@@ -54,6 +54,10 @@ pub trait Env {
     fn clips(&self, model: u32) -> &dyn Clips;
     /// Sora.
     fn player_position(&self) -> Vec3;
+    /// Whether the map blocks the line between two points (`bghit_check_line`).
+    fn line_blocked(&self, _from: Vec3, _to: Vec3) -> bool {
+        false
+    }
     /// Sora's heading about Y (the direction scripts read from the player object).
     fn player_yaw(&self) -> f32 {
         0.

@@ -87,6 +87,19 @@ pub enum Event {
         effect: i32,
         arguments: [i32; 2],
         handle: u32,
+        /// Where the script placed it (`obj_effect_start_pos`); otherwise it
+        /// follows the object.
+        position: Option<[f32; 3]>,
+        /// Bound to the object (`obj_effect_start_bind`).
+        bound: bool,
+        /// The object it is bound to when that is not the caller.
+        other: Option<ObjId>,
+    },
+    /// A presentation request this build does not play (lights, screen fades,
+    /// camera shots, command overrides): the trap's name and its operand words.
+    Presentation {
+        name: &'static str,
+        words: [u32; 3],
     },
     ScatterPrize {
         object: ObjId,
