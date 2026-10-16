@@ -150,9 +150,9 @@ pub struct Instance {
 }
 
 /// Programs the executable's thread set-up (FUN_1403e1240) gives a 1024-byte
-/// stack. Its list is `b_ex240`, `b_ex330`, `blizzard`, and a fourth name that
-/// has not been read; only programs declaring 512 bytes are changed.
-const BIG_STACK_NAMES: [&[u8]; 3] = [b"b_ex240", b"b_ex330", b"blizzard"];
+/// stack: those declaring 512 bytes whose name is one of these (DAT_1405c8610,
+/// 1405c8618, 1405c8620, strcmp with "blizzard", DAT_1405c8628).
+const BIG_STACK_NAMES: [&[u8]; 5] = [b"b_ex370", b"b_ex420", b"p_ex330", b"blizzard", b"m_ex880"];
 
 impl Instance {
     /// An empty stand-in used while the real instance is lent to the interpreter.
