@@ -363,7 +363,7 @@ fn trigger_lookup_and_stack_size_patch() {
     let mut a = Asm::new();
     a.op(0x0049);
     let mut bytes = a.build(64, 0x200, 128);
-    bytes[..8].copy_from_slice(b"b_ex330\0");
+    bytes[..8].copy_from_slice(b"b_ex370\0");
     let inst = Instance::new(0, &bytes).unwrap();
     assert_eq!(inst.stack_bytes, 0x400);
     assert_eq!(inst.trigger(0), CODE_START as i32);
