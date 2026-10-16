@@ -19,7 +19,7 @@ Reference: the local PS2 motion routine (OpenKH Kh2AnimEmu, pin `7a3b945`, run t
 ## Results against the reference (max joint translation error)
 
 - Master Form clips checked first: 75 → ≤0.02. Whole player motion sets: 896 of ~930 slots ≤0.1; remaining 0.1–2.3 (one Wisdom Form clip ~30).
-- All 636 installed motion sets, 8254 interpolated motions sampled every 8 key units: 7198 ≤0.1 after these fixes (87%). Still above 0.1: 1056 motions in 70 objects, mostly enemy/boss/NPC rigs (examples: `M_EX710` non-finite, `B_EX330`, `B_EX180`, `P_HE000`, `P_BB000`, `M_EX540/550/560/580`).
+- All 636 installed motion sets, 8254 interpolated motions sampled every 8 key units: 7202 ≤0.1 after these fixes (87%). Still above 0.1: 1052 motions in about 70 objects, mostly enemy/boss/NPC rigs (examples: `M_EX710` non-finite, `B_EX330`, `B_EX180`, `P_HE000`, `P_BB000`, `M_EX540/550/560/580`).
 
 ## Checks
 
@@ -28,7 +28,7 @@ PASS `cargo fmt --all --check`; PASS clippy with warnings denied; unit tests add
 ## Uncertainty and not done
 
 - The reference is the PS2 routine, assumed equivalent to the PC code.
-- Not ported: solving an IK chain at its top joint (tried; broke base Sora, reverted), the exe's special blend for IK-flagged joints, the new motion held at its start phase during a blend, walk/run phase sync, the first-tick time quirk, loop at FrameReturn. Out-of-order constraint sources read the previous tick in the exe; the evaluator is stateless.
+- Not ported: the exe's special blend for IK-flagged joints, the new motion held at its start phase during a blend, walk/run phase sync, the first-tick time quirk, loop at FrameReturn. Out-of-order constraint sources read the previous tick in the exe; the evaluator is stateless.
 
 ## Verdict / next
 

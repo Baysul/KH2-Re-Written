@@ -630,11 +630,21 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
     }
 
     let mut stats = EvaluationStats::default();
+    // Chains solved when their top joint's turn came (the reference solves a
+    // chain there, so a joint ordered between top and end already reads the
+    // solved limb). `solved_end[j]` marks the end joint, `solved_mid[j]` the
+    // middle joint, whose pose must not be rebuilt from its channels.
+    let mut solved_end = vec![false; total];
+    let mut solved_mid = vec![false; total];
     let order: Vec<usize> = if joint_flags.len() == total {
         joint_flags.iter().map(|&(j, _)| j).collect()
     } else {
         (0..total).collect()
     };
+    let mut order_pos = vec![usize::MAX; total];
+    for (at, &j) in order.iter().enumerate() {
+        order_pos[j] = at;
+    }
     for &j in &order {
         // Expressions override this joint's local channels first.
         for &(joint, channel, node) in &expressions {
@@ -658,11 +668,13 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
             }
         }
         let parent = parents[j];
-        world[j] = if parent < 0 {
-            World::compose(&root_world, &locals[j])
-        } else {
-            World::compose(&world[parent as usize], &locals[j])
-        };
+        if !solved_mid[j] {
+            world[j] = if parent < 0 {
+                World::compose(&root_world, &locals[j])
+            } else {
+                World::compose(&world[parent as usize], &locals[j])
+            };
+        }
         let mut first_position: Option<Vec3> = None;
         // IK level 1: the joint turns its +X toward the position target of
         // the next joint (index + 1), facing the pole of an up-vector
@@ -713,6 +725,81 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
                 .find(|c| c.kind == 4 && c.constrained == joint && c.temporary_active)
                 .map(|c| c.source)
         };
+        // IK chain top (levels 2 and 3): the chain is solved here, with the
+        // position constraint of the joint two indices on as its target
+        // (FUN_1401d3b80: end = top + 2, mid = top + 1).
+        if flags[j] & 3 >= 2 && j + 2 < total {
+            let (mid, end) = (j + 1, j + 2);
+            let targets: Vec<usize> = constraints
+                .iter()
+                .filter(|c| c.constrained == end && c.temporary_active && c.kind == 0)
+                .map(|c| c.source)
+                .collect();
+            if parents[end] == mid as i32
+                && parents[mid] == j as i32
+                && flags[end] & 4 != 0
+                && flags[mid] & 32 != 0
+                && !targets.is_empty()
+                // A target the order has not reached yet is read when the
+                // end joint's turn comes instead.
+                && targets.iter().all(|&t| order_pos[t] < order_pos[j])
+                // Only when other joints are ordered between top and end
+                // (they may read the limb); chains processed in a row are
+                // solved at the end joint's turn, which matched the
+                // reference in every such case checked.
+                && order_pos[end] > order_pos[j] + 2
+            {
+                let target = if targets.len() >= 2 {
+                    add(world[targets[0]].translation, world[targets[1]].translation)
+                        .map(|v| v * 0.5)
+                } else {
+                    world[targets[0]].translation
+                };
+                // The chain's own expressions (roll channels) take effect
+                // before the solve reads them.
+                for &(joint, channel, node) in &expressions {
+                    if joint == mid || joint == end {
+                        let ctx = ExprContext {
+                            nodes: &nodes,
+                            locals: &locals,
+                            world: &world,
+                            frame,
+                        };
+                        if let Some(v) = ctx.eval(node, 0).filter(|v| v.is_finite()) {
+                            let v = if (3..=5).contains(&channel) {
+                                v * 0.017_453_3
+                            } else {
+                                v
+                            };
+                            set_channel(&mut locals[joint], channel, v);
+                        }
+                    }
+                }
+                let parent_frame = if parent >= 0 {
+                    world[parent as usize]
+                } else {
+                    root_world
+                };
+                let pole = pole_of(j).map(|p| world[p].translation);
+                let reach = [
+                    lengths[j] * world[j].scale[0],
+                    lengths[mid] * world[mid].scale[0],
+                ];
+                solve_two_joint(
+                    &mut world,
+                    &locals,
+                    reach,
+                    parent_frame,
+                    flags[j] & 3 == 3,
+                    [j, mid, end],
+                    target,
+                    pole,
+                );
+                stats.ik_chains_solved += 1;
+                solved_end[end] = true;
+                solved_mid[mid] = true;
+            }
+        }
         // The reference collects a joint's constraints first and then applies
         // them in a fixed order: position sources, the position limit, the
         // rotation limit, then rotation constraints (opt1_fk_translation
@@ -734,6 +821,13 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
                 // The position constraint of an aiming joint, and of the
                 // joint an aiming joint points at, is that aim's target.
                 0 if aims || aimed_at => {}
+                0 if solved_end[j] => {
+                    if flags[j] & 8 != 0 {
+                        // The end joint keeps its own rotation in character
+                        // space.
+                        world[j].rotation = from_euler(locals[j].rotation);
+                    }
+                }
                 0 => {
                     let chain_end = flags[j] & 4 != 0;
                     let mid = parents[j];
