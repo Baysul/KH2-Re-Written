@@ -768,6 +768,9 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
         battle
             .brain
             .follow_capture(game.magic.as_ref().map_or(&[], |m| m.volumes.as_slice()));
+        if let Brain::Script(a) = &mut battle.brain {
+            a.player_yaw = game.player.yaw;
+        }
         let prior = (battle.brain.motion(), battle.brain.serial());
         match battle.tick(&game.world, game.player.position, &actor.kind, &mut rng) {
             Ok((choice, key)) => {

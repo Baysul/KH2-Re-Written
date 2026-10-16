@@ -19,6 +19,7 @@ struct BrainEnv<'a> {
     room: Option<&'a RoomWorld>,
     clips: &'a Clips,
     player: Vec3,
+    player_yaw: f32,
 }
 
 impl Env for BrainEnv<'_> {
@@ -30,6 +31,9 @@ impl Env for BrainEnv<'_> {
     }
     fn player_position(&self) -> Vec3 {
         self.player
+    }
+    fn player_yaw(&self) -> f32 {
+        self.player_yaw
     }
     fn target_position(&self, _id: u32) -> Option<Vec3> {
         None
@@ -54,6 +58,8 @@ pub struct ScriptBrain {
     payload: Vec<u8>,
     spawn: Vec3,
     player: Vec3,
+    /// Sora's heading, set by the host before each tick.
+    pub player_yaw: f32,
     /// Faults the interpreter or a missing trap reported, for the host log.
     pub fault: Option<String>,
 }
@@ -94,6 +100,7 @@ impl ScriptBrain {
             payload,
             spawn: position,
             player: position,
+            player_yaw: 0.,
             fault: None,
         };
         brain.build(position, yaw, stats, sstm, &mut ScriptRandom::default())?;
@@ -118,6 +125,7 @@ impl ScriptBrain {
             room: None,
             clips: &self.clips,
             player: self.player,
+            player_yaw: self.player_yaw,
         };
         self.object = Object::spawn(&mut self.world, &env, 0, &self.payload, sys)
             .map_err(|e| format!("object script rejected: {e:?}"))?;
@@ -132,6 +140,7 @@ impl ScriptBrain {
             room: Some(room),
             clips: &self.clips,
             player,
+            player_yaw: self.player_yaw,
         };
         self.object.tick(&mut self.world, &env);
         rng.0 = self.world.rng.0;
@@ -204,6 +213,7 @@ impl ScriptBrain {
             room: None,
             clips: &self.clips,
             player: self.player,
+            player_yaw: self.player_yaw,
         };
         let damage = self.object.take_hit(
             &mut self.world,
@@ -223,6 +233,7 @@ impl ScriptBrain {
             room: None,
             clips: &self.clips,
             player: self.player,
+            player_yaw: self.player_yaw,
         };
         self.object.reflect(&mut self.world, &env, motion, back);
         self.record_faults();
@@ -238,6 +249,7 @@ impl ScriptBrain {
             room: None,
             clips: &self.clips,
             player: self.player,
+            player_yaw: self.player_yaw,
         };
         let actions = self.object.acts.start(b"dead");
         self.object

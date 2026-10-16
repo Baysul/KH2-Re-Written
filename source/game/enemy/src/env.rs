@@ -54,6 +54,10 @@ pub trait Env {
     fn clips(&self, model: u32) -> &dyn Clips;
     /// Sora.
     fn player_position(&self) -> Vec3;
+    /// Sora's heading about Y (the direction scripts read from the player object).
+    fn player_yaw(&self) -> f32 {
+        0.
+    }
     /// Position of a target actor (centre of its TARGET shape).
     fn target_position(&self, id: u32) -> Option<Vec3>;
     /// The battle target table's choice for an actor (`None`: no entry).

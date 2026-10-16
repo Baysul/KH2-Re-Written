@@ -223,8 +223,15 @@ pub struct Sysobj {
     /// +0x5a8: the collision shape masks `obj_disable_collision` and
     /// `obj_reset_collision` edit (word `n` of shapes 32n..).
     pub collision: Vec<u32>,
-    /// The object entry's id (`obj_get_entry_id`).
+    /// The object entry's id and part id (`obj_get_entry_id`, `obj_part`).
     pub entry_id: u32,
+    pub entry_part: u16,
+    /// +0xccc: routine option flags (`rtn_option_flag`), and +0xcd8..+0xcfc:
+    /// the routine time parameters (`set_rtn_time_param`; word 7 is `touch_zone`).
+    pub rtn_flags: Vec<u32>,
+    pub rtn_time: [u32; 9],
+    /// +0x3c: the fourth lane of the scale vector.
+    pub scale_w: f32,
     pub(crate) pending_fly: Option<PendingFly>,
     pub(crate) fly: Option<Fly>,
     /// Physics mode 5 state, and +0x124 bit 27 (the last step moved).
@@ -324,6 +331,10 @@ impl Sysobj {
             karma_limit: 0,
             collision: Vec::new(),
             entry_id: 0,
+            entry_part: 0,
+            rtn_flags: Vec::new(),
+            rtn_time: [0; 9],
+            scale_w: 1.,
             pending_fly: None,
             fly: None,
             steer: None,
@@ -784,6 +795,7 @@ impl Sysobj {
             0x30 => Some(self.scale[0].to_bits()),
             0x34 => Some(self.scale[1].to_bits()),
             0x38 => Some(self.scale[2].to_bits()),
+            0x3c => Some(self.scale_w.to_bits()),
             0x134 => Some(self.turn_rate.to_bits()),
             _ => None,
         }
@@ -795,10 +807,36 @@ impl Sysobj {
             0x30 => self.scale[0] = f32::from_bits(value),
             0x34 => self.scale[1] = f32::from_bits(value),
             0x38 => self.scale[2] = f32::from_bits(value),
+            0x3c => self.scale_w = f32::from_bits(value),
             0x134 => self.turn_rate = f32::from_bits(value),
             _ => return false,
         }
         true
+    }
+
+    /// FUN_140418800: set routine option flag `index`.
+    pub fn set_rtn_flag(&mut self, index: u32) {
+        let w = (index >> 5) as usize;
+        if self.rtn_flags.len() <= w {
+            self.rtn_flags.resize(w + 1, 0);
+        }
+        self.rtn_flags[w] |= 1 << (index & 31);
+    }
+
+    /// FUN_140417630.
+    pub fn rtn_flag(&self, index: u32) -> bool {
+        self.rtn_flags
+            .get((index >> 5) as usize)
+            .is_some_and(|w| w >> (index & 31) & 1 != 0)
+    }
+
+    /// `trap_obj_is_fly` (FUN_14042ef50): the physics mode has the fly bit
+    /// (the flyjump and steering modes here), or the motion holds the arc
+    /// (+0x18c bit 6).
+    pub fn is_fly(&self) -> bool {
+        self.fly.is_some()
+            || self.steer.is_some()
+            || self.motion.flags.word & motion::flag::HOLD != 0
     }
 
     /// FUN_1403f1f80: disable collision shape `index` (bit in the second word of
@@ -872,6 +910,6 @@ impl Sysobj {
 
     /// `trap_obj_is_jump`: the physics state byte at +0xc bit 0.
     pub fn is_jump(&self) -> bool {
-        self.jump.is_some() || self.fly.is_some() || self.steer.is_some()
+        self.jump.is_some() || self.fly.is_some()
     }
 }

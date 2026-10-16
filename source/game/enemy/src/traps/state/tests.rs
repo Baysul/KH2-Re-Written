@@ -20,7 +20,8 @@ fn collision_masks_pair_a_disable_word_with_a_reset_of_both() {
 fn obj_fly_normalises_the_direction_and_decays_without_a_request() {
     let mut s = Sysobj::bare();
     s.start_steer([3., 4., 0.], 5., 0.5);
-    assert!(s.is_jump());
+    assert!(!s.is_jump(), "mode 5 has the fly bit, not the jump bit");
+    assert!(s.is_fly());
     // The first run happens on the next frame; it keeps half the velocity.
     s.end_tick(&NullEnv);
     let step = s.steer.unwrap().velocity;
@@ -46,7 +47,7 @@ fn going_to_the_ground_mode_ends_the_fly() {
     let mut s = Sysobj::bare();
     s.start_steer([0., 1., 0.], 1., 0.9);
     s.to_ground_mode();
-    assert!(!s.is_jump());
+    assert!(!s.is_fly());
 }
 
 #[test]
@@ -90,4 +91,22 @@ fn teamwork_blocks_are_shared_by_key() {
     teamwork_alloc(&mut ctx, &mut memory, &mut args).unwrap();
     assert_ne!(args[0].value, a);
     assert_eq!(ctx.world.static_read(args[0].value), Some(0));
+}
+
+#[test]
+fn routine_option_flags_are_bits_across_words() {
+    let mut s = Sysobj::bare();
+    assert!(!s.rtn_flag(40));
+    s.set_rtn_flag(40);
+    assert!(s.rtn_flag(40));
+    assert!(!s.rtn_flag(8));
+    assert_eq!(s.rtn_flags, [0, 1 << 8]);
+}
+
+#[test]
+fn scale_w_is_word_0x3c() {
+    let mut s = Sysobj::bare();
+    assert_eq!(s.peek_word(0x3c), Some(1.0f32.to_bits()));
+    assert!(s.poke_word(0x3c, 2.4f32.to_bits()));
+    assert_eq!(s.scale_w, 2.4);
 }

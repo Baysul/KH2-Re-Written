@@ -124,6 +124,12 @@ pub enum Event {
         arguments: [i32; 4],
         handle: u32,
     },
+    /// `obj_voice`: the object plays a voice line.
+    Voice {
+        object: ObjId,
+        id: i32,
+        arg: i32,
+    },
     /// A service the executable provides that this build does not translate yet.
     Unsupported(&'static str),
 }
@@ -150,6 +156,8 @@ pub struct World {
     /// `teamwork_alloc` blocks by key (DAT_142ae75d0).
     pub teamwork: HashMap<i32, u32>,
     next_magic: u32,
+    /// `status_set_lockon_ratio`: the lock-on ratio scripts last set.
+    pub lockon_ratio: f32,
 }
 
 impl Default for World {
@@ -167,6 +175,7 @@ impl Default for World {
             target_dups: Vec::new(),
             teamwork: HashMap::new(),
             next_magic: 0,
+            lockon_ratio: 0.,
         }
     }
 }

@@ -638,10 +638,16 @@ fn status_force_leave(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) ->
 
 /// 1:201 FUN_14042ba00 -> FUN_1403b56e0: the facing vector (w = heading).
 fn direction(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let id = ctx.sys_of_ai(m, args[0].value)?;
-    let sys = &ctx.object(id)?.sys;
-    let v = sys.forward();
-    let yaw = sys.yaw;
+    let (v, yaw) = match ctx.sys_ref_ai(m, args[0].value)? {
+        SysRef::Player => {
+            let yaw = ctx.env.player_yaw();
+            ([yaw.sin(), 0., yaw.cos()], yaw)
+        }
+        SysRef::Object(id) => {
+            let sys = &ctx.object(id)?.sys;
+            (sys.forward(), sys.yaw)
+        }
+    };
     shared_vector(ctx, m, [v[0], 0., v[2], yaw], args)
 }
 
