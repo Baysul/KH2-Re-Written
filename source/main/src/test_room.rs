@@ -6252,11 +6252,13 @@ fn simulate(
     combat_tick(&mut game, tick);
     prize_room::tick(&mut game, tick);
     if game.magic_tour
-        && let Some((spell, heal)) = magic_tour::party_cast(tick, game.magic_shift)
+        && let Some((member, spell, heal)) = magic_tour::party_cast(tick, game.magic_shift)
     {
-        let ordered = party_room::order_cast(&mut game, 0, spell, heal);
-        game.event(serde_json::json!({"event":"party_cast_order","tick":tick,
-            "spell":format!("{spell:?}"),"heal":heal,"ordered":ordered}));
+        let ordered = party_room::order_cast(&mut game, member, spell, heal);
+        game.event(
+            serde_json::json!({"event":"party_cast_order","tick":tick,"member":member,
+            "spell":format!("{spell:?}"),"heal":heal,"ordered":ordered}),
+        );
     }
     party_room::tick(&mut game, tick);
     // Drive: requests, the form change, the form gauge (after the player

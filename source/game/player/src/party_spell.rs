@@ -4,6 +4,13 @@
 //! which effect elements start, where the attack volumes sit and for how
 //! long, and the heal.
 //!
+//! Goofy's `tornado` and `turbo` are movement acts: the member's movement
+//! lives in `party_members` (`special_step`); here the act spends its MP at
+//! the start (his start callback passes 1 to L2869) and Tornado's own
+//! attack object (ATKP 1188, sphere 200, 100 above the member) lives while
+//! the motion's range 16 is active. The weapon windows (ATKP 1160, 1162)
+//! come from the weapon motion.
+//!
 //! Positions are the simulation's Y-up space; the script's Y-down offsets
 //! are negated. A script wait of `n` frames is `n` ticks (the scripts count
 //! `frametime`, 1 per tick, as the spells of `magic` do). Effect handles
@@ -22,6 +29,7 @@ pub const FIRE_ATKP: u16 = 1163;
 pub const BLIZZARD_ATKP: u16 = 1164;
 pub const THUNDER_ATKP: u16 = 1165;
 pub const CURE_ATKP: u16 = 1525;
+pub const TORNADO_ATKP: u16 = 1188;
 
 /// Fire: the ring's volume (`attack_set_radius(a, 220, 70)`) follows the
 /// second effect for at most this long.
@@ -55,6 +63,8 @@ pub struct Context<'a> {
     pub ground: &'a dyn Fn(Vec3, f32) -> Option<Vec3>,
     /// `attack_is_hit_bg` for a sphere.
     pub bg_hit: &'a dyn Fn(Vec3, f32) -> bool,
+    /// The member's attack motion has ended.
+    pub over: bool,
 }
 
 /// One tick of an act.
@@ -104,6 +114,8 @@ pub struct Cast {
     strike: Option<Vec3>,
     /// Effect handles seen dead (bit per handle).
     gone: u8,
+    /// The motion's range 16 (Tornado's attack object lives in it).
+    range: Option<(u32, u32)>,
 }
 
 fn add(a: Vec3, b: Vec3) -> Vec3 {
@@ -133,7 +145,14 @@ impl Cast {
             shot: None,
             strike: None,
             gone: 0,
+            range: None,
         }
+    }
+
+    /// The motion's range 16, in ticks of the motion.
+    pub fn with_range(mut self, range: Option<(u32, u32)>) -> Self {
+        self.range = range;
+        self
     }
 
     pub fn finished(&self) -> bool {
@@ -368,6 +387,30 @@ impl Cast {
                     }
                 }
             }
+            Spell::Tornado | Spell::Turbo => {
+                if age == 0 {
+                    out.spend = Some(10);
+                }
+                if self.spell == Spell::Tornado
+                    && self.range.is_some_and(|(lo, hi)| (lo..=hi).contains(&age))
+                {
+                    out.volumes.push(Volume {
+                        key: self.key + 0x10,
+                        atkp: TORNADO_ATKP,
+                        sub: 0,
+                        centre: [ctx.caster[0], ctx.caster[1] + 100., ctx.caster[2]],
+                        radius: 200.,
+                        height: 200.,
+                        previous: self.previous,
+                        moving: None,
+                        role: Role::Damage,
+                    });
+                    self.previous = Some([ctx.caster[0], ctx.caster[1] + 100., ctx.caster[2]]);
+                }
+                if ctx.over {
+                    self.done = true;
+                }
+            }
             Spell::Cure => {
                 if age == r {
                     out.fx.push(Fx::Start {
@@ -418,6 +461,7 @@ mod tests {
             effect,
             ground: &ground,
             bg_hit: &bg,
+            over: false,
         };
         let mut c = Cast::new(spell, 1, 0, 0x100, release);
         (0..ticks).map(|_| c.tick(&ctx)).collect()
@@ -527,6 +571,38 @@ mod tests {
     }
 
     #[test]
+    fn tornado_spends_ten_at_the_start_and_its_attack_lives_in_the_range() {
+        let ground = |_: Vec3, _: f32| None;
+        let bg = |_: Vec3, _: f32| false;
+        let mut c = Cast::new(Spell::Tornado, 2, 0, 0x100, 0).with_range(Some((50, 380)));
+        let mut spent = Vec::new();
+        let mut live = Vec::new();
+        for t in 0..420u32 {
+            let ctx = Context {
+                caster: [0., 40., 0.],
+                facing: [0., 1.],
+                centre: [0.; 3],
+                target: None,
+                effect: &none,
+                ground: &ground,
+                bg_hit: &bg,
+                over: t >= 400,
+            };
+            let o = c.tick(&ctx);
+            if o.spend.is_some() {
+                spent.push(t);
+            }
+            if let Some(v) = o.volumes.first() {
+                live.push((t, v.atkp, v.centre[1], v.radius));
+            }
+        }
+        assert_eq!(spent, vec![0]);
+        assert_eq!(live.first(), Some(&(50, 1188, 140., 200.)));
+        assert_eq!(live.last().map(|l| l.0), Some(380));
+        assert!(c.finished());
+    }
+
+    #[test]
     fn cure_spends_everything_and_heals_the_chosen_member_at_the_release() {
         let mut c = Cast::new(Spell::Cure, 1, 2, 0x100, 26);
         let ground = |_: Vec3, _: f32| None;
@@ -539,6 +615,7 @@ mod tests {
             effect: &none,
             ground: &ground,
             bg_hit: &bg,
+            over: false,
         };
         let mut healed = Vec::new();
         for t in 0..30 {

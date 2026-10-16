@@ -41,19 +41,21 @@ const AFTER_SPACING: u64 = 200;
 /// Cure on Donald, then on Goofy (the party list's picks).
 const PARTY_CURES: [(u64, usize); 2] = [(4650, 1), (4800, 2)];
 /// Donald's four spells on order, then the party's AI casting on its own.
-const PARTY_CASTS: [(u64, Spell, u8); 4] = [
-    (5050, Spell::Fire, 0),
-    (5250, Spell::Thunder, 0),
-    (5450, Spell::Blizzard, 0),
-    (5650, Spell::Cure, 2),
+const PARTY_CASTS: [(u64, usize, Spell, u8); 6] = [
+    (5050, 0, Spell::Fire, 0),
+    (5250, 0, Spell::Thunder, 0),
+    (5450, 0, Spell::Blizzard, 0),
+    (5650, 0, Spell::Cure, 2),
+    (5800, 1, Spell::Turbo, 0),
+    (6200, 1, Spell::Tornado, 0),
 ];
 /// The AI's own casts run from here to the end.
-pub const FREE_PARTY: u64 = 5900;
+pub const FREE_PARTY: u64 = 6800;
 /// Magic Lock-On: Fire pressed with the enemy beyond the automatic
 /// target's range, with the ability (first) and without it (second).
-const LOCK: [(u64, bool); 2] = [(7500, true), (7700, false)];
+const LOCK: [(u64, bool); 2] = [(8400, true), (8600, false)];
 const LOCK_DISTANCE: f32 = 1400.;
-pub const END: u64 = 7900;
+pub const END: u64 = 8800;
 
 /// The party slot Cure targets when it is cast this tick (0 = Sora).
 pub fn cure_target(tick: u64, shift: u64) -> usize {
@@ -63,10 +65,14 @@ pub fn cure_target(tick: u64, shift: u64) -> usize {
     PARTY_CURES.iter().find(|c| c.0 == tick).map_or(0, |c| c.1)
 }
 
-/// Donald's ordered cast this tick, with the party slot Cure heals.
-pub fn party_cast(tick: u64, shift: u64) -> Option<(Spell, u8)> {
+/// A party member's ordered cast this tick: member index (0 Donald, 1
+/// Goofy), the act, and the party slot Cure heals.
+pub fn party_cast(tick: u64, shift: u64) -> Option<(usize, Spell, u8)> {
     let tick = tick.checked_sub(shift)?;
-    PARTY_CASTS.iter().find(|c| c.0 == tick).map(|c| (c.1, c.2))
+    PARTY_CASTS
+        .iter()
+        .find(|c| c.0 == tick)
+        .map(|c| (c.1, c.2, c.3))
 }
 
 /// Whether Magic Lock-On is on from this tick on, when a probe changes it.

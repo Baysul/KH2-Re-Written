@@ -48,8 +48,16 @@ tour logs and captures in `runs/`). Nothing from the game is in Git: the effect 
 11. Found why Magic Lock-On had no candidates: the legacy enemy's per-tick bone matrices
     held only its HIT and claw bones, so its TARGET shapes were never placed. The bones of
     the TARGET shapes are now included; the lock-on and Donald's Thunder read them.
-12. `--magic-tour` gained Donald's four ordered casts, the party AI running free, and two
-    Magic Lock-On probes (enemy 1400 ahead, ability on and off).
+12. `--magic-tour` gained Donald's four ordered casts, Goofy's Turbo and Tornado, the party AI
+    running free, and two Magic Lock-On probes (enemy 1400 ahead, ability on and off).
+13. Goofy's Tornado (`p_ex030` L1967) and Turbo (L2924): the member waits for its motion's range 16,
+    then moves by `obj_set_movement(heading, speed)` with the heading turning toward its goal 0.1745
+    a tick (Tornado: hover 65 + 35 sin(a) over the target, speed 3 within 150 of it, else 10; Turbo:
+    15 a tick toward the ground under the target, re-read every 4 ticks), 10 MP at the start, the
+    weapon windows (ATKP 1160, 1162) from his weapon motion and Tornado's own ATKP 1188 sphere (200,
+    100 above him) while the range is active. He falls to the floor afterwards.
+14. `vector_homing` (FUN_14041d3d0 / FUN_1403b7200) is now the original's rotation about the cross
+    axis, limited to the rate, instead of a linear blend (Sora's Blizzard shards use it too).
 
 ## Findings
 
@@ -111,10 +119,11 @@ tour logs and captures in `runs/`). Nothing from the game is in Git: the effect 
 - Donald's staff top (bone 0x4003/4) is taken the way the Keyblade tip is: bone 2 of his staff with the posed vertex farthest from it. His type-1 and type-9 collision centres are read from `P_EX020.mdlx`.
 - Cure's record reads a range of 0-0 and flags 3; read literally the original's range test would only pass when the enemy overlaps Donald, so the cast waits on the heal target instead. The record's flags were not decoded.
 - Donald casts with all four spells equipped (the test room does not model his equipment); the original needs each ability learned and equipped.
-- Not modelled for the party: the voices (`?1,262`), hit sparks of the party's spells, reflect of Blizzard's shot, interrupting a cast, Goofy's spells, Donald's Limit and items, and Donald being hit.
+- Goofy's movement: `obj_set_movement` (o+0x10 = normalized heading, o+0x1c = speed) is applied as heading x speed a tick through the collision solver, vertically only for Tornado; the physics of the original's consumer (FUN_1403b9da0's reader) was not traced. Turbo's random 300-500 point (FUN_1403f3fa0) is drawn from the member's own stream and only matters with no target. The scale DAT_140717480 in `vector_homing` is taken as 1. Tornado's ATKP 1188 row did no damage in the tour.
+- Not modelled for the party: the voices (`?1,262`), hit sparks of the party's spells, reflect of Blizzard's shot, interrupting a cast, Goofy's Bash (a spawned shield object with its own flight and PAX), Donald's Limit and items, and the party being hit.
 - Not modelled: controller vibration on casts.
 - Which behavior the owner saw as "magic does not use the combo system" was not reproduced.
 
 ## Verdict / next
 
-PARTIAL: the spells show their own effects, animations and variants in the base, Wisdom, Master and Final forms and join the combo as the executable's gate does; Cure has its party target menu; Donald casts his four spells; Magic Lock-On works in the room. Open: owner playtest of each spell in each form, a comparison with the installed game, and the party items in the Uncertainty list.
+PARTIAL: the spells show their own effects, animations and variants in the base, Wisdom, Master and Final forms and join the combo as the executable's gate does; Cure has its party target menu; Donald casts his four spells and Goofy his Tornado and Turbo; Magic Lock-On works in the room. Open: owner playtest of each spell in each form, a comparison with the installed game, and the party items in the Uncertainty list.

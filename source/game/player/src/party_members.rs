@@ -43,14 +43,17 @@ pub enum Gait {
     Run,
 }
 
-/// The spells of Donald's `p_ex020` acts (`fire`, `blizzard`, `thunder`,
-/// `cure`).
+/// The acts of the party's BDX scripts: Donald's `p_ex020` spells (`fire`,
+/// `blizzard`, `thunder`, `cure`) and Goofy's `p_ex030` specials
+/// (`tornado`, `turbo`; `blade`, his Bash, is not built).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spell {
     Fire,
     Blizzard,
     Thunder,
     Cure,
+    Tornado,
+    Turbo,
 }
 
 /// One action parameter entry (record of 0x80 bytes): the attack's motion
@@ -123,8 +126,16 @@ pub const DONALD: [Record; 6] = [
         ..spell(60, Spell::Cure, 192, [0., 0., 0., 0.], 255)
     },
 ];
-/// Goofy's ground attack records (personality 1).
-pub const GOOFY: [Record; 2] = [ground(4, 151, 220.), ground(5, 152, 300.)];
+/// Goofy's records (personality 1): the two ground attacks and the
+/// specials Tornado (id 92, range 0-500, height window -500/100 after the
+/// negation) and Turbo (id 94, 0-500, -150/100), 10 MP each. Bash (id 93,
+/// 250-750) needs the spawned shield object and is not built.
+pub const GOOFY: [Record; 4] = [
+    ground(4, 151, 220.),
+    ground(5, 152, 300.),
+    spell(92, Spell::Tornado, 191, [0., 500., -500., 100.], 10),
+    spell(94, Spell::Turbo, 194, [0., 500., -150., 100.], 10),
+];
 
 /// The enemy a member fights: its centre and radius.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -145,6 +156,36 @@ pub struct Attack {
     pub heal: u8,
 }
 
+/// The movement loop of Goofy's Tornado and Turbo (`p_ex030` L1967 and
+/// L2924): `obj_set_movement(heading, speed)` each tick, the heading
+/// turning toward the goal by at most 0.1745 per tick.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Special {
+    heading: Vec3,
+    /// Tornado's hover phase (+5 degrees a tick).
+    spin: f32,
+    /// Turbo's re-aim timer and count.
+    timer: f32,
+    count: u32,
+    goal: Vec3,
+    start_y: f32,
+    started: bool,
+}
+
+impl Special {
+    fn new() -> Self {
+        Special {
+            heading: [0., 1., 0.],
+            spin: 0.,
+            timer: 4.,
+            count: 0,
+            goal: [0.; 3],
+            start_y: 0.,
+            started: false,
+        }
+    }
+}
+
 /// A party member that follows the leader and fights.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Follower {
@@ -162,6 +203,9 @@ pub struct Follower {
     /// The think loop's spell permit (obj+0xe18 bit 5), rolled each
     /// decision.
     pub permit: bool,
+    special: Special,
+    /// Downward speed while falling after a special.
+    fall: f32,
 }
 
 fn wrap(a: f32) -> f32 {
@@ -186,6 +230,13 @@ pub struct Scene<'a, W: World> {
     pub busy: bool,
     /// The AI may choose spells (the tour orders its casts instead).
     pub spells: bool,
+    /// The enemy target's centre (`target_pos`), for the specials' goals.
+    pub centre: Option<Vec3>,
+    /// Sora's feet height (`trap_sysobj_player`), Tornado's hover reference.
+    pub leader_y: f32,
+    /// The motion's range 16 (`range_bit(obj, 1)`): the ticks the special
+    /// moves in.
+    pub range: &'a dyn Fn(u16) -> Option<(u32, u32)>,
     /// This member's MP: current, maximum and whether an MP Charge runs.
     pub mp: Option<(i32, i32, bool)>,
     /// HP and maximum HP of Sora, Donald and Goofy (None: absent).
@@ -205,6 +256,8 @@ impl Follower {
             history: [255; 3],
             seed: 0x1234_5678 ^ (slot as u32 * 0x9e37_79b9),
             permit: false,
+            special: Special::new(),
+            fall: 0.,
         }
     }
 
@@ -349,6 +402,132 @@ impl Follower {
         });
         self.gait = Gait::Stand;
         self.tick = 0;
+        self.special = Special::new();
+    }
+
+    /// One tick of Tornado (`L1967`) or Turbo (`L2924`): the member waits for
+    /// the motion's range 16, then moves along a heading it turns toward the
+    /// goal; Tornado hovers over the target, Turbo dashes along the ground.
+    fn special_step<W: World>(&mut self, a: &Attack, spell: Spell, scene: &Scene<W>) {
+        let Some((lo, hi)) = (scene.range)(a.motion) else {
+            return;
+        };
+        let sp = &mut self.special;
+        let pos = self.position;
+        if !sp.started {
+            sp.started = true;
+            sp.start_y = pos[1];
+            if spell == Spell::Turbo {
+                sp.heading = [self.yaw.sin(), 0., self.yaw.cos()];
+                self.special.goal = self.random_ring(pos);
+            }
+        }
+        let sp = &mut self.special;
+        // The script waits for the range before it does anything.
+        if a.tick < lo {
+            if spell == Spell::Turbo
+                && let Some(t) = scene.centre
+            {
+                // Range 22 turns the member toward the target.
+                let d = [t[0] - pos[0], t[2] - pos[2]];
+                if d[0].hypot(d[1]) > 1e-3 {
+                    self.yaw = d[0].atan2(d[1]);
+                }
+            }
+            return;
+        }
+        let ground = |x: f32, z: f32, top: f32| scene.world.floor(x, z, top);
+        let mut home = true;
+        let (goal, speed) = match spell {
+            Spell::Tornado => {
+                let hover = 65. + 35. * sp.spin.sin();
+                match scene.centre {
+                    Some(t) => {
+                        let near = (t[0] - pos[0]).hypot(t[2] - pos[2]) < 150.;
+                        if near {
+                            ([t[0], scene.leader_y + hover, t[2]], 3.)
+                        } else {
+                            let g = ground(t[0], t[2], t[1] + 80.);
+                            (
+                                match g {
+                                    Some(g) => [t[0], g + hover, t[2]],
+                                    None => [t[0], t[1] + 80., t[2]],
+                                },
+                                10.,
+                            )
+                        }
+                    }
+                    None => (
+                        [
+                            pos[0] + self.yaw.sin() * 100.,
+                            sp.start_y + hover,
+                            pos[2] + self.yaw.cos() * 100.,
+                        ],
+                        2.,
+                    ),
+                }
+            }
+            _ => {
+                // Turbo: the goal is the ground under the target; every 30
+                // ticks a new search (one enemy here) and a new random point
+                // 300-500 away, kept until the target is read
+                // (FUN_1403f3fa0, drawn here from the member's own stream).
+                if sp.timer >= 30. {
+                    sp.count = if sp.count >= 5 { 0 } else { sp.count } + 1;
+                    sp.timer = 0.;
+                    self.special.goal = self.random_ring(pos);
+                    home = false;
+                } else if sp.timer >= 4. {
+                    if let Some(t) = scene.centre {
+                        let g = ground(t[0], t[2], t[1] + 80.);
+                        self.special.goal = match g {
+                            Some(g) => [t[0], g, t[2]],
+                            None => t,
+                        };
+                    }
+                } else {
+                    home = false;
+                }
+                (self.special.goal, 15.)
+            }
+        };
+        let sp = &mut self.special;
+        let want = [goal[0] - pos[0], goal[1] - pos[1], goal[2] - pos[2]];
+        if home {
+            sp.heading = crate::magic::vector_homing(sp.heading, want, 0.174533);
+        }
+        if spell == Spell::Tornado {
+            sp.spin = (sp.spin + 5f32.to_radians()).rem_euclid(std::f32::consts::TAU);
+        } else {
+            sp.timer += 1.;
+        }
+        if a.tick <= hi {
+            let h = sp.heading;
+            let flying = spell == Spell::Tornado;
+            let disp = [
+                h[0] * speed,
+                if flying { h[1] * speed } else { 0. },
+                h[2] * speed,
+            ];
+            let moved = scene
+                .world
+                .collide(self.position, disp, flying, &scene.body);
+            self.position = moved.position;
+            if !flying && h[0].hypot(h[2]) > 1e-3 {
+                self.yaw = h[0].atan2(h[2]);
+            }
+        }
+    }
+
+    /// FUN_1403f3fa0: a point 300-500 from `pos` at a random bearing.
+    fn random_ring(&mut self, pos: Vec3) -> Vec3 {
+        let r = 300. + self.rand_unit() * 200.;
+        let ang = self.rand_unit() * std::f32::consts::TAU;
+        [pos[0] + ang.sin() * r, pos[1], pos[2] + ang.cos() * r]
+    }
+
+    fn rand_unit(&mut self) -> f32 {
+        self.rand(10_000) as f32 / 10_000.
     }
 
     /// One tick: finish or continue an attack, else choose one against the
@@ -357,13 +536,18 @@ impl Follower {
         // An attack plays out its motion with root motion, then ends.
         if let Some(mut a) = self.attack {
             a.tick += 1;
-            let (s, c) = self.yaw.sin_cos();
-            let m = (scene.root)(a.motion, a.tick);
-            let p = (scene.root)(a.motion, a.tick.saturating_sub(1));
-            let (dx, dz) = (m[0] - p[0], m[2] - p[2]);
-            let disp = [dx * c + dz * s, 0., -dx * s + dz * c];
-            let moved = scene.world.collide(self.position, disp, false, &scene.body);
-            self.position = moved.position;
+            if let Some(spell @ (Spell::Tornado | Spell::Turbo)) = a.spell {
+                // The script moves the member; the motion's root does not.
+                self.special_step(&a, spell, scene);
+            } else {
+                let (s, c) = self.yaw.sin_cos();
+                let m = (scene.root)(a.motion, a.tick);
+                let p = (scene.root)(a.motion, a.tick.saturating_sub(1));
+                let (dx, dz) = (m[0] - p[0], m[2] - p[2]);
+                let disp = [dx * c + dz * s, 0., -dx * s + dz * c];
+                let moved = scene.world.collide(self.position, disp, false, &scene.body);
+                self.position = moved.position;
+            }
             self.tick = a.tick;
             let end = (scene.length)(a.motion).unwrap_or(0);
             self.attack = (a.tick < end).then_some(a);
@@ -372,6 +556,20 @@ impl Follower {
             }
             return;
         }
+        // After a flying special the member falls to the floor (motion 4).
+        if let Some(floor) = scene
+            .world
+            .floor(self.position[0], self.position[2], self.position[1])
+            && self.position[1] > floor + 0.01
+        {
+            self.fall = (self.fall + 0.408).min(40.);
+            let moved = scene
+                .world
+                .collide(self.position, [0., -self.fall, 0.], true, &scene.body);
+            self.position = moved.position;
+            return;
+        }
+        self.fall = 0.;
         // A running spell act holds the member where it stands.
         if scene.busy {
             self.gait = Gait::Stand;
@@ -468,6 +666,13 @@ mod tests {
     fn no_root(_: u16, _: u32) -> Vec3 {
         [0.; 3]
     }
+    fn no_range(m: u16) -> Option<(u32, u32)> {
+        match m {
+            191 => Some((50, 380)),
+            194 => Some((92, 330)),
+            _ => None,
+        }
+    }
     fn scene(leader: Vec3, target: Option<Target>, world: &Flat) -> Scene<'_, Flat> {
         Scene {
             leader,
@@ -479,6 +684,9 @@ mod tests {
             root: &no_root,
             busy: false,
             spells: false,
+            centre: None,
+            leader_y: 0.,
+            range: &no_range,
             mp: None,
             hp: [None; 3],
         }
@@ -574,6 +782,9 @@ mod tests {
             root: &no_root,
             busy: false,
             spells: true,
+            centre: t.map(|t| t.position),
+            leader_y: 0.,
+            range: &no_range,
             mp: Some(mp),
             hp,
         }
@@ -656,5 +867,32 @@ mod tests {
             f.heal_target(0.4, &[Some((7, 20)), Some((20, 20)), Some((20, 20))]),
             Some(0)
         );
+    }
+
+    #[test]
+    fn turbo_waits_for_its_range_then_dashes_fifteen_a_tick_at_the_target() {
+        let mut f = Follower::spawn([0.; 3], 0., 1);
+        let t = Target {
+            position: [0., 0., 6000.],
+            radius: 40.,
+        };
+        f.begin(&GOOFY[3], &t, 0);
+        let scene = |t: Target| Scene {
+            centre: Some(t.position),
+            length: &|m| matches!(m, 194).then_some(400),
+            ..spell_scene(Some(t), &Flat, (100, 100, false), [None; 3])
+        };
+        let mut z_at = Vec::new();
+        for _ in 0..400 {
+            f.tick(&GOOFY, &scene(t));
+            z_at.push(f.position[2]);
+        }
+        // Motionless before the range opens (attack tick 92 is index 91).
+        assert!(z_at[..91].iter().all(|&z| z == 0.), "{}", z_at[90]);
+        // Fifteen a tick inside it, straight along the target's bearing.
+        assert!((z_at[92] - z_at[91] - 15.).abs() < 1e-3);
+        // And it stops when the range ends (attack tick 330).
+        assert_eq!(z_at[340], z_at[345]);
+        assert!(z_at[345] > 3000.);
     }
 }

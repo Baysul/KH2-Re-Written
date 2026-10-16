@@ -438,6 +438,34 @@ fn len2(v: [f32; 2]) -> f32 {
     v[0].hypot(v[1])
 }
 
+/// `vector_homing` (FUN_14041d3d0 / FUN_1403b7200): turns `dir` toward
+/// `want` about their cross product by the angle between them, at most
+/// `rate` radians [the scale DAT_140717480 is taken as 1]. Opposite
+/// vectors (no axis) stay put.
+pub fn vector_homing(dir: Vec3, want: Vec3, rate: f32) -> Vec3 {
+    let (d, w) = (norm(dir), norm(want));
+    let dot = (d[0] * w[0] + d[1] * w[1] + d[2] * w[2]).clamp(-1., 1.);
+    let angle = dot.acos().min(rate);
+    let axis = [
+        d[1] * w[2] - d[2] * w[1],
+        d[2] * w[0] - d[0] * w[2],
+        d[0] * w[1] - d[1] * w[0],
+    ];
+    let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    if len < 1e-6 || angle < 1e-6 {
+        return d;
+    }
+    let k = axis.map(|c| c / len);
+    let (s, c) = angle.sin_cos();
+    let kd = k[0] * d[0] + k[1] * d[1] + k[2] * d[2];
+    let kxd = [
+        k[1] * d[2] - k[2] * d[1],
+        k[2] * d[0] - k[0] * d[2],
+        k[0] * d[1] - k[1] * d[0],
+    ];
+    norm([0, 1, 2].map(|i| d[i] * c + kxd[i] * s + k[i] * kd * (1. - c)))
+}
+
 fn norm(v: Vec3) -> Vec3 {
     let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     if l > 0. {
@@ -1036,20 +1064,11 @@ impl Spell {
                     if let Some(t) = ctx.target
                         && s.rate > 0.
                     {
-                        let want = norm([t[0] - s.pos[0], t[1] - s.pos[1], t[2] - s.pos[2]]);
-                        let dot = (s.dir[0] * want[0] + s.dir[1] * want[1] + s.dir[2] * want[2])
-                            .clamp(-1., 1.);
-                        let angle = dot.acos();
-                        let step = (s.rate * dt).min(angle);
-                        if angle > 1e-6 {
-                            let k = step / angle;
-                            let v = [
-                                s.dir[0] + (want[0] - s.dir[0]) * k,
-                                s.dir[1] + (want[1] - s.dir[1]) * k,
-                                s.dir[2] + (want[2] - s.dir[2]) * k,
-                            ];
-                            s.dir = norm(v);
-                        }
+                        s.dir = vector_homing(
+                            s.dir,
+                            [t[0] - s.pos[0], t[1] - s.pos[1], t[2] - s.pos[2]],
+                            s.rate * dt,
+                        );
                     }
                     s.pos = add(s.pos, scale(s.dir, s.speed * dt));
                     if s.life > 0. {
@@ -2145,5 +2164,21 @@ mod tests {
         }
         // Eight draws visit eight different sectors.
         assert!(sectors.iter().all(|&s| s));
+    }
+
+    #[test]
+    fn homing_turns_about_the_cross_axis_by_at_most_the_rate() {
+        // A quarter turn wanted, 0.1 allowed: the heading turns 0.1 radians.
+        let v = vector_homing([1., 0., 0.], [0., 0., 1.], 0.1);
+        assert!((v[0] - 0.1f32.cos()).abs() < 1e-5 && (v[2] - 0.1f32.sin()).abs() < 1e-5);
+        // Less than the rate left: it lands on the target direction.
+        let v = vector_homing([1., 0., 0.], [0.99, 0., 0.01], 0.5);
+        assert!((v[2] / v[0] - 0.01 / 0.99).abs() < 1e-4);
+        // Nearly opposite: it still comes around.
+        let mut v = [1., 0., 0.];
+        for _ in 0..40 {
+            v = vector_homing(v, [-1., 0., 0.01], 0.1745);
+        }
+        assert!(v[0] < -0.99);
     }
 }

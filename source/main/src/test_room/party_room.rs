@@ -33,6 +33,8 @@ pub struct MotionData {
     pub loop_start: u32,
     /// Frame trigger 9 (the spell release, `ctl+0x155` bit 0).
     pub release: Option<u32>,
+    /// Range 16 (`range_bit(obj, 1)`): when Goofy's Tornado and Turbo move.
+    pub range16: Option<(u32, u32)>,
     /// The staff's top as a bone matrix (weapon slot 0 top,
     /// FUN_1403b5450): bone 2's rotation at the weapon vertex farthest from
     /// its origin [I: the Keyblade rule of `spell_fx`].
@@ -137,6 +139,21 @@ fn build_motion(
             .filter(|f| f.trigger == 9)
             .map(|f| f.frame.max(0) as u32)
             .min(),
+        range16: selected
+            .triggers
+            .iter()
+            .flat_map(|t| &t.records.ranges)
+            .find(|r| r.trigger == 16)
+            .map(|r| {
+                (
+                    r.start_frame.max(0) as u32,
+                    if r.end_frame < 0 {
+                        end
+                    } else {
+                        r.end_frame as u32
+                    },
+                )
+            }),
         staff: Vec::new(),
     };
     if let Some(own) = own {
@@ -590,6 +607,7 @@ pub fn tick(game: &mut Game, tick: u64) {
                 .and_then(|d| d.root.get(t as usize))
                 .map_or([0.; 3], |r| r.to_array())
         };
+        let range = |id: u16| kind.motions.get(&id).and_then(|d| d.range16);
         let scene = party_members::Scene {
             leader: player.position,
             leader_yaw: player.yaw,
@@ -598,6 +616,9 @@ pub fn tick(game: &mut Game, tick: u64) {
             body,
             length: &length,
             root: &root,
+            centre,
+            leader_y: player.position[1],
+            range: &range,
             busy: m.cast.is_some() || m.forced.is_some(),
             mp: Some((m.mp.cur, m.mp.max, m.mp.charging())),
             spells,
@@ -644,13 +665,10 @@ pub fn tick(game: &mut Game, tick: u64) {
                 .and_then(|d| d.release)
                 .unwrap_or(26);
             let key = FX_BASE | (index as u64) << 40 | m.casts << 8;
-            m.cast = Some(party_spell::Cast::new(
-                spell,
-                index + 1,
-                a.heal as usize,
-                key,
-                release,
-            ));
+            m.cast = Some(
+                party_spell::Cast::new(spell, index + 1, a.heal as usize, key, release)
+                    .with_range(kind.motions.get(&a.motion).and_then(|d| d.range16)),
+            );
             log_event(
                 log,
                 serde_json::json!({"event":"party_cast","tick":tick,"member":kind.name,
@@ -659,6 +677,21 @@ pub fn tick(game: &mut Game, tick: u64) {
                 "heal":a.heal,"mp":m.mp.cur,"charging":m.mp.charging()}),
             );
         }
+        if let Some(a) = m.follower.attack
+            && matches!(
+                a.spell,
+                Some(party_members::Spell::Tornado | party_members::Spell::Turbo)
+            )
+            && a.tick % 30 == 0
+        {
+            log_event(
+                log,
+                serde_json::json!({"event":"party_special","tick":tick,"member":kind.name,
+                "motion_tick":a.tick,"position":m.follower.position,"yaw":m.follower.yaw,
+                "enemy":target.map(|t| t.position)}),
+            );
+        }
+        let over = m.follower.attack.is_none();
         if let Some(cast) = m.cast.as_mut() {
             let pos = m.follower.position;
             let facing = [m.follower.yaw.sin(), m.follower.yaw.cos()];
@@ -683,6 +716,7 @@ pub fn tick(game: &mut Game, tick: u64) {
                 effect: &effect,
                 ground: &ground,
                 bg_hit: &bg,
+                over,
             };
             let out = cast.tick(&ctx);
             let spell = cast.spell;
