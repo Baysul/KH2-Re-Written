@@ -43,6 +43,11 @@ test = false
 bench = false
 
 [[bin]]
+name = "enemy_script_survey"
+test = false
+bench = false
+
+[[bin]]
 name = "event_probe"
 test = false
 bench = false
