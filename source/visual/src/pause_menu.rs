@@ -39,6 +39,8 @@ const HELP_PARENTS: [usize; 3] = [39, 40, 41];
 const PRIO_FRAME: u32 = 0x7533;
 const PRIO_PANEL: u32 = 0x753b;
 const PRIO_ROW: u32 = 0x753c;
+/// The top rows' NEW! badges (camp-01 §3.3).
+const PRIO_ROW_BADGE: u32 = 0x753d;
 const PRIO_BAR: u32 = 0x753d;
 const PRIO_LIGHT: u32 = 0x754a;
 
@@ -758,6 +760,26 @@ impl Camp {
             self.closers.push((r, TOP_ROWS.close));
             rows.push(r);
         }
+        // FUN_140306790: a badge on the row of an entry with something
+        // new, pulsing (50) until all of it is seen, then dim (49). The
+        // Items row asks FUN_14036a8f0(−1) / FUN_14036a7f0(−1).
+        let g = &seq.groups[TOP_ROWS.appear];
+        let badge_at = [g.light_position_x as f32, g.text_position_y as f32];
+        for (i, e) in self.data.entries.clone().iter().enumerate() {
+            let Some(all_seen) = self.top_badge(e.id) else {
+                continue;
+            };
+            let b = self.sprites.create(
+                seq,
+                PRIO_ROW_BADGE,
+                ART,
+                items::BADGE[all_seen as usize],
+                None,
+                None,
+            );
+            self.child(b, rows[i]);
+            self.sprites.get_mut(b).offset = badge_at;
+        }
         self.top = MenuList::new(rows, cursor);
         let frame = self
             .sprites
@@ -776,6 +798,17 @@ impl Camp {
         self.status_block = Some(self.build_status_block(seq));
         self.state = State::Top;
         self.substate = 0;
+    }
+
+    /// Whether the top entry `id` shows a NEW! badge: `Some(all seen)`.
+    fn top_badge(&self, id: u8) -> Option<bool> {
+        match id {
+            0 => {
+                let new = self.new_stock_items();
+                (!new.is_empty()).then(|| new.iter().all(|i| self.data.items.seen.contains(i)))
+            }
+            _ => None,
+        }
     }
 
     fn build_status_block(&mut self, seq: &Sequence) -> Id {

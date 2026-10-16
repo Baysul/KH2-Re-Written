@@ -44,7 +44,7 @@ const WHITE: usize = 123;
 const GREY: usize = 119;
 const RED: usize = 122;
 const YELLOW: usize = 124;
-const BADGE: [usize; 2] = [50, 49];
+pub(super) const BADGE: [usize; 2] = [50, 49];
 
 const STOCK_FRAME: [usize; 3] = [293, 294, 295];
 const STOCK_EMPTY: usize = 302;
@@ -172,6 +172,16 @@ pub struct ItemsData {
     /// "New" items (DAT_140bf0dc0) and the seen bits (save+0x41a8).
     pub new_items: Vec<u16>,
     pub seen: Vec<u16>,
+}
+
+/// The camp's "new" items (FUN_140369520): the stock's items the save has
+/// not marked seen, except those the game started with.
+pub fn new_items(counts: &BTreeMap<u16, u8>, seen: &[u16], starting: &[u16]) -> Vec<u16> {
+    counts
+        .iter()
+        .filter(|(id, n)| **n > 0 && !seen.contains(id) && !starting.contains(id))
+        .map(|(id, _)| *id)
+        .collect()
 }
 
 /// FUN_1402ebdd0's table 0x1405ba700: type → (icon, alt icon).
@@ -652,7 +662,7 @@ impl Camp {
 
     /// Items of the "new" types (0x1405bc560) not yet in the stock list's
     /// seen bits.
-    fn new_stock_items(&self) -> Vec<u16> {
+    pub(super) fn new_stock_items(&self) -> Vec<u16> {
         self.data
             .items
             .new_items
@@ -2088,5 +2098,13 @@ mod tests {
         assert!(press(&mut g, R1).1);
         assert_eq!(g.index(), 3);
         assert_eq!(press(&mut g, DECIDE), (Pick::Row(3), false));
+    }
+
+    #[test]
+    fn only_items_gained_after_the_start_and_unseen_are_new() {
+        let counts = BTreeMap::from([(1, 3), (2, 0), (3, 1), (4, 2)]);
+        // 1 starts in stock, 2 is empty, 3 was seen: only 4 is new.
+        assert_eq!(new_items(&counts, &[3], &[1]), vec![4]);
+        assert_eq!(new_items(&counts, &[], &[]), vec![1, 3, 4]);
     }
 }
