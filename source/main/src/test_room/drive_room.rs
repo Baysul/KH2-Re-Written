@@ -1011,7 +1011,15 @@ pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
     // Unattended runs (between the camp visits): Limit Form at 7490, then
     // Strike Raid and Infinity with MP refilled, each follow-up pressed as
     // soon as it is offered.
-    if game.autoplay.is_some() {
+    // The magic tour casts in a form (`--magic-form`).
+    if game.magic_tour && game.magic_form != 0 {
+        match game.tick {
+            5 => game.player.drive.refill(),
+            10 => d.request = Some(game.magic_form),
+            _ => {}
+        }
+    }
+    if game.autoplay.is_some() && !game.magic_tour {
         use player::limit_form::{INFINITY, STRIKE_RAID};
         match game.tick {
             7480 => game.player.drive.refill(),

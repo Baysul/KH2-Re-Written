@@ -1,0 +1,856 @@
+//! The spells' own effects in the test room: the PAX of the `magic/*.mag`
+//! file of the spell's level (`FUN_1402c6b30` on the spell's container),
+//! started and steered by the spell scripts' `pax_start`, `pax_start_bind`
+//! and `effect_*` calls (`player::magic::Fx`).
+//!
+//! An element is placed as the original's instance creator does
+//! (`FUN_1402c6b30`, `FUN_1402c5f70`, `FUN_1402c49d0`): unbound elements
+//! take the PAX translation, rotation and scale as the instance transform,
+//! which `effect_set_pos` / `effect_set_dir` / `effect_set_scale` then
+//! replace; bound elements follow the object's bone matrix (flag 1), only
+//! its position (flag 4, BindOnlyPos) or only at the start (flag 2,
+//! BindOnlyStart). Bone codes from 0x4000 are the object's own frames
+//! (`FUN_1403b50f0`): 0x4000 its root, 0x4001 / 0x4009 its body centre and
+//! 0x4003 / 0x4004 the Keyblade's top. An element's own sound plays at its
+//! start, after its start wait.
+//!
+//! The drawing follows the Drive effects' presenter (`drive_fx.rs`): per-DPD
+//! textures by TEX0, OMD model draws, blend and layer batches.
+use super::*;
+use ::effect::{Instance, ModelDraw, Quad, Rng, math::Mat};
+use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSamplerDescriptor};
+use data::object_effect::{Dpd, OmdHeader, OmdMesh, Pax};
+use player::magic::{Anchor, Fx, FxLive};
+
+/// A script's effect call with the PAX of the spell it belongs to.
+pub struct Call {
+    pub pax: Option<Arc<Pax>>,
+    pub fx: Fx,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct TexKey {
+    dpd: usize,
+    tbp: u16,
+    cbp: u16,
+    tw: u8,
+    th: u8,
+}
+
+impl TexKey {
+    fn new(dpd: &Arc<Dpd>, tex0: u64) -> Self {
+        TexKey {
+            dpd: Arc::as_ptr(dpd) as usize,
+            tbp: (tex0 & 0x3fff) as u16,
+            cbp: ((tex0 >> 37) & 0x3fff) as u16,
+            tw: ((tex0 >> 26) & 0xf) as u8,
+            th: ((tex0 >> 30) & 0xf) as u8,
+        }
+    }
+    fn size(&self) -> [u32; 2] {
+        [1 << self.tw.min(10), 1 << self.th.min(10)]
+    }
+}
+
+type ParsedModel = (OmdHeader, Vec<OmdMesh>);
+
+#[derive(Default)]
+struct Batch {
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    colors: Vec<[f32; 4]>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct BatchKey {
+    texture: Option<TexKey>,
+    additive: bool,
+    repeat: bool,
+    layer: i8,
+}
+
+/// Odd layers behind everything, even layers in front, 0 by depth
+/// (FUN_1402c2720 / FUN_1402c27a0).
+fn layer_rank(layer: u8) -> i8 {
+    match layer {
+        0 => 0,
+        v if v % 2 == 1 => -((v as i8 + 1) / 2),
+        v => (v / 2) as i8,
+    }
+}
+
+/// Scene matrix into the effect space (x, −y, −z).
+fn to_effect(m: Mat4) -> Mat {
+    let flip = Mat4::from_diagonal(Vec4::new(1., -1., -1., 1.));
+    (flip * m * flip).to_cols_array_2d()
+}
+
+/// A simulation position in the effect space.
+fn point_to_effect(p: [f32; 3]) -> [f32; 3] {
+    [p[0], -p[1], -p[2]]
+}
+
+fn point_from_effect(p: [f32; 3]) -> [f32; 3] {
+    [p[0], -p[1], -p[2]]
+}
+
+/// `effect_set_dir` (FUN_14041e100, FUN_1403b7710): the pair of Euler
+/// angles that turn the effect's +Z onto `dir` (effect space, y down).
+fn dir_euler(dir: [f32; 3]) -> [f32; 3] {
+    let d = point_to_effect(dir);
+    let h = (d[0] * d[0] + d[2] * d[2]).sqrt();
+    [(-d[1]).atan2(h), d[0].atan2(d[2]), 0.]
+}
+
+struct Running {
+    key: u64,
+    instance: Instance,
+    dpd: Arc<Dpd>,
+    bone: i16,
+    flags: u32,
+    local: ([f32; 3], [f32; 3], [f32; 3]),
+    anchor: Option<Anchor>,
+    /// `effect_set_pos` (simulation space), `effect_set_dir` and
+    /// `effect_set_scale` (effect space).
+    pos: Option<[f32; 3]>,
+    rot: Option<[f32; 3]>,
+    scl: Option<[f32; 3]>,
+    /// BindOnlyStart: the world matrix once taken.
+    fixed: Option<Mat>,
+    /// The element's sound and the ticks left before it plays.
+    sound: Option<u32>,
+    sound_wait: f32,
+}
+
+/// Sora's frames of this tick.
+struct Frames {
+    root: Mat4,
+    hand: Option<Mat4>,
+    tip: Vec3,
+    bones: Option<HashMap<usize, Mat4>>,
+    lift: f32,
+    members: Vec<(Vec3, f32)>,
+}
+
+impl Frames {
+    fn of(game: &Game) -> Frames {
+        let p = game.player.position;
+        let root = Mat4::from_rotation_translation(
+            Quat::from_rotation_y(game.player.yaw),
+            Vec3::from_array(p),
+        );
+        let clip = game
+            .poses
+            .get(&(game.player.action, game.player.armed))
+            .and_then(|&c| game.clip_poses.get(c));
+        let frame = game.player.motion_frame(&game.clips) as usize;
+        let hand = clip.and_then(|c| c.weapon.get(frame.min(c.weapon.len().saturating_sub(1))));
+        let bones = clip
+            .and_then(|c| c.body.get(frame.min(c.body.len().saturating_sub(1))))
+            .cloned();
+        // The Keyblade's top: the weapon vertex farthest from the grip.
+        let tip = game
+            .weapon_display
+            .iter()
+            .copied()
+            .max_by(|a, b| a.length_squared().total_cmp(&b.length_squared()))
+            .unwrap_or(Vec3::ZERO);
+        let members = game
+            .party
+            .iter()
+            .map(|m| (Vec3::from_array(m.follower.position), m.follower.yaw))
+            .collect();
+        Frames {
+            root,
+            hand: hand.copied(),
+            tip,
+            bones,
+            lift: game.magic.as_ref().map_or(70., |m| m.src.target_lift),
+            members,
+        }
+    }
+
+    /// The bound object's bone matrix (FUN_1403b50f0), in the scene space.
+    fn bone(&self, anchor: Anchor, bone: i16) -> Mat4 {
+        let root = match anchor {
+            Anchor::Caster | Anchor::Party(0) => self.root,
+            Anchor::Party(i) => match self.members.get(i - 1) {
+                Some(&(p, yaw)) => Mat4::from_rotation_translation(Quat::from_rotation_y(yaw), p),
+                None => self.root,
+            },
+        };
+        let own = matches!(anchor, Anchor::Caster | Anchor::Party(0));
+        match bone {
+            0x4000 => root,
+            0x4001 | 0x4009 => root * Mat4::from_translation(Vec3::new(0., self.lift, 0.)),
+            0x4003 | 0x4004 if own => match self.hand {
+                Some(h) => root * h * Mat4::from_translation(self.tip),
+                None => root * Mat4::from_translation(Vec3::new(0., self.lift, 0.)),
+            },
+            0x4003..=0x4009 => root * Mat4::from_translation(Vec3::new(0., self.lift, 0.)),
+            b if b >= 0 && own => match self.bones.as_ref().and_then(|m| m.get(&(b as usize))) {
+                // The bone read through FUN_1401a7af0 negates its y and z
+                // columns.
+                Some(m) => root * *m * Mat4::from_diagonal(Vec4::new(1., -1., -1., 1.)),
+                None => root,
+            },
+            _ => root,
+        }
+    }
+}
+
+/// The instance world matrix of an element (FUN_1402c49d0 for a bound
+/// element, the instance's own transform otherwise):  is the PAX
+/// translation, rotation and scale; ,  and  what the script's
+///  calls replaced.
+#[allow(clippy::too_many_arguments)]
+fn element_world(
+    flags: u32,
+    anchor: Option<Anchor>,
+    bone: i16,
+    local: ([f32; 3], [f32; 3], [f32; 3]),
+    pos: Option<[f32; 3]>,
+    rot: Option<[f32; 3]>,
+    scl: Option<[f32; 3]>,
+    frames: &Frames,
+) -> Mat {
+    let (t, r, s) = local;
+    let rot = rot.unwrap_or(r);
+    let scl = scl.unwrap_or(s);
+    match anchor.filter(|_| flags & 1 != 0) {
+        Some(anchor) => {
+            let bone = to_effect(frames.bone(anchor, bone));
+            if flags & 4 != 0 {
+                // BindOnlyPos: the position through the bone matrix, the
+                // element's own rotation and scale.
+                let o = ::effect::math::apply(&bone, [t[0], t[1], t[2], 1.]);
+                ::effect::instance_matrix([o[0], o[1], o[2]], rot, scl)
+            } else {
+                ::effect::math::mul(&bone, &::effect::instance_matrix(t, rot, scl))
+            }
+        }
+        None => ::effect::instance_matrix(pos.map_or(t, point_to_effect), rot, scl),
+    }
+}
+
+impl Running {
+    /// The instance world matrix this tick.
+    fn world(&mut self, frames: &Frames) -> Mat {
+        if let Some(f) = self.fixed {
+            return f;
+        }
+        let world = element_world(
+            self.flags,
+            self.anchor,
+            self.bone,
+            self.local,
+            self.pos,
+            self.rot,
+            self.scl,
+            frames,
+        );
+        // BindOnlyStart: bound once, at the start.
+        if self.anchor.is_some() && self.flags & 1 != 0 && self.flags & 2 != 0 {
+            self.fixed = Some(world);
+        }
+        world
+    }
+
+    fn sim_pos(&self) -> [f32; 3] {
+        let m = self.instance.world;
+        point_from_effect([m[3][0], m[3][1], m[3][2]])
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct SpellFx {
+    common: Option<Arc<Dpd>>,
+    running: Vec<Running>,
+    rng: Rng,
+    models: HashMap<(usize, i16), Option<ParsedModel>>,
+    batches: HashMap<BatchKey, Batch>,
+    dirty: bool,
+    images: HashMap<TexKey, Handle<Image>>,
+    materials: HashMap<BatchKey, Handle<StandardMaterial>>,
+    spawned: Vec<Entity>,
+    dpds: Vec<Arc<Dpd>>,
+    reported: Vec<u32>,
+}
+
+impl SpellFx {
+    pub fn new(common: Option<Arc<Dpd>>) -> Self {
+        SpellFx {
+            common,
+            ..Default::default()
+        }
+    }
+}
+
+/// One tick: the scripts' calls, then every instance steps and batches.
+pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<SpellFx>) {
+    let calls = std::mem::take(&mut game.fx_calls);
+    let tick = game.tick;
+    let frames = Frames::of(&game);
+    let mut sounds = Vec::new();
+    let mut log = Vec::new();
+    let mut live: HashMap<u64, FxLive> = HashMap::new();
+    // Waiting effect sounds count down one tick at a time and play when
+    // their element starts.
+    for r in fx.running.iter_mut() {
+        if let Some(id) = r.sound
+            && r.sound_wait > 0.
+        {
+            r.sound_wait -= 1.;
+            if r.sound_wait <= 0. {
+                sounds.push(id);
+                r.sound = None;
+            }
+        }
+    }
+    for call in calls {
+        match call.fx {
+            Fx::Start { key, id, bound, at } => {
+                let started = call.pax.as_ref().and_then(|pax| {
+                    let element = pax.by_id(id)?;
+                    let dpx = pax.effect(element.effect_number)?;
+                    let dpd = pax.dpds.get(dpx.dpd)?.clone();
+                    Some((element.clone(), dpx, dpd))
+                });
+                let Some((element, dpx, dpd)) = started else {
+                    log.push(serde_json::json!({"event":"spell_effect_missing","tick":tick,"key":key,"element":id}));
+                    live.insert(
+                        key,
+                        FxLive {
+                            alive: false,
+                            pos: at.unwrap_or_default(),
+                            tracked: false,
+                        },
+                    );
+                    continue;
+                };
+                // A bound element waits one extra tick (DAT_1406239f8, 0.1).
+                let wait = element.start_wait + if element.flags & 1 != 0 { 0.1 } else { 0. };
+                let local = (element.translation, element.rotation, element.scale);
+                let mut r = Running {
+                    key,
+                    instance: match Instance::new(
+                        dpd.clone(),
+                        dpx.pdata,
+                        ::effect::math::IDENTITY,
+                        wait,
+                    ) {
+                        Some(i) => i,
+                        None => continue,
+                    },
+                    dpd: dpd.clone(),
+                    bone: element.bone,
+                    flags: element.flags,
+                    local,
+                    anchor: bound,
+                    pos: at,
+                    rot: None,
+                    scl: None,
+                    fixed: None,
+                    sound: (element.sound > 0).then_some(element.sound as u32),
+                    sound_wait: wait,
+                };
+                r.instance.world = r.world(&frames);
+                if let Some(id) = r.sound
+                    && wait <= 0.
+                {
+                    sounds.push(id);
+                    r.sound = None;
+                }
+                log.push(
+                    serde_json::json!({"event":"spell_effect","tick":tick,"key":key,
+                    "element":element.id,"effect":element.effect_number,"bone":element.bone,
+                    "flags":element.flags,"bound":bound.is_some(),"dpd":dpx.dpd,"pdata":dpx.pdata}),
+                );
+                if !fx.dpds.iter().any(|x| Arc::ptr_eq(x, &dpd)) {
+                    fx.dpds.push(dpd);
+                }
+                // A handle started again replaces the old effect.
+                fx.running.retain(|o| o.key != key);
+                fx.running.push(r);
+            }
+            Fx::Pos(key, p) => {
+                for r in fx.running.iter_mut().filter(|r| r.key == key) {
+                    r.pos = Some(p);
+                }
+            }
+            Fx::Dir(key, d) => {
+                let e = dir_euler(d);
+                for r in fx.running.iter_mut().filter(|r| r.key == key) {
+                    r.rot = Some(e);
+                }
+            }
+            Fx::Scale(key, s) => {
+                for r in fx.running.iter_mut().filter(|r| r.key == key) {
+                    r.scl = Some([s, s, s]);
+                }
+            }
+            Fx::Fade(key, frames) => {
+                for r in fx.running.iter_mut().filter(|r| r.key == key) {
+                    r.instance.fade_out(frames);
+                }
+            }
+            Fx::Kill(key) => {
+                for r in fx.running.iter_mut().filter(|r| r.key == key) {
+                    r.instance.fade_out(0.);
+                }
+            }
+            Fx::LoopEnd(key) => {
+                for r in fx.running.iter_mut().filter(|r| r.key == key) {
+                    r.instance.release();
+                }
+            }
+        }
+    }
+    for s in sounds {
+        game.sound_queue.push((s, "spell_effect_se"));
+    }
+    let view = game_view(rig.camera.eye, rig.camera.look_at);
+    let view_inverse = Mat4::from_cols_array_2d(&view).inverse();
+    let fx = &mut *fx;
+    fx.batches.clear();
+    fx.dirty = true;
+    let mut quads: Vec<(Arc<Dpd>, i8, Vec<Quad>)> = Vec::new();
+    let mut draws: Vec<(Arc<Dpd>, i8, Vec<ModelDraw>)> = Vec::new();
+    let mut triangles: Vec<(i8, Vec<::effect::Triangle>)> = Vec::new();
+    let mut unsupported = Vec::new();
+    for r in fx.running.iter_mut() {
+        let world = r.world(&frames);
+        r.instance.world = world;
+        let q = r.instance.frame(&view, &mut fx.rng);
+        for &k in &r.instance.unsupported {
+            if !fx.reported.contains(&k) {
+                fx.reported.push(k);
+                unsupported.push(k);
+            }
+        }
+        // A program this translation lacks: stepped, not shown.
+        let complete = r.instance.unsupported.is_empty();
+        let d = std::mem::take(&mut r.instance.model_draws);
+        let layer = layer_rank(r.instance.layer());
+        if complete && !q.is_empty() {
+            quads.push((r.dpd.clone(), layer, q));
+        }
+        if complete && !d.is_empty() {
+            draws.push((r.dpd.clone(), layer, d));
+        }
+        let t = std::mem::take(&mut r.instance.triangles);
+        if complete && !t.is_empty() {
+            triangles.push((layer, t));
+        }
+    }
+    // What the scripts read next tick: alive and the effect position.
+    for r in fx.running.iter() {
+        live.insert(
+            r.key,
+            FxLive {
+                alive: !r.instance.finished(),
+                pos: r.sim_pos(),
+                tracked: true,
+            },
+        );
+    }
+    fx.running.retain(|r| !r.instance.finished());
+    // A finished effect stays known as dead for one tick so the loops see it.
+    game.fx_live = live;
+    for k in unsupported {
+        game.event(serde_json::json!({"event":"spell_effect_unsupported","tick":tick,"program":k}));
+    }
+    for v in log {
+        game.event(v);
+    }
+    let scene = |p: [f32; 3]| {
+        from_world(
+            view_inverse
+                .transform_point3(Vec3::from_array(p))
+                .to_array(),
+        )
+        .to_array()
+    };
+    for (dpd, layer, list) in quads {
+        for q in list {
+            let key = TexKey::new(&dpd, q.tex0);
+            let size = key.size();
+            let batch = fx
+                .batches
+                .entry(BatchKey {
+                    texture: Some(key),
+                    additive: q.blend == 0x48,
+                    repeat: true,
+                    layer,
+                })
+                .or_default();
+            let colour = [
+                q.colour[0].clamp(0., 1.99).powf(2.2),
+                q.colour[1].clamp(0., 1.99).powf(2.2),
+                q.colour[2].clamp(0., 1.99).powf(2.2),
+                q.colour[3].clamp(0., 1.),
+            ];
+            for i in [0, 1, 2, 0, 2, 3] {
+                batch.positions.push(scene(q.corners[i]));
+                batch
+                    .uvs
+                    .push([q.uv[i][0] / size[0] as f32, q.uv[i][1] / size[1] as f32]);
+                batch.colors.push(colour);
+            }
+        }
+    }
+    for (layer, list) in triangles {
+        for t in list {
+            let batch = fx
+                .batches
+                .entry(BatchKey {
+                    texture: None,
+                    additive: t.blend == 0x48,
+                    repeat: false,
+                    layer,
+                })
+                .or_default();
+            for i in 0..3 {
+                let c = t.colours[i].map(|v| v as f32 / 128.);
+                batch.positions.push(scene(t.corners[i]));
+                batch.uvs.push([0.; 2]);
+                batch.colors.push([
+                    c[0].clamp(0., 1.99).powf(2.2),
+                    c[1].clamp(0., 1.99).powf(2.2),
+                    c[2].clamp(0., 1.99).powf(2.2),
+                    c[3].clamp(0., 1.),
+                ]);
+            }
+        }
+    }
+    for (dpd, layer, list) in draws {
+        for d in list {
+            model(fx, &dpd, &d, layer, &scene);
+        }
+    }
+}
+
+/// An OMD model draw (pppDrawMdl3), as the event presenter batches it.
+fn model(
+    fx: &mut SpellFx,
+    dpd: &Arc<Dpd>,
+    d: &ModelDraw,
+    layer: i8,
+    scene: &impl Fn([f32; 3]) -> [f32; 3],
+) {
+    let cached = fx
+        .models
+        .entry((Arc::as_ptr(dpd) as usize, d.model))
+        .or_insert_with(|| {
+            let m = dpd.models.get(&d.model)?;
+            let header = object_effect::omd_header(&dpd.bytes, m.hdr).ok()?;
+            let meshes = object_effect::omd_meshes(&dpd.bytes, m.hdr).ok()?;
+            Some((header, meshes))
+        });
+    let Some((header, meshes)) = cached.as_ref() else {
+        return;
+    };
+    let vertex = |i: u16| -> Option<[f32; 3]> {
+        let v = match &d.vertices {
+            Some(o) => o.get(i as usize).copied(),
+            None => dpd.vertex(d.model, i),
+        }?;
+        let p = ::effect::math::apply(&d.a, [v[0] as f32, v[1] as f32, v[2] as f32, 1.]);
+        Some(scene([p[0], p[1], p[2]]))
+    };
+    let additive = header.alpha == 0x48;
+    let repeat = header.flags & 4 != 0;
+    let part = d.rgba.map(|c| c as f32 / 128.);
+    let mut out_batches: Vec<(BatchKey, Batch)> = Vec::new();
+    for mesh in meshes {
+        let texture = mesh.textured.then(|| TexKey::new(dpd, mesh.tex0));
+        let shift = texture.map_or(4, |t| t.tw as u32 + 4).min(31);
+        let mut batch = Batch::default();
+        for t in &mesh.triangles {
+            let Some(p) = t.index.map(vertex).into_iter().collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+            for (k, point) in p.iter().enumerate() {
+                batch.positions.push(*point);
+                let (u, v) = (t.uv[k][0] as i32, t.uv[k][1] as i32);
+                let su = d.scroll[0] >> shift;
+                let sv = d.scroll[1] >> (texture.map_or(4, |t| t.th as u32 + 4).min(31));
+                batch.uvs.push([
+                    u.wrapping_add(su) as f32 / 4096.,
+                    v.wrapping_add(sv) as f32 / 4096.,
+                ]);
+                let c = t.colour[k];
+                let out: [f32; 4] = std::array::from_fn(|i| {
+                    ((c[i] as f32 / 255.) * part[i]).min(1.) * (255. / 128.)
+                });
+                batch.colors.push([
+                    out[0].powf(2.2),
+                    out[1].powf(2.2),
+                    out[2].powf(2.2),
+                    out[3].min(1.),
+                ]);
+            }
+        }
+        out_batches.push((
+            BatchKey {
+                texture,
+                additive,
+                repeat,
+                layer,
+            },
+            batch,
+        ));
+    }
+    for (key, b) in out_batches {
+        let e = fx.batches.entry(key).or_default();
+        e.positions.extend(b.positions);
+        e.uvs.extend(b.uvs);
+        e.colors.extend(b.colors);
+    }
+}
+
+fn image(fx: &mut SpellFx, key: TexKey, repeat: bool, images: &mut Assets<Image>) -> Handle<Image> {
+    if let Some(h) = fx.images.get(&key) {
+        return h.clone();
+    }
+    let [w, h] = key.size();
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    let own = fx
+        .dpds
+        .iter()
+        .find(|d| Arc::as_ptr(d) as usize == key.dpd)
+        .cloned();
+    let mut sources: Vec<&object_effect::DpdTexture> = Vec::new();
+    if let Some(d) = &own {
+        sources.extend(d.textures.iter().filter(|t| t.dbp == key.tbp));
+    }
+    if sources.is_empty()
+        && let Some(c) = &fx.common
+    {
+        sources.extend(c.textures.iter().filter(|t| t.dbp == key.tbp));
+    }
+    let palette = own
+        .iter()
+        .map(|d| d.as_ref())
+        .chain(fx.common.as_deref())
+        .flat_map(|d| d.textures.iter())
+        .find(|t| t.cbp == key.cbp)
+        .map(|t| t.palette.clone());
+    for t in sources {
+        let rgba =
+            object_effect::decode_psmt8(&t.indices, palette.as_deref().unwrap_or(&t.palette));
+        for row in 0..t.height {
+            let y = t.y as u32 + row;
+            if y >= h {
+                break;
+            }
+            for col in 0..t.width {
+                let x = t.x as u32 + col;
+                if x >= w {
+                    break;
+                }
+                let s = ((row * t.width + col) * 4) as usize;
+                let d = ((y * w + x) * 4) as usize;
+                pixels[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+            }
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        pixels,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    let mode = if repeat {
+        ImageAddressMode::Repeat
+    } else {
+        ImageAddressMode::ClampToEdge
+    };
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: mode,
+        address_mode_v: mode,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    let handle = images.add(image);
+    fx.images.insert(key, handle.clone());
+    handle
+}
+
+/// Rebuilds the effect meshes from this tick's batches.
+pub fn present(
+    mut commands: Commands,
+    fx: Option<ResMut<SpellFx>>,
+    scene: Option<Res<SceneRoot>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(mut fx) = fx else { return };
+    if !fx.dirty {
+        return;
+    }
+    fx.dirty = false;
+    for e in std::mem::take(&mut fx.spawned) {
+        commands.entity(e).despawn();
+    }
+    let batches = std::mem::take(&mut fx.batches);
+    for (key, batch) in &batches {
+        if batch.positions.is_empty() {
+            continue;
+        }
+        let material = match fx.materials.get(key) {
+            Some(m) => m.clone(),
+            None => {
+                let texture = key
+                    .texture
+                    .map(|t| image(&mut fx, t, key.repeat, &mut images));
+                let m = materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    base_color_texture: texture,
+                    unlit: true,
+                    cull_mode: None,
+                    depth_bias: key.layer as f32 * 500.,
+                    alpha_mode: if key.additive {
+                        AlphaMode::Add
+                    } else {
+                        AlphaMode::Blend
+                    },
+                    ..default()
+                });
+                fx.materials.insert(*key, m.clone());
+                m
+            }
+        };
+        let mesh = visual::room::mesh(
+            batch.positions.clone(),
+            batch.uvs.clone(),
+            batch.colors.clone(),
+        );
+        let mut e = commands.spawn((
+            Mesh3d(meshes.add(mesh)),
+            MeshMaterial3d(material),
+            Transform::default(),
+            Visibility::default(),
+        ));
+        if let Some(s) = &scene {
+            e.insert(ChildOf(s.0));
+        }
+        fx.spawned.push(e.id());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frames() -> Frames {
+        Frames {
+            root: Mat4::from_rotation_translation(
+                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+                Vec3::new(100., 0., 50.),
+            ),
+            hand: Some(Mat4::from_translation(Vec3::new(0., 40., 0.))),
+            tip: Vec3::new(0., 0., 30.),
+            bones: None,
+            lift: 70.,
+            members: vec![(Vec3::new(-200., 0., 0.), 0.)],
+        }
+    }
+
+    fn pos(m: &Mat) -> [f32; 3] {
+        point_from_effect([m[3][0], m[3][1], m[3][2]])
+    }
+
+    fn close(a: [f32; 3], b: [f32; 3]) {
+        assert!(
+            a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3),
+            "{a:?} vs {b:?}"
+        );
+    }
+
+    #[test]
+    fn an_unbound_element_sits_where_the_script_put_it() {
+        let f = frames();
+        let local = ([0., -10., 0.], [0.; 3], [1.; 3]);
+        // No set_pos: the PAX translation (y down).
+        let m = element_world(0, None, 0, local, None, None, None, &f);
+        close(pos(&m), [0., 10., 0.]);
+        let m = element_world(0, None, 0, local, Some([5., 6., 7.]), None, None, &f);
+        close(pos(&m), [5., 6., 7.]);
+        // An element with the Bind flag but no object is still unbound.
+        let m = element_world(1, None, 0x4000, local, Some([1., 2., 3.]), None, None, &f);
+        close(pos(&m), [1., 2., 3.]);
+    }
+
+    #[test]
+    fn a_bound_element_follows_the_bone_and_bind_only_pos_keeps_its_own_rotation() {
+        let f = frames();
+        // Fire's ring: bone 0x4000, flags 5, 92.88 up (T.y = -92.88).
+        let local = ([0., -92.88, 0.], [0.; 3], [1.; 3]);
+        let m = element_world(5, Some(Anchor::Caster), 0x4000, local, None, None, None, &f);
+        close(pos(&m), [100., 92.88, 50.]);
+        // Rotation stays the element's own (identity) with BindOnlyPos ...
+        close([m[0][0], m[0][1], m[0][2]], [1., 0., 0.]);
+        // ... and follows Sora's yaw with a full bind (flag 1).
+        let full = element_world(1, Some(Anchor::Caster), 0x4000, local, None, None, None, &f);
+        close(pos(&full), [100., 92.88, 50.]);
+        assert!((full[0][2].abs() - 1.).abs() < 1e-3);
+        // Bone 0x4003 is the Keyblade's top: root · hand · tip.
+        let tip = element_world(
+            3,
+            Some(Anchor::Caster),
+            0x4003,
+            ([0.; 3], [0.; 3], [1.; 3]),
+            None,
+            None,
+            None,
+            &f,
+        );
+        // tip (0,0,30) at hand height 40, then Sora turned a quarter.
+        close(pos(&tip), [130., 40., 50.]);
+        // A party member's frame.
+        let m = element_world(
+            1,
+            Some(Anchor::Party(1)),
+            0x4000,
+            ([0.; 3], [0.; 3], [1.; 3]),
+            None,
+            None,
+            None,
+            &f,
+        );
+        close(pos(&m), [-200., 0., 0.]);
+        // 0x4001 / 0x4009 are the body centre.
+        let m = element_world(
+            1,
+            Some(Anchor::Party(1)),
+            0x4009,
+            ([0.; 3], [0.; 3], [1.; 3]),
+            None,
+            None,
+            None,
+            &f,
+        );
+        close(pos(&m), [-200., 70., 0.]);
+    }
+
+    #[test]
+    fn effect_set_dir_turns_the_effect_onto_the_direction() {
+        // Along +Z: no turn about Y (the flip of z gives yaw 180°); up
+        // tilts the pitch.
+        let e = dir_euler([1., 0., 0.]);
+        assert!((e[1] - std::f32::consts::FRAC_PI_2).abs() < 1e-5 && e[0].abs() < 1e-5);
+        let up = dir_euler([0., 1., 0.]);
+        assert!((up[0] - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        let m = ::effect::instance_matrix([0.; 3], dir_euler([0., 0., 1.]), [1.; 3]);
+        // The effect's +Z axis lands on effect-space −Z (sim +Z).
+        assert!(m[2][2] < -0.99);
+    }
+}

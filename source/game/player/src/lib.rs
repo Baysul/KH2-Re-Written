@@ -559,7 +559,10 @@ struct CastState {
     level: u8,
     cost: u8,
     form: u8,
-    released: bool,
+    /// Releases so far (a form's finisher can release several times, each
+    /// running trigger 21 again) and the frame of the last one.
+    volleys: u32,
+    last_frame: Option<u32>,
 }
 
 /// A spell released this tick (FUN_1403c6150): MP is already spent.
@@ -572,6 +575,8 @@ pub struct Released {
     pub finisher: bool,
     pub airborne: bool,
     pub form: u8,
+    /// Index of this release within the cast (0 for the first).
+    pub volley: u32,
 }
 
 /// The variable-height jump (obj+0x120 bits 16–18). The jump command sets
@@ -2111,7 +2116,8 @@ impl Player {
             level: rec.level,
             cost,
             form,
-            released: false,
+            volleys: 0,
+            last_frame: None,
         });
         // A release at tick 0 (Reflect) fires with the start.
         self.release_if_due_at(clips, i, 0);
@@ -2128,7 +2134,7 @@ impl Player {
     fn release_if_due_at(&mut self, clips: &Clips, i: usize, frame: u32) {
         let spell = &clips.spells[i];
         let Some(c) = self.cast.as_mut() else { return };
-        if c.released
+        if c.last_frame == Some(frame)
             || !spell
                 .clip
                 .release
@@ -2137,9 +2143,13 @@ impl Player {
         {
             return;
         }
-        c.released = true;
+        c.last_frame = Some(frame);
         // 0xff is "all MP": it always takes MP below 0 and starts a charge.
-        self.mp.change(-(c.cost as i32), magic::CHARGE_LENGTH);
+        // The cost is taken once: FUN_1403d7e90 clears it (obj+0xd58 = 0).
+        let cost = std::mem::take(&mut c.cost);
+        if c.volleys == 0 {
+            self.mp.change(-(cost as i32), magic::CHARGE_LENGTH);
+        }
         self.mp_charging = self.mp.charging();
         self.released = Some(Released {
             magic_type: c.magic_type,
@@ -2148,7 +2158,27 @@ impl Player {
             finisher: c.start.finisher,
             airborne: c.start.airborne,
             form: c.form,
+            volley: c.volleys,
         });
+        c.volleys += 1;
+    }
+
+    /// What gates a command now: the combo window, the finisher window,
+    /// whether the motion takes commands, and the combo counters.
+    pub fn command_gate(&self, clips: &Clips) -> (bool, bool, bool, ptya::Combo) {
+        let clip = self.clip(clips);
+        let frame = self.motion_frame(clips);
+        (
+            Clip::within(&clip.combo_windows, frame),
+            Clip::within(&clip.finisher_windows, frame),
+            self.command_ready(clips),
+            self.combo,
+        )
+    }
+
+    /// Whether a cast is running (from the command to the end of its motion).
+    pub fn casting(&self) -> bool {
+        self.cast.is_some()
     }
 
     /// The spell released since the last call.
@@ -4174,6 +4204,26 @@ mod tests {
         }
         assert_eq!(player.action, Action::Idle);
         assert!(player.take_released().is_none());
+    }
+
+    #[test]
+    fn a_form_finisher_releases_several_times_and_spends_mp_once() {
+        let (p, w) = (params(), room());
+        let mut c = clips();
+        // A motion with three release frames (Final Form's Blizzard finisher
+        // releases five times).
+        c.spells[0].clip.release = vec![(4, None), (8, None), (12, None)];
+        let mut player = Player::new([0., 0., 0.], 0.);
+        player.mp = magic::Mp::new(100);
+        player.cast(&fire(1), 12, 0, false, &c).unwrap();
+        let mut volleys = Vec::new();
+        for _ in 0..20 {
+            player.tick(&Input::default(), &p, &c, &w);
+            if let Some(r) = player.take_released() {
+                volleys.push((r.volley, player.mp.cur));
+            }
+        }
+        assert_eq!(volleys, vec![(0, 88), (1, 88), (2, 88)]);
     }
 
     #[test]

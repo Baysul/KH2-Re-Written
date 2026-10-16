@@ -18,7 +18,6 @@ pub mod room;
 pub mod scenery;
 pub mod settings;
 pub mod sound;
-pub mod spell_sound;
 pub mod sprite_player;
 pub mod title;
 pub mod title_banner;

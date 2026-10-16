@@ -5,6 +5,7 @@
 //! Spell attacks go through the same hit pipeline as the Keyblade (attack
 //! ids, hit records, ATKP level rows by sub-table) in `combat_tick`; this
 //! module only owns the casts and the volumes they emit.
+use super::spell_fx::Call;
 use super::*;
 use player::magic::{self, Feedback, Spell};
 
@@ -26,6 +27,10 @@ pub struct MagicSource {
     pub names: HashMap<u16, Vec<u8>>,
     /// Sora's TARGET shape lift above his origin (Blizzard starts there).
     pub target_lift: f32,
+    /// The effect container (PAX, BAR entry type 18) of each spell file
+    /// by the `magc` record's file name, and the resident common textures.
+    pub paxes: HashMap<String, Arc<object_effect::Pax>>,
+    pub texcommon: Option<Arc<object_effect::Dpd>>,
 }
 
 /// `magc` (00battle), `pref/magi` and the `cmd` table.
@@ -79,7 +84,54 @@ pub fn load(
         commands,
         names: HashMap::new(),
         target_lift,
+        paxes: HashMap::new(),
+        texcommon: None,
     })
+}
+
+/// Reads the effect container of every spell file the records name
+/// (`magic/FIRE_1.mag` ...) and `effect/texcommon.dpd`. A file that cannot
+/// be read leaves its spell without effects.
+pub fn load_effects(source: &ProbeSource, src: &mut MagicSource) {
+    let Ok(mut library) = data::path_lookup::Library::open(source) else {
+        eprintln!("Spell effects unavailable: the installation's file library did not open");
+        return;
+    };
+    src.texcommon = library
+        .read("effect/texcommon.dpd")
+        .ok()
+        .and_then(|b| object_effect::read_dpd(&b).ok())
+        .map(Arc::new);
+    let files: Vec<String> = src
+        .records
+        .iter()
+        .filter(|r| r.world == 0)
+        .map(|r| r.file.clone())
+        .collect();
+    for file in files {
+        if src.paxes.contains_key(&file) {
+            continue;
+        }
+        let pax = library
+            .read(&file)
+            .ok()
+            .and_then(|bytes| {
+                let table = bar::read_bar(&bytes).ok()?;
+                let e = table
+                    .entries
+                    .iter()
+                    .find(|e| e.entry_type == 18 && e.size > 0)?;
+                let pax = bytes.get(e.offset as usize..e.offset as usize + e.size as usize)?;
+                object_effect::read_pax(pax).ok()
+            })
+            .map(Arc::new);
+        match pax {
+            Some(p) => {
+                src.paxes.insert(file, p);
+            }
+            None => eprintln!("Spell effects: {file} could not be read"),
+        }
+    }
 }
 
 /// The cast motion ids the records use (world 0 only), without
@@ -115,6 +167,24 @@ pub struct MagicRt {
     pub last_hits: Vec<u64>,
     /// The open Magic submenu's rows, by magic type.
     pub menu_types: Vec<u8>,
+    /// The cast in progress (script trigger 20's thread) and Reflect's
+    /// shared block.
+    pub cast: Option<CastFx>,
+    pub barrier: Option<u64>,
+    pub barrier_count: u32,
+    /// The effect container of each spell's serial (for `Fx::Start`).
+    pax_of: HashMap<u64, Arc<object_effect::Pax>>,
+    /// Hit sparks started (their handles).
+    sparks: u64,
+}
+
+/// A cast between its start and its release or interruption.
+pub struct CastFx {
+    pub serial: u64,
+    pub released: bool,
+    pub magic_type: u8,
+    pub level: u8,
+    pub pax: Option<Arc<object_effect::Pax>>,
 }
 
 impl MagicRt {
@@ -130,6 +200,11 @@ impl MagicRt {
             volumes: Vec::new(),
             last_hits: Vec::new(),
             menu_types: Vec::new(),
+            cast: None,
+            barrier: None,
+            barrier_count: 0,
+            pax_of: HashMap::new(),
+            sparks: 0,
         }
     }
 
@@ -164,6 +239,42 @@ impl MagicRt {
     }
 }
 
+/// The hit spark of a spell's volume (`attack_set_pax`: the element of the
+/// spell's own PAX chosen by the ATKP's hit-effect category, FUN_1402c6730),
+/// started at the contact point facing the hit direction. None when the
+/// volume is not a spell's or its PAX has no such element.
+pub fn spark(
+    m: &mut MagicRt,
+    volume: u64,
+    effect: u8,
+    contact: [f32; 3],
+    direction: [f32; 3],
+) -> Option<Vec<Call>> {
+    // Volume keys are `serial << 8 | slot`; the Wisdom shots' and others
+    // are not.
+    let pax = m.pax_of.get(&(volume >> 8))?.clone();
+    // mask = (1 << (32 + hitEffect − 1)) | 1 (a normal target).
+    let mask = (1u64 << (32 + effect as u64 - 1)) | 1;
+    let element = pax.by_category(mask)?;
+    m.sparks += 1;
+    let key = 1 << 63 | m.sparks;
+    Some(vec![
+        Call {
+            pax: Some(pax.clone()),
+            fx: magic::Fx::Start {
+                key,
+                id: element.id,
+                bound: None,
+                at: Some(contact),
+            },
+        },
+        Call {
+            pax: None,
+            fx: magic::Fx::Dir(key, direction),
+        },
+    ])
+}
+
 /// The cast command for a magic type (menu or shortcut). Returns whether a
 /// cast started.
 pub fn request(game: &mut Game, magic_type: u8, tick: u64) -> bool {
@@ -172,11 +283,20 @@ pub fn request(game: &mut Game, magic_type: u8, tick: u64) -> bool {
         player,
         clips,
         sound_queue,
+        drive,
+        fx_calls,
+        magic_tour,
+        voices,
         ..
     } = game;
     let Some(m) = magic.as_mut() else {
         return false;
     };
+    // The unattended tour casts with a full bar each time.
+    if *magic_tour {
+        player.mp = magic::Mp::new(player.mp.max);
+        player.mp_charging = false;
+    }
     let Some(rec) = m.current(magic_type).cloned() else {
         return false;
     };
@@ -196,13 +316,57 @@ pub fn request(game: &mut Game, magic_type: u8, tick: u64) -> bool {
     }
     // Cure on a shortcut targets Sora himself.
     let target_is_self = magic_type == magic::CURE;
-    let Some((action, start)) = player.cast(&rec, cmd.cost, 0, target_is_self, clips) else {
+    // obj+0xde0: the Drive form picks the variant row (Wisdom +10, Master
+    // +20, Final +30).
+    let form = drive.as_ref().map_or(0, |d| d.form);
+    let Some((action, start)) = player.cast(&rec, cmd.cost, form, target_is_self, clips) else {
+        let (combo_window, finisher_window, ready, combo) = player.command_gate(clips);
+        let record = serde_json::json!({"event":"cast_refused","tick":tick,"magic":magic_type,
+            "action":format!("{:?}", player.action),"frame":player.motion_frame(clips),
+            "combo_window":combo_window,"finisher_window":finisher_window,"ready":ready,
+            "combo_step":combo.step,"combo_finish":combo.finish});
+        game.event(record);
         return false;
     };
-    // The cast sound plays at the motion's start (script trigger 20).
-    if let Some(id) = visual::spell_sound::cast_sound(magic_type, 0) {
-        sound_queue.push((id, "spell_cast"));
+    // The cast's battle voice (FUN_1403c5170: vt+0xa0 = FUN_1403d69b0, the
+    // frame trigger 14 voice; none in Antiform).
+    let anti = drive
+        .as_ref()
+        .is_some_and(|d| d.active && d.form == player::forms::ANTI);
+    if start.voice >= 0
+        && !anti
+        && let Some(id) = voices.as_mut().and_then(|v| v.pick(1, start.voice as i16))
+    {
+        sound_queue.push((id, "spell_voice"));
     }
+    // Script trigger 20: the cast effect starts with the motion; an earlier
+    // cast that never released leaves its effect.
+    if let Some(old) = m.cast.take()
+        && !old.released
+    {
+        fx_calls.push(Call {
+            pax: None,
+            fx: magic::Fx::Kill(magic::cast_key(old.serial)),
+        });
+    }
+    m.serial += 1;
+    let pax = m.src.paxes.get(&rec.file).cloned();
+    if let Some(p) = &pax {
+        m.pax_of.insert(m.serial, p.clone());
+    }
+    for fx in magic::cast_effects(magic_type, start.row, magic::cast_key(m.serial)) {
+        fx_calls.push(Call {
+            pax: pax.clone(),
+            fx,
+        });
+    }
+    m.cast = Some(CastFx {
+        serial: m.serial,
+        released: false,
+        magic_type,
+        level: rec.level,
+        pax,
+    });
     // Leaf Bracer (ability 114): Cure on oneself gives 60 ticks of
     // invulnerability and a super guard from the cast's start.
     let leaf = magic_type == magic::CURE && player.abilities.has(114);
@@ -226,6 +390,8 @@ pub fn request(game: &mut Game, magic_type: u8, tick: u64) -> bool {
             party: &ctx_party,
             ground: &ground,
             bg_hit: &bg,
+            barrier: None,
+            barrier_count: 0,
         };
         let serial = m.serial;
         m.spells.push(Spell::leaf_bracer(serial, &ctx));
@@ -240,8 +406,8 @@ pub fn request(game: &mut Game, magic_type: u8, tick: u64) -> bool {
     true
 }
 
-/// One tick of the casts: release, then every spell's volumes, heals,
-/// recoil and invulnerability.
+/// One tick of the casts: release, then every spell's volumes, effects,
+/// heals, recoil and invulnerability.
 pub fn tick(game: &mut Game, tick: u64) {
     let mut events: Vec<serde_json::Value> = Vec::new();
     {
@@ -251,10 +417,34 @@ pub fn tick(game: &mut Game, tick: u64) {
             selected_target,
             enemy,
             world,
-            sound_queue,
+            fx_calls,
+            fx_live,
+            magic_tour,
+            clips,
             ..
         } = game;
         let Some(m) = magic.as_mut() else { return };
+        // The tour records the windows the installed motions give (range
+        // triggers 11, 50 and 0-2, frame trigger 17), the data the combo gate
+        // reads.
+        if *magic_tour && tick == 1 {
+            let window = |c: &player::Clip| {
+                serde_json::json!({"end":c.end,"combo":c.combo_windows,
+                    "finisher":c.finisher_windows,"actionable":c.actionable})
+            };
+            events.push(serde_json::json!({"event":"motion_windows","tick":tick,
+                "attacks":clips.attacks.iter().map(|a| window(&a.clip)).collect::<Vec<_>>(),
+                "spells":clips.spells.iter().map(|s| {
+                    let mut w = window(&s.clip);
+                    w["motion"] = s.motion.into();
+                    w["release"] = serde_json::json!(s.clip.release);
+                    w
+                }).collect::<Vec<_>>()}));
+        }
+        // The tour's enemy takes every hit and stays.
+        if *magic_tour && let Some(rt) = enemy.as_mut() {
+            rt.enemy.hp = rt.enemy.hp.max(500);
+        }
         let pos = player.position;
         let facing = [player.yaw.sin(), player.yaw.cos()];
         let action = player.action;
@@ -276,22 +466,37 @@ pub fn tick(game: &mut Game, tick: u64) {
                 (w[0] - p[0]).abs() > 1e-3 || (w[1] - p[2]).abs() > 1e-3
             }
         };
-        let ctx = |airborne: bool, casting: bool| magic::Context {
-            dt: 1.,
-            caster: pos,
-            facing,
-            caster_centre: centre,
-            airborne,
-            casting,
-            target,
-            party: &party,
-            ground: &ground,
-            bg_hit: &bg,
-        };
-        // Feedback from last tick's collisions reaches the spells now.
+        let ctx =
+            |airborne: bool, casting: bool, barrier: Option<u64>, count: u32| magic::Context {
+                dt: 1.,
+                caster: pos,
+                facing,
+                caster_centre: centre,
+                airborne,
+                casting,
+                target,
+                party: &party,
+                ground: &ground,
+                bg_hit: &bg,
+                barrier,
+                barrier_count: count,
+            };
+        // Feedback from last tick's collisions and effect update reaches the
+        // spells now.
         m.feedback.reflected = m.reflected.iter().map(|(&k, &c)| (k, c)).collect();
+        m.feedback.fx = fx_live.iter().map(|(&k, &v)| (k, v)).collect();
         if let Some(r) = player.take_released() {
+            let (cast_serial, pax) = match m.cast.as_mut() {
+                Some(c) => {
+                    c.released = true;
+                    (c.serial, c.pax.clone())
+                }
+                None => (0, None),
+            };
             m.serial += 1;
+            if let Some(p) = &pax {
+                m.pax_of.insert(m.serial, p.clone());
+            }
             let row = m
                 .src
                 .rows
@@ -299,30 +504,31 @@ pub fn tick(game: &mut Game, tick: u64) {
                 .or(m.src.rows.first())
                 .copied()
                 .unwrap_or_default();
-            let c = ctx(r.airborne, true);
-            m.spells.push(Spell::new(
-                m.serial,
-                r.magic_type,
-                r.level,
-                r.row,
-                row,
-                r.form,
-                &c,
-            ));
-            // The release sounds (script trigger 21).
-            for id in visual::spell_sound::release_sounds(
-                r.magic_type,
-                r.level,
-                r.finisher,
-                r.airborne,
-                r.form,
-            ) {
-                sound_queue.push((id, "spell_release"));
-            }
+            let c = ctx(r.airborne, true, m.barrier, m.barrier_count);
+            let spell = Spell::new(m.serial, r.magic_type, r.level, r.row, row, r.form, &c)
+                .with_cast(magic::cast_key(cast_serial), r.volley);
+            m.spells.push(spell);
+            // The release's sounds are the effect elements' own (trigger 21
+            // starts them).
             events.push(serde_json::json!({"event":"spell_release","tick":tick,
                 "magic":r.magic_type,"level":r.level,"row":r.row,"finisher":r.finisher,
+                "volley":r.volley,"form":r.form,
                 "mp":player.mp.cur,"charging":player.mp.charging(),
                 "target":target.map(|t| t.to_vec())}));
+        }
+        // A cast whose motion ended without releasing ends its effect.
+        if let Some(c) = m.cast.as_ref()
+            && !player.casting()
+        {
+            if !c.released {
+                fx_calls.push(Call {
+                    pax: None,
+                    fx: magic::Fx::Kill(magic::cast_key(c.serial)),
+                });
+                events.push(serde_json::json!({"event":"cast_interrupted","tick":tick,
+                    "magic":c.magic_type,"level":c.level}));
+            }
+            m.cast = None;
         }
         let mut volumes = Vec::new();
         let mut strikes = Vec::new();
@@ -332,10 +538,24 @@ pub fn tick(game: &mut Game, tick: u64) {
         m.last_hits = fb.hit.clone();
         let airborne = matches!(action, Action::AirCast(_) | Action::AirAttack(_));
         let casting = matches!(action, Action::Cast(_) | Action::AirCast(_));
+        let (mut barrier, mut barrier_count) = (m.barrier, m.barrier_count);
         for s in m.spells.iter_mut() {
-            let out = s.tick(&ctx(airborne, casting), &fb);
+            let out = s.tick(&ctx(airborne, casting, barrier, barrier_count), &fb);
             volumes.extend(out.volumes);
             strikes.extend(out.strikes);
+            for fx in out.fx {
+                let pax = match &fx {
+                    magic::Fx::Start { key, .. } => m.pax_of.get(&(key >> 8)).cloned(),
+                    _ => None,
+                };
+                fx_calls.push(Call { pax, fx });
+            }
+            if let Some(b) = out.barrier {
+                barrier = b;
+            }
+            if let Some(n) = out.barrier_count {
+                barrier_count = n;
+            }
             if out.recoil.is_some() {
                 recoil = out.recoil;
             }
@@ -343,7 +563,11 @@ pub fn tick(game: &mut Game, tick: u64) {
                 invulnerable = Some(invulnerable.map_or(t, |v| v.max(t)));
             }
         }
+        (m.barrier, m.barrier_count) = (barrier, barrier_count);
         m.spells.retain(|s| !s.finished());
+        // Serials of long finished spells no longer start effects.
+        let newest = m.serial;
+        m.pax_of.retain(|&k, _| k + 64 > newest);
         m.volumes = volumes;
         if let Some(strength) = recoil {
             // obj_hitback(S, roty(obj_dir, pi), f7): back along the facing.

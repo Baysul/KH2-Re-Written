@@ -86,6 +86,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         cheats,
         sound_queue,
         effect_queue,
+        fx_calls,
         log,
         hero_hit_tick,
         enemy_incoming_hits,
@@ -400,12 +401,28 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                     let across = Vec3::new(delta.x, 0., delta.z).normalize_or_zero()
                         * target.radius
                         * (1. - (y / target.height).powi(2)).max(0.).sqrt();
-                    effect_queue.push(EffectRequest::Hit {
-                        effect: rows[row].hit_effect,
-                        random: rows[row].hit_effect_random,
-                        contact: target.centre + across + Vec3::Y * y,
-                        direction,
+                    let contact = target.centre + across + Vec3::Y * y;
+                    // A spell's spark comes from the spell's own PAX.
+                    let spell_spark = v.magic.and_then(|key| {
+                        magic.as_mut().and_then(|m| {
+                            magic_room::spark(
+                                m,
+                                key,
+                                rows[row].hit_effect,
+                                contact.to_array(),
+                                direction.to_array(),
+                            )
+                        })
                     });
+                    match spell_spark {
+                        Some(calls) => fx_calls.extend(calls),
+                        None => effect_queue.push(EffectRequest::Hit {
+                            effect: rows[row].hit_effect,
+                            random: rows[row].hit_effect_random,
+                            contact,
+                            direction,
+                        }),
+                    }
                 }
                 if let Some(key) = v.magic
                     && let Some(m) = magic.as_mut()

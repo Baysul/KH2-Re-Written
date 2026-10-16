@@ -66,7 +66,7 @@ Built (all in the test room, against the one Shadow):
 - The jump is variable: letting go of Jump cuts the rise short. Square starts Upper Slash, Finishing Leap and Horizontal Slash mid-combo, and Retaliating Slash out of a blow (T105).
 
 Unfinished:
-- Spell visuals are not drawn (stand-in shapes), and no voices play.
+- Spells show the effects of their own effect files since T136 (the old stand-in shapes appear only with F1); no voices play.
 - Heal effects, prize models and sparkles are not drawn; item drops are only logged.
 - Level-up messages, fanfare and HP/MP/Drive growth are not reproduced.
 - The game-over flow is not modelled.
