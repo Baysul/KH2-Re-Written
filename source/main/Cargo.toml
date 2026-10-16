@@ -15,6 +15,7 @@ collision = { path = "../game/collision" }
 event = { path = "../game/event" }
 data = { path = "../data" }
 player = { path = "../game/player" }
+enemy = { path = "../game/enemy" }
 save = { path = "../game/save" }
 validation = { path = "../../validation" }
 skate_source = { path = "../extras/skateboard/source" }
@@ -45,6 +46,16 @@ bench = false
 
 [[bin]]
 name = "motion_eval_compare"
+test = false
+bench = false
+
+[[bin]]
+name = "motion_audit"
+test = false
+bench = false
+
+[[bin]]
+name = "pose_sheet"
 test = false
 bench = false
 

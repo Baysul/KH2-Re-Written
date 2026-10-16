@@ -17,6 +17,8 @@ use player::{
 use std::{collections::HashMap, sync::Arc};
 
 pub enum Brain {
+    /// The enemy's own object script, run by the translated interpreter.
+    Script(Box<super::enemy_script::ScriptBrain>),
     Shadow(Box<Shadow>),
     Dusk(Box<dusk::Dusk>),
     Soldier(Box<soldier::Soldier>),
@@ -24,6 +26,7 @@ pub enum Brain {
 impl Brain {
     pub fn position(&self) -> [f32; 3] {
         match self {
+            Self::Script(a) => a.position(),
             Self::Shadow(a) => a.position,
             Self::Dusk(a) => a.position,
             Self::Soldier(a) => a.position,
@@ -31,6 +34,7 @@ impl Brain {
     }
     pub fn yaw(&self) -> f32 {
         match self {
+            Self::Script(a) => a.yaw(),
             Self::Shadow(a) => a.yaw,
             Self::Dusk(a) => a.yaw,
             Self::Soldier(a) => a.yaw,
@@ -38,6 +42,7 @@ impl Brain {
     }
     pub fn hp(&self) -> i32 {
         match self {
+            Self::Script(a) => a.hp(),
             Self::Shadow(a) => a.hp,
             Self::Dusk(a) => a.hp,
             Self::Soldier(a) => a.hp,
@@ -45,6 +50,7 @@ impl Brain {
     }
     pub fn alive(&self) -> bool {
         match self {
+            Self::Script(a) => a.alive(),
             Self::Shadow(a) => a.alive(),
             Self::Dusk(a) => a.alive(),
             Self::Soldier(a) => a.alive(),
@@ -52,6 +58,7 @@ impl Brain {
     }
     pub fn targetable(&self) -> bool {
         match self {
+            Self::Script(a) => a.targetable(),
             Self::Shadow(a) => a.targetable(),
             Self::Dusk(a) => a.targetable(),
             Self::Soldier(a) => a.targetable(),
@@ -59,6 +66,7 @@ impl Brain {
     }
     pub fn record_mut(&mut self) -> &mut combat::HitRecord {
         match self {
+            Self::Script(a) => a.record_mut(),
             Self::Shadow(a) => &mut a.record,
             Self::Dusk(a) => a.record(),
             Self::Soldier(a) => a.record(),
@@ -73,6 +81,7 @@ impl Brain {
         difficulty: combat::Difficulty,
     ) -> Option<i32> {
         match self {
+            Self::Script(a) => a.hit(d, high, p, s, difficulty),
             Self::Shadow(a) => a.hit(d, high, p, s, difficulty),
             Self::Dusk(a) => a.hit(d, high, p, s, difficulty),
             Self::Soldier(a) => a.hit(d, high, p, s, difficulty),
@@ -80,6 +89,10 @@ impl Brain {
     }
     pub fn reflect(&mut self, motion: usize, back: f32) -> bool {
         match self {
+            Self::Script(a) => {
+                a.reflect(motion, back);
+                true
+            }
             Self::Soldier(a) => {
                 a.reflect(motion, back);
                 true
@@ -96,6 +109,7 @@ impl Brain {
     }
     pub fn motion(&self) -> usize {
         match self {
+            Self::Script(a) => a.motion(),
             Self::Shadow(a) => a.motion,
             Self::Dusk(a) => a.motion,
             Self::Soldier(a) => a.motion,
@@ -103,6 +117,7 @@ impl Brain {
     }
     pub fn elapsed(&self) -> u32 {
         match self {
+            Self::Script(a) => a.elapsed(),
             Self::Shadow(a) => a.motion_tick,
             Self::Dusk(a) => a.motion_tick,
             Self::Soldier(a) => a.motion_tick,
@@ -110,6 +125,7 @@ impl Brain {
     }
     pub fn serial(&self) -> u64 {
         match self {
+            Self::Script(a) => a.serial(),
             Self::Shadow(a) => a.motion_serial as u64,
             Self::Dusk(a) => a.motion_serial,
             Self::Soldier(a) => a.motion_serial,
@@ -117,6 +133,7 @@ impl Brain {
     }
     pub fn scale_y(&self) -> f32 {
         match self {
+            Self::Script(a) => a.scale_y(),
             Self::Shadow(a) => a.scale_y,
             Self::Dusk(a) => a.scale_y,
             Self::Soldier(_) => 1.,
@@ -124,6 +141,7 @@ impl Brain {
     }
     pub fn blend(&self) -> f32 {
         match self {
+            Self::Script(a) => a.blend(),
             Self::Shadow(_) => 0.,
             Self::Dusk(a) => a.blend,
             Self::Soldier(a) => a.blend,
@@ -131,6 +149,7 @@ impl Brain {
     }
     pub fn gone(&self) -> bool {
         match self {
+            Self::Script(a) => a.gone(),
             Self::Shadow(a) => a.gone,
             Self::Dusk(a) => a.gone,
             Self::Soldier(a) => a.gone,
@@ -138,6 +157,7 @@ impl Brain {
     }
     pub fn fault(&self) -> Option<String> {
         match self {
+            Self::Script(a) => a.fault.clone(),
             Self::Shadow(_) => None,
             Self::Dusk(a) => a.fault.map(|f| format!("{f:?}")),
             Self::Soldier(a) => a.fault.map(|f| format!("{f:?}")),
@@ -145,6 +165,7 @@ impl Brain {
     }
     pub fn description(&self) -> String {
         match self {
+            Self::Script(a) => a.description(),
             Self::Shadow(a) => format!("{:?}", a.current_act()),
             Self::Dusk(a) => format!("{:?}", a.current_act()),
             Self::Soldier(a) => format!("{:?}", a.current_act()),
@@ -152,6 +173,7 @@ impl Brain {
     }
     pub fn defeat(&mut self) {
         match self {
+            Self::Script(a) => a.defeat(),
             Self::Shadow(a) => a.defeat(),
             Self::Dusk(a) => a.defeat(),
             Self::Soldier(a) => a.defeat(),
@@ -159,6 +181,7 @@ impl Brain {
     }
     pub fn respawn(&mut self) {
         match self {
+            Self::Script(a) => a.respawn(),
             Self::Shadow(a) => a.respawn(),
             Self::Dusk(a) => a.respawn(),
             Self::Soldier(a) => a.respawn(),
@@ -166,11 +189,32 @@ impl Brain {
     }
     pub fn capture(&mut self, key: u64, centre: [f32; 3], radius: f32, spin: f32) -> bool {
         match self {
+            Self::Script(_) => false,
             Self::Shadow(a) => {
                 a.capture(key, centre, radius, spin);
                 true
             }
             Self::Dusk(_) | Self::Soldier(_) => false,
+        }
+    }
+    /// The attack objects a script brain placed (none for the other brains).
+    pub fn script_attacks(&self) -> Vec<super::enemy_script::ScriptAttack> {
+        match self {
+            Self::Script(a) => a.attacks(),
+            _ => Vec::new(),
+        }
+    }
+    /// A script attack struck Sora.
+    pub fn mark_script_attack(&mut self, slot: usize) {
+        if let Self::Script(a) = self {
+            a.mark_attack_hit(slot);
+        }
+    }
+    /// The effects a script brain started this frame (none for other brains).
+    pub fn take_script_effects(&mut self) -> Vec<super::enemy_script::ScriptEffect> {
+        match self {
+            Self::Script(a) => std::mem::take(&mut a.effects),
+            _ => Vec::new(),
         }
     }
     pub fn follow_capture(&mut self, volumes: &[player::magic::Volume]) {
@@ -188,7 +232,7 @@ impl Brain {
     }
 }
 
-struct Clip {
+pub(super) struct Clip {
     choice: usize,
     motion: Arc<SelectedMotion>,
     duration: u32,
@@ -197,6 +241,8 @@ struct Clip {
     fps: f32,
     roots: Vec<[f32; 3]>,
     windows: Vec<AttackWindow>,
+    /// The clip's trigger tables as the enemy engine reads them.
+    events: enemy::motion::MotionEvents,
 }
 fn native_clock(t: u32, duration: u32, loop_top: u32) -> u32 {
     if t < duration {
@@ -238,7 +284,7 @@ impl Clip {
         self.roots[self.clock(t) as usize]
     }
 }
-struct Clips(HashMap<usize, Clip>);
+pub(super) struct Clips(HashMap<usize, Clip>);
 impl shadow::Clips for Clips {
     fn advance(&self, _s: usize, t: u32) -> u32 {
         if t == 0 { 2 } else { t.saturating_add(1) }
@@ -266,6 +312,30 @@ impl shadow::Clips for Clips {
         self.0.get(&s).map_or([0.; 3], |c| c.root(t))
     }
 }
+impl enemy::env::Clips for Clips {
+    fn length(&self, slot: usize) -> u32 {
+        shadow::Clips::length(self, slot)
+    }
+    fn loop_start(&self, slot: usize) -> u32 {
+        shadow::Clips::loop_start(self, slot)
+    }
+    fn root_delta(&self, slot: usize, tick: u32) -> [f32; 3] {
+        dusk::Clips::root_delta(self, slot, tick)
+    }
+    fn advance(&self, slot: usize, tick: u32) -> u32 {
+        dusk::Clips::advance(self, slot, tick)
+    }
+    fn events(&self, slot: usize) -> Option<&enemy::motion::MotionEvents> {
+        self.0.get(&slot).map(|c| &c.events)
+    }
+    fn ended(&self, slot: usize, tick: u32) -> bool {
+        dusk::Clips::ended(self, slot, tick)
+    }
+    fn in_loop(&self, slot: usize, tick: u32) -> bool {
+        dusk::Clips::in_loop(self, slot, tick)
+    }
+}
+
 impl dusk::Clips for Clips {
     fn takeoff(&self, s: usize, t: u32) -> Option<bool> {
         let c = self.0.get(&s)?;
@@ -371,7 +441,7 @@ pub struct BattleActor {
     pub serial: u64,
     pub windows: Vec<AttackWindow>,
     pub contacts: ContactState,
-    clips: Clips,
+    clips: Arc<Clips>,
     pub paused: bool,
     pub error: Option<String>,
 }
@@ -540,6 +610,29 @@ impl BattleActor {
                 roots.push(pose.root_translation);
             }
             let windows = assets.windows(&motion)?;
+            let events = enemy::motion::MotionEvents {
+                ranges: motion
+                    .triggers
+                    .iter()
+                    .flat_map(|t| &t.records.ranges)
+                    .map(|r| enemy::motion::RangeEvent {
+                        start: r.start_frame as u16,
+                        end: r.end_frame as u16,
+                        kind: r.trigger,
+                        params: r.parameters.iter().map(|&v| v as u16).collect(),
+                    })
+                    .collect(),
+                frames: motion
+                    .triggers
+                    .iter()
+                    .flat_map(|t| &t.records.frames)
+                    .map(|f| enemy::motion::FrameEvent {
+                        frame: f.frame as u16,
+                        kind: f.trigger,
+                        params: f.parameters.iter().map(|&v| v as u16).collect(),
+                    })
+                    .collect(),
+            };
             clips.insert(
                 m.slot,
                 Clip {
@@ -551,10 +644,22 @@ impl BattleActor {
                     fps,
                     roots,
                     windows,
+                    events,
                 },
             );
         }
-        let brain = if entry.character == 1000 {
+        let clips = Arc::new(Clips(clips));
+        let brain = if std::env::var("KH2RW_ENEMY_AI").is_ok_and(|v| v == "script") {
+            Brain::Script(Box::new(super::enemy_script::ScriptBrain::load(
+                source,
+                &entry.model_name,
+                position.to_array(),
+                yaw,
+                assets.stats,
+                assets.sstm,
+                clips.clone(),
+            )?))
+        } else if entry.character == 1000 {
             Brain::Soldier(Box::new(soldier::Soldier::new(
                 position.to_array(),
                 yaw,
@@ -577,6 +682,7 @@ impl BattleActor {
             )))
         };
         let c = clips
+            .0
             .get(&brain.motion())
             .ok_or("initial source motion absent")?;
         let frame = c.key(0);
@@ -590,7 +696,7 @@ impl BattleActor {
             frame,
             serial: 0,
             contacts: ContactState::default(),
-            clips: Clips(clips),
+            clips,
             paused: false,
             error: None,
         })
@@ -604,14 +710,15 @@ impl BattleActor {
     ) -> Result<(usize, f32), String> {
         if !self.paused && !self.brain.gone() {
             match &mut self.brain {
-                Brain::Shadow(a) => a.tick(rng, &self.clips, &Arena(world), player, player),
+                Brain::Script(a) => a.tick(world, player, rng),
+                Brain::Shadow(a) => a.tick(rng, &*self.clips, &Arena(world), player, player),
                 Brain::Dusk(a) => a.tick(
                     dusk::Input::arena(
                         player,
                         player,
                         actor_physics::ObjParams::defaults(self.assets.sstm.fall_max).turn,
                     ),
-                    &self.clips,
+                    &*self.clips,
                     &Arena(world),
                     rng,
                 ),
@@ -621,7 +728,7 @@ impl BattleActor {
                         player,
                         actor_physics::ObjParams::defaults(self.assets.sstm.fall_max).turn,
                     ),
-                    &self.clips,
+                    &*self.clips,
                     &Arena(world),
                     rng,
                 ),
@@ -681,6 +788,9 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
         battle
             .brain
             .follow_capture(game.magic.as_ref().map_or(&[], |m| m.volumes.as_slice()));
+        if let Brain::Script(a) = &mut battle.brain {
+            a.player_yaw = game.player.yaw;
+        }
         let prior = (battle.brain.motion(), battle.brain.serial());
         match battle.tick(&game.world, game.player.position, &actor.kind, &mut rng) {
             Ok((choice, key)) => {
@@ -690,6 +800,23 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
                     actor.error = Some(e)
                 }
                 super::enemy_motion_fx::scan(&mut game, actor);
+                if let Some(battle) = actor.battle.as_mut() {
+                    let object = battle.assets.object_id;
+                    for e in battle.brain.take_script_effects() {
+                        game.effect_queue.push(match e.at {
+                            Some(at) => super::EffectRequest::ActorElementAt {
+                                object,
+                                id: e.id,
+                                at: Vec3::from_array(at),
+                            },
+                            None => super::EffectRequest::ActorElement {
+                                object,
+                                actor: actor.id,
+                                id: e.id,
+                            },
+                        });
+                    }
+                }
             }
             Err(e) => {
                 battle.error = Some(e.clone());

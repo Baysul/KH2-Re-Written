@@ -183,13 +183,13 @@ fn bind_matrices(bones: &[BoneRecord], profile: PoseProfile) -> io::Result<Vec<M
     }
     Ok(result)
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Influence {
     matrix: usize,
     vertex_bits: [u32; 4],
 }
 /// Checked, retained coordinates and assignments; packet decoding happens once.
-#[derive(Default, Serialize)]
+#[derive(Clone, Default, Serialize)]
 pub struct Skinning {
     pub bones: Vec<BoneRecord>,
     assignments: Vec<Vec<Influence>>,
@@ -388,6 +388,17 @@ impl Skinning {
             "motion_eval_ik_constraints_look_v1",
         )?;
         Ok((pose, evaluated))
+    }
+
+    /// Skins evaluated joints (one per model bone, e.g. a blend of two
+    /// evaluations) the way `sample_evaluated` skins its own.
+    pub fn pose_from_worlds(&self, worlds: &[crate::motion_eval::World]) -> io::Result<ModelPose> {
+        let matrices = worlds
+            .iter()
+            .take(self.bones.len())
+            .map(|w| w.matrix())
+            .collect();
+        self.pose(matrices, PoseProfile::Legacy, "motion_eval_blend_v1")
     }
 
     /// Full motion evaluation (IK helpers, constraints, IK chains and

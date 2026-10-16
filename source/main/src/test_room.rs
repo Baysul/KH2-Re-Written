@@ -44,6 +44,7 @@ use std::{
 };
 use visual::area_fog::{AddFogged, FogMaterial, FogPlugin};
 use visual::controller::{self, Pad};
+use visual::enemy_gauge::EnemyGauge;
 use visual::fade::{self, Fade};
 use visual::field_command_menu::{self, CommandMenu, Decision, Item};
 use visual::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
@@ -74,6 +75,7 @@ mod enemy_catalog;
 mod enemy_combat;
 mod enemy_gallery;
 mod enemy_motion_fx;
+mod enemy_script;
 mod enemy_target;
 mod enemy_tour;
 mod game_over;
@@ -318,6 +320,8 @@ enum EffectRequest {
     /// A battle enemy's motion frame trigger 1: element `id` of its own
     /// container, bound to the actor.
     ActorElement { object: u32, actor: u64, id: u16 },
+    /// The same element placed at a point by a script (`obj_effect_start_pos`).
+    ActorElementAt { object: u32, id: u16, at: Vec3 },
     /// The enemy's `dead` act: effect_start_bind(obj, 2).
     EnemyDead,
     /// A system (00effect) element at a point, unrotated
@@ -429,6 +433,8 @@ struct MenuSources {
 /// HUD sources loaded with the session.
 struct HudSource {
     sheets: Vec<Sheet>,
+    /// The field 2D archive's 'fiel' sheet: the lock-on reticle.
+    field: Sheet,
     /// The field 2D archive's 'mapj' area-change iris (areas only).
     iris: Option<Sheet>,
     stats: (i32, i32),
@@ -489,9 +495,22 @@ const DISARM_TICKS: u32 = 360;
 const PARTY_STAND: u32 = 1 << 0;
 const PARTY_COLLIDE: u32 = 1 << 4;
 
+/// What a joint-space blend of two shown poses needs: the actor's skinning
+/// and parents, and the joint carrying the Keyblade.
+struct Skin {
+    skinning: data::model_pose::Skinning,
+    parents: Vec<i32>,
+    weapon_joint: usize,
+}
+
 /// Precomputed skinned positions for every frame of one clip.
 struct ClipPoses {
     frames: Vec<Vec<Vec3>>,
+    /// The evaluated joints of each frame with the root motion removed
+    /// (empty for basic FK), blended joint by joint when a motion switch
+    /// cross-fades.
+    joints: Vec<Vec<data::motion_eval::World>>,
+    skin: Option<Arc<Skin>>,
     /// Model-space matrix of the objentry weapon joint for each frame.
     weapon: Vec<Mat4>,
     /// The same for weapon slot 1's joint (forms with two Keyblades).
@@ -579,6 +598,10 @@ const SE_CURSOR: u32 = 1;
 const SE_OPEN: u32 = 3;
 const SE_CLOSE: u32 = 4;
 const SE_LOW_HP: u32 = 9;
+/// Manual lock engaged, and released by the toggle (FUN_1401dd170(7) / (8) in
+/// the lock manager, FUN_1403dd650 / FUN_1403dcd70).
+const SE_LOCK: u32 = 7;
+const SE_UNLOCK: u32 = 8;
 
 /// The room collision the controller and the enemy read: the generated
 /// arena's triangles, or a game map's COCT through the exe's routines.
@@ -908,8 +931,14 @@ struct Game {
     menu_down_queued: bool,
     enemy: Option<EnemyRuntime>,
     display: Vec<Vec3>,
+    /// The clip frame the shown pose came from (research logging).
+    display_frame: usize,
     /// Pose, Keyblade transform and start tick of the active crossfade.
     blend_from: Option<(Vec<Vec3>, Transform, u64)>,
+    /// The joints behind `display` and behind `blend_from`'s pose (empty
+    /// when the shown clip has none), for joint-space blends.
+    display_joints: Vec<data::motion_eval::World>,
+    blend_from_joints: Vec<data::motion_eval::World>,
     display_hand: Transform,
     weapon_indices: Vec<Vec<u32>>,
     /// The same for slot 1's Keyblade (the form's own).
@@ -982,6 +1011,16 @@ struct Hud {
     iris: Option<Sheet>,
     menu: Option<MenuState>,
     gauge: Gauge,
+    /// The Scan target gauge (GAUGE_ENEMY, layer 6) and what it shows.
+    enemy_gauge: EnemyGauge,
+    scan: enemy_target::ScanTracker,
+    /// The HUD slot-height table that popups register in (the Scan gauge stacks
+    /// on it).
+    slots: visual::hud_slots::HudSlots,
+    /// The `fiel` sheet and the lock-on reticle drawn from it.
+    field: Sheet,
+    reticle: visual::lock_on::Reticle,
+    reticle_draw: Option<Draw>,
     stats: GaugeStats,
     canvas: Canvas,
     image: Handle<Image>,
@@ -999,9 +1038,55 @@ struct CameraRig {
     /// Right-drag turn not yet consumed by a tick, in manual-turn units.
     pending_turn: f32,
     recenter_queued: bool,
-    /// Map camera collision triangles in game world space.
-    collision: Vec<[[f32; 3]; 3]>,
+    /// The map's camera collision in game world space.
+    collision: CameraCollision,
     collision_hits: u64,
+}
+
+/// The camera's collision: a map's COCT worlds queried like the executable's
+/// camera ray (planes, surface nibbles), or plain triangles for the generated
+/// arena.
+struct CameraCollision {
+    worlds: Vec<::collision::World>,
+    triangles: Vec<[[f32; 3]; 3]>,
+}
+
+impl CameraCollision {
+    fn new(room: &visual::room::LoadedRoom) -> Self {
+        Self {
+            // The COCT vertices already are game world coordinates.
+            worlds: room
+                .camera_collisions
+                .iter()
+                .filter_map(|c| ::collision::World::new(c, u64::MAX).ok())
+                .collect(),
+            triangles: room
+                .camera_triangles
+                .iter()
+                .map(|t| t.map(|p| to_world(p.to_array())))
+                .collect(),
+        }
+    }
+
+    fn polygons(&self) -> usize {
+        self.triangles.len()
+    }
+
+    fn cast(&self, from: [f32; 3], to: [f32; 3]) -> Option<follow_camera::RayHit> {
+        if self.worlds.is_empty() {
+            return follow_camera::triangle_hit(&self.triangles, from, to);
+        }
+        let squared = |p: [f32; 3]| (0..3).map(|i| (p[i] - from[i]).powi(2)).sum::<f32>();
+        self.worlds
+            .iter()
+            .filter_map(|w| w.camera_ray(from, to))
+            .min_by(|a, b| squared(a.point).total_cmp(&squared(b.point)))
+            .map(|hit| follow_camera::RayHit {
+                point: hit.point,
+                normal: hit.normal,
+                surface: hit.surface,
+            })
+    }
 }
 
 /// Scene (Y up) to game world (Y down) and back; the map is converted with
@@ -2717,6 +2802,7 @@ fn load(
                 None => None,
             };
             Some(HudSource {
+                field: hud::load(source, &l.index, l.ordinal, l.name_hash, b"fiel")?,
                 sheets,
                 iris,
                 stats: hud::starting_stats(bar_entry(&battle, b"plrp")?)?,
@@ -3940,11 +4026,7 @@ fn area_transition(
     game.ambient = room_ambient(&game.step_info, next.world, next.area);
     let (position, yaw) = next.player;
     game.player = Player::new(position.to_array(), yaw);
-    rig.collision = room
-        .camera_triangles
-        .iter()
-        .map(|t| t.map(|p| to_world(p.to_array())))
-        .collect();
+    rig.collision = CameraCollision::new(&room);
     rig.camera = FollowCamera::new(
         follow_camera::OUTDOOR,
         &camera_input(&game.player, game.player.position, game.params.run_speed),
@@ -4723,6 +4805,7 @@ fn setup(
     let enemy_model = startup.enemy_model.take();
     if let Some(HudSource {
         sheets,
+        field,
         iris,
         stats: (hp, mp),
         menu,
@@ -4774,12 +4857,19 @@ fn setup(
             ));
             compose.white_sheet = Some(frame.add_sheet(&mut images, vec![255; 16], [2, 2], 1.));
         }
+        let mut slots = visual::hud_slots::HudSlots::default();
         commands.insert_resource(Hud {
             panels: Default::default(),
             gauge: Gauge::new(
                 &sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(),
                 &stats,
             ),
+            enemy_gauge: EnemyGauge::new(&sheets[0].sequence, &mut slots),
+            scan: Default::default(),
+            slots,
+            field,
+            reticle: Default::default(),
+            reticle_draw: None,
             sheets,
             iris,
             menu: menu.map(|(sheet, font, labels)| {
@@ -5571,6 +5661,8 @@ const AUTOPLAY_GUARDS: [u64; 3] = [1170, 1340, 1720];
 /// The index that holds the item pictures.
 const PICTURE_INDEX: &str = "Image/dt/kh2_fifth.hed";
 const AUTOPLAY_END: u64 = 9400;
+/// A shown-pose change above this many units in one frame is logged.
+const POSE_JUMP_LOG: f32 = 6.;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 #[allow(clippy::too_many_arguments)]
@@ -5913,6 +6005,25 @@ fn simulate(
         game.event(serde_json::json!({"event":"target_changed","tick":tick,"target":format!("{:?}",selected.id),"locked":selected.locked}));
     }
     game.selected_target = selected.target.map(|t| t.centre);
+    // The lock plays se000 #7 as it engages (also when the lock moves to
+    // another actor) and #8 when the toggle or an untargetable target releases it.
+    let other_actor = match (before, selected.id) {
+        (
+            Some(enemy_target::TargetId::Gallery(a, _)),
+            Some(enemy_target::TargetId::Gallery(b, _)),
+        ) => a != b,
+        (Some(old), Some(new)) => std::mem::discriminant(&old) != std::mem::discriminant(&new),
+        _ => false,
+    };
+    if selected.locked && (!game.target_locked || other_actor) {
+        game.sound_queue.push((SE_LOCK, "lock_on"));
+    } else if !selected.locked
+        && game.target_locked
+        && (toggle
+            || before.is_some_and(|id| enemy_target::untargetable_but_present(&game, &gallery, id)))
+    {
+        game.sound_queue.push((SE_UNLOCK, "lock_off"));
+    }
     game.target_locked = selected.locked;
     let target = selected.target.map(|s| {
         let p = game.player.position;
@@ -6204,7 +6315,7 @@ fn simulate(
     } = &mut *rig;
     let hits = std::cell::Cell::new(0);
     follow.tick(&camera, &|a, b| {
-        let hit = follow_camera::segment_hit(collision, a, b);
+        let hit = collision.cast(a, b);
         hits.set(hits.get() + hit.is_some() as u64);
         hit
     });
@@ -6237,7 +6348,7 @@ fn simulate(
         game.event(
             serde_json::json!({"event":"state","tick":tick,"position":position,"yaw":yaw,
             "action":format!("{action:?}"),"camera_eye":rig.camera.eye,"camera_yaw":rig.camera.yaw,
-            "camera_collision_triangles":rig.collision.len(),"camera_collision_hits":rig.collision_hits,
+            "camera_collision_triangles":rig.collision.polygons(),"camera_collision_hits":rig.collision_hits,
             "enemy":enemy,
             "npcs":area.as_deref().map(|a| a.current.npcs.iter().map(|n| serde_json::json!({
                 "kind":a.source.kinds[n.kind].name,"position":n.position.to_array(),"yaw":n.yaw,
@@ -6372,6 +6483,27 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
                         owner: 0xfa,
                     },
                     anchor: drive_fx::Anchor::Actor(actor),
+                });
+                continue;
+            }
+            EffectRequest::ActorElementAt { object, id, at } => {
+                let pax = if object == 0 {
+                    fx.enemy.clone()
+                } else {
+                    fx.enemy_paxes.get(&object).cloned()
+                };
+                let Some(pax) = pax else { continue };
+                game.fx_queue.push(drive_fx::Placed {
+                    req: drive_fx::FxRequest {
+                        pax,
+                        id,
+                        owner: 0xfa,
+                    },
+                    anchor: drive_fx::Anchor::World {
+                        at,
+                        pitch: 0.,
+                        yaw: 0.,
+                    },
                 });
                 continue;
             }
@@ -7133,7 +7265,14 @@ fn play_sounds(mut game: ResMut<Game>, mut audio: ResMut<Audio>, hud: Option<Res
 
 /// HUD frame: test-room debug keys (F4 blow hit, F5/F6 HP -/+2, F7/F8 MP -/+10, F9 drive +10)
 /// or the unattended script change stats, then the gauge logic runs.
-fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
+fn hud_tick(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut game: ResMut<Game>,
+    hud: Option<ResMut<Hud>>,
+    gallery: Res<enemy_gallery::EnemyGallery>,
+    targeting: Res<enemy_target::Targeting>,
+    rig: Option<Res<CameraRig>>,
+) {
     if keys.just_pressed(KeyCode::F4) && game.autoplay.is_none() {
         game.debug_blow = true;
     }
@@ -7201,12 +7340,36 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
         sheets,
         gauge,
         menu,
+        enemy_gauge,
+        scan,
+        slots,
         ..
     } = &mut *hud;
     if let Some(m) = menu {
         m.menu.update(&m.sheet.sequence);
     }
     gauge.update(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(), &s);
+    // The Scan gauge follows the lock manager's target (priority 7000, after
+    // the player's gauge).
+    scan.step(
+        enemy_gauge,
+        &sheets[0].sequence,
+        slots,
+        enemy_target::scan_view(&game, &gallery, &targeting),
+    );
+    // The reticle (priority 4000) follows the held target's TARGET shape,
+    // projected through the camera as last applied.
+    let held = rig.as_ref().and_then(|rig| {
+        enemy_target::reticle_view(&game, &gallery, &targeting)
+            .map(|(held, at)| (held, rig.camera.project(at)))
+    });
+    let Hud {
+        reticle,
+        field,
+        reticle_draw,
+        ..
+    } = &mut *hud;
+    *reticle_draw = reticle.step(&field.sequence, held, 0);
     // Form levels gained this frame queue their panels (FUN_1403edb90).
     if let Some(d) = game.drive.as_mut() {
         for up in std::mem::take(&mut d.level_ups) {
@@ -7253,8 +7416,6 @@ fn hud_present(
     skate: Res<crate::skate::Skate>,
     debug: Res<debug_menu::DebugMenu>,
     gallery: Res<enemy_gallery::EnemyGallery>,
-    targeting: Res<enemy_target::Targeting>,
-    game: Res<Game>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut hud) = hud else { return };
@@ -7264,6 +7425,9 @@ fn hud_present(
     let Hud {
         sheets,
         gauge,
+        enemy_gauge,
+        field,
+        reticle_draw,
         canvas,
         image,
         menu,
@@ -7278,6 +7442,16 @@ fn hud_present(
             texel_scale: s.texel_scale as f32,
         })
         .collect();
+    let field_sheet = textures.len();
+    textures.push(Texture {
+        rgba: &field.texture_rgba,
+        size: field.texture_size.map(|v| v as usize),
+        texel_scale: field.texel_scale as f32,
+    });
+    let mut lock_on = reticle_draw.take();
+    if let Some(Draw::Quads { sheet, .. }) = lock_on.as_mut() {
+        *sheet = field_sheet;
+    }
     // The command menu (priorities 0x14b5..0x14b7) draws before the gauge
     // (7000).
     let mut draws: Vec<Draw> = Vec::new();
@@ -7312,7 +7486,12 @@ fn hud_present(
         };
     }
     if !skate.replaces_hud() {
+        // The reticle (priority 4000) draws before the command menu.
+        if let Some(reticle) = lock_on {
+            draws.insert(0, reticle);
+        }
         draws.extend(gauge.draw(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>()));
+        draws.extend(enemy_gauge.draw(&sheets[0].sequence, 0));
         if let Some((font_sheet, widths)) = menu_font.as_ref() {
             draws.extend(panels.draw(
                 &sheets[0].sequence,
@@ -7390,25 +7569,6 @@ fn hud_present(
             z: 0,
             sheet: *sheet,
         });
-    }
-    if !debug.open
-        && let Some((sheet, widths)) = menu_font.as_ref()
-    {
-        let white = textures.len();
-        textures.push(Texture {
-            rgba: &debug_menu::WHITE,
-            size: [1, 1],
-            texel_scale: 1.,
-        });
-        draws.extend(enemy_target::draws(
-            &game,
-            &gallery,
-            &targeting,
-            white,
-            *sheet,
-            widths,
-            Some(enemy_target::SCAN_BIT),
-        ));
     }
     // The debug menu (F3) draws over everything.
     if debug.open
@@ -8653,31 +8813,85 @@ fn present(
 ) {
     let action = game.player.action;
     let started = game.action_started;
+    let previous = game.shown_action;
     if game.shown_action != Some((action, started)) {
         if game.shown_action.is_some() {
             game.blend_from = Some((game.display.clone(), game.display_hand, game.action_started));
+            game.blend_from_joints = std::mem::take(&mut game.display_joints);
         }
         game.shown_action = Some((action, started));
     }
     let frame = game.player.motion_frame(&game.clips) as usize;
     let clip = game.poses[&(action, game.player.armed)];
+    let skin = game.clip_poses[clip].skin.clone();
+    let target_joints: Option<Vec<data::motion_eval::World>> = {
+        let joints = &game.clip_poses[clip].joints;
+        joints
+            .get(frame.min(joints.len().saturating_sub(1)))
+            .cloned()
+    };
     let target = &game.clip_poses[clip].frames;
     let target = &target[frame.min(target.len() - 1)];
+    // Unattended runs log how far each switch of action moves the shown
+    // pose when it is not blended (the first frame of the new motion
+    // against the pose left behind).
+    let switched = if game.autoplay.is_some()
+        && let Some((from, _)) = previous
+        && previous != Some((action, started))
+        && game.display.len() == target.len()
+    {
+        let jump = target
+            .iter()
+            .zip(&game.display)
+            .map(|(a, b)| a.distance(*b))
+            .fold(0f32, f32::max);
+        Some((format!("{from:?}"), jump, game.display_frame))
+    } else {
+        None
+    };
     let mut display = target.clone();
     let weapons = &game.clip_poses[clip].weapon;
     let mut hand = Transform::from_matrix(weapons[frame.min(weapons.len() - 1)]);
     // Crossfade measured in simulation ticks (plus the fixed-step overstep),
-    // applied to the body and the Keyblade alike.
+    // applied to the body and the Keyblade alike. The reference starts a
+    // blend's clock at 2 and counts one tick before the first shown frame
+    // (FUN_1403c8a40, FUN_1403c6740), and takes durations of 2 or less as no
+    // blend; the weight is that clock over the duration.
+    let mut shown_joints = target_joints.clone().unwrap_or_default();
     if let Some((from, from_hand, start)) = &game.blend_from {
         let elapsed = (game.tick - start) as f32 + fixed.overstep_fraction();
         let blend = game.player.blend;
-        let weight = if blend > 0. {
-            (elapsed / blend).clamp(0., 1.)
+        let weight = if blend > 2. {
+            ((elapsed + 3.) / blend).clamp(0., 1.)
         } else {
             1.
         };
         if weight >= 1. {
             game.blend_from = None;
+            game.blend_from_joints.clear();
+        } else if let (Some(skin), Some(to)) = (&skin, &target_joints)
+            && game.blend_from_joints.len() == to.len()
+            && let Ok(pose) = {
+                shown_joints = data::motion_eval::blend_poses(
+                    &skin.parents,
+                    &game.blend_from_joints,
+                    to,
+                    weight,
+                );
+                skin.skinning.pose_from_worlds(&shown_joints)
+            }
+        {
+            // Joint by joint, as the reference blends (FUN_1401c3970): the
+            // body's joints turn between the two poses instead of the
+            // skinned points sliding past each other.
+            display = pose
+                .position_bits
+                .iter()
+                .map(|p| Vec3::from_array(p.map(f32::from_bits)))
+                .collect();
+            if let Some(m) = pose.matrix_bits.get(skin.weapon_joint) {
+                hand = Transform::from_matrix(Mat4::from_cols_array(&m.map(f32::from_bits)));
+            }
         } else {
             for (d, f) in display.iter_mut().zip(from) {
                 *d = f.lerp(*d, weight);
@@ -8687,8 +8901,10 @@ fn present(
                 rotation: from_hand.rotation.slerp(hand.rotation, weight),
                 scale: from_hand.scale.lerp(hand.scale, weight),
             };
+            shown_joints.clear();
         }
     }
+    game.display_joints = shown_joints;
     game.display_hand = hand;
     if let Ok((mut transform, mut visibility)) = hands.single_mut() {
         *transform = hand;
@@ -8707,7 +8923,29 @@ fn present(
             visual::room::update_positions(&mut mesh, positions);
         }
     }
+    if let Some((from, jump, from_frame)) = switched {
+        let (tick, blend) = (game.tick, game.player.blend);
+        game.event(serde_json::json!({"event":"pose_switch","tick":tick,"from":from,
+            "to":format!("{action:?}"),"jump":jump,"blend":blend,"from_frame":from_frame,"frame":frame}));
+    }
+    // Unattended runs log every sudden change of the shown pose, with the
+    // action, its frame and the blend, to find abrupt motion ends.
+    if game.autoplay.is_some() && game.display.len() == display.len() {
+        let jump = display
+            .iter()
+            .zip(&game.display)
+            .map(|(a, b)| a.distance(*b))
+            .fold(0f32, f32::max);
+        if jump > POSE_JUMP_LOG {
+            let (tick, frame, blend) = (game.tick, frame, game.player.blend);
+            game.event(
+                serde_json::json!({"event":"pose_jump","tick":tick,"action":format!("{action:?}"),
+                "frame":frame,"jump":jump,"blend":blend}),
+            );
+        }
+    }
     game.display = display;
+    game.display_frame = frame;
     // The Keyblade's own motion (key chain and blade) at the same frame.
     let weapon_frames = &game.clip_poses[clip].weapon_frames;
     if !weapon_frames.is_empty() {
@@ -10187,6 +10425,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut journal_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
+    // Capture ticks replacing the unattended run's own list (research).
+    let mut capture_at: Option<Vec<u64>> = None;
     let mut options = args[3..].iter();
     while let Some(option) = options.next() {
         match option.to_str() {
@@ -10208,6 +10448,17 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 )
             }
             Some("--autoplay") if autoplay.is_none() => autoplay = options.next().cloned(),
+            Some("--capture-at") if capture_at.is_none() => {
+                capture_at = Some(
+                    options
+                        .next()
+                        .and_then(|v| v.to_str())
+                        .ok_or("capture ticks absent")?
+                        .split(',')
+                        .map(str::parse)
+                        .collect::<Result<_, _>>()?,
+                )
+            }
             Some("--enemy-tour") if autoplay.is_none() => {
                 enemy_tour = true;
                 autoplay = Some(
@@ -10456,7 +10707,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 if talk_room {
                     AUTOPLAY_TALK_CAPTURES.to_vec()
                 } else {
-                    AUTOPLAY_CAPTURES.to_vec()
+                    capture_at
+                        .clone()
+                        .unwrap_or_else(|| AUTOPLAY_CAPTURES.to_vec())
                 }
             })
     };
@@ -10478,6 +10731,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         tour.as_ref().map_or(
             if talk_room {
                 AUTOPLAY_TALK_END
+            } else if let Some(last) = capture_at.as_ref().and_then(|c| c.last()) {
+                last + 2
             } else {
                 AUTOPLAY_END
             },
@@ -10525,6 +10780,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         poses,
         clip_poses: loaded.kit.clip_poses,
         part_indices: Vec::new(),
+        display_frame: 0,
         tick: 0,
         log,
         limit,
@@ -10590,6 +10846,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         enemy: None,
         display: Vec::new(),
         blend_from: None,
+        display_joints: Vec::new(),
+        blend_from_joints: Vec::new(),
         display_hand: Transform::IDENTITY,
         weapon_indices: Vec::new(),
         weapon2_indices: Vec::new(),
@@ -10866,12 +11124,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         pending_turn: 0.,
         recenter_queued: false,
         collision_hits: 0,
-        collision: loaded
-            .room
-            .camera_triangles
-            .iter()
-            .map(|t| t.map(|p| to_world(p.to_array())))
-            .collect(),
+        collision: CameraCollision::new(&loaded.room),
     };
     eprintln!(
         "Test room ready (the original PC bindings). WASD moves (Left Alt walks), Space/Backspace jump, Enter/left-click decides (Attack), Up/Down choose a command, right-click/Right Shift guards, F/Right Ctrl reacts (Talk), M opens the menu, the mouse turns the camera, middle-click/Right Alt recentres, F3 opens the debug menu, Esc exits."
