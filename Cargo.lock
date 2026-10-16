@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "area"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "data",
 ]
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "audio"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "autocfg"
@@ -1466,7 +1466,7 @@ dependencies = [
 
 [[package]]
 name = "collision"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "data",
 ]
@@ -1687,7 +1687,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "data"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -1794,7 +1794,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "effect"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "data",
 ]
@@ -1883,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "event"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "data",
 ]
@@ -2549,7 +2549,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "main"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "area",
  "audio",
@@ -3253,7 +3253,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "player"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "png"
@@ -3807,7 +3807,7 @@ dependencies = [
 
 [[package]]
 name = "skate_source"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "slab"
@@ -4170,7 +4170,7 @@ dependencies = [
 
 [[package]]
 name = "validation"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -4208,7 +4208,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visual"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "audio",
  "bevy",

@@ -11,6 +11,11 @@ and [unknowns](docs/unknowns.md).
 Start with the [folder guide](docs/folder-guide.md) for examples of common edits,
 a glossary and the old-to-new name table.
 
+Game rules, presentation, the launcher and the data readers that feed them sit
+together under `source/`. `validation/` stays separate: it checks the selected
+installation, and every gameplay session runs it first. The effect crate lives
+inside the visual folder because it draws what the game produces.
+
 | Folder | What belongs here | Cargo package |
 |---|---|---|
 | `source/main/` | Launcher, application startup, playable scene assembly and developer programs | `main` |
@@ -58,7 +63,7 @@ rewriting another collection game. The `skate3` feature remains opt-in for Cargo
 
 ## Current limitations
 
-This move preserves behavior and existing unfinished boundaries. The visual
+This layout preserves behavior and existing unfinished boundaries. The visual
 package still contains menu/title state and input adapters. The main package
 still assembles gameplay and rendering in the development room, and current enemy
 controllers still share the player package. Future behavior work should extract
