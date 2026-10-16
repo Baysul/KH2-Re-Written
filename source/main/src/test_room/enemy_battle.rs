@@ -210,6 +210,13 @@ impl Brain {
             a.mark_attack_hit(slot);
         }
     }
+    /// The effects a script brain started this frame (none for other brains).
+    pub fn take_script_effects(&mut self) -> Vec<super::enemy_script::ScriptEffect> {
+        match self {
+            Self::Script(a) => std::mem::take(&mut a.effects),
+            _ => Vec::new(),
+        }
+    }
     pub fn follow_capture(&mut self, volumes: &[player::magic::Volume]) {
         if let Self::Shadow(a) = self
             && let Some(h) = a.held
@@ -793,6 +800,23 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
                     actor.error = Some(e)
                 }
                 super::enemy_motion_fx::scan(&mut game, actor);
+                if let Some(battle) = actor.battle.as_mut() {
+                    let object = battle.assets.object_id;
+                    for e in battle.brain.take_script_effects() {
+                        game.effect_queue.push(match e.at {
+                            Some(at) => super::EffectRequest::ActorElementAt {
+                                object,
+                                id: e.id,
+                                at: Vec3::from_array(at),
+                            },
+                            None => super::EffectRequest::ActorElement {
+                                object,
+                                actor: actor.id,
+                                id: e.id,
+                            },
+                        });
+                    }
+                }
             }
             Err(e) => {
                 battle.error = Some(e.clone());

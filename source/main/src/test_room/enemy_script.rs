@@ -72,6 +72,14 @@ pub struct ScriptAttack {
     pub radius: f32,
 }
 
+/// An effect a script started: element `id` of the enemy's own container.
+#[derive(Clone, Copy, Debug)]
+pub struct ScriptEffect {
+    pub id: u16,
+    /// Where it was placed (`obj_effect_start_pos`); `None` follows the enemy.
+    pub at: Option<Vec3>,
+}
+
 pub struct ScriptBrain {
     world: EnemyWorld,
     object: Object,
@@ -83,6 +91,12 @@ pub struct ScriptBrain {
     pub player_yaw: f32,
     /// Faults the interpreter or a missing trap reported, for the host log.
     pub fault: Option<String>,
+    /// Effects the script started since the host last took them.
+    pub effects: Vec<ScriptEffect>,
+    /// Voice lines the script asked for (id, argument), for the host log.
+    pub voices: Vec<(i32, i32)>,
+    /// Names of the engine services the script called that are not translated.
+    pub unsupported: std::collections::BTreeSet<&'static str>,
 }
 
 fn script_payload(source: &ProbeSource, model: &str) -> Result<Vec<u8>, String> {
@@ -123,6 +137,9 @@ impl ScriptBrain {
             player: position,
             player_yaw: 0.,
             fault: None,
+            effects: Vec::new(),
+            voices: Vec::new(),
+            unsupported: Default::default(),
         };
         brain.build(position, yaw, stats, sstm, &mut ScriptRandom::default())?;
         Ok(brain)
@@ -165,6 +182,7 @@ impl ScriptBrain {
         };
         self.object.tick(&mut self.world, &env);
         self.world.tick_attacks();
+        self.drain_events();
         if self.object.sys.gone {
             self.world.attacks.clear();
         }
@@ -202,6 +220,34 @@ impl ScriptBrain {
     pub fn mark_attack_hit(&mut self, slot: usize) {
         if let Some(Some(a)) = self.world.attacks.get_mut(slot) {
             a.mark_hit(enemy::attack::flag::STRUCK);
+        }
+    }
+
+    /// Sort the engine's events into what the host plays and what it only
+    /// reports; the list never grows past one frame.
+    fn drain_events(&mut self) {
+        use enemy::world::Event;
+        for event in std::mem::take(&mut self.world.events) {
+            match event {
+                Event::EffectStart {
+                    effect, position, ..
+                } => {
+                    if let Ok(id) = u16::try_from(effect) {
+                        self.effects.push(ScriptEffect { id, at: position });
+                    }
+                }
+                Event::Voice { id, arg, .. } => self.voices.push((id, arg)),
+                Event::Unsupported(name) => {
+                    self.unsupported.insert(name);
+                }
+                Event::Presentation { name, .. } => {
+                    self.unsupported.insert(name);
+                }
+                Event::MagicStart { .. } => {
+                    self.unsupported.insert("magic_start_thread");
+                }
+                _ => {}
+            }
         }
     }
 
