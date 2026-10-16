@@ -7,7 +7,7 @@
 //! OpenKH's 03system and 00objentry documentation; checked on the install by
 //! the Kingdom Key resolving to the room's own weapon model).
 use bevy::prelude::*;
-use data::{item_table, objentry::ObjectEntry};
+use data::{item_table, objentry::ObjectEntry, weapon_entry};
 use std::collections::HashMap;
 
 /// The ground below the board frame (scene units): Skate 3's deck frame
@@ -44,7 +44,7 @@ impl Keyblades {
             .iter()
             .find(|o| o.model_name == player.as_bytes())
             .ok_or("player object entry absent")?;
-        let set = went_set(went, player.neo_moveset as usize)?;
+        let set = weapon_entry::set(went, player.neo_moveset as usize)?;
         let mut by_item = HashMap::new();
         for item in item_table::read(items)?
             .iter()
@@ -53,10 +53,7 @@ impl Keyblades {
             // The id counts words from the set's start, the size word being
             // 0 (on the install the Kingdom Key then resolves to W_EX010,
             // the room's own weapon model).
-            let Some(&object_id) = (item.amount as usize)
-                .checked_sub(1)
-                .and_then(|i| set.get(i))
-            else {
+            let Some(object_id) = weapon_entry::object_id(&set, item.amount) else {
                 continue;
             };
             if let Some(o) = objects.iter().find(|o| o.object_id == object_id) {
@@ -90,39 +87,6 @@ impl Keyblades {
     pub fn model(&self, item: u16) -> Option<&str> {
         self.by_item.get(&item).map(String::as_str)
     }
-}
-
-fn word(bytes: &[u8], at: usize) -> Result<u32, Box<dyn std::error::Error>> {
-    Ok(u32::from_le_bytes(
-        bytes
-            .get(at..at + 4)
-            .ok_or("WENT entry out of range")?
-            .try_into()?,
-    ))
-}
-
-/// One WENT set: pointers (4-byte units) at the start, each to a set of
-/// `size` words, the first being `size` itself.
-fn went_set(went: &[u8], index: usize) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
-    let pointer = word(went, index * 4)? as usize;
-    // The pointer table ends where the first set begins.
-    let mut first = usize::MAX;
-    let mut i = 0;
-    while i < first && i < 4096 {
-        match word(went, i * 4)? as usize {
-            0 => {}
-            p => first = first.min(p),
-        }
-        i += 1;
-    }
-    if pointer == 0 || index >= first {
-        return Err("WENT set index outside the table".into());
-    }
-    let size = word(went, pointer * 4)? as usize;
-    if size == 0 || size > 4096 {
-        return Err("WENT set size out of range".into());
-    }
-    (1..size).map(|i| word(went, (pointer + i) * 4)).collect()
 }
 
 /// The principal axes of `points` (largest spread first), by power
@@ -210,20 +174,6 @@ pub fn deck_transform(points: &[Vec3]) -> (Transform, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn le(words: &[u32]) -> Vec<u8> {
-        words.iter().flat_map(|w| w.to_le_bytes()).collect()
-    }
-
-    #[test]
-    fn went_sets_follow_their_pointers() {
-        // Two pointers (the second repeats the first), then one set of
-        // size 3 holding object ids 103 and 104.
-        let went = le(&[2, 2, 3, 103, 104]);
-        assert_eq!(went_set(&went, 0).unwrap(), [103, 104]);
-        assert_eq!(went_set(&went, 1).unwrap(), [103, 104]);
-        assert!(went_set(&went, 2).is_err());
-    }
 
     #[test]
     fn the_key_end_points_forward_along_the_board() {

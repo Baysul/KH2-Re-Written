@@ -941,6 +941,7 @@ mod tests {
             mega_model: HashMap::new(),
             vertex_override: None,
             ribbons: HashMap::new(),
+            shipoly: HashMap::new(),
             thunder: HashMap::new(),
             serial: 1,
             parent: None,
@@ -993,6 +994,7 @@ mod tests {
                     unsupported: &mut unsupported,
                     catch_up: false,
                     flags: &mut [0; 3],
+                    trail: None,
                 };
                 if first {
                     create(&p, part, &mut ctx);

@@ -529,6 +529,7 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
                 uv,
                 colour: colour(alpha),
                 blend,
+                corner_colours: None,
                 tbp: (tex0 & 0x3fff) as u16,
                 tex0,
             });

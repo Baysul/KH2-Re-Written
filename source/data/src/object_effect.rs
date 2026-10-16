@@ -42,6 +42,21 @@ pub struct Element {
     pub translation: [f32; 3],
     pub rotation: [f32; 3],
     pub scale: [f32; 3],
+    /// +0x40: the pair of points a swing trail follows (flag 0x10000).
+    pub bone_pos: BonePos,
+}
+
+/// Element +0x40: two points on bones, each `ratio` along its bone
+/// (FUN_1402c5f70 builds them with FUN_1403b54f0 every frame).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BonePos {
+    pub bone_a: u16,
+    pub bone_b: u16,
+    pub ratio_a: f32,
+    pub ratio_b: f32,
+    /// +0x4c: the end-fold flag (FUN_1402c5f70 folds the points through
+    /// the element's own translation when set).
+    pub adjust: u8,
 }
 
 /// A DPX record: which DPD and PDATA play for an effect number.
@@ -121,6 +136,15 @@ pub fn read_pax(bytes: &[u8]) -> io::Result<Pax> {
             translation: v3(o + 0x1c)?,
             rotation: v3(o + 0x28)?,
             scale: v3(o + 0x34)?,
+            bone_pos: BonePos {
+                bone_a: i16_at(bytes, o + 0x40)? as u16,
+                bone_b: i16_at(bytes, o + 0x42)? as u16,
+                ratio_a: f32_at(bytes, o + 0x44)?,
+                ratio_b: f32_at(bytes, o + 0x48)?,
+                adjust: *bytes
+                    .get(o + 0x4c)
+                    .ok_or_else(|| invalid("PAX truncated"))?,
+            },
         });
     }
     let x = bytes.get(dpx..).ok_or_else(|| invalid("PAX DPX offset"))?;

@@ -24,6 +24,31 @@ pub struct FxRequest {
     pub owner: u8,
 }
 
+/// Where an element starts, when it is not Sora's own.
+pub enum Anchor {
+    /// Sora's own object (his bones, for bound elements).
+    Sora,
+    /// A fixed place in scene coordinates, turned by the hit direction
+    /// (FUN_1403d1b40: translation = contact, rotation = pitch, yaw, 0;
+    /// the element's scale stays).
+    World { at: Vec3, pitch: f32, yaw: f32 },
+    /// The room enemy's object: a bound element follows it.
+    Enemy,
+    /// One element of the map's own container, by table index, placed by
+    /// its own translation, rotation and scale in engine world space
+    /// (FUN_1402c7010); it belongs to the element's background group.
+    Map { index: usize },
+    /// The equipped weapon: a trail element (BonePos pair) follows the
+    /// blade bone.
+    Weapon,
+}
+
+/// A start request that names its anchor (Sora's own use [`FxRequest`]).
+pub struct Placed {
+    pub req: FxRequest,
+    pub anchor: Anchor,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct TexKey {
     dpd: usize,
@@ -75,6 +100,14 @@ struct Running {
     dpd: Arc<Dpd>,
     bind: Option<Bind>,
     owner: u8,
+    /// The element, when it follows the room enemy's object.
+    enemy_element: Option<object_effect::Element>,
+    /// The BonePos pair a swing trail follows on the weapon's blade bone.
+    trail: Option<object_effect::BonePos>,
+    /// The background group a map element belongs to.
+    group: Option<u8>,
+    /// The element's sound, stopped with the element (map beds loop).
+    sound_id: Option<u32>,
     /// The element's sound (sound > 0) and the ticks until it plays: it
     /// starts with the element, after its start wait.
     sound: Option<u32>,
@@ -154,9 +187,37 @@ fn bound_world(root: Mat4, bones: Option<&HashMap<usize, Mat4>>, bind: &Bind) ->
 /// One tick: start the queued elements, follow Sora, step every instance
 /// and batch what it drew.
 pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>) {
-    let Some(d) = game.drive.as_mut() else { return };
-    let requests = std::mem::take(&mut d.fx_requests);
-    let swapped = d.fx_owner_left.take();
+    let mut requests: Vec<Placed> = std::mem::take(&mut game.fx_queue);
+    let mut swapped = None;
+    if let Some(d) = game.drive.as_mut() {
+        requests.extend(
+            std::mem::take(&mut d.fx_requests)
+                .into_iter()
+                .map(|req| Placed {
+                    req,
+                    anchor: Anchor::Sora,
+                }),
+        );
+        swapped = d.fx_owner_left.take();
+    }
+    let enemy_at = game
+        .enemy
+        .as_ref()
+        .map(|rt| (rt.enemy.position, rt.enemy.yaw));
+    // Map elements leave with their background group (FUN_1402c65a0).
+    for group in std::mem::take(&mut game.fx_clear_map) {
+        for r in fx
+            .running
+            .iter()
+            .filter(|r| r.group.is_some() && group.is_none_or(|g| r.group == Some(g)))
+        {
+            if let Some(id) = r.sound_id {
+                game.sound_stops.push(id);
+            }
+        }
+        fx.running
+            .retain(|r| !(r.group.is_some() && group.is_none_or(|g| r.group == Some(g))));
+    }
     let (root, bones) = sora_pose(&game);
     let mut sounds = Vec::new();
     let mut log = Vec::new();
@@ -181,24 +242,62 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
             r.instance.fade_out(15.);
         }
     }
-    for req in requests {
-        let Some(element) = req.pax.by_id(req.id) else {
+    for Placed { req, anchor } in requests {
+        let element = match anchor {
+            Anchor::Map { index } => req.pax.elements.get(index),
+            _ => req.pax.by_id(req.id),
+        };
+        let Some(element) = element else {
             continue;
         };
         let Some(dpx) = req.pax.effect(element.effect_number) else {
             continue;
         };
         let local = ::effect::instance_matrix(element.translation, element.rotation, element.scale);
-        let bind = (element.flags & 1 != 0).then_some(Bind {
-            bone: element.bone,
-            local,
-        });
-        let world = match &bind {
-            Some(b) => bound_world(root, bones, b),
-            None => ::effect::math::mul(&to_game(root), &local),
+        let mut enemy_element = None;
+        let (bind, world) = match anchor {
+            Anchor::Sora => {
+                let bind = (element.flags & 1 != 0).then_some(Bind {
+                    bone: element.bone,
+                    local,
+                });
+                let world = match &bind {
+                    Some(b) => bound_world(root, bones, b),
+                    None => ::effect::math::mul(&to_game(root), &local),
+                };
+                (bind, world)
+            }
+            Anchor::Map { .. } => (None, local),
+            Anchor::Weapon => (None, ::effect::math::IDENTITY),
+            Anchor::World { at, pitch, yaw } => (
+                None,
+                ::effect::instance_matrix(to_world(at.to_array()), [pitch, yaw, 0.], element.scale),
+            ),
+            Anchor::Enemy => {
+                let Some((position, yaw)) = enemy_at else {
+                    continue;
+                };
+                if element.flags & 1 != 0 {
+                    enemy_element = Some(element.clone());
+                    (None, super::bound_world(position, yaw, element))
+                } else {
+                    (
+                        None,
+                        ::effect::math::mul(
+                            &::effect::instance_matrix(to_world(position), [0., -yaw, 0.], [1.; 3]),
+                            &local,
+                        ),
+                    )
+                }
+            }
         };
         // A bound element waits one extra tick (DAT_1406239f8, 0.1).
-        let wait = element.start_wait + if bind.is_some() { 0.1 } else { 0. };
+        let wait = element.start_wait
+            + if bind.is_some() || enemy_element.is_some() {
+                0.1
+            } else {
+                0.
+            };
         let dpd = req.pax.dpds[dpx.dpd].clone();
         // A sound plays only for sound > 0 (the element's SE id), at the
         // element's start: now when it has no wait.
@@ -219,6 +318,11 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
                 dpd,
                 bind,
                 owner: req.owner,
+                enemy_element,
+                trail: (matches!(anchor, Anchor::Weapon) && element.flags & 0x10000 != 0)
+                    .then_some(element.bone_pos),
+                group: matches!(anchor, Anchor::Map { .. }).then_some(element.group),
+                sound_id: sound.filter(|_| matches!(anchor, Anchor::Map { .. })),
                 sound: sound.filter(|_| wait > 0.),
                 sound_wait: wait,
             });
@@ -243,6 +347,12 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
     for r in fx.running.iter_mut() {
         if let Some(b) = &r.bind {
             r.instance.world = bound_world(root, bones, b);
+        }
+        if let (Some(element), Some((position, yaw))) = (&r.enemy_element, enemy_at) {
+            r.instance.world = super::bound_world(position, yaw, element);
+        }
+        if let Some(bone) = &r.trail {
+            r.instance.trail = super::weapon_trail::points(&game, bone);
         }
         let q = r.instance.frame(&view, &mut fx.rng);
         for &k in &r.instance.unsupported {
@@ -291,13 +401,16 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
                     layer,
                 })
                 .or_default();
-            let colour = [
-                q.colour[0].clamp(0., 1.99).powf(2.2),
-                q.colour[1].clamp(0., 1.99).powf(2.2),
-                q.colour[2].clamp(0., 1.99).powf(2.2),
-                q.colour[3].clamp(0., 1.),
-            ];
+            let grade = |c: [f32; 4]| {
+                [
+                    c[0].clamp(0., 1.99).powf(2.2),
+                    c[1].clamp(0., 1.99).powf(2.2),
+                    c[2].clamp(0., 1.99).powf(2.2),
+                    c[3].clamp(0., 1.),
+                ]
+            };
             for i in [0, 1, 2, 0, 2, 3] {
+                let colour = grade(q.corner_colours.map_or(q.colour, |c| c[i]));
                 batch.positions.push(scene(q.corners[i]));
                 batch
                     .uvs

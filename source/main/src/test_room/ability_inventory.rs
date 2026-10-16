@@ -18,6 +18,9 @@ pub struct Tour {
     pub close: u64,
     pub end: u64,
     pub expected_slots: Vec<u16>,
+    /// Ticks the field's Attack button is pressed (the gear tour swings the
+    /// new Keyblade).
+    pub attacks: Vec<u64>,
 }
 
 impl Tour {
@@ -26,6 +29,7 @@ impl Tour {
             slots: inventory.slots.clone(),
             ap_max: inventory.ap,
             weapon_ability: 0,
+            form_weapon_abilities: Vec::new(),
         };
         let entries = pause_menu::abilities::entries(table, &member);
         let mut inputs = vec![(40, 2), (100, 0x20), (140, 4), (200, 4)];
@@ -74,6 +78,7 @@ impl Tour {
             close,
             end: close + 200,
             expected_slots,
+            attacks: Vec::new(),
         }
     }
 

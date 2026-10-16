@@ -78,6 +78,24 @@ pub struct ItemStats {
     pub defense: u8,
     pub ap: u8,
     pub resists: [u8; 4],
+    /// The physical, neutral and general resistance bytes (+8, +0xd, +0xe)
+    /// the info rows leave out but the status totals multiply in.
+    pub other_resists: [u8; 3],
+}
+
+impl ItemStats {
+    /// The row FUN_1403c1190 adds to a member's totals.
+    fn row(&self) -> player::equipment_stats::Row {
+        let [fire, blizzard, thunder, dark] = self.resists;
+        let [physical, neutral, general] = self.other_resists;
+        player::equipment_stats::Row {
+            strength: self.strength,
+            magic: self.magic,
+            defense: self.defense,
+            ap: self.ap,
+            resist: [physical, fire, blizzard, thunder, dark, neutral, general],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -85,6 +103,8 @@ pub struct EquipTexts {
     /// 0x845b Weapons, 0x845d Valor, 0x8463 Armor, 0x8465 Accessories,
     /// 0x8467 Items.
     pub sections: [Vec<u8>; 5],
+    /// 0x845d Valor, 0x845f Master, 0x8461 Final: the form weapons' labels.
+    pub form_labels: [Vec<u8>; 3],
     /// 0x8449 "None", 0x844a "There are no items.".
     pub none: Vec<u8>,
     pub no_items: Vec<u8>,
@@ -102,6 +122,12 @@ pub struct EquipTexts {
 pub struct EquipData {
     pub stats: Vec<ItemStats>,
     pub totals: Vec<Totals>,
+    /// Each member's totals before any equipment (the level row and the
+    /// record's bonuses, resists 100), to rebuild `totals` as items change.
+    pub bases: Vec<player::equipment_stats::Totals>,
+    /// The Drive form weapon (item id, 0 = none) counted into each member's
+    /// totals while a form is active.
+    pub form_weapons: Vec<u16>,
     pub texts: EquipTexts,
 }
 
@@ -228,6 +254,16 @@ impl Camp {
             count: u8::from(e.weapon != 0),
             alt: false,
         }];
+        // FUN_14034c4b0 section 1: the form weapons of the owned forms.
+        for (j, &id) in e.forms.iter().enumerate() {
+            out.push(Slot {
+                sec: 1,
+                j,
+                id,
+                count: u8::from(id != 0),
+                alt: false,
+            });
+        }
         for (sec, ids) in [(2, &e.armor), (3, &e.accessories)] {
             for (j, &id) in ids.iter().enumerate() {
                 out.push(Slot {
@@ -251,6 +287,31 @@ impl Camp {
             });
         }
         out
+    }
+
+    /// The section label of a slot: a form weapon takes its form's name
+    /// (0x845d Valor, 0x845f Master, 0x8461 Final).
+    fn section_label(&self, s: &Slot) -> Vec<u8> {
+        let texts = &self.data.equip.texts;
+        if s.sec == 1 {
+            let form = self
+                .data
+                .items
+                .equipment
+                .get(self.member())
+                .and_then(|e| e.form_ids.get(s.j))
+                .copied();
+            let at = match form {
+                Some(1) => 0,
+                Some(4) => 1,
+                Some(5) => 2,
+                _ => return texts.sections[1].clone(),
+            };
+            if !texts.form_labels[at].is_empty() {
+                return texts.form_labels[at].clone();
+            }
+        }
+        texts.sections[s.sec].clone()
     }
 
     /// FUN_14034c1b0 (char mode): `09 g` + name; an empty slot `09 g`
@@ -413,7 +474,7 @@ impl Camp {
             if s.j == 0 || s.sec == 1 {
                 let l = self.equip_ui.labels[v];
                 self.sprites.set(seq, l, LABEL[s.sec], None);
-                self.set_text(l, self.data.equip.texts.sections[s.sec].clone());
+                self.set_text(l, self.section_label(s));
             }
             self.sprites
                 .set(seq, self.equip_ui.rows[v], ROW[s.sec], None);
@@ -788,7 +849,7 @@ impl Camp {
                 Pick::Row(r) => {
                     self.memory.equip = memo;
                     let s = self.equip_ui.slots[r];
-                    self.pending_tab_text[2] = Some(self.data.equip.texts.sections[s.sec].clone());
+                    self.pending_tab_text[2] = Some(self.section_label(&s));
                     self.equip_ui.slot = r;
                     self.close_banner(seq);
                     self.hide_help(seq);
@@ -875,6 +936,7 @@ impl Camp {
             .table
             .iter()
             .filter(|r| wanted(r.kind))
+            .filter(|r| !(self.data.items.struggle_hidden && items::STRUGGLE.contains(&r.id)))
             .filter_map(|r| {
                 let n = self.data.items.counts.get(&r.id).copied().unwrap_or(0);
                 (n != 0).then_some((r.id, n))
@@ -1222,6 +1284,7 @@ impl Camp {
         if let Some(e) = self.data.items.equipment.get_mut(m) {
             let place: &mut u16 = match slot.sec {
                 0 => &mut e.weapon,
+                1 => &mut e.forms[slot.j],
                 2 => &mut e.armor[slot.j],
                 3 => &mut e.accessories[slot.j],
                 _ => &mut e.items[slot.j],
@@ -1259,6 +1322,58 @@ impl Camp {
             if let Some(n) = self.data.items.counts.get_mut(&id) {
                 *n = n.saturating_sub(1);
             }
+        }
+        self.refresh_totals();
+    }
+
+    /// FUN_1402fc760 after an equip: the member's totals and weapon ability
+    /// follow the equipment (FUN_1403c1d90).
+    fn refresh_totals(&mut self) {
+        let m = self.member();
+        let Some(base) = self.data.equip.bases.get(m).copied() else {
+            return;
+        };
+        let Some(e) = self.data.items.equipment.get(m) else {
+            return;
+        };
+        let form = self.data.equip.form_weapons.get(m).copied();
+        let ids: Vec<u16> = [e.weapon, e.secondary_weapon]
+            .into_iter()
+            .chain(form)
+            .chain(e.armor.iter().copied())
+            .chain(e.accessories.iter().copied())
+            .collect();
+        let weapon = e.weapon;
+        let rows: Vec<_> = ids
+            .iter()
+            .filter_map(|&id| self.item_stats(id))
+            .map(|s| s.row())
+            .collect();
+        let t = player::equipment_stats::totals(base, rows);
+        if let Some(slot) = self.data.equip.totals.get_mut(m) {
+            *slot = Totals {
+                ap: i32::from(t.ap),
+                strength: i32::from(t.strength),
+                magic: i32::from(t.magic),
+                defense: i32::from(t.defense),
+                resists: [t.resist[1], t.resist[2], t.resist[3], t.resist[4]],
+            };
+        }
+        let ability = self.item_stats(weapon).map_or(0, |s| s.ability);
+        let form_abilities: Vec<u16> = self
+            .data
+            .items
+            .equipment
+            .get(m)
+            .map(|e| e.forms.clone())
+            .unwrap_or_default()
+            .iter()
+            .map(|&id| self.item_stats(id).map_or(0, |s| s.ability))
+            .collect();
+        if let Some(a) = self.data.abilities.members.get_mut(m) {
+            a.ap_max = i32::from(t.ap);
+            a.weapon_ability = ability;
+            a.form_weapon_abilities = form_abilities;
         }
     }
 
