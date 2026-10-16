@@ -19,3 +19,10 @@ Owner Claude, 2026-10-16, requested by burba in the project thread. Gates P12/P1
 Still differing: per-Keyblade swing/hit sound bank (500xxx id remap, FUN_1403dadf0) is not ported; Keyblade-specific object effects (`W_EX010_*.a.us`) are not drawn; form-weapon stats count only while that form is active; slot counts and ownership are development choices; Donald/Goofy equipment untouched; ability consumers for Form Boost, Drive Boost, Item Boost not re-verified here.
 
 Verdict: PROGRESS. Next: sound bank and weapon effects, paired captures.
+
+## Follow-up (same day)
+
+- Form Boost, Drive Boost and Item Boost: the Rust consumers match the earlier exe traces (Drive Boost +0.2 on drive gain, Form Boost ×0.8 on the form drain, Item Boost +50% on item heals). No change.
+- Sound bank: the 27 Keyblade object entries are byte-identical except the object id (`probe-03`), so no per-Keyblade bank exists in the entries; nothing to port from them.
+- Keyblade effects: every Keyblade has an `obj/<model>.a.us`. A kit built for a Keyblade now carries that file, and the swing trail and hit sparks use it after the swap; the trail length is recalibrated per Keyblade. Verified by a quick tour (swap and totals pass); visual comparison NOT RUN.
+- Not done: Donald and Goofy equipment.

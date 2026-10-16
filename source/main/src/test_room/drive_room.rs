@@ -304,6 +304,10 @@ impl FormSources {
             Ok((models.remove(0), blade))
         };
         let (weapon, blade0) = load_weapon(weapons.main)?;
+        // The Keyblade's own effects (swing trail, hit sparks).
+        let weapon_pax = keyblades
+            .model(weapons.main)
+            .and_then(|m| object_pax(&mut Library::open(source).ok()?, m));
         // FUN_1403ef750: each weapon slot's motion set is `obj/%s.mset` of
         // wmst row set × 2 + slot; an empty name (Antiform) leaves the
         // weapon without motions and unattached.
@@ -363,6 +367,7 @@ impl FormSources {
                 weapon,
                 weapon2,
                 blades: [blade0, blade1],
+                weapon_pax,
                 weapon_joint: self.weapon_joint,
                 second_joint,
                 motion_set,
@@ -443,6 +448,8 @@ struct Stash {
     attack: HashMap<u8, Vec<(usize, Vec3, f32)>>,
     /// The kit's two Keyblades' attack spheres.
     blade: [character_kit::Blade; 2],
+    /// Its slot 0 Keyblade's effects (None: the room's default).
+    weapon_pax: Option<Arc<data::object_effect::Pax>>,
 }
 
 /// Drive state of the session.
@@ -884,6 +891,7 @@ fn swap_kit(game: &mut Game, form: u8) -> Result<(), String> {
             }
             Stash {
                 blade: kit.blades,
+                weapon_pax: kit.weapon_pax.map(Arc::new),
                 target_shape: kit.target_shape,
                 params: kit.params,
                 clips: kit.clips,
@@ -914,7 +922,11 @@ fn swap_kit(game: &mut Game, form: u8) -> Result<(), String> {
         body,
         attack: std::mem::replace(&mut game.sora_attack, incoming.attack),
         blade,
+        weapon_pax: std::mem::replace(&mut game.weapon_pax, incoming.weapon_pax),
     };
+    game.weapon_pax_changed = true;
+    // The trail's length follows the new Keyblade's size.
+    game.trail_length = None;
     // The new kit's attack rows (ATKP by id, sub-table 0) for the hits.
     if let Some(rt) = game.enemy.as_mut() {
         let ids: Vec<u16> = game

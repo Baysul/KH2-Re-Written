@@ -905,6 +905,10 @@ struct Game {
     weapon_indices: Vec<Vec<u32>>,
     /// The same for slot 1's Keyblade (the form's own).
     weapon2_indices: Vec<Vec<u32>>,
+    /// The equipped Keyblade's own effects once a kit was built for it (None:
+    /// the room's default), and whether the effect sources must take it.
+    weapon_pax: Option<Arc<object_effect::Pax>>,
+    weapon_pax_changed: bool,
     weapon_display: Vec<Vec3>,
     shown_action: Option<(Action, u64)>,
     action_started: u64,
@@ -2735,6 +2739,7 @@ fn load(
             weapon,
             weapon2: None,
             blades: Default::default(),
+            weapon_pax: None,
             weapon_joint,
             second_joint: None,
             motion_set: selection.clone(),
@@ -6157,6 +6162,11 @@ fn bound_world(
 /// and keeps the quads they drew.
 fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effects>) {
     let tick = game.tick;
+    if std::mem::take(&mut game.weapon_pax_changed)
+        && let Some(pax) = game.weapon_pax.clone()
+    {
+        fx.weapon = Some(pax);
+    }
     weapon_trail::tick(&mut game, fx.weapon.as_ref());
     let view = game_view(rig.camera.eye, rig.camera.look_at);
     for request in std::mem::take(&mut game.effect_queue) {
@@ -10361,6 +10371,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         display_hand: Transform::IDENTITY,
         weapon_indices: Vec::new(),
         weapon2_indices: Vec::new(),
+        weapon_pax: None,
+        weapon_pax_changed: false,
         weapon_display: Vec::new(),
         shown_action: None,
         action_started: 0,
