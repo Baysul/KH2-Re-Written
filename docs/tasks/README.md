@@ -145,3 +145,4 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T162](T162-new-badges-items.md) | NEW! badges: the Items row, new items from pickups | PARTIAL. |
 | [T163](T163-npc-push-and-pop-fade.md) | Twilight Town townspeople: pop-in and pop-out fade, and the push | PARTIAL. |
 | [T164](T164-journal-limits-missions-minigames-story-synthesis.md) | Journal: Limits, Missions, Minigames, Story and Synthesis Notes pages | PARTIAL. |
+| [T165](T165-launcher-empty-data-folder-check.md) | Launcher: every test from an empty data folder | PARTIAL. |
