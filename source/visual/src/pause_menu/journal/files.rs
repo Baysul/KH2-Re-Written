@@ -89,7 +89,7 @@ fn list_state(detail: u8) -> u8 {
 }
 
 impl Journal {
-    fn world_unlocked(&self, w: u8) -> bool {
+    pub(super) fn world_unlocked(&self, w: u8) -> bool {
         if w > 0x0f {
             return true;
         }
@@ -101,7 +101,7 @@ impl Journal {
     }
 
     /// FUN_140326960(w, 1): the world's second name.
-    fn world_name2(&self, w: u8) -> Vec<u8> {
+    pub(super) fn world_name2(&self, w: u8) -> Vec<u8> {
         let Some(r) = self.data.worlds.iter().find(|r| r.world == w as i8) else {
             return Vec::new();
         };
@@ -118,7 +118,7 @@ impl Journal {
     }
 
     /// "?" per glyph, five in English (FUN_1403008d0).
-    fn locked_text() -> Vec<u8> {
+    pub(super) fn locked_text() -> Vec<u8> {
         vec![0x49; 5]
     }
 

@@ -34,7 +34,7 @@ Built:
 - Journal Characters, Links and Album pages with faces and photos; Character Files, Heartless and Nobodies lists and detail pages; Treasures and Maps grids; Ansem Reports list and reader; first-time tutorial notices; keyboard key-cap prompts (T093).
 
 Unfinished:
-- Journal: Story, Pieces, Missions, Minigames, Limits, Synthesis and Puzzles pages; the 3D model pages of Character Files; the "Slain" counts; scroll-bar thumbs.
+- Journal: the Pieces and Puzzles pages; the 3D model pages of Character Files; the "Slain" counts; scroll-bar thumbs. The Story, Missions, Minigames, Limits and Synthesis Notes pages are built (T164) but show only test values in the room.
 - Equip: form sub-weapons and the weapon-change list; status totals are not recomputed after equipping.
 - Customize and Party: party members' settings, locked members and world guests.
 - NEW! badges show on the Items row and the Stock list for items the room adds (T162); the other rows and lists, Load/Save and the item shop are not built.

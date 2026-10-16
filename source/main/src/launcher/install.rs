@@ -1003,4 +1003,44 @@ mod tests {
         .unwrap();
         assert!(combined_room_config(&arena, &talk).is_err());
     }
+
+    /// Starts every test of the list from an empty data folder against the
+    /// installed game (`KH2_TEST_FOLDER` = the Steam game folder): scans
+    /// it, makes the configs, then runs each program of the built
+    /// `KH2RW` (short unattended runs; the event player only loads).
+    /// `cargo build -p main` first; run with `-- --ignored`.
+    #[test]
+    #[ignore = "needs the installed game: set KH2_TEST_FOLDER"]
+    fn every_test_starts_from_an_empty_data_folder() {
+        let Some(folder) = std::env::var_os("KH2_TEST_FOLDER") else {
+            return;
+        };
+        let f = Fixture::new();
+        let data = f.0.join("data");
+        let bound = full_scan(&data, Path::new(&folder), &AtomicU64::new(0)).unwrap();
+        let exe = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join(if cfg!(windows) { "KH2RW.exe" } else { "KH2RW" });
+        assert!(
+            exe.is_file(),
+            "build the main binary first: {}",
+            exe.display()
+        );
+        for t in TESTS.iter() {
+            let mut args = test_args(&data, t.program, &bound).unwrap();
+            if t.program == "event" {
+                args.push("--load-only".into());
+            } else {
+                args.extend(["--frames".into(), "240".into()]);
+            }
+            let status = std::process::Command::new(&exe)
+                .args(&args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{} exited with {status}", t.name);
+        }
+    }
 }
