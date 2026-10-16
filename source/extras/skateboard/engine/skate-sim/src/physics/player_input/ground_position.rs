@@ -47,24 +47,3 @@ fn rotate(basis: &[[f32; 4]; 3], point: [f32; 4]) -> [f32; 4] {
         basis[2][i].mul_add(point[2], xy)
     })
 }
-
-#[cfg(any())]
-mod tests {
-    use super::*;
-    #[test]
-    fn minimum_height_is_measured_in_the_ground_frame() {
-        let ground = [
-            [0.0, 1.0, 0.0, 0.0],
-            [-1.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [99.0; 4],
-        ];
-        let wheels = [
-            [1.0, 2.0, 3.0, 0.0],
-            [2.0, 4.0, 5.0, 0.0],
-            [3.0, 6.0, 7.0, 0.0],
-            [4.0, 8.0, 9.0, 0.0],
-        ];
-        assert_eq!(wheel_ground_position(wheels, &ground), [4.0, 5.0, 6.0, 0.0]);
-    }
-}

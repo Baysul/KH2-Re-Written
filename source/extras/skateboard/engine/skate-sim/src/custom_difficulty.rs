@@ -392,46 +392,6 @@ pub(crate) fn load_collections(root: &Path) -> Result<Collections, String> {
 }
 
 #[cfg(any())]
-mod tests {
-    use super::*;
-    #[test]
-    fn invalid_custom_values_are_rejected() {
-        for v in [f32::NAN, -1., 2001.] {
-            let mut t = Tuning::default();
-            t.values.insert("MotorTopSpeed".into(), v);
-            assert!(t.validate().is_err());
-        }
-        let mut t = Tuning::default();
-        t.values.insert("MotorEnabled".into(), 0.5);
-        assert!(t.validate().is_err());
-    }
-    #[test]
-    fn custom_inherits_easy_without_changing_stock_or_assets() {
-        let mut data:Collections=serde_json::from_value(serde_json::json!({"version":1,"collections":[
-            {"class":"physics_mode","key":"easy","parent":"","source":"test","sha256":"","fields":{
-                "MotorEnabled":{"type":"EA::Reflection::Bool","data":"00"},
-                "MotorTopSpeed":{"type":"EA::Reflection::Float","data":"00000000"}}}
-        ]})).unwrap();
-        let mut t = Tuning::default();
-        t.values.insert("MotorTopSpeed".into(), 90.);
-        t.overlay(&mut data).unwrap();
-        assert_eq!(
-            data.float("physics_mode", "test", "MotorTopSpeed").unwrap(),
-            90.
-        );
-        assert!(
-            !data
-                .boolean("physics_mode", "test", "MotorEnabled")
-                .unwrap()
-        );
-        assert_eq!(
-            data.float("physics_mode", "easy", "MotorTopSpeed").unwrap(),
-            0.
-        );
-    }
-}
-
-#[cfg(any())]
 mod stock_tests {
     use super::*;
     #[test]
@@ -467,26 +427,5 @@ mod stock_tests {
                 o.label
             );
         }
-    }
-}
-
-#[cfg(any())]
-mod push_slider_tests {
-    use super::*;
-    #[test]
-    fn strength_adjustment_and_saved_values_round_trip() {
-        let i = OPTIONS
-            .iter()
-            .position(|o| o.key == "HostPushStrength")
-            .unwrap();
-        let mut t = Tuning::default();
-        t.values.insert("HostPushStrength".into(), 1.);
-        t.adjust(i, 1);
-        assert_eq!(t.value(i), 1.25);
-        t.set_fraction(i, 0.5);
-        assert_eq!(t.value(i), 50.);
-        let saved = serde_json::to_vec(&t).unwrap();
-        let loaded: Tuning = serde_json::from_slice(&saved).unwrap();
-        assert_eq!(loaded.value(i), 50.);
     }
 }

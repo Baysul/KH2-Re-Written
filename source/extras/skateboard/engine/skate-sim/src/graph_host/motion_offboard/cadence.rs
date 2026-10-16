@@ -6,9 +6,6 @@ use skate_core::animation::{
     skeleton_input::name::encode,
 };
 use skate_data::state_graph::attributes::Attributes;
-#[cfg(any())]
-#[path = "cadence/tests.rs"]
-mod tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Operation {

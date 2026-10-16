@@ -106,30 +106,3 @@ impl GroundLaunchInfo {
         self.wall_jump = true;
     }
 }
-
-#[cfg(any())]
-mod tests {
-    use super::*;
-    #[test]
-    fn wall_jump_selector_receives_launch_velocity_and_physical_anchors() {
-        let mut info = GroundLaunchInfo {
-            board_position: [1.0, 2.0, 3.0, 0.0],
-            physical_center_of_mass: [1.2, 3.0, 3.1, 0.0],
-            skeleton_vector_16208: [0.2, 0.8, 0.1, 0.0],
-            flags_270: 7,
-            time_step: 1.0 / 60.0,
-            ..Default::default()
-        };
-        let velocity = [2.0, 4.0, -3.0, 0.0];
-        info.wall_jump(velocity);
-        let launch = info.selector_launch();
-        assert!(launch.player_jumped);
-        assert!(!launch.use_position_override);
-        assert_eq!(launch.start_velocity, velocity);
-        assert_eq!(launch.com_velocity, velocity);
-        assert_eq!(launch.board_position, info.board_position);
-        assert_eq!(launch.animation_com_position, info.physical_center_of_mass);
-        assert_eq!(launch.skeleton_vector_160, info.skeleton_vector_16208);
-        assert_eq!(launch.trajectory_count, 7);
-    }
-}

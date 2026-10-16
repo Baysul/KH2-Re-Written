@@ -158,9 +158,6 @@ mod provider;
 mod spline;
 pub(crate) use provider::StaticProvider;
 
-#[cfg(any())]
-mod tests;
-
 pub(crate) fn spline_blob() -> Vec<u8> {
     spline::build_rails(&test_rails()).expect("authored course splines")
 }

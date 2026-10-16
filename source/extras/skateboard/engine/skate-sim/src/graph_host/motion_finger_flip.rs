@@ -56,32 +56,3 @@ impl State {
         settings.curve.evaluate(self.elapsed)
     }
 }
-
-#[cfg(any())]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finger_flip_release_regrab_bounds_and_reentry() {
-        let settings = Settings {
-            minimum: 0.0,
-            maximum: 0.5,
-            curve: PointGraph {
-                x: std::array::from_fn(|i| i as f32 / 14.0),
-                y: std::array::from_fn(|i| 1.0 - i as f32 / 7.0),
-            },
-        };
-        let mut state = State::default();
-        state.begin();
-        assert_eq!(state.update(true, 0.25, &settings), 1.0);
-        assert!((state.update(false, 0.125, &settings) - 0.75).abs() < 1e-6);
-        assert!((state.update(false, 0.125, &settings) - 0.5).abs() < 1e-6);
-        assert!((state.update(true, 0.125, &settings) - 0.75).abs() < 1e-6);
-        assert_eq!(state.update(false, 1.0, &settings), 0.0);
-        assert_eq!(state.update(false, 1.0, &settings), 0.0);
-        assert_eq!(state.elapsed, 0.5);
-        state.begin();
-        assert_eq!(state.elapsed, 0.0);
-        assert_eq!(state.update(true, 0.25, &settings), 1.0);
-    }
-}

@@ -18,9 +18,6 @@ use skate_core::{
 use skate_data::collections::Collections;
 pub(crate) mod runtime;
 
-#[cfg(any())]
-mod tests;
-
 pub(crate) struct Owner {
     pub state: native::State,
     settings: Settings,

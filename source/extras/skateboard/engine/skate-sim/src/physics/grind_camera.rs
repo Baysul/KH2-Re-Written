@@ -77,7 +77,3 @@ impl GrindCamera {
         // grinding_316 is produced by the physical selector; never inferred here.
     }
 }
-
-#[cfg(any())]
-#[path = "grind_camera/tests.rs"]
-mod tests;

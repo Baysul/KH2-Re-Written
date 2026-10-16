@@ -258,37 +258,6 @@ fn to_apex(start: V, end: V) -> Trajectory {
     arc_between(start, end, t)
 }
 
-#[cfg(any())]
-mod tests {
-    use super::*;
-    #[test]
-    fn stock_handplant_apex_is_above_coping_and_back_towards_ramp() {
-        let coping = [-7.0, 3.8850045, 5.5987973, 0.0];
-        let apex = apex_position(coping, [0.0, 0.0, 1.0, 0.0], 0.8, -0.3);
-        assert!((apex[1] - 4.649274).abs() < 0.00001);
-        assert!((apex[2] - 5.362381).abs() < 0.00001);
-        //Observed late attempt COM previously exceeded the incorrectly lowered
-        //apex. The original geometry admits a finite ascending trajectory.
-        let start = [-6.9291053, 3.925457, 4.9562364, 0.0];
-        let trajectory = to_apex(start, apex);
-        assert!(trajectory.velocity.iter().all(|v| v.is_finite()));
-        assert!(trajectory.duration > 0.0);
-        let end = trajectory.position_at(trajectory.duration);
-        for i in 0..3 {
-            assert!((end[i] - apex[i]).abs() < 0.00001);
-        }
-        assert!(trajectory.velocity_at(trajectory.duration)[1].abs() < 0.00001);
-    }
-    #[test]
-    fn apex_angle_zero_places_com_directly_above_lip_for_either_edge_direction() {
-        for direction in [-1.0, 1.0] {
-            let apex = apex_position([2.0, 3.0, 4.0, 0.0], [direction, 0.0, 0.0, 0.0], 0.8, 0.0);
-            assert!((apex[1] - 3.8).abs() < 0.00001);
-            assert!((apex[0] - 2.0).abs() < 0.00001);
-            assert!((apex[2] - 4.0).abs() < 0.00001);
-        }
-    }
-}
 fn from_apex(start: V, end: V) -> Trajectory {
     let t = ((-2.0 * GRAVITY[1]) * (start[1] - end[1])).sqrt() * reciprocal(-GRAVITY[1]);
     arc_between(start, end, t)

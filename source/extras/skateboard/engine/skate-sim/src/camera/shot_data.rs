@@ -214,52 +214,6 @@ impl ShotDatabase for StockShots {
     }
 }
 
-#[cfg(any())]
-mod tests {
-    use super::*;
-    use skate_core::camera::Shot;
-
-    #[test]
-    fn tuning_replaces_only_named_fields_in_retail_units() {
-        let stock = ShotDefinition {
-            name: "chase_flat_slow".into(),
-            shot_type: 0,
-            shot: Shot {
-                distance: 1.8,
-                position_elevation: 7.0 * RADIANS,
-                lens_length: 12.0,
-                ..Shot::new()
-            },
-            transition_time: 0.5,
-            transition_units: 0,
-            children: [None, None, None],
-            blend_points: [0.0; 3],
-            blend_value: 0.0,
-            blend_type: 0,
-            blend_smoothing: 0.0,
-        };
-        let mut shots = StockShots {
-            stock: BTreeMap::from([(stock.name.clone(), stock.clone())]),
-            tuned: BTreeMap::new(),
-        };
-        assert_eq!(shots.load("CHASE_FLAT_SLOW").unwrap(), stock);
-        let tuning = CameraShotTuning {
-            position_distance: Some(3.0),
-            position_elevation: Some(30.0),
-            ..Default::default()
-        };
-        shots.set_tunings([("chase_flat_slow", &tuning)].into_iter());
-        let tuned = shots.load("chase_flat_slow").unwrap();
-        assert_eq!(tuned.shot.distance, 3.0);
-        assert_eq!(tuned.shot.position_elevation, 30.0 * RADIANS);
-        assert_eq!(tuned.shot.lens_length, 12.0);
-        assert_eq!(tuned.transition_time, 0.5);
-        shots.set_tunings(std::iter::empty());
-        assert_eq!(shots.load("chase_flat_slow").unwrap(), stock);
-        assert!(shots.contains("Chase_Flat_Slow") && !shots.contains("made_up"));
-    }
-}
-
 fn has_field(data: &Collections, key: &str, name: &str) -> Result<bool, String> {
     let mut current = key;
     for _ in 0..=data.entries().len() {

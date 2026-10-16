@@ -163,38 +163,3 @@ pub(super) fn post_velocity(physics: &mut GamePhysics, skater: &SkaterRuntime) {
         ));
     }
 }
-
-#[cfg(any())]
-mod tests {
-    use super::*;
-    #[test]
-    fn grind_trick_latches_after_four_contact_free_updates_and_resets_on_enter() {
-        let mut s = GrindTrick::default();
-        for _ in 0..3 {
-            s.update_contact(0);
-            assert_eq!(s.wipeout_scale(), 2.0);
-        }
-        s.update_contact(0x4000);
-        for _ in 0..3 {
-            s.update_contact(0);
-            assert!(!s.released);
-        }
-        s.update_contact(0);
-        assert!(s.released);
-        assert_eq!(s.wipeout_scale(), 0.5);
-        s.update_contact(0x4000);
-        assert!(s.released);
-        s = GrindTrick::default();
-        assert_eq!(s.wipeout_scale(), 2.0);
-    }
-    #[test]
-    fn grind_trick_motion_preserves_velocity_perpendicular_to_authored_direction() {
-        let v = authored_velocity([10.0, -3.0, 4.0, 0.0], [2.0, 0.0, 0.0, 0.0]);
-        assert!((v[0] - 3.52).abs() < 0.00001);
-        assert_eq!(&v[1..3], &[-3.0, 4.0]);
-        assert_eq!(
-            authored_velocity([10.0, -3.0, 4.0, 0.0], [0.0; 4]),
-            [10.0, -3.0, 4.0, 0.0]
-        );
-    }
-}

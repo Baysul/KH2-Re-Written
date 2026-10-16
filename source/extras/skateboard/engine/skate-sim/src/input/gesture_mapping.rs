@@ -94,32 +94,3 @@ impl State {
         }
     }
 }
-
-#[cfg(any())]
-mod tests {
-    use super::*;
-    #[test]
-    fn tre_flip_uses_original_mirror_mapping_and_presence_not_strength() {
-        let mut ag = IntentMap::new();
-        ag.insert("360Flip", 0.0);
-        assert_eq!(select(Group::Square, &ag, false), Some("360Flip"));
-        assert_eq!(select(Group::Square, &ag, true), Some("Laserflip"));
-        ag.insert("DontMirrorTrick", 0.0);
-        assert_eq!(select(Group::Square, &ag, true), Some("360Flip"));
-    }
-    #[test]
-    fn first_update_retains_launch_intent_then_successor_is_cleaned_on_exit() {
-        let mut ag = IntentMap::new();
-        ag.insert("Kickflip", 1.0);
-        let mut mg = IntentMap::new();
-        let mut state = State::default();
-        state.begin(Group::Square, None, &ag, &mut mg, false);
-        state.update(&mut mg);
-        assert!(mg.contains_key("Kickflip"));
-        state.update(&mut mg);
-        assert!(!mg.contains_key("Kickflip"));
-        assert!(mg.contains_key("KickflipHold"));
-        state.end(&mut mg);
-        assert!(mg.is_empty());
-    }
-}

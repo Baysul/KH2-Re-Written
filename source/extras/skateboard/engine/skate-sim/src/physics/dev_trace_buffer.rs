@@ -50,32 +50,3 @@ impl Buffer {
         Some(lines)
     }
 }
-#[cfg(any())]
-mod tests {
-    use super::*;
-    #[test]
-    fn bounded_history_retains_order_and_first_failure() {
-        let mut b = Buffer::default();
-        for i in 0..200 {
-            b.tick(format!("tick={i}"));
-            b.stage(format!("stage={i}"));
-        }
-        let dump = b.freeze("bad root").unwrap();
-        assert_eq!(dump.len(), HISTORY + STAGES + 2);
-        assert_eq!(dump[1], "tick=80");
-        assert_eq!(dump[HISTORY + 1], "stage=168");
-        b.tick("later".into());
-        b.stage("later".into());
-        assert!(b.freeze("secondary error").is_none());
-        assert_eq!(b.history.back().unwrap(), "tick=199");
-    }
-    #[test]
-    fn unicode_and_newlines_cannot_break_report_records() {
-        let mut b = Buffer::default();
-        b.stage("é\n".repeat(4000));
-        let line = b.stages.front().unwrap();
-        assert!(line.len() < 4096);
-        assert!(!line.contains('\n'));
-        assert!(line.ends_with("[truncated]"));
-    }
-}

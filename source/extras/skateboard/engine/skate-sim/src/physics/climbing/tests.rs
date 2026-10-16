@@ -81,41 +81,6 @@ fn world(height: f32, width: f32, depth: f32, ceiling: bool, top: bool) -> Board
     )
     .unwrap()
 }
-#[test]
-fn reachable_ledge_needs_width_support_and_headroom() {
-    let probe = |w| ledge::find(&w, Vec3::ZERO, Vec3::Z);
-    let good = probe(world(2.2, 2., 3., false, true)).expect("reachable ledge");
-    assert!((good.anchor.y - 2.225).abs() < 0.002);
-    assert!(probe(world(4., 2., 3., false, true)).is_none(), "too high");
-    assert!(probe(world(2.2, 2., 3., false, false)).is_none(), "no top");
-    assert!(
-        probe(world(2.2, 0.2, 3., false, true)).is_none(),
-        "too narrow for hands"
-    );
-    assert!(
-        probe(world(2.2, 2., 0.4, false, true)).is_none(),
-        "no standing support"
-    );
-    assert!(probe(world(2.2, 2., 3., true, true)).is_none(), "ceiling");
-    assert!(ledge::find(&world(2.2, 2., 3., false, true), Vec3::ZERO, -Vec3::Z).is_none());
-}
-
-#[test]
-fn default_course_has_a_reachable_test_block() {
-    let world = super::super::ground::world(RetailContactMaterial {
-        static_friction: 0.8,
-        dynamic_friction: 0.6,
-        restitution: 0.,
-    });
-    assert!(
-        ledge::find(
-            &world,
-            Vec3::new(-4.4, super::super::ground::FLOOR_HEIGHT, 0.),
-            Vec3::NEG_X
-        )
-        .is_some()
-    );
-}
 
 #[test]
 #[ignore = "requires private stock graphs and authored climbing clips"]

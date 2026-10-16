@@ -35,23 +35,3 @@ pub fn capture(physical: Physical, mirrored: bool) -> Parameters {
     }
 }
 
-#[cfg(any())]
-mod tests {
-    use super::*;
-    #[test]
-    fn runout_direction_speed_stance_and_trajectory_selection() {
-        let mut p = Physical { forward: [0.,0.,1.,0.], velocity: [3.,4.,0.,0.],
-            up: [0.,1.,0.,0.], trajectory_velocity: None };
-        let regular = capture(p, false);
-        let mirrored = capture(p, true);
-        assert!((regular.angle_degrees - 90.).abs() < 0.001);
-        assert!((mirrored.angle_degrees + 90.).abs() < 0.001);
-        assert!((regular.speed - 5.).abs() < 0.00001);
-        p.trajectory_velocity = Some([0.,0.,-2.,0.]);
-        assert!((capture(p, false).angle_degrees - 180.).abs() < 0.001);
-        assert!((capture(p, true).angle_degrees.abs() - 180.).abs() < 0.001);
-        assert!((capture(p, false).speed - 2.).abs() < 0.00001);
-        p.trajectory_velocity = Some([0.;4]);
-        assert_eq!(capture(p, false), Parameters { angle_degrees: 0., speed: 0. });
-    }
-}
