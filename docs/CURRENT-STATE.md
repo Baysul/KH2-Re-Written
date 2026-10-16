@@ -85,7 +85,7 @@ Built:
 - NPCs turn their heads toward Sora, and map textures animate.
 
 Unfinished:
-- NPC push, pop-in fade, the other NPC programs (sitting and others).
+- Townspeople fade in and out and push with Sora (T163); the other NPC programs (sitting and others) are not ported.
 - Map effects (sun, lens flare, dust), area enemies and battles, and story events.
 - Glow post-effect, per-object level of detail and fade distances, alpha-pass ordering, subtractive blends, texture frame swaps.
 - Story progression is fixed at a chosen "first visit" point.

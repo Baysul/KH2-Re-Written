@@ -842,6 +842,8 @@ struct Game {
     growth_tour: bool,
     /// The unattended `--prize-tour` (prize sprites and the heal effect).
     prize_tour: bool,
+    /// The unattended `--npc-tour` (Sora walks into a townsperson).
+    npc_tour: bool,
     /// The unattended `--badge-tour` (an item pickup, then the camp's NEW! badges).
     badge_tour: bool,
     hero_hit_tick: Option<u64>,
@@ -4130,11 +4132,19 @@ fn spawn_field_npcs(
     }
 }
 
+/// The `--npc-tour`'s capture ticks and end.
+const NPC_TOUR_CAPTURES: [u64; 3] = [25, 45, 90];
+const NPC_TOUR_END: u64 = 120;
+
 /// One tick of every townsperson, and the choice of whom Talk addresses:
 /// the nearest with a script whose reaction sphere holds Sora
 /// (FUN_140407de0). Talking NPCs stand still; after a talk they face Sora
 /// and wait 60 ticks (rtn after_talk, npc-01 §2.4).
-fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<ResMut<Talk>>) {
+fn field_npc_tick(
+    mut game: ResMut<Game>,
+    area: Option<ResMut<AreaRes>>,
+    talk: Option<ResMut<Talk>>,
+) {
     let (Some(mut area), Some(mut talk)) = (area, talk) else {
         return;
     };
@@ -4145,6 +4155,14 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
         was_talking,
         ..
     } = &mut *area;
+    // The `--npc-tour`: at tick 30 Sora is put 30 units from the first
+    // townsperson, so the push shows.
+    if game.npc_tour
+        && game.tick == 30
+        && let Some(n) = current.npcs.iter().find(|n| n.alive)
+    {
+        game.player.position = [n.position.x + 30., n.position.y, n.position.z];
+    }
     let sora = Vec3::from_array(game.player.position);
     let talking = talk.active.is_some();
     if *was_talking
@@ -4217,6 +4235,7 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
     // kind-1 zone of its spawn point and leaves 5 ticks after he is not.
     let engine_sora = [sora.x, -sora.y, -sora.z];
     let mut random = crate::npcs::Lcg(0x9e37 ^ game.tick as u32);
+    let mut events = Vec::new();
     for d in &mut current.deferred {
         let inside = current.state.objects[d.spawn.point].zones.iter().any(|z| {
             let raw = &current.state.objects[d.spawn.point].point.activators[z.activator].raw;
@@ -4226,13 +4245,15 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
             d.away = 0;
             match d.npc {
                 None => {
-                    let n = crate::area::build_npc(
+                    let mut n = crate::area::build_npc(
                         &current.state,
                         d.kind,
                         &d.spawn,
                         d.spawn.point,
                         &mut random,
                     );
+                    n.pop_in();
+                    events.push(serde_json::json!({"event":"npc_pop_in","serial":n.serial}));
                     current.npcs.push(n);
                     d.npc = Some(current.npcs.len() - 1);
                 }
@@ -4244,13 +4265,25 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
                         d.spawn.point,
                         &mut random,
                     );
+                    current.npcs[i].pop_in();
+                    events.push(
+                        serde_json::json!({"event":"npc_pop_in","serial":current.npcs[i].serial}),
+                    );
                 }
                 _ => {}
             }
         } else if let Some(i) = d.npc {
             d.away += 1;
-            if d.away > 4 && !(talking && *talk_npc == Some(i)) {
-                current.npcs[i].alive = false;
+            // FUN_140416270: the townsperson fades out over ten ticks and is
+            // released at zero (`tick_fade`).
+            if d.away > 4
+                && !(talking && *talk_npc == Some(i))
+                && current.npcs[i].alive
+                && current.npcs[i].pop_out()
+            {
+                events.push(
+                    serde_json::json!({"event":"npc_pop_out","serial":current.npcs[i].serial}),
+                );
             }
         }
     }
@@ -4273,6 +4306,37 @@ fn field_npc_tick(game: Res<Game>, area: Option<ResMut<AreaRes>>, talk: Option<R
         let kind = &source.kinds[n.kind];
         n.tick(&kind.anims, sora, is_target, &mut random);
         n.update_look(kind, sora);
+        if n.tick_fade() {
+            events.push(serde_json::json!({"event":"npc_gone","serial":n.serial}));
+        }
+    }
+    // FUN_1403b9090 / FUN_14040ad70: Sora and the townspeople push each
+    // other apart (look-02 §2; walls are not consulted).
+    let mut at = sora;
+    for (i, n) in current.npcs.iter_mut().enumerate() {
+        if !n.alive {
+            continue;
+        }
+        let body = source.kinds[n.kind].body;
+        let shape = [body[1], body[2], body[0]];
+        let movable = !n.immovable(talking && *talk_npc == Some(i));
+        if let Some((c, back)) = crate::npcs::push(at, SORA_OBJ, n.position, shape, movable) {
+            n.position.x += c[0];
+            n.position.z += c[1];
+            at.x += back[0];
+            at.z += back[1];
+        }
+    }
+    if at != sora {
+        events.push(
+            serde_json::json!({"event":"npc_push","sora_from":sora.to_array(),
+            "sora_to":at.to_array()}),
+        );
+    }
+    game.player.position[0] = at.x;
+    game.player.position[2] = at.z;
+    for e in events {
+        game.event(e);
     }
 }
 
@@ -4350,13 +4414,15 @@ fn field_npc_spawn_new(
 }
 
 /// Places and poses the townspeople.
+#[allow(clippy::too_many_arguments)]
 fn field_npc_present(
     game: Res<Game>,
     area: Option<Res<AreaRes>>,
     mut roots: Query<(&FieldNpcRoot, &mut Transform, &mut Visibility)>,
-    parts: Query<(&FieldNpcPart, &Mesh3d)>,
+    parts: Query<(&FieldNpcPart, &Mesh3d, &MeshMaterial3d<FogMaterial>)>,
     added: Query<(), Added<FieldNpcPart>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<FogMaterial>>,
     mut shown: Local<Option<u64>>,
 ) {
     let Some(area) = area else { return };
@@ -4377,10 +4443,21 @@ fn field_npc_present(
             };
         }
     }
-    for (part, handle) in &parts {
+    for (part, handle, material) in &parts {
         let Some(n) = npcs.get(part.npc).filter(|n| n.alive) else {
             continue;
         };
+        // The pop-in / pop-out alpha factor (sys+0xa08 → the colour alpha).
+        if let Some(mut m) = materials.get_mut(&material.0)
+            && (m.base.base_color.alpha() - n.fade).abs() > 1e-4
+        {
+            m.base.base_color = Color::WHITE.with_alpha(n.fade);
+            m.base.alpha_mode = if n.fade < 1. {
+                AlphaMode::Blend
+            } else {
+                AlphaMode::Opaque
+            };
+        }
         let kind = &kinds[n.kind];
         let frame = n
             .look_positions
@@ -6287,7 +6364,7 @@ fn simulate(
             "enemy":enemy,
             "npcs":area.as_deref().map(|a| a.current.npcs.iter().map(|n| serde_json::json!({
                 "kind":a.source.kinds[n.kind].name,"position":n.position.to_array(),"yaw":n.yaw,
-                "pose":format!("{:?}", n.pose),"talk":n.talk,"reaction":n.reaction,"alive":n.alive,
+                "pose":format!("{:?}", n.pose),"talk":n.talk,"reaction":n.reaction,"alive":n.alive,"fade":n.fade,
                 "serial":n.serial,"point":n.entity,"act":n.act_name(),
                 "script":a.current.scripts.contains_key(&n.talk),
                 "target":a.source.kinds[n.kind].target.is_some()})).collect::<Vec<_>>())}),
@@ -10212,6 +10289,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut magic_form = 0u8;
     let mut growth_tour = false;
     let mut prize_tour = false;
+    let mut npc_tour = false;
     let mut badge_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
@@ -10288,6 +10366,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("game over tour capture directory absent")?,
+                );
+            }
+            Some("--npc-tour") if autoplay.is_none() => {
+                npc_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("npc tour capture directory absent")?,
                 );
             }
             Some("--badge-tour") if autoplay.is_none() => {
@@ -10460,7 +10547,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     };
     // A form's change takes about 260 ticks before the first cast.
     let magic_shift = if magic_form != 0 { 260 } else { 0 };
-    let captures = if magic_tour {
+    let captures = if npc_tour {
+        NPC_TOUR_CAPTURES.to_vec()
+    } else if magic_tour {
         magic_tour::captures(magic_shift)
     } else if prize_tour {
         prize_room::CAPTURES.to_vec()
@@ -10483,7 +10572,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 }
             })
     };
-    let autoplay_end = if magic_tour {
+    let autoplay_end = if npc_tour {
+        NPC_TOUR_END
+    } else if magic_tour {
         magic_tour::END + magic_shift
     } else if prize_tour {
         prize_room::END
@@ -10533,6 +10624,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         magic_shift,
         growth_tour,
         prize_tour,
+        npc_tour,
         badge_tour,
         hero_hit_tick: None,
         enemy_incoming_hits: 0,
