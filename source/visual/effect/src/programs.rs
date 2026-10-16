@@ -115,6 +115,8 @@ pub(crate) fn has_draw(kind: u32) -> bool {
                 | models::DRAW_MDL_LOOP_Z
                 | models::SNO_MDL_DTT_NORM
                 | crate::tail::KIND
+                | crate::tail2::TAIL_X
+                | crate::tail2::TAIL_2X
                 | crate::shipoly::KIND
                 | crate::thunder::KIND
                 | crate::ribbon::KIND
@@ -185,6 +187,7 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
         MEGA_BIRTH_MODEL => crate::mega_model::create(p, part, ctx),
         crate::ribbon::KIND => crate::ribbon::create(p, part, ctx),
         crate::tail::KIND => crate::tail::create(p, part, ctx),
+        crate::tail2::TAIL_X | crate::tail2::TAIL_2X => crate::tail2::create(p, part, ctx),
         crate::shipoly::KIND => crate::shipoly::create(p, part),
         crate::thunder::KIND => crate::thunder::create(p, part, ctx),
         models::VT_MIME
@@ -372,6 +375,7 @@ pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx)
         DRAW_MATRIX_WORLD_FRONT => draw_matrix_world_front(p, part, ctx),
         DRAW_MATRIX_WORLD_WOOD => draw_matrix_world_wood(p, part, ctx),
         crate::tail::KIND => crate::tail::update(p, cursor, part, ctx),
+        crate::tail2::TAIL_X | crate::tail2::TAIL_2X => crate::tail2::update(p, cursor, part, ctx),
         crate::thunder::KIND => crate::thunder::update(p, cursor, part, ctx),
         MATRIX_SCL => {
             let (u0, u1) = (use_val(ctx, p, 0), use_val(ctx, p, 1));
@@ -446,6 +450,7 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
         MEGA_BIRTH_MODEL => crate::mega_model::draw(p, cursor, part, ctx),
         crate::ribbon::KIND => crate::ribbon::draw(p, cursor, part, ctx),
         crate::tail::KIND => crate::tail::draw(p, cursor, part, ctx),
+        crate::tail2::TAIL_X | crate::tail2::TAIL_2X => crate::tail2::draw(p, cursor, part, ctx),
         crate::shipoly::KIND => crate::shipoly::draw(p, cursor, part, ctx),
         crate::thunder::KIND => crate::thunder::draw(p, cursor, part, ctx),
         k if crate::extra::draws(k) => crate::extra::draw(p, cursor, part, ctx),

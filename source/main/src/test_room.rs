@@ -879,6 +879,9 @@ struct Game {
     ambient: Option<u32>,
     steps: visual::footsteps::Steps,
     step_scan: Option<(u64, Action, u32)>,
+    /// The map's own effects, whose category elements are the ground dust.
+    map_pax: Option<Arc<object_effect::Pax>>,
+    dust_scan: Option<(u64, Action, u32)>,
     /// The scan of the actor's own frame-8 sounds.
     move_se_scan: Option<(u64, Action, u32)>,
     /// The shown kit's attack shapes by collision group (bone, offset,
@@ -1230,6 +1233,12 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
             1 => {
                 if let Some(&n) = record.parameters.first() {
                     clip.effects.push((frame, n));
+                }
+            }
+            // Ground dust (FUN_140424c60): p0 is the foot id.
+            19 => {
+                if let Some(&p0) = record.parameters.first() {
+                    clip.dust.push((frame, p0));
                 }
             }
             // A footstep (FUN_1403b4fc0): p0 picks the step within the
@@ -5900,6 +5909,7 @@ fn simulate(
         && let Some(a) = area.as_deref()
     {
         game.map_fx_pending = false;
+        game.map_pax = a.current.pax.clone();
         if let Some(pax) = a.current.pax.clone() {
             start_map_effects(&mut game, &pax, a.bg_mask, None);
         }
@@ -6083,6 +6093,7 @@ fn simulate(
         );
     }
     sora_sounds(&mut game);
+    sora_dust(&mut game);
     if tick.is_multiple_of(60) {
         let (position, yaw, action) = (game.player.position, game.player.yaw, game.player.action);
         let enemy = game.enemy.as_ref().map(|e| {
@@ -6836,6 +6847,57 @@ fn sora_sounds(game: &mut Game) {
                 game.sound_queue.push((id, "footstep"));
             }
         }
+    }
+}
+
+/// The map-effect category bit of a ground attribute (the table at
+/// 0x1405d4ff0, 0 = no dust).
+fn dust_ground_bit(ground: u8) -> u8 {
+    const TABLE: [u8; 28] = [
+        0, 1, 0, 2, 3, 4, 5, 0, 0, 0, 6, 7, 8, 9, 10, 11, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 13,
+    ];
+    TABLE.get(ground as usize).copied().unwrap_or(0)
+}
+
+/// Frame trigger 19 (FUN_140424c60): the map's category element for this
+/// ground and foot starts at the foot, turned along Sora's heading.
+fn sora_dust(game: &mut Game) {
+    let key = (game.action_started, game.player.action);
+    let looped = game.player.motion_frame(&game.clips);
+    let from = match game.dust_scan {
+        Some((s, a, f)) if (s, a) == key && f <= looped => Some(f),
+        _ => None,
+    };
+    game.dust_scan = Some((key.0, key.1, looped));
+    let (Some(pax), RoomWorld::Map(map)) = (game.map_pax.clone(), &game.world) else {
+        return;
+    };
+    let bit = dust_ground_bit(map.floor_ground());
+    if bit == 0 {
+        return;
+    }
+    let clip = game.player.clip(&game.clips).clone();
+    for &(at, p0) in &clip.dust {
+        if !(0..32).contains(&p0) || !from.is_none_or(|f| at > f) || at > looped {
+            continue;
+        }
+        let mask = (1u64 << bit) | (1u64 << (32 + p0 as u64));
+        let Some(element) = pax.by_category(mask) else {
+            continue;
+        };
+        let heading = to_world([game.player.yaw.sin(), 0., game.player.yaw.cos()]);
+        game.fx_queue.push(drive_fx::Placed {
+            req: drive_fx::FxRequest {
+                pax: pax.clone(),
+                id: element.id,
+                owner: 0xfb,
+            },
+            anchor: drive_fx::Anchor::World {
+                at: Vec3::from_array(game.player.position),
+                pitch: 0.,
+                yaw: heading[0].atan2(heading[2]),
+            },
+        });
     }
 }
 
@@ -10201,6 +10263,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         step_info: loaded.step_info.take(),
         steps: visual::footsteps::Steps::default(),
         step_scan: None,
+        map_pax: None,
+        dust_scan: None,
         move_se_scan: None,
         sora_attack: std::mem::take(&mut loaded.kit.attack),
         party: loaded
