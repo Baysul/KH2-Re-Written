@@ -100,6 +100,9 @@ pub mod bit {
     /// Item 0x9e "Aerial Recovery" (FUN_1403d6d50 tests stats +0x1d0 bit
     /// 20): a Jump press in a blow flight.
     pub const AERIAL_RECOVERY: u16 = 20;
+    /// Item 0x194 "No Experience" (stats +0x1dc bit 20): FUN_1403ed110
+    /// refuses a kill's EXP (the Winner's Proof's ability).
+    pub const NO_EXPERIENCE: u16 = 0x74;
 }
 
 /// Ability items whose effect FUN_140401730 applies beyond setting the bit

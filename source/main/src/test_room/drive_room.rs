@@ -51,6 +51,9 @@ const LIMIT_NAMES: [u16; 13] = [
 /// PRTY and command tables, and base Sora's motion sets.
 pub struct FormSources {
     objects: Vec<objentry::ObjectEntry>,
+    /// Base Sora's object name (form 0), whose kit a Keyblade change
+    /// rebuilds.
+    base_object: String,
     /// `memt` row 0 (FUN_140405190): the object id of each form.
     pub form_objects: [u16; 7],
     weapon_joint: usize,
@@ -92,6 +95,14 @@ pub struct FormSources {
     pub texcommon: Option<data::object_effect::Dpd>,
 }
 
+/// The Keyblade items a kit holds: slot 0's (the member's equipped weapon)
+/// and slot 1's (the form's own, 0 = none chosen).
+#[derive(Clone, Copy, Debug)]
+pub struct Weapons {
+    pub main: u16,
+    pub sub: u16,
+}
+
 /// An object's own effects: the PAX (entry type 18) of `obj/<name>.a.us`.
 pub fn object_pax(library: &mut Library, name: &str) -> Option<data::object_effect::Pax> {
     let bytes = library.read(&format!("obj/{name}.a.us")).ok()?;
@@ -115,6 +126,7 @@ impl FormSources {
         battle: &[u8],
         objects: &[objentry::ObjectEntry],
         weapon_joint: usize,
+        base_object: &str,
         base_set: motion::MotionSetSelection,
         spell_ids: Vec<u16>,
         hurt: bool,
@@ -159,6 +171,7 @@ impl FormSources {
             data::battle_tables::form_starting_abilities(bar_entry(battle, b"plrp")?, 0)?;
         Ok(FormSources {
             objects: objects.to_vec(),
+            base_object: base_object.to_owned(),
             form_objects,
             weapon_joint,
             second_joint,
@@ -207,6 +220,13 @@ impl FormSources {
 
     /// The form's object entry (`memt`).
     fn object(&self, form: u8) -> Result<&objentry::ObjectEntry, Box<dyn std::error::Error>> {
+        if form == 0 {
+            return self
+                .objects
+                .iter()
+                .find(|o| o.model_name == self.base_object.as_bytes())
+                .ok_or_else(|| "base Sora's object entry is absent".into());
+        }
         let id = *self
             .form_objects
             .get(form as usize)
@@ -223,6 +243,7 @@ impl FormSources {
         &self,
         source: &ProbeSource,
         form: u8,
+        weapons: Weapons,
     ) -> Result<character_kit::Kit, Box<dyn std::error::Error>> {
         let object = self.object(form)?;
         let name = String::from_utf8_lossy(&object.model_name).into_owned();
@@ -243,20 +264,32 @@ impl FormSources {
             name_hash: set.name_hash,
             ..self.base_set.clone()
         };
-        // Weapon slot 0: the equipped Keyblade through the form's WENT set
-        // (FUN_1403e0cc0 / FUN_1403d7c70).
+        // Weapon slot 0: the equipped Keyblade through the object's WENT
+        // set (FUN_1403e0cc0 / FUN_1403d7c70); slot 1 (the objects whose
+        // wmst row names a second motion set) takes the form's own
+        // Keyblade (FUN_1402fc630), the main one while its record is empty
+        // [the original's handling of a Limit Form record was not traced].
         let keyblades =
             crate::keyblade_board::Keyblades::read(&self.went, &self.items, &self.objects, &name)?;
-        let weapon_name = keyblades
-            .model(KINGDOM_KEY)
-            .ok_or("the form's Keyblade model is not in its WENT set")?
-            .to_owned();
-        let w = find(&format!("obj/{weapon_name}.mdlx"))?;
-        let mut weapons = model_inspection::read_model_at(source, w.index, w.ordinal, w.name_hash)?;
-        if weapons.is_empty() {
-            return Err("form weapon model absent".into());
-        }
-        let weapon = weapons.remove(0);
+        let load_weapon = |item: u16| -> Result<
+            (model_inspection::InspectionModel, character_kit::Blade),
+            Box<dyn std::error::Error>,
+        > {
+            let weapon_name = keyblades
+                .model(item)
+                .ok_or_else(|| format!("Keyblade {item:#x} has no model in the object's WENT set"))?
+                .to_owned();
+            let w = find(&format!("obj/{weapon_name}.mdlx"))?;
+            let mut library = Library::open(source)?;
+            let blade = character_kit::blade_spheres(&library.read_found(&w)?);
+            let mut models =
+                model_inspection::read_model_at(source, w.index, w.ordinal, w.name_hash)?;
+            if models.is_empty() {
+                return Err(format!("{weapon_name} has no model").into());
+            }
+            Ok((models.remove(0), blade))
+        };
+        let (weapon, blade0) = load_weapon(weapons.main)?;
         // FUN_1403ef750: each weapon slot's motion set is `obj/%s.mset` of
         // wmst row set × 2 + slot; an empty name (Antiform) leaves the
         // weapon without motions and unattached.
@@ -280,7 +313,21 @@ impl FormSources {
             }))
         };
         let weapon_motion_set = weapon_set(0)?;
-        let second_weapon_motion_set = weapon_set(1)?;
+        // Base Sora (objentry +0x57 = 0) has no slot 1.
+        let second_weapon_motion_set = if form == 0 { None } else { weapon_set(1)? };
+        let second = if second_weapon_motion_set.is_some() {
+            Some(load_weapon(if weapons.sub != 0 {
+                weapons.sub
+            } else {
+                weapons.main
+            })?)
+        } else {
+            None
+        };
+        let (weapon2, blade1) = match second {
+            Some((model, blade)) => (Some(model), blade),
+            None => (None, character_kit::Blade::new()),
+        };
         let collision_archive = if self.hurt {
             let mut lib = Library::open(source)?;
             Some(lib.read_found(&model)?)
@@ -300,10 +347,12 @@ impl FormSources {
                 form,
                 actor,
                 weapon,
+                weapon2,
+                blades: [blade0, blade1],
                 weapon_joint: self.weapon_joint,
                 second_joint,
                 motion_set,
-                fallback: Some(self.base_set.clone()),
+                fallback: (form != 0).then(|| self.base_set.clone()),
                 weapon_motion_set,
                 second_weapon_motion_set,
                 ptya: &self.ptya,
@@ -378,6 +427,8 @@ struct Stash {
     clip_poses: Vec<ClipPoses>,
     body: Vec<(usize, Vec3, f32, bool)>,
     attack: HashMap<u8, Vec<(usize, Vec3, f32)>>,
+    /// The kit's two Keyblades' attack spheres.
+    blade: [character_kit::Blade; 2],
 }
 
 /// Drive state of the session.
@@ -399,8 +450,13 @@ pub struct DriveRt {
         (
             model_inspection::InspectionModel,
             model_inspection::InspectionModel,
+            Option<model_inspection::InspectionModel>,
         ),
     >,
+    /// The member's equipped Keyblade (slot 0 of every kit) and the kits'
+    /// rebuild after it changes.
+    pub main_weapon: u16,
+    reweapon: Option<u8>,
     /// Keyblades each kit shows: 0 (Antiform), 1 or 2.
     pub weapons: HashMap<u8, u8>,
     loading: Option<(u8, KitSlot)>,
@@ -484,6 +540,8 @@ impl DriveRt {
             change: None,
             stash: HashMap::new(),
             models: HashMap::new(),
+            main_weapon: KINGDOM_KEY,
+            reweapon: None,
             weapons: HashMap::new(),
             loading: None,
             ready: HashMap::new(),
@@ -643,8 +701,7 @@ impl DriveRt {
     }
 
     fn start_load(&mut self, form: u8) {
-        if form == 0
-            || self.ready.contains_key(&form)
+        if self.ready.contains_key(&form)
             || self.stash.contains_key(&form)
             || self.loading.as_ref().is_some_and(|l| l.0 == form)
         {
@@ -656,8 +713,9 @@ impl DriveRt {
             Arc::clone(&self.source),
             Arc::clone(&slot),
         );
+        let weapons = self.weapons_for(form);
         std::thread::spawn(move || {
-            let built = src.build(&source, form).map_err(|e| e.to_string());
+            let built = src.build(&source, form, weapons).map_err(|e| e.to_string());
             if let Ok(mut o) = out.lock() {
                 *o = Some(built);
             }
@@ -665,9 +723,31 @@ impl DriveRt {
         self.loading = Some((form, slot));
     }
 
+    /// The Keyblades form `form`'s kit holds: the equipped one, and the
+    /// form's own (FUN_1402fc630).
+    fn weapons_for(&self, form: u8) -> Weapons {
+        Weapons {
+            main: self.main_weapon,
+            sub: self.forms.record(form).map_or(0, |r| r.keyblade),
+        }
+    }
+
+    /// The equipped Keyblade or a form's Keyblade changed: every kit built
+    /// with the old ones is dropped, and the one on screen is rebuilt in the
+    /// background and swapped in when ready (the weapon-change list,
+    /// FUN_14036afa0 / FUN_14036b210, replaces the weapon objects).
+    pub fn keyblades_changed(&mut self, main: u16) {
+        self.main_weapon = main;
+        self.ready.clear();
+        self.stash.clear();
+        self.loading = None;
+        self.reweapon = Some(self.shown);
+        self.start_load(self.shown);
+    }
+
     /// Whether form `form`'s kit can be swapped in now.
     fn loaded(&mut self, form: u8, log: &mut Vec<serde_json::Value>) -> Result<bool, String> {
-        if form == 0 || self.ready.contains_key(&form) || self.stash.contains_key(&form) {
+        if self.ready.contains_key(&form) || self.stash.contains_key(&form) {
             return Ok(true);
         }
         let Some((f, slot)) = &self.loading else {
@@ -784,11 +864,12 @@ fn swap_kit(game: &mut Game, form: u8) -> Result<(), String> {
                 1
             };
             d.weapons.insert(form, n);
-            d.models.insert(form, (kit.actor, kit.weapon));
+            d.models.insert(form, (kit.actor, kit.weapon, kit.weapon2));
             if let Some(p) = kit.pax {
                 d.paxes.insert(form, Arc::new(p));
             }
             Stash {
+                blade: kit.blades,
                 target_shape: kit.target_shape,
                 params: kit.params,
                 clips: kit.clips,
@@ -801,6 +882,10 @@ fn swap_kit(game: &mut Game, form: u8) -> Result<(), String> {
     };
     let shown = d.shown;
     d.previous_shown = shown;
+    let blade = game.enemy.as_mut().map_or_else(
+        || [Default::default(), Default::default()],
+        |rt| std::mem::replace(&mut rt.blade, incoming.blade.clone()),
+    );
     let body = game
         .enemy
         .as_mut()
@@ -814,6 +899,7 @@ fn swap_kit(game: &mut Game, form: u8) -> Result<(), String> {
         clip_poses: std::mem::replace(&mut game.clip_poses, incoming.clip_poses),
         body,
         attack: std::mem::replace(&mut game.sora_attack, incoming.attack),
+        blade,
     };
     // The new kit's attack rows (ATKP by id, sub-table 0) for the hits.
     if let Some(rt) = game.enemy.as_mut() {
@@ -935,6 +1021,8 @@ pub fn rebuild_abilities(game: &mut Game, sora: Option<&[u16]>) {
     game.player.abilities =
         game.ability_source
             .build_with_form(&game.ability_slots, &game.equipment, form.as_ref());
+    // FUN_1403c1d90 rebuilds the stat totals and the abilities together.
+    game.refresh_gear();
 }
 
 /// Form EXP for Sora (FUN_1403e8380), with level-ups' ability changes
@@ -986,6 +1074,46 @@ pub fn add_form_exp(game: &mut Game, amount: i32, sora: Option<&mut Vec<u16>>) {
 /// the change task, the form gauge's drain and the automatic revert.
 pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
     let Some(d) = game.drive.as_mut() else { return };
+    // A rebuilt kit with the new Keyblades replaces the one on screen.
+    if let Some(form) = d.reweapon
+        && d.change.is_none()
+    {
+        let mut log = Vec::new();
+        let ready = d.loaded(form, &mut log);
+        for entry in log {
+            game.event(entry);
+        }
+        match ready {
+            Ok(true) => {
+                if let Some(d) = game.drive.as_mut() {
+                    d.reweapon = None;
+                }
+                match swap_kit(game, form) {
+                    Ok(()) => {
+                        // The old kit swapped out is stale: not kept.
+                        if let Some(d) = game.drive.as_mut() {
+                            d.stash.remove(&form);
+                        }
+                        let tick = game.tick;
+                        game.event(
+                            serde_json::json!({"event":"keyblade_kit","tick":tick,"form":form}),
+                        );
+                    }
+                    Err(e) => {
+                        game.event(serde_json::json!({"event":"keyblade_kit_error","error":e}))
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                if let Some(d) = game.drive.as_mut() {
+                    d.reweapon = None;
+                }
+                game.event(serde_json::json!({"event":"keyblade_kit_error","error":e}));
+            }
+        }
+    }
+    let Some(d) = game.drive.as_mut() else { return };
     // FUN_1403ab6f0's battle state.
     let p = game.player.position;
     let target = game.enemy.as_ref().is_some_and(|rt| {
@@ -1019,7 +1147,7 @@ pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
             _ => {}
         }
     }
-    if game.autoplay.is_some() && !game.magic_tour {
+    if game.autoplay.is_some() && game.ability_tour.is_none() && !game.magic_tour {
         use player::limit_form::{INFINITY, STRIKE_RAID};
         match game.tick {
             7480 => game.player.drive.refill(),
@@ -1195,7 +1323,7 @@ pub fn present(
             .get(frame.min(cp.weapon2_frames.len().saturating_sub(1)))
         {
             for (part, handle) in &second_parts {
-                let positions: Vec<[f32; 3]> = game.weapon_indices[part.0]
+                let positions: Vec<[f32; 3]> = game.weapon2_indices[part.0]
                     .iter()
                     .map(|&i| pose[i as usize].to_array())
                     .collect();
@@ -1227,7 +1355,7 @@ pub fn present(
     }
     let g = &mut *game;
     let Some(d) = g.drive.as_ref() else { return };
-    let Some((actor, weapon)) = d.models.get(&form) else {
+    let Some((actor, weapon, weapon2)) = d.models.get(&form) else {
         return;
     };
     let count = d.weapons.get(&form).copied().unwrap_or(1);
@@ -1265,6 +1393,12 @@ pub fn present(
     } else {
         battle_idle.weapon_frames[0].clone()
     };
+    // Slot 1's Keyblade is posed by its own motion at the same key time.
+    let weapon2_pose = battle_idle
+        .weapon2_frames
+        .first()
+        .cloned()
+        .unwrap_or_else(|| weapon_pose.clone());
     let mut hands_to_fill = Vec::new();
     if count >= 1 {
         hands_to_fill.push(hand);
@@ -1281,18 +1415,26 @@ pub fn present(
         hands_to_fill.push(e);
     }
     let mut weapon_indices = Vec::new();
+    let mut weapon2_indices = Vec::new();
     for (k, &h) in hands_to_fill.iter().enumerate() {
+        let (model, pose) = if k == 0 {
+            (weapon, &weapon_pose)
+        } else {
+            (weapon2.as_ref().unwrap_or(weapon), &weapon2_pose)
+        };
         for (ordinal, entity) in spawn_model(
             &mut commands,
-            weapon,
-            &weapon_pose,
+            model,
+            pose,
             h,
             &mut meshes,
             &mut materials,
             &mut images,
         ) {
             if k == 0 {
-                weapon_indices.push(weapon.parts[ordinal].indices.clone());
+                weapon_indices.push(model.parts[ordinal].indices.clone());
+            } else {
+                weapon2_indices.push(model.parts[ordinal].indices.clone());
             }
             if let Some(entity) = entity {
                 if k == 0 {
@@ -1305,6 +1447,7 @@ pub fn present(
     }
     g.part_indices = part_indices;
     g.weapon_indices = weapon_indices;
+    g.weapon2_indices = weapon2_indices;
     g.display = pose;
     g.weapon_display = weapon_pose;
     g.blend_from = None;

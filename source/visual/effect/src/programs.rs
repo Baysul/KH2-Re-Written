@@ -20,6 +20,9 @@ pub(crate) struct Birth {
 }
 
 /// pppKeThRes16 / 16x4 / 32: create only (bolt node pools for pppKeTh).
+const KE_TH_RES8: u32 = 3;
+const KE_TH_RES24: u32 = 9;
+const KE_TH_RES40: u32 = 14;
 const KE_TH_RES16: u32 = 6;
 const KE_TH_RES16X4: u32 = 7;
 const KE_TH_RES32: u32 = 11;
@@ -84,34 +87,41 @@ const MATRIX_LOOP_YXZ: u32 = 232;
 
 /// Whether the table record has an update function (+8).
 pub(crate) fn has_update(kind: u32) -> bool {
-    !matches!(
-        kind,
-        KE_TH_RES16
-            | KE_TH_RES16X4
-            | KE_TH_RES32
-            | models::DRAW_MDL3
-            | models::DRAW_MDL_SEMI3
-            | models::SNO_MDL_DTT_NORM
-    )
+    !crate::extra::without_update(kind)
+        && kind != crate::shipoly::KIND
+        && !matches!(
+            kind,
+            KE_TH_RES8
+                | KE_TH_RES24
+                | KE_TH_RES40
+                | KE_TH_RES16
+                | KE_TH_RES16X4
+                | KE_TH_RES32
+                | models::DRAW_MDL3
+                | models::DRAW_MDL_SEMI3
+                | models::SNO_MDL_DTT_NORM
+        )
 }
 
 pub(crate) fn has_draw(kind: u32) -> bool {
-    matches!(
-        kind,
-        DRAW_SHAPE_X
-            | MEGA_BIRTH
-            | MEGA_BIRTH_MODEL
-            | models::VT_MIME
-            | models::DRAW_MDL3
-            | models::DRAW_MDL_TS3
-            | models::DRAW_MDL_SEMI3
-            | models::DRAW_MDL_LOOP
-            | models::DRAW_MDL_LOOP_Z
-            | models::SNO_MDL_DTT_NORM
-            | crate::tail::KIND
-            | crate::thunder::KIND
-            | crate::ribbon::KIND
-    )
+    crate::extra::draws(kind)
+        || matches!(
+            kind,
+            DRAW_SHAPE_X
+                | MEGA_BIRTH
+                | MEGA_BIRTH_MODEL
+                | models::VT_MIME
+                | models::DRAW_MDL3
+                | models::DRAW_MDL_TS3
+                | models::DRAW_MDL_SEMI3
+                | models::DRAW_MDL_LOOP
+                | models::DRAW_MDL_LOOP_Z
+                | models::SNO_MDL_DTT_NORM
+                | crate::tail::KIND
+                | crate::shipoly::KIND
+                | crate::thunder::KIND
+                | crate::ribbon::KIND
+        )
 }
 
 /// The update functions listed at PTR_FUN_140779990, which a loop
@@ -178,6 +188,7 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
         MEGA_BIRTH_MODEL => crate::mega_model::create(p, part, ctx),
         crate::ribbon::KIND => crate::ribbon::create(p, part, ctx),
         crate::tail::KIND => crate::tail::create(p, part, ctx),
+        crate::shipoly::KIND => crate::shipoly::create(p, part),
         crate::thunder::KIND => crate::thunder::create(p, part, ctx),
         models::VT_MIME
         | models::DRAW_MDL_TS3
@@ -188,6 +199,9 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
         // FUN_1404bf080 / FUN_1404bf0a0 / FUN_1404bf160: pool header (node
         // count, points per bolt, node size) and the free list of nodes from
         // +0x10; the exe's handles are stood in by work offsets + 1.
+        KE_TH_RES8 => ke_th_res(part, use_val(ctx, p, 0), 1, 8, 0x1e0),
+        KE_TH_RES24 => ke_th_res(part, use_val(ctx, p, 0), 1, 0x18, 0x4e0),
+        KE_TH_RES40 => ke_th_res(part, use_val(ctx, p, 0), 1, 0x28, 0x7e0),
         KE_TH_RES16 => ke_th_res(part, use_val(ctx, p, 0), 1, 0x10, 0x360),
         KE_TH_RES16X4 => ke_th_res(part, use_val(ctx, p, 0), 4, 0x10, 0x360),
         KE_TH_RES32 => ke_th_res(part, use_val(ctx, p, 0), 1, 0x20, 0x660),
@@ -223,9 +237,12 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
             part.zero(o + 0x80, 12);
         }
         // FUN_1404c06c0 / FUN_1404c07f0: the loop move rate.
-        ANG_MOVE_LOOP | SCL_MOVE_LOOP => {
+        ANG_MOVE_LOOP | SCL_MOVE_LOOP | crate::extra::MOVE_LOOP => {
             let o = use_val(ctx, p, 1);
             part.zero(o, 12);
+        }
+        crate::extra::SNO_SCALE_ALL | crate::extra::DRAW_MDL_TS | crate::extra::VERTEX_AP_AT => {
+            crate::extra::create(p, part, ctx)
         }
         // FUN_1404c6b90 / FUN_1404c6ed0: the position and the axis lengths.
         DRAW_MATRIX_WORLD_FRONT | DRAW_MATRIX_WORLD_WOOD => world_create(p, part, ctx),
@@ -242,9 +259,24 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
 /// sends a part back to frame 0. Most repeat their create function.
 pub(crate) fn restart(p: &Program, part: &mut Part, ctx: &mut Ctx) {
     match p.kind {
-        ACCELE | ANG_ACCELE | SCL_ACCELE | MOVE | ANG_MOVE | SCL_MOVE | COL_ACCELE | COL_MOVE
-        | POINT | ANGLE | SCALE | COLOR | DRAW_SHAPE_X | KE_TH_SFT | ANG_MOVE_LOOP
-        | SCL_MOVE_LOOP => create(p, part, ctx),
+        ACCELE
+        | ANG_ACCELE
+        | SCL_ACCELE
+        | MOVE
+        | ANG_MOVE
+        | SCL_MOVE
+        | COL_ACCELE
+        | COL_MOVE
+        | POINT
+        | ANGLE
+        | SCALE
+        | COLOR
+        | DRAW_SHAPE_X
+        | KE_TH_SFT
+        | ANG_MOVE_LOOP
+        | SCL_MOVE_LOOP
+        | crate::extra::MOVE_LOOP
+        | crate::extra::SNO_SCALE_ALL => create(p, part, ctx),
         POINT_LOOP | ANGLE_LOOP | SCALE_LOOP => loop_restart(p, part, ctx),
         crate::ribbon::KIND => crate::ribbon::restart(p, part, ctx),
         crate::tail::KIND => crate::tail::restart(p, part, ctx),
@@ -263,6 +295,7 @@ pub(crate) fn destroy(p: &Program, part: &mut Part, ctx: &mut Ctx) {
         MEGA_BIRTH => crate::mega_birth::destroy(p, part, ctx),
         MEGA_BIRTH_MODEL => crate::mega_model::destroy(p, part, ctx),
         crate::ribbon::KIND => crate::ribbon::destroy(p, part, ctx),
+        crate::shipoly::KIND => crate::shipoly::destroy(p, part),
         _ => {}
     }
 }
@@ -335,7 +368,8 @@ pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx)
         MATRIX_YZX => matrix_from(p, part, ctx, math::rot_yzx),
         MATRIX_LOOP_ZXY => matrix_from(p, part, ctx, math::rot_zxy),
         ANG_MOVE_LOOP => loop_move_i32(p, cursor, part, ctx),
-        SCL_MOVE_LOOP => loop_move_f32(p, cursor, part, ctx),
+        SCL_MOVE_LOOP | crate::extra::MOVE_LOOP => loop_move_f32(p, cursor, part, ctx),
+        k if crate::extra::handles(k) => crate::extra::update(p, cursor, part, ctx),
         MATRIX_NO_ROT => matrix_no_rot(p, part, ctx),
         DRAW_MATRIX_WORLD => draw_matrix_world(p, part, ctx),
         DRAW_MATRIX_WORLD_FRONT => draw_matrix_world_front(p, part, ctx),
@@ -417,7 +451,9 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
         MEGA_BIRTH_MODEL => crate::mega_model::draw(p, cursor, part, ctx),
         crate::ribbon::KIND => crate::ribbon::draw(p, cursor, part, ctx),
         crate::tail::KIND => crate::tail::draw(p, cursor, part, ctx),
+        crate::shipoly::KIND => crate::shipoly::draw(p, cursor, part, ctx),
         crate::thunder::KIND => crate::thunder::draw(p, cursor, part, ctx),
+        k if crate::extra::draws(k) => crate::extra::draw(p, cursor, part, ctx),
         models::VT_MIME
         | models::DRAW_MDL3
         | models::DRAW_MDL_TS3
@@ -765,6 +801,7 @@ pub(crate) fn emit_sprites(ctx: &mut Ctx, anim: usize, index: usize, m: &Mat, pa
             uv,
             colour,
             blend: s.colour[4],
+            corner_colours: None,
             tbp,
             tex0,
         });

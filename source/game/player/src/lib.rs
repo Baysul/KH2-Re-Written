@@ -14,6 +14,7 @@ pub mod combat;
 pub mod drive;
 pub mod dusk;
 pub mod enemy_prizes;
+pub mod equipment_stats;
 pub mod follow_camera;
 pub mod forms;
 pub mod growth;

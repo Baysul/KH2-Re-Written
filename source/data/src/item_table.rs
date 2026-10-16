@@ -102,6 +102,10 @@ pub struct Stats {
     pub ap: u8,
     /// +9..+0xc: Fire, Blizzard, Thunder, Dark (100 = no resistance).
     pub resists: [u8; 4],
+    /// +8..+0xe: all seven resistance percents the battle record multiplies
+    /// (FUN_1403c1190): physical, Fire, Blizzard, Thunder, Dark, neutral
+    /// and general (100 = no resistance).
+    pub resist: [u8; 7],
 }
 
 /// The stat table that follows the item records in the same subfile.
@@ -129,6 +133,7 @@ pub fn read_stats(bytes: &[u8]) -> io::Result<Vec<Stats>> {
             defense: r[6],
             ap: r[7],
             resists: [r[9], r[10], r[11], r[12]],
+            resist: [r[8], r[9], r[10], r[11], r[12], r[13], r[14]],
         })
         .collect())
 }
@@ -169,6 +174,8 @@ mod tests {
         assert_eq!(stats[0].id, 0x50);
         assert_eq!(stats[0].ability, 0x21e);
         assert_eq!((stats[0].strength, stats[0].magic), (3, 1));
+        assert_eq!(stats[0].resist, [100; 7]);
+        assert_eq!(stats[0].resists, [100; 4]);
     }
 
     #[test]

@@ -184,7 +184,7 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
     }
 }
 
-fn push_draw(
+pub(crate) fn push_draw(
     ctx: &mut Ctx,
     part: &Part,
     model: u32,
@@ -260,7 +260,7 @@ fn vt_mime_draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
 
 /// FUN_1404c8da0: U/V scroll integrators in the u2 block
 /// (U, Uvel, Uacc, V, Vvel, Vacc), keyed adds at the part frame.
-fn ts3_update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
+pub(crate) fn ts3_update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
     if !active(part) {
         return;
     }

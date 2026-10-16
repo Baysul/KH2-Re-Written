@@ -20,6 +20,7 @@ pub fn tick(game: &mut Game, tick: u64) {
         log,
         autoplay,
         drive,
+        sound_queue,
         ..
     } = game;
     // The Drive form Sora is in (0 without one).
@@ -46,7 +47,9 @@ pub fn tick(game: &mut Game, tick: u64) {
         let floor = world
             .floor(orb.position[0], orb.position[2], orb.position[1] + 30.)
             .unwrap_or(0.);
-        orb.tick(floor);
+        if let Some(id) = orb.tick(floor) {
+            sound_queue.push((id, "prize_bounce"));
+        }
         // A dead Sora collects nothing (FUN_1403dc500: 0x9b8 bit 2).
         if !player.dead() && orb.collected_by(at, draw) {
             collected.push(i);
@@ -55,6 +58,8 @@ pub fn tick(game: &mut Game, tick: u64) {
     for i in collected.into_iter().rev() {
         let orb = rt.orbs.remove(i);
         let e = enemy_prizes::effect(orb.kind);
+        // FUN_140413650: the descriptor's pickup sound.
+        sound_queue.push((enemy_prizes::sounds(orb.kind).1, "prize_pickup"));
         // Antiform's pickup skips HP orbs (formcmd-01 §5).
         if e.hp > 0 && form != player::forms::ANTI {
             rt.sora_hp = (rt.sora_hp + e.hp).min(rt.sora_target.max_hp);
@@ -95,7 +100,10 @@ fn kill(
     let low = rt.sora_hp * 2 <= rt.sora_target.max_hp;
     let boost = low.then_some(player.abilities.experience_boost as u32);
     let exp = enemy_prizes::kill_exp(enemy_exp, level_exp, critical, boost);
-    grant_exp(rt, exp, log, tick);
+    // FUN_1403ed110: No Experience (ability bit 116) takes the kill's EXP.
+    if !player.abilities.has(abilities::bit::NO_EXPERIENCE) {
+        grant_exp(rt, exp, log, tick);
+    }
     // FUN_1403dc170: counts scaled by Jackpot, munny converted by Drive
     // Converter, three item rolls with Lucky Lucky.
     let ab = &player.abilities;

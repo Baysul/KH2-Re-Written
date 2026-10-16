@@ -15,6 +15,8 @@ pub struct ItemInfo {
     pub amount: u16,
     /// +0x10: the command that uses it.
     pub command: u16,
+    /// +6: the system effect element it starts on the target (1..4).
+    pub effect: u16,
 }
 
 pub struct ItemSource {
@@ -33,6 +35,7 @@ pub fn load(system: &[u8]) -> Result<ItemSource, Box<dyn std::error::Error>> {
                 ItemInfo {
                     amount: r.amount,
                     command: r.command,
+                    effect: r.weapon_stats,
                 },
             )
         })
@@ -140,8 +143,11 @@ pub fn tick(game: &mut Game, tick: u64) {
         items,
         enemy,
         log,
+        drive,
+        fx_queue,
         ..
     } = game;
+    let system = drive.as_ref().and_then(|d| d.src.system_pax.clone());
     let Some(rt) = items.as_mut() else { return };
     if player.take_item()
         && let Some(slot) = rt.using.take()
@@ -150,6 +156,18 @@ pub fn tick(game: &mut Game, tick: u64) {
         // FUN_1403f6790: the slot empties at the trigger.
         rt.pending.push((HEAL_DELAY, *id));
         *id = 0;
+        // FUN_1403f6b30's first update: system element 0 (se000 #100) at
+        // the user.
+        if let Some(pax) = system.clone() {
+            fx_queue.push(drive_fx::Placed {
+                req: drive_fx::FxRequest {
+                    pax,
+                    id: 0,
+                    owner: 0xff,
+                },
+                anchor: drive_fx::Anchor::Sora,
+            });
+        }
     }
     // FUN_1403f6960: the heal waits out its delay whatever Sora does.
     let mut due = Vec::new();
@@ -166,6 +184,18 @@ pub fn tick(game: &mut Game, tick: u64) {
         let Some(info) = rt.src.items.get(&id).copied() else {
             continue;
         };
+        // Thirty updates later the item's own element (101..104) starts
+        // on the target, bound to bone 0x4009.
+        if let Some(pax) = system.clone() {
+            fx_queue.push(drive_fx::Placed {
+                req: drive_fx::FxRequest {
+                    pax,
+                    id: info.effect,
+                    owner: 0xff,
+                },
+                anchor: drive_fx::Anchor::Sora,
+            });
+        }
         let Some(e) = enemy.as_mut() else { continue };
         // FUN_1403c4b80: percent of the maxima, Item Boost adding to 100.
         let pct = 100 + player.abilities.item_boost as i32;
