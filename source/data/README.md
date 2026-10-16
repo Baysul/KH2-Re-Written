@@ -7,4 +7,4 @@ reads effects. `bar.rs`, `ard.rs`, `ptya.rs` and `scd.rs` identify game formats;
 see the folder guide. `src/bin/` holds inspection commands; `examples/` holds
 generated boundary checks. Gameplay rules belong in `game/`.
 
-See the [folder guide](../docs/folder-guide.md) and [architecture](../ARCHITECTURE.md).
+See the [folder guide](../../docs/folder-guide.md) and [architecture](../../ARCHITECTURE.md).

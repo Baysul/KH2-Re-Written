@@ -24,7 +24,7 @@ The project is already written largely in Rust. The work is to finish and valida
 - **Exists:** `source`, bounded readers, launcher checks and session-bound chunk verification. [T080](tasks/T080-launcher-and-session-check.md) describes what the fast path does and does not verify. The probe code still explicitly handles a quarantined, unqualified manifest.
 - **Essential work:** finish build/edition/shared/language qualification; distinguish research admission from supported gameplay; audit all entry points and reads; reject changed or unsupported sources without accepting a remembered path or cache as proof. Extend readers only for actual needed formats, preserving unknown fields.
 - **Completion evidence:** synthetic corruption and admission tests, independently checked decoded records, complete dependency identity, and refusal of unsupported builds. Add transactional source-bound caching when needed; cache never replaces session validation.
-- **Gates:** P02, P06–P08, P12, P29. **Locations:** `validation`, `data/src/probe_source.rs`, launcher install code.
+- **Gates:** P02, P06–P08, P12, P29. **Locations:** `validation`, `source/data/src/probe_source.rs`, launcher install code.
 
 ### 3. Player movement, collision, camera and action transitions
 
@@ -87,7 +87,7 @@ The project is already written largely in Rust. The work is to finish and valida
 - **Exists:** skeletal evaluation, IK work, motion triggers and cutscene actor animation.
 - **Essential work:** qualify remaining solver semantics, root/scale channels, blending, attachments, texture animation and mesh visibility; synchronize motion events with authoritative actions.
 - **Completion evidence:** sampled reference poses, root trajectories and trigger times agree across representative action families; no claim of completeness from one motion.
-- **Gates:** P15, P17, P18. **Locations:** `data/src/motion*.rs`, model pose/texture modules. **Evidence:** [unknowns U019/U022](unknowns.md), [T099](tasks/T099-axel-roxas-cutscene.md).
+- **Gates:** P15, P17, P18. **Locations:** `source/data/src/motion*.rs`, model pose/texture modules. **Evidence:** [unknowns U019/U022](unknowns.md), [T099](tasks/T099-axel-roxas-cutscene.md).
 
 ### 10. Cutscenes and transitions integrated with gameplay
 

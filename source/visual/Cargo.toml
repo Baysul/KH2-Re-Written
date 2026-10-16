@@ -6,9 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-audio = { path = "../../audio" }
-effect = { path = "../../effect" }
-data = { path = "../../data" }
+audio = { path = "../audio" }
+effect = { path = "../effect" }
+data = { path = "../data" }
 player = { path = "../game/player" }
 validation = { path = "../../validation" }
 serde.workspace = true

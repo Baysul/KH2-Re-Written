@@ -8,18 +8,18 @@ rust-version.workspace = true
 
 [dependencies]
 visual = { path = "../visual" }
-audio = { path = "../../audio" }
-effect = { path = "../../effect" }
+audio = { path = "../audio" }
+effect = { path = "../effect" }
 area = { path = "../game/area" }
 collision = { path = "../game/collision" }
 event = { path = "../game/event" }
-data = { path = "../../data" }
+data = { path = "../data" }
 player = { path = "../game/player" }
 validation = { path = "../../validation" }
-skate_source = { path = "../../extras/skateboard/source" }
+skate_source = { path = "../extras/skateboard/source" }
 # The optional Skate 3 skateboard (GPL-3.0-only, extras/skateboard/engine); see T103.
-skate-disc = { path = "../../extras/skateboard/engine/skate-disc", optional = true }
-skate-sim = { path = "../../extras/skateboard/engine/skate-sim", optional = true }
+skate-disc = { path = "../extras/skateboard/engine/skate-disc", optional = true }
+skate-sim = { path = "../extras/skateboard/engine/skate-sim", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

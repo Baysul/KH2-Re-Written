@@ -19,11 +19,11 @@ a glossary and the old-to-new name table.
 | `source/game/collision/` | Movement against room geometry | `collision` |
 | `source/game/event/` | Cutscene timeline and camera state | `event` |
 | `source/visual/` | Rendering, menus, HUD, controller input and scene presentation | `visual` |
-| `effect/` | Particle and model effect execution | `effect` |
-| `audio/` | Mixing and Windows sound output | `audio` |
-| `data/` | Bounded readers for game packages, models, motion, images, text and sound | `data` |
+| `source/effect/` | Particle and model effect execution | `effect` |
+| `source/audio/` | Mixing and Windows sound output | `audio` |
+| `source/data/` | Bounded readers for game packages, models, motion, images, text and sound | `data` |
 | `validation/` | Selected-install validation, hashing and manifest tools | `validation` |
-| `extras/` | Existing optional skateboard extension and its license boundary | See its README |
+| `source/extras/` | Existing optional skateboard extension and its license boundary | See its README |
 | `tools/` | Build helpers and research/verification scripts | None |
 | `docs/` | Guides, evidence, scope, roadmap and acceptance records | None |
 
@@ -52,7 +52,7 @@ is selected with `--bin KH2RW` or built with `build.bat`.
 application. `source/visual/src/overlay.rs` and `overlay.wgsl` compose the 2D display.
 
 The optional Skate 3 code retains its upstream package names and GPL notices in
-`extras/skateboard/engine/`. It is existing extension code, not a roadmap for
+`source/extras/skateboard/engine/`. It is existing extension code, not a roadmap for
 rewriting another collection game. The `skate3` feature remains opt-in for Cargo;
 `build.bat` retains its existing feature selection.
 

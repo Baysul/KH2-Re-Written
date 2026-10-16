@@ -35,9 +35,9 @@ Whole-game 1:1 coverage is **unmeasured** until the complete function and behavi
 ## Find your way around
 
 Start with the [folder guide](docs/folder-guide.md) for common edits and naming rules.
-`source/game/` holds gameplay, `source/visual/` holds rendering and menus, `effect/` runs effects,
-and `source/main/` holds the launcher and application. `data/` reads game formats,
-`validation/` validates the installation, and `audio/` handles sound output.
+`source/game/` holds gameplay, `source/visual/` holds rendering and menus, `source/effect/` runs effects,
+and `source/main/` holds the launcher and application. `source/data/` reads game formats,
+`validation/` validates the installation, and `source/audio/` handles sound output.
 Each main folder has a short README. See [ARCHITECTURE.md](ARCHITECTURE.md)
 for package boundaries and current limitations.
 
@@ -111,7 +111,7 @@ Source manifests, package records, captures and saves stay outside this reposito
 - **Code:** written with [Claude](https://claude.com/claude-code), an AI coding assistant, under the owner's direction.
 - **Format research:** [OpenKH](https://git.openkh.dev/) (Apache-2.0) documents the game's file formats, and the project's reader follows it. The attribution list is in [NOTICE](NOTICE).
 - **Other third-party code:** [Bevy](https://bevy.org), the `image` and `png` crates, zlib-rs, Microsoft DirectXTex (MIT), the .NET runtime (MIT), and `bevy_mikktspace` (Morten Mikkelsen). Release licences are in [docs/release/](docs/release/).
-- **Skate 3 crates** (`extras/skateboard/engine/`, GPL-3.0): adapted from [SK8-ENGINE/skate-3-rust-engine](https://github.com/SK8-ENGINE/skate-3-rust-engine). See [its README](extras/skateboard/engine/README.md).
+- **Skate 3 crates** (`source/extras/skateboard/engine/`, GPL-3.0): adapted from [SK8-ENGINE/skate-3-rust-engine](https://github.com/SK8-ENGINE/skate-3-rust-engine). See [its README](source/extras/skateboard/engine/README.md).
 - **Games:** *Kingdom Hearts* is by Square Enix and Disney. This project is not affiliated with or endorsed by either company.
 
 ## License
