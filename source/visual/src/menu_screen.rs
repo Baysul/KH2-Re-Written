@@ -188,6 +188,18 @@ pub fn load(
     ordinal: usize,
     name_hash: [u8; 16],
 ) -> Result<Menu2ld, Box<dyn std::error::Error>> {
+    load_layout(source, index, ordinal, name_hash, 0)
+}
+
+/// `load` for the `nth` LAYD of a 2LD that holds several (save.2ld has one
+/// for the save point menu and one for the load list).
+pub fn load_layout(
+    source: &ProbeSource,
+    index: &str,
+    ordinal: usize,
+    name_hash: [u8; 16],
+    nth: usize,
+) -> Result<Menu2ld, Box<dyn std::error::Error>> {
     let mut checked = source.open_index(index)?;
     let entry = checked
         .inventory
@@ -203,7 +215,8 @@ pub fn load(
         let e = table
             .entries
             .iter()
-            .find(|e| e.entry_type == kind)
+            .filter(|e| e.entry_type == kind)
+            .nth(if kind == LAYD { nth } else { 0 })
             .ok_or("2LD entry absent")?;
         archive
             .get(e.offset as usize..e.offset as usize + e.size as usize)

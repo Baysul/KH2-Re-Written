@@ -131,6 +131,9 @@ pub struct Clip {
     /// Frame trigger 2: a footstep (first parameter p0, which selects the
     /// step sound within the floor material's group of 16).
     pub steps: Vec<(u32, i16)>,
+    /// Frame trigger 19 (FUN_140424c60): ground dust at the foot, by the
+    /// trigger parameter (the foot id).
+    pub dust: Vec<(u32, i16)>,
     /// Frame trigger 8: a sound request (`p0 * 1000 + p1`) on the actor's
     /// own motion (cloth, jump and item-use sounds, bank 0 and 999).
     pub sounds: Vec<(u32, u32)>,

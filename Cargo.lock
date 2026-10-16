@@ -2569,6 +2569,7 @@ dependencies = [
  "fontdue",
  "image",
  "player",
+ "save",
  "serde",
  "serde_json",
  "sha2",
@@ -3627,6 +3628,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "save"
+version = "0.1.2"
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4225,6 +4230,7 @@ dependencies = [
  "fontdue",
  "image",
  "player",
+ "save",
  "serde",
  "serde_json",
  "sha2",

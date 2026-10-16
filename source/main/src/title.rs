@@ -7,6 +7,7 @@
 //! Every launch checks the selected source (executable and indexes rehashed,
 //! each package byte read verified against the full-scan record). Not built:
 //! the file menu, the Theater and the Game Settings overlay. Esc quits (on PC it opens Game Settings).
+use crate::save_files;
 use bevy::{
     app::AppExit,
     input::mouse::MouseWheel,
@@ -99,6 +100,18 @@ const AUTOPLAY_CAPTURES: &[u64] = &[
     60, 240, 450, 690, 750, 790, 800, 830, 845, 900, 970, 1010, 1080, 1125, 1135, 1200, 1300,
 ];
 const AUTOPLAY_END: u64 = 1450;
+
+/// Unattended plan for the Load menu (`--autoplay-files`): down to Load,
+/// open it, move, page, ask to delete, back out of the question, load a slot.
+const FILES_PRESSES: &[(u64, u64)] = &[
+    (700, pad_bits::DOWN),
+    (760, pad_bits::DECIDE),
+    (900, 0x1000),
+    (1000, pad_bits::CANCEL),
+    (1060, pad_bits::DECIDE),
+];
+const FILES_CAPTURES: &[u64] = &[700, 880, 940, 1040, 1075, 1200];
+const FILES_END: u64 = 1250;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 mod pad_bits {
@@ -146,9 +159,37 @@ struct Session {
     captures_taken: usize,
     capture_pending: bool,
     exit_code: Option<u8>,
+    /// The Load menu's art and state; None when `save.2ld` is missing.
+    files: Option<save_files::Files>,
+    files_plan: bool,
+    loaded_slot: Option<usize>,
 }
 
 impl Session {
+    fn presses(&self) -> &'static [(u64, u64)] {
+        if self.files_plan {
+            FILES_PRESSES
+        } else {
+            AUTOPLAY_PRESSES
+        }
+    }
+
+    fn captures(&self) -> &'static [u64] {
+        if self.files_plan {
+            FILES_CAPTURES
+        } else {
+            AUTOPLAY_CAPTURES
+        }
+    }
+
+    fn end(&self) -> u64 {
+        if self.files_plan {
+            FILES_END
+        } else {
+            AUTOPLAY_END
+        }
+    }
+
     fn event(&mut self, value: serde_json::Value) {
         if let Some(log) = &mut self.log {
             serde_json::to_writer(&mut *log, &value).expect("title log write");
@@ -206,6 +247,14 @@ fn setup(
             s.glyph_sheets[slot] = Some(frame.add_sheet(&mut images, rgba, size, scale));
         }
     }
+    if let Some(f) = s.files.as_mut() {
+        for k in 0..f.menu.image_sizes.len() {
+            if let Some(t) = f.menu.replacements[k].take() {
+                f.sheets
+                    .push(frame.add_sheet(&mut images, t.rgba, t.size, t.texel_scale));
+            }
+        }
+    }
     s.white = frame.add_sheet(&mut images, vec![255; 4], [1, 1], 1.);
     s.font_sheet = frame.add_sheet(
         &mut images,
@@ -249,14 +298,16 @@ fn tick(
     s.wheel = 0.;
     let mut logical = controller::logical(controller::raw(&data), controller::MODE_TITLE);
     if s.autoplay.is_some() {
-        logical = AUTOPLAY_PRESSES
+        logical = s
+            .presses()
             .iter()
             .filter(|(at, _)| *at == tick)
             .fold(0, |acc, (_, b)| acc | b);
     }
     s.pad.update(logical, 1.);
-    let trig = s.pad.pressed;
-    if trig != 0 {
+    let file_open = s.files.as_ref().is_some_and(|f| f.ui.is_some());
+    let trig = if file_open { 0 } else { s.pad.pressed };
+    if s.pad.pressed != 0 {
         s.event(serde_json::json!({"event":"input","tick":tick,"trig":trig}));
     }
     // FUN_1402b40d0: keyboard activity selects the keyboard sheet.
@@ -293,6 +344,26 @@ fn tick(
             for b in menu_screen::draw(&s.menu, task, [0, 0]) {
                 s.snapshot.push((s.image_sheets[b.image], b.quads));
             }
+        }
+    }
+    if let Some(f) = &s.files
+        && let Some(ui) = &f.ui
+    {
+        let font = Font {
+            widths: &s.font.widths,
+            pad: 1,
+        };
+        let d = ui.draw(&f.menu, &font);
+        for (image, quads) in d.art {
+            s.snapshot.push((f.sheets[image], quads));
+        }
+        for (sheet, quads) in d.sheets {
+            let slot = match sheet {
+                Sheet::Art(image) => f.sheets[image],
+                Sheet::Font => s.font_sheet,
+                Sheet::Icon => s.icon_sheet,
+            };
+            s.snapshot.push((slot, quads));
         }
     }
     if let Some(d) = &s.dialog {
@@ -392,8 +463,57 @@ fn tick(
         } else {
             events = t.frame(&s.menu.layout, trig, 1.);
         }
+        if file_open {
+            // The Load menu holds the title: its idle timer does not run.
+            t.timer = 0.;
+        }
+        let mut loaded = None;
+        let mut file_sounds = Vec::new();
+        if let Some(f) = s.files.as_mut()
+            && let Some(ui) = f.ui.as_mut()
+        {
+            let pressed = save_files::inputs(s.pad.pressed, s.pad.repeat);
+            let layout = &f.menu.layout;
+            for e in ui.frame(layout, &mut f.backend, &pressed) {
+                match e {
+                    save::menu::Event::Sound(n) => file_sounds.push(n as u32),
+                    save::menu::Event::Loaded { slot, data } => {
+                        f.last_slot = Some(slot);
+                        loaded = Some((slot, data));
+                    }
+                    save::menu::Event::Closed => ui.close(layout),
+                    _ => {}
+                }
+            }
+            if ui.is_finished() {
+                f.ui = None;
+            }
+        }
+        for n in file_sounds {
+            s.play(n, "file menu");
+        }
+        if let Some((slot, _data)) = loaded {
+            s.event(serde_json::json!({"event":"file_loaded","tick":tick,"slot":slot}));
+            s.loaded_slot = Some(slot);
+            t.action = Some(Action::Load);
+            t.leave(&mut events);
+        }
         for e in events {
             match e {
+                Event::OpenFileMenu => {
+                    if let Some(f) = s.files.as_mut()
+                        && f.ui.is_none()
+                    {
+                        let menu =
+                            save::menu::Menu::new(save::menu::Kind::Title, &f.backend, f.last_slot);
+                        f.ui = Some(visual::file_menu::FileMenu::new(
+                            menu,
+                            f.texts.clone(),
+                            &f.menu.layout,
+                        ));
+                        s.play(11, "file menu open");
+                    }
+                }
                 Event::Sound(n) => s.play(n, "title"),
                 Event::FadeOut(n) => s.fade.fade_out(n, false),
                 Event::FadeBgm(units) => {
@@ -481,7 +601,7 @@ fn finish(
     }
     if let Some(dir) = session.autoplay.clone()
         && !session.capture_pending
-        && let Some(&at) = AUTOPLAY_CAPTURES.get(session.captures_taken)
+        && let Some(&at) = session.captures().get(session.captures_taken)
         && session.tick >= at
     {
         session.capture_pending = true;
@@ -515,8 +635,8 @@ fn finish(
         );
     }
     let autoplay_done = session.autoplay.is_some()
-        && session.tick >= AUTOPLAY_END
-        && session.captures_taken == AUTOPLAY_CAPTURES.len();
+        && session.tick >= session.end()
+        && session.captures_taken == session.captures().len();
     let window_closed = closed.read().count() > 0;
     let handed_off =
         session.handoff.is_some() && session.title.is_none() && session.autoplay.is_none();
@@ -586,6 +706,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         return Err("usage: title <Steam-root> <manifest> <title-config> [--log new.jsonl] [--frames N] [--autoplay <new-capture-dir>]".into());
     }
     let (mut log_path, mut limit, mut autoplay) = (None, None, None);
+    let mut files_plan = false;
     let mut options = args[3..].iter();
     while let Some(option) = options.next() {
         match option.to_str() {
@@ -600,6 +721,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 )
             }
             Some("--autoplay") if autoplay.is_none() => autoplay = options.next().cloned(),
+            Some("--autoplay-files") if autoplay.is_none() => {
+                files_plan = true;
+                autoplay = options.next().cloned();
+            }
             _ => return Err("unknown/duplicate title option".into()),
         }
     }
@@ -656,6 +781,19 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         m.name_hash,
         &new_game::message_ids(),
     )?);
+    let backend = if autoplay.is_some() {
+        save_files::FileBackend::in_memory(save_files::synthetic_container())
+    } else {
+        save_files::FileBackend::open(&crate::launcher::data_dir(), Path::new(&args[0]))?
+    };
+    let files =
+        match save_files::Files::load(&source, (&m.index, m.ordinal, m.name_hash), backend, 1) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                eprintln!("Load menu unavailable: {e}");
+                None
+            }
+        };
     let (fi, fo) = (&config.font_image, &config.font_info);
     let font = hud::load_font(
         &source,
@@ -734,6 +872,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         captures_taken: 0,
         capture_pending: false,
         exit_code: None,
+        files,
+        files_plan,
+        loaded_slot: None,
     };
     eprintln!(
         "Title ready. Arrows/W/S or the D-pad move, Enter/left-click/A decides, Space/Backspace/B backs out, M/Start skips the intro, Esc quits."

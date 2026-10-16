@@ -10,6 +10,7 @@ audio = { path = "../audio" }
 effect = { path = "effect" }
 data = { path = "../data" }
 player = { path = "../game/player" }
+save = { path = "../game/save" }
 validation = { path = "../../validation" }
 serde.workspace = true
 serde_json.workspace = true

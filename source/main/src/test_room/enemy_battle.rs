@@ -779,6 +779,7 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
                 if let Err(e) = actor.battle_pose(choice, key, basic_fk) {
                     actor.error = Some(e)
                 }
+                super::enemy_motion_fx::scan(&mut game, actor);
             }
             Err(e) => {
                 battle.error = Some(e.clone());

@@ -37,7 +37,7 @@ Unfinished:
 - Journal: Story, Pieces, Missions, Minigames, Limits, Synthesis and Puzzles pages; the 3D model pages of Character Files; the "Slain" counts; scroll-bar thumbs.
 - Equip: form sub-weapons and the weapon-change list; status totals are not recomputed after equipping.
 - Customize and Party: party members' settings, locked members and world guests.
-- NEW! badges, Load/Save and the item shop are not built.
+- NEW! badges show on the Items row and the Stock list for items the room adds (T162); the other rows and lists, Load/Save and the item shop are not built.
 - Tutorial notices and Journal "seen" marks are kept in memory only, never in a save.
 
 ### Gravity and movement feel
@@ -67,8 +67,8 @@ Built (all in the test room, against the one Shadow):
 
 Unfinished:
 - Spell visuals are not drawn (stand-in shapes), and no voices play.
-- Heal effects, prize models and sparkles are not drawn; item drops are only logged.
-- Level-up messages, fanfare and HP/MP/Drive growth are not reproduced.
+- Prize sprites, the heal effect and item treasure boxes are drawn and picked up (T161); their physics, the box flight and pickup message are not.
+- Level-up panels, the level-up effect and bonus-level HP/MP/Drive growth are built (T160); the EXP popup and encounter bonus ids are not.
 - Game over: Sora's death event, the Continue / Load Game list over his lying pose and Continue's reload are built (T140); Load Game, the other game-over modes and the Drive-form KO are not.
 - Only one enemy exists, so targeting between several enemies is untested.
 

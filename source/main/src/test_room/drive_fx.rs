@@ -38,6 +38,8 @@ pub enum Anchor {
     /// its own translation, rotation and scale in engine world space
     /// (FUN_1402c7010); it belongs to the element's background group.
     Map { index: usize },
+    /// A battle enemy (by gallery actor id): a bound element follows it.
+    Actor(u64),
     /// The equipped weapon: a trail element (BonePos pair) follows the
     /// blade bone.
     Weapon,
@@ -102,6 +104,8 @@ struct Running {
     owner: u8,
     /// The element, when it follows the room enemy's object.
     enemy_element: Option<object_effect::Element>,
+    /// The battle actor an element follows, with the element.
+    actor_element: Option<(u64, object_effect::Element)>,
     /// The BonePos pair a swing trail follows on the weapon's blade bone.
     trail: Option<object_effect::BonePos>,
     /// The background group a map element belongs to.
@@ -133,6 +137,8 @@ fn to_game(m: Mat4) -> Mat {
 #[derive(Resource, Default)]
 pub struct DriveFx {
     common: Option<Arc<Dpd>>,
+    /// `obj/PRIZE.mdlx`'s sprites for the prizes on the ground.
+    prize: Option<(Arc<Dpd>, ::effect::prize::Prize)>,
     running: Vec<Running>,
     rng: Rng,
     models: HashMap<(usize, i16), Option<ParsedModel>>,
@@ -147,9 +153,16 @@ pub struct DriveFx {
 }
 
 impl DriveFx {
-    pub fn new(common: Option<Dpd>) -> Self {
+    pub fn new(common: Option<Dpd>, prize: Option<Arc<Pax>>) -> Self {
+        let prize = prize.and_then(|pax| {
+            let dpd = pax.dpds.first()?.clone();
+            let sprites = ::effect::prize::Prize::new(&dpd)?;
+            Some((dpd, sprites))
+        });
         DriveFx {
             common: common.map(Arc::new),
+            dpds: prize.iter().map(|(d, _)| d.clone()).collect(),
+            prize,
             ..Default::default()
         }
     }
@@ -255,6 +268,7 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
         };
         let local = ::effect::instance_matrix(element.translation, element.rotation, element.scale);
         let mut enemy_element = None;
+        let mut actor_element = None;
         let (bind, world) = match anchor {
             Anchor::Sora => {
                 let bind = (element.flags & 1 != 0).then_some(Bind {
@@ -269,6 +283,24 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
             }
             Anchor::Map { .. } => (None, local),
             Anchor::Weapon => (None, ::effect::math::IDENTITY),
+            Anchor::Actor(id) => {
+                let Some(&(position, yaw)) = game.actor_poses.get(&id) else {
+                    continue;
+                };
+                let position = position.to_array();
+                if element.flags & 1 != 0 {
+                    actor_element = Some((id, element.clone()));
+                    (None, super::bound_world(position, yaw, element))
+                } else {
+                    (
+                        None,
+                        ::effect::math::mul(
+                            &::effect::instance_matrix(to_world(position), [0., -yaw, 0.], [1.; 3]),
+                            &local,
+                        ),
+                    )
+                }
+            }
             Anchor::World { at, pitch, yaw } => (
                 None,
                 ::effect::instance_matrix(to_world(at.to_array()), [pitch, yaw, 0.], element.scale),
@@ -319,6 +351,7 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
                 bind,
                 owner: req.owner,
                 enemy_element,
+                actor_element,
                 trail: (matches!(anchor, Anchor::Weapon) && element.flags & 0x10000 != 0)
                     .then_some(element.bone_pos),
                 group: matches!(anchor, Anchor::Map { .. }).then_some(element.group),
@@ -347,6 +380,11 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
     for r in fx.running.iter_mut() {
         if let Some(b) = &r.bind {
             r.instance.world = bound_world(root, bones, b);
+        }
+        if let Some((id, element)) = &r.actor_element
+            && let Some(&(position, yaw)) = game.actor_poses.get(id)
+        {
+            r.instance.world = super::bound_world(position.to_array(), yaw, element);
         }
         if let (Some(element), Some((position, yaw))) = (&r.enemy_element, enemy_at) {
             r.instance.world = super::bound_world(position, yaw, element);
@@ -377,6 +415,26 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
         }
     }
     fx.running.retain(|r| !r.instance.finished());
+    // The prizes on the ground (obj/PRIZE.mdlx, program 203): billboards at
+    // each prize's centre.
+    if let (Some((dpd, prize)), Some(rt)) = (&fx.prize, game.enemy.as_ref()) {
+        let mut list = Vec::new();
+        for orb in &rt.orbs {
+            let Some(frame) = prize.frame(orb.kind, orb.age, orb.seed) else {
+                continue;
+            };
+            let centre = to_world([
+                orb.position[0],
+                orb.position[1] + player::enemy_prizes::centre_height(orb.kind),
+                orb.position[2],
+            ]);
+            let v = ::effect::math::apply(&view, [centre[0], centre[1], centre[2], 1.]);
+            list.extend(prize.quads(dpd, orb.kind, frame, [v[0], v[1], v[2]]));
+        }
+        if !list.is_empty() {
+            quads.push((dpd.clone(), 0, list));
+        }
+    }
     for k in unsupported {
         game.event(serde_json::json!({"event":"drive_effect_unsupported","tick":tick,"program":k}));
     }

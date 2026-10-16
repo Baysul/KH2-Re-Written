@@ -115,6 +115,8 @@ pub(crate) fn has_draw(kind: u32) -> bool {
                 | models::DRAW_MDL_LOOP_Z
                 | models::SNO_MDL_DTT_NORM
                 | crate::tail::KIND
+                | crate::tail2::TAIL_X
+                | crate::tail2::TAIL_2X
                 | crate::shipoly::KIND
                 | crate::thunder::KIND
                 | crate::ribbon::KIND
@@ -185,6 +187,7 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
         MEGA_BIRTH_MODEL => crate::mega_model::create(p, part, ctx),
         crate::ribbon::KIND => crate::ribbon::create(p, part, ctx),
         crate::tail::KIND => crate::tail::create(p, part, ctx),
+        crate::tail2::TAIL_X | crate::tail2::TAIL_2X => crate::tail2::create(p, part, ctx),
         crate::shipoly::KIND => crate::shipoly::create(p, part),
         crate::thunder::KIND => crate::thunder::create(p, part, ctx),
         models::VT_MIME
@@ -372,6 +375,7 @@ pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx)
         DRAW_MATRIX_WORLD_FRONT => draw_matrix_world_front(p, part, ctx),
         DRAW_MATRIX_WORLD_WOOD => draw_matrix_world_wood(p, part, ctx),
         crate::tail::KIND => crate::tail::update(p, cursor, part, ctx),
+        crate::tail2::TAIL_X | crate::tail2::TAIL_2X => crate::tail2::update(p, cursor, part, ctx),
         crate::thunder::KIND => crate::thunder::update(p, cursor, part, ctx),
         MATRIX_SCL => {
             let (u0, u1) = (use_val(ctx, p, 0), use_val(ctx, p, 1));
@@ -446,6 +450,7 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
         MEGA_BIRTH_MODEL => crate::mega_model::draw(p, cursor, part, ctx),
         crate::ribbon::KIND => crate::ribbon::draw(p, cursor, part, ctx),
         crate::tail::KIND => crate::tail::draw(p, cursor, part, ctx),
+        crate::tail2::TAIL_X | crate::tail2::TAIL_2X => crate::tail2::draw(p, cursor, part, ctx),
         crate::shipoly::KIND => crate::shipoly::draw(p, cursor, part, ctx),
         crate::thunder::KIND => crate::thunder::draw(p, cursor, part, ctx),
         k if crate::extra::draws(k) => crate::extra::draw(p, cursor, part, ctx),
@@ -742,10 +747,23 @@ fn draw_shape(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
 /// frame `index` of the shape at `anim`, through matrix `m`, modulated by
 /// the packet colour bytes (0x80 = 1.0).
 pub(crate) fn emit_sprites(ctx: &mut Ctx, anim: usize, index: usize, m: &Mat, packet: [u8; 4]) {
-    let b = &ctx.dpd.bytes;
+    let quads = sprite_quads(&ctx.dpd.bytes, anim, index, m, packet);
+    ctx.quads.extend(quads);
+}
+
+/// The quads of flip-book frame `index` of the shape at `anim` (see
+/// [`emit_sprites`]).
+pub(crate) fn sprite_quads(
+    b: &[u8],
+    anim: usize,
+    index: usize,
+    m: &Mat,
+    packet: [u8; 4],
+) -> Vec<Quad> {
+    let mut out = Vec::new();
     let packet: [f32; 4] = packet.map(|c| c as f32 / 128.);
     let Ok(sprites) = object_effect::shape_frame(b, anim, index) else {
-        return;
+        return out;
     };
     let address = i16_at(b, anim + 0x10 + index * 8).unwrap_or(0) as isize;
     let frame = (anim as isize + address) as usize;
@@ -765,7 +783,7 @@ pub(crate) fn emit_sprites(ctx: &mut Ctx, anim: usize, index: usize, m: &Mat, pa
             [su / 16., (tv + h) / 8.],
         ];
         let colour = std::array::from_fn(|i| s.colour[i] as f32 / 128. * packet[i]);
-        ctx.quads.push(Quad {
+        out.push(Quad {
             corners,
             uv,
             colour,
@@ -775,6 +793,7 @@ pub(crate) fn emit_sprites(ctx: &mut Ctx, anim: usize, index: usize, m: &Mat, pa
             tex0,
         });
     }
+    out
 }
 
 /// FUN_1404d4ea0 → FUN_1404e1780 → FUN_1404d4f80: every `interval` ticks

@@ -87,12 +87,16 @@ pub struct FormSources {
     pub item_names: HashMap<u16, Vec<u8>>,
     pub gauge_up: Vec<u8>,
     pub sora_title: Vec<u8>,
+    /// Sora's level-up and bonus-level panel texts and the `bons` table.
+    pub growth: super::level_growth::Texts,
     pub drive_label: Vec<u8>,
     pub revert_label: Vec<u8>,
     /// 00effect's PAX (the form level-up's element 16) and the resident
     /// `effect/texcommon.dpd`.
     pub system_pax: Option<Arc<data::object_effect::Pax>>,
     pub texcommon: Option<data::object_effect::Dpd>,
+    /// `obj/PRIZE.mdlx`'s effect: the prizes' sprites.
+    pub prize_pax: Option<Arc<data::object_effect::Pax>>,
 }
 
 /// The Keyblade items a kit holds: slot 0's (the member's equipped weapon)
@@ -105,7 +109,12 @@ pub struct Weapons {
 
 /// An object's own effects: the PAX (entry type 18) of `obj/<name>.a.us`.
 pub fn object_pax(library: &mut Library, name: &str) -> Option<data::object_effect::Pax> {
-    let bytes = library.read(&format!("obj/{name}.a.us")).ok()?;
+    file_pax(library, &format!("obj/{name}.a.us"))
+}
+
+/// The first PAX of an installed BAR file.
+pub fn file_pax(library: &mut Library, path: &str) -> Option<data::object_effect::Pax> {
+    let bytes = library.read(path).ok()?;
     let table = data::bar::read_bar(&bytes).ok()?;
     let e = table
         .entries
@@ -195,9 +204,14 @@ impl FormSources {
             item_names: HashMap::new(),
             gauge_up: Vec::new(),
             sora_title: Vec::new(),
+            growth: super::level_growth::Texts {
+                bons: bar_entry(battle, b"bons")?.to_vec(),
+                ..Default::default()
+            },
             drive_label: Vec::new(),
             system_pax: None,
             texcommon: None,
+            prize_pax: None,
             revert_label: Vec::new(),
         })
     }
@@ -290,6 +304,10 @@ impl FormSources {
             Ok((models.remove(0), blade))
         };
         let (weapon, blade0) = load_weapon(weapons.main)?;
+        // The Keyblade's own effects (swing trail, hit sparks).
+        let weapon_pax = keyblades
+            .model(weapons.main)
+            .and_then(|m| object_pax(&mut Library::open(source).ok()?, m));
         // FUN_1403ef750: each weapon slot's motion set is `obj/%s.mset` of
         // wmst row set × 2 + slot; an empty name (Antiform) leaves the
         // weapon without motions and unattached.
@@ -349,6 +367,7 @@ impl FormSources {
                 weapon,
                 weapon2,
                 blades: [blade0, blade1],
+                weapon_pax,
                 weapon_joint: self.weapon_joint,
                 second_joint,
                 motion_set,
@@ -429,6 +448,8 @@ struct Stash {
     attack: HashMap<u8, Vec<(usize, Vec3, f32)>>,
     /// The kit's two Keyblades' attack spheres.
     blade: [character_kit::Blade; 2],
+    /// Its slot 0 Keyblade's effects (None: the room's default).
+    weapon_pax: Option<Arc<data::object_effect::Pax>>,
 }
 
 /// Drive state of the session.
@@ -870,6 +891,7 @@ fn swap_kit(game: &mut Game, form: u8) -> Result<(), String> {
             }
             Stash {
                 blade: kit.blades,
+                weapon_pax: kit.weapon_pax.map(Arc::new),
                 target_shape: kit.target_shape,
                 params: kit.params,
                 clips: kit.clips,
@@ -900,7 +922,11 @@ fn swap_kit(game: &mut Game, form: u8) -> Result<(), String> {
         body,
         attack: std::mem::replace(&mut game.sora_attack, incoming.attack),
         blade,
+        weapon_pax: std::mem::replace(&mut game.weapon_pax, incoming.weapon_pax),
     };
+    game.weapon_pax_changed = true;
+    // The trail's length follows the new Keyblade's size.
+    game.trail_length = None;
     // The new kit's attack rows (ATKP by id, sub-table 0) for the hits.
     if let Some(rt) = game.enemy.as_mut() {
         let ids: Vec<u16> = game
@@ -1764,6 +1790,7 @@ pub fn level_panels(src: &FormSources, up: &forms::LevelUp) -> Vec<visual::level
         .cloned()
         .unwrap_or_default();
     let mut out = vec![visual::level_up::Entry {
+        kind: visual::level_up::Kind::Form,
         form: up.form,
         level: up.level,
         title,
@@ -1777,6 +1804,7 @@ pub fn level_panels(src: &FormSources, up: &forms::LevelUp) -> Vec<visual::level
         .collect();
     if let Some(first) = sora.first() {
         out.push(visual::level_up::Entry {
+            kind: visual::level_up::Kind::Form,
             form: 0,
             level: up.level,
             title: src.sora_title.clone(),
