@@ -25,6 +25,16 @@ fn entry<'a>(bytes: &'a [u8], name: &[u8; 4]) -> Result<&'a [u8], Fail> {
         .ok_or_else(|| "BAR range outside file".into())
 }
 
+/// The 0x60 raw bytes of an object entry as hex.
+fn raw_entry(table: &[u8], object_id: u32) -> Option<String> {
+    let count = u32::from_le_bytes(table.get(4..8)?.try_into().ok()?) as usize;
+    (0..count).find_map(|i| {
+        let e = table.get(8 + i * objentry::ENTRY_SIZE..8 + (i + 1) * objentry::ENTRY_SIZE)?;
+        (u32::from_le_bytes(e[0..4].try_into().ok()?) == object_id)
+            .then(|| e.iter().map(|b| format!("{b:02x}")).collect())
+    })
+}
+
 fn typed(bytes: &[u8], kind: u16) -> Option<&[u8]> {
     let table = bar::read_bar(bytes).ok()?;
     let e = table
@@ -55,7 +65,8 @@ fn run() -> Result<(), Fail> {
     let items = item_table::read(item_bytes)?;
     let stats = item_table::read_stats(item_bytes)?;
     let went = entry(&system, b"went")?.to_vec();
-    let objects = objentry::read(&library.read("00objentry.bin")?)?;
+    let objentry_bytes = library.read("00objentry.bin")?;
+    let objects = objentry::read(&objentry_bytes)?;
     let player = objects
         .iter()
         .find(|o| o.model_name == b"P_EX100")
@@ -127,8 +138,11 @@ fn run() -> Result<(), Fail> {
                 weapon["model"] = json!(model);
                 weapon["mset"] = json!(mset);
                 weapon["weapon_joint"] = json!(o.weapon_joint);
+                weapon["objentry_raw"] = json!(raw_entry(&objentry_bytes, o.object_id));
                 let path = format!("obj/{model}.mdlx");
                 weapon["mdlx_installed"] = json!(library.find(&path).is_some());
+                weapon["effects_installed"] =
+                    json!(library.find(&format!("obj/{model}.a.us")).is_some());
                 weapon["mset_installed"] = json!(library.find(&format!("obj/{mset}")).is_some());
                 if let Some(found) = library.find(&path) {
                     let archive = library.read_found(&found)?;
