@@ -1477,6 +1477,8 @@ pub fn present(
     g.display = pose;
     g.weapon_display = weapon_pose;
     g.blend_from = None;
+    g.display_joints.clear();
+    g.blend_from_joints.clear();
     g.shown_action = None;
 }
 

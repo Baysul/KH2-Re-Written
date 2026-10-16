@@ -5,13 +5,13 @@
 //! object entry during the drive-start motion, FUN_1403e0630, and waits
 //! for the load, FUN_14039e340).
 use super::{
-    ClipPoses, HURT_COUNT, LOCOMOTION, SORA_GUARD, SORA_HURT, WEAPON_BANK, clip_for, ptya_record,
-    sound_triggers,
+    ClipPoses, HURT_COUNT, LOCOMOTION, SORA_GUARD, SORA_HURT, Skin, WEAPON_BANK, clip_for,
+    ptya_record, sound_triggers,
 };
 use bevy::prelude::*;
 use data::{model_inspection, motion, object_collision, probe_source::ProbeSource, ptya};
 use player::{Action, AttackStep, Clip, Clips, Params};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 /// What a kit is built from.
 pub(super) struct KitInputs<'a> {
@@ -403,6 +403,16 @@ pub(super) fn load_kit(
 
     // Precompute every frame of every clip; undefined basic-FK frames reject
     // the session instead of substituting a pose.
+    let skin = Arc::new(Skin {
+        skinning: actor.skinning.clone(),
+        parents: actor
+            .skinning
+            .bones
+            .iter()
+            .map(|b| b.header_i32[1])
+            .collect(),
+        weapon_joint,
+    });
     let mut clip_poses = Vec::new();
     let mut eval_totals = [0usize; 4];
     let mut clip_list: Vec<(Clip, usize)> = Vec::new();
@@ -429,6 +439,7 @@ pub(super) fn load_kit(
             Some(&i) => i,
             None => {
                 let mut frames = Vec::with_capacity(clip.end as usize);
+                let mut joints = Vec::new();
                 let mut hand = Vec::with_capacity(clip.end as usize);
                 let mut hand2 = Vec::new();
                 let mut root = Vec::with_capacity(clip.end as usize);
@@ -525,6 +536,20 @@ pub(super) fn load_kit(
                         // stays at the player origin.
                         let r = evaluated.root_translation;
                         root.push(Vec3::from_array(r));
+                        // Raw-matrix motions have no joints to blend.
+                        if let Some(own) = evaluated.joints.get(..skin.parents.len()) {
+                            joints.push(
+                                own.iter()
+                                    .map(|w| {
+                                        let mut w = *w;
+                                        for (t, r) in w.translation.iter_mut().zip(r) {
+                                            *t -= r;
+                                        }
+                                        w
+                                    })
+                                    .collect(),
+                            );
+                        }
                         for p in &mut pose.position_bits {
                             *p = std::array::from_fn(|i| (f32::from_bits(p[i]) - r[i]).to_bits());
                         }
@@ -575,6 +600,8 @@ pub(super) fn load_kit(
                 }
                 clip_poses.push(ClipPoses {
                     frames,
+                    joints,
+                    skin: Some(skin.clone()),
                     weapon: hand,
                     weapon2: hand2,
                     weapon_frames,

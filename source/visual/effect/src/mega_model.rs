@@ -15,9 +15,9 @@
 //!   its XY perpendicular and their cross product.
 //! - FUN_140140560's argument order (float XYZ rotation) is taken as the
 //!   instance matrix convention (RotX, RotY, RotZ applied in that order).
-//! - The colour-accumulator buffer (+0x101) and the snapshot-matrix buffer
-//!   (+0x106) are not modelled; an effect using them is flagged
-//!   unsupported (0x4000_0101 / 0x4000_0106).
+//! - The per-slot colour accumulator (key +0x101, FUN_1404bd910) and the
+//!   spawn-time world matrix snapshot (key +0x106, FUN_1404be590) are
+//!   modelled in [`Slot`].
 //! - Part pause (`inst+0xc1`) and the +0xc2 camera offset are not
 //!   interpreted (613 sets only the draw layer through pppRyjMngFlag).
 use crate::math::{self, IDENTITY, Mat, Vec4};
@@ -48,6 +48,10 @@ struct Slot {
     age: u8,
     fade_in: u8,
     fade_out: u8,
+    /// The colour accumulator (key +0x101): the added colour and its rate.
+    acc: Option<[f32; 8]>,
+    /// The instance world matrix at spawn (key +0x106).
+    snapshot: Option<Mat>,
 }
 
 impl Default for Slot {
@@ -70,6 +74,8 @@ impl Default for Slot {
             age: 0,
             fade_in: 0,
             fade_out: 0,
+            acc: None,
+            snapshot: None,
         }
     }
 }
@@ -127,11 +133,6 @@ fn wrap_angle(a: i32) -> i32 {
 
 /// FUN_1404be1f0.
 pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
-    for (offset, code) in [(0x106, 0x4000_0106), (0x101, 0x4000_0101)] {
-        if byte(ctx, cursor + offset) != 0 && !ctx.unsupported.contains(&code) {
-            ctx.unsupported.push(code);
-        }
-    }
     let colour_var = use_val(ctx, p, 1);
     let mut pool = match part.mega_model.remove(&p.use_val) {
         Some(pool) => pool,
@@ -510,12 +511,35 @@ fn spawn(ctx: &mut Ctx, cursor: usize, part: &Part, colour_var: usize, pool: &mu
     }
     let life = i16_at(&ctx.dpd.bytes, cursor + 0x22).unwrap_or(0);
     s.life = if life == 0 { -1 } else { life };
+    // Spawn: the colour accumulator starts at zero with the key's rate
+    // (+0x28..), the snapshot is the instance world matrix.
+    if byte(ctx, cursor + 0x101) != 0 {
+        let mut acc = [0f32; 8];
+        for (i, a) in acc[4..].iter_mut().enumerate() {
+            *a = float(ctx, cursor + 0x28 + 4 * i);
+        }
+        s.acc = Some(acc);
+    }
+    if byte(ctx, cursor + 0x106) != 0 {
+        s.snapshot = Some(ctx.world);
+    }
     s
 }
 
 /// FUN_1404bd910.
 fn step(ctx: &mut Ctx, cursor: usize, part: &Part, colour_var: usize, axis: Vec4, s: &mut Slot) {
-    let alpha = part.u8(colour_var + 0xb) as f32;
+    let mut alpha = part.u8(colour_var + 0xb) as f32;
+    // FUN_1404bd910's colour accumulator: value += rate, rate += key; the
+    // fade reads the part alpha plus the accumulated alpha, capped at 255.
+    if let Some(acc) = s.acc.as_mut() {
+        for i in 0..4 {
+            acc[i] += acc[4 + i];
+        }
+        for i in 0..4 {
+            acc[4 + i] += float(ctx, cursor + 0x38 + 4 * i);
+        }
+        alpha = (acc[3] as i32 + part.u8(colour_var + 0xb) as i32).min(0xff) as f32;
+    }
     let flags = byte(ctx, cursor + 0x103);
     for i in 0..3 {
         s.angle[i] = s.angle[i].wrapping_add(s.angle_vel[i]);
@@ -582,7 +606,14 @@ fn step(ctx: &mut Ctx, cursor: usize, part: &Part, colour_var: usize, axis: Vec4
 }
 
 /// FUN_1404be590: the slot's draw matrix.
-fn slot_matrix(ctx: &Ctx, mode: u8, matrix_mode: u8, emitter_world: &Mat, s: &Slot) -> Mat {
+fn slot_matrix(
+    ctx: &Ctx,
+    cur: &Mat,
+    mode: u8,
+    matrix_mode: u8,
+    emitter_world: &Mat,
+    s: &Slot,
+) -> Mat {
     let mut m = if matrix_mode == 0 {
         let mut m = IDENTITY;
         m[3] = s.frame[3];
@@ -607,7 +638,11 @@ fn slot_matrix(ctx: &Ctx, mode: u8, matrix_mode: u8, emitter_world: &Mat, s: &Sl
     } else {
         let t = m[3];
         m = math::mul(&ctx.ed60, &m);
-        m[3] = math::apply(emitter_world, t);
+        // With a snapshot the position goes through view · snapshot · cur.
+        m[3] = match &s.snapshot {
+            Some(snap) => math::apply(&math::mul(&ctx.view, &math::mul(snap, cur)), t),
+            None => math::apply(emitter_world, t),
+        };
     }
     math::mul(&ctx.ede0, &m)
 }
@@ -638,9 +673,12 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
         if s.life == 0 {
             continue;
         }
-        let a = slot_matrix(ctx, mode, matrix_mode, &emitter_world, s);
-        let c = |i: usize| (s.colour[i] as i32 + base[i]).clamp(0, 0xff) as u8;
-        let alpha = ((s.colour[3] as f32 + base[3] as f32) - s.alpha_reduction) as i32;
+        let a = slot_matrix(ctx, &part.cur, mode, matrix_mode, &emitter_world, s);
+        let added: [i32; 4] = s
+            .acc
+            .map_or([0; 4], |a| std::array::from_fn(|i| a[i] as i32));
+        let c = |i: usize| (s.colour[i] as i32 + base[i] + added[i]).clamp(0, 0xff) as u8;
+        let alpha = ((s.colour[3] as f32 + base[3] as f32) - s.alpha_reduction) as i32 + added[3];
         ctx.model_draws.push(ModelDraw {
             model: model as i16,
             vertices: part.vertex_override.clone(),

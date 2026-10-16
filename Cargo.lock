@@ -1846,6 +1846,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "enemy"
+version = "0.1.2"
+dependencies = [
+ "player",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2557,6 +2564,7 @@ dependencies = [
  "collision",
  "data",
  "effect",
+ "enemy",
  "event",
  "fontdue",
  "image",
