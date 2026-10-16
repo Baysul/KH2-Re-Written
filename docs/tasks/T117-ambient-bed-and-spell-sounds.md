@@ -34,3 +34,5 @@ PASS fmt; PASS clippy (warnings denied); PASS `cargo test --workspace --locked` 
 ## Verdict / next
 
 PROGRESS: the room ambient bed plays with its cross-fade, and each spell requests its cast and release sounds. Next: spell hit sounds and Magnet's hold, then the item effect's sounds (#100–104).
+
+Superseded by [T136](T136-magic-effects-and-combos.md): the spell sounds now come from the effect elements themselves and `spell_sound.rs` is gone.

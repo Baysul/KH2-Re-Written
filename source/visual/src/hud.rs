@@ -90,15 +90,23 @@ pub fn load(
 /// OpenKH 00battle layout: 128-byte entries after an 8-byte header; id u16,
 /// character u8, HP u8, MP u8). Entry id 0 of character 1 (Sora).
 pub fn starting_stats(plrp: &[u8]) -> Result<(i32, i32), Box<dyn std::error::Error>> {
+    starting_stats_of(plrp, 1)
+}
+
+/// The same row for another character (2 Donald, 3 Goofy).
+pub fn starting_stats_of(
+    plrp: &[u8],
+    character: u8,
+) -> Result<(i32, i32), Box<dyn std::error::Error>> {
     let count = u32::from_le_bytes(plrp.get(4..8).ok_or("PLRP header")?.try_into()?) as usize;
     if plrp.len() < 8 + count * 128 {
         return Err("PLRP table truncated".into());
     }
     (0..count)
         .map(|i| &plrp[8 + i * 128..8 + i * 128 + 5])
-        .find(|e| u16::from_le_bytes([e[0], e[1]]) == 0 && e[2] == 1)
+        .find(|e| u16::from_le_bytes([e[0], e[1]]) == 0 && e[2] == character)
         .map(|e| (e[3] as i32, e[4] as i32))
-        .ok_or_else(|| "PLRP entry for Sora absent".into())
+        .ok_or_else(|| "PLRP entry absent".into())
 }
 
 /// System font: the HD replacement of fontimage.bar's 'sys' plane and the

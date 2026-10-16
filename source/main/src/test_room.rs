@@ -44,6 +44,7 @@ use std::{
 };
 use visual::area_fog::{AddFogged, FogMaterial, FogPlugin};
 use visual::controller::{self, Pad};
+use visual::enemy_gauge::EnemyGauge;
 use visual::fade::{self, Fade};
 use visual::field_command_menu::{self, CommandMenu, Decision, Item};
 use visual::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
@@ -74,6 +75,7 @@ mod enemy_catalog;
 mod enemy_combat;
 mod enemy_gallery;
 mod enemy_motion_fx;
+mod enemy_script;
 mod enemy_target;
 mod enemy_tour;
 mod game_over;
@@ -83,9 +85,11 @@ mod item_drop_view;
 mod item_room;
 mod level_growth;
 mod magic_room;
+mod magic_tour;
 mod party_room;
 mod prize_room;
 mod settings_room;
+mod spell_fx;
 mod weapon_trail;
 
 fn player_object_default() -> String {
@@ -317,6 +321,8 @@ enum EffectRequest {
     /// A battle enemy's motion frame trigger 1: element `id` of its own
     /// container, bound to the actor.
     ActorElement { object: u32, actor: u64, id: u16 },
+    /// The same element placed at a point by a script (`obj_effect_start_pos`).
+    ActorElementAt { object: u32, id: u16, at: Vec3 },
     /// The enemy's `dead` act: effect_start_bind(obj, 2).
     EnemyDead,
     /// A system (00effect) element at a point, unrotated
@@ -428,6 +434,8 @@ struct MenuSources {
 /// HUD sources loaded with the session.
 struct HudSource {
     sheets: Vec<Sheet>,
+    /// The field 2D archive's 'fiel' sheet: the lock-on reticle.
+    field: Sheet,
     /// The field 2D archive's 'mapj' area-change iris (areas only).
     iris: Option<Sheet>,
     stats: (i32, i32),
@@ -488,9 +496,22 @@ const DISARM_TICKS: u32 = 360;
 const PARTY_STAND: u32 = 1 << 0;
 const PARTY_COLLIDE: u32 = 1 << 4;
 
+/// What a joint-space blend of two shown poses needs: the actor's skinning
+/// and parents, and the joint carrying the Keyblade.
+struct Skin {
+    skinning: data::model_pose::Skinning,
+    parents: Vec<i32>,
+    weapon_joint: usize,
+}
+
 /// Precomputed skinned positions for every frame of one clip.
 struct ClipPoses {
     frames: Vec<Vec<Vec3>>,
+    /// The evaluated joints of each frame with the root motion removed
+    /// (empty for basic FK), blended joint by joint when a motion switch
+    /// cross-fades.
+    joints: Vec<Vec<data::motion_eval::World>>,
+    skin: Option<Arc<Skin>>,
     /// Model-space matrix of the objentry weapon joint for each frame.
     weapon: Vec<Mat4>,
     /// The same for weapon slot 1's joint (forms with two Keyblades).
@@ -578,6 +599,10 @@ const SE_CURSOR: u32 = 1;
 const SE_OPEN: u32 = 3;
 const SE_CLOSE: u32 = 4;
 const SE_LOW_HP: u32 = 9;
+/// Manual lock engaged, and released by the toggle (FUN_1401dd170(7) / (8) in
+/// the lock manager, FUN_1403dd650 / FUN_1403dcd70).
+const SE_LOCK: u32 = 7;
+const SE_UNLOCK: u32 = 8;
 
 /// The room collision the controller and the enemy read: the generated
 /// arena's triangles, or a game map's COCT through the exe's routines.
@@ -830,6 +855,12 @@ struct Game {
     ability_tour: Option<ability_inventory::Tour>,
     enemy_tour: bool,
     enemy_battle_tour: bool,
+    /// `--magic-tour`: the scripted spell and combo run (magic_tour.rs).
+    magic_tour: bool,
+    /// The Drive form the tour casts in (`--magic-form`, 0 = none) and the
+    /// ticks its change takes before the first cast.
+    magic_form: u8,
+    magic_shift: u64,
     /// The unattended `--growth-tour` (level-up and bonus panels).
     growth_tour: bool,
     /// The unattended `--prize-tour` (prize sprites and the heal effect).
@@ -878,6 +909,16 @@ struct Game {
     cheats: debug_menu::Cheats,
     /// Sora's magic: owned spells, running casts and their volumes.
     magic: Option<magic_room::MagicRt>,
+    /// The spell scripts' effect calls of this tick and the effects' state
+    /// after the last effect update (`spell_fx`).
+    fx_calls: Vec<spell_fx::Call>,
+    /// The party's AI may cast (Donald's spells).
+    party_spells: bool,
+    fx_live: HashMap<u64, magic::FxLive>,
+    /// The party slot the Magic menu's Cure target list picked (0 Sora)
+    /// and the Magic row Cure was chosen from, while that list is open.
+    cure_target: usize,
+    cure_pick: Option<usize>,
     /// Donald and Goofy, following Sora.
     party: Vec<party_room::MemberRt>,
     items: Option<item_room::ItemRt>,
@@ -905,8 +946,14 @@ struct Game {
     menu_down_queued: bool,
     enemy: Option<EnemyRuntime>,
     display: Vec<Vec3>,
+    /// The clip frame the shown pose came from (research logging).
+    display_frame: usize,
     /// Pose, Keyblade transform and start tick of the active crossfade.
     blend_from: Option<(Vec<Vec3>, Transform, u64)>,
+    /// The joints behind `display` and behind `blend_from`'s pose (empty
+    /// when the shown clip has none), for joint-space blends.
+    display_joints: Vec<data::motion_eval::World>,
+    blend_from_joints: Vec<data::motion_eval::World>,
     display_hand: Transform,
     weapon_indices: Vec<Vec<u32>>,
     /// The same for slot 1's Keyblade (the form's own).
@@ -979,6 +1026,16 @@ struct Hud {
     iris: Option<Sheet>,
     menu: Option<MenuState>,
     gauge: Gauge,
+    /// The Scan target gauge (GAUGE_ENEMY, layer 6) and what it shows.
+    enemy_gauge: EnemyGauge,
+    scan: enemy_target::ScanTracker,
+    /// The HUD slot-height table that popups register in (the Scan gauge stacks
+    /// on it).
+    slots: visual::hud_slots::HudSlots,
+    /// The `fiel` sheet and the lock-on reticle drawn from it.
+    field: Sheet,
+    reticle: visual::lock_on::Reticle,
+    reticle_draw: Option<Draw>,
     stats: GaugeStats,
     canvas: Canvas,
     image: Handle<Image>,
@@ -996,9 +1053,55 @@ struct CameraRig {
     /// Right-drag turn not yet consumed by a tick, in manual-turn units.
     pending_turn: f32,
     recenter_queued: bool,
-    /// Map camera collision triangles in game world space.
-    collision: Vec<[[f32; 3]; 3]>,
+    /// The map's camera collision in game world space.
+    collision: CameraCollision,
     collision_hits: u64,
+}
+
+/// The camera's collision: a map's COCT worlds queried like the executable's
+/// camera ray (planes, surface nibbles), or plain triangles for the generated
+/// arena.
+struct CameraCollision {
+    worlds: Vec<::collision::World>,
+    triangles: Vec<[[f32; 3]; 3]>,
+}
+
+impl CameraCollision {
+    fn new(room: &visual::room::LoadedRoom) -> Self {
+        Self {
+            // The COCT vertices already are game world coordinates.
+            worlds: room
+                .camera_collisions
+                .iter()
+                .filter_map(|c| ::collision::World::new(c, u64::MAX).ok())
+                .collect(),
+            triangles: room
+                .camera_triangles
+                .iter()
+                .map(|t| t.map(|p| to_world(p.to_array())))
+                .collect(),
+        }
+    }
+
+    fn polygons(&self) -> usize {
+        self.triangles.len()
+    }
+
+    fn cast(&self, from: [f32; 3], to: [f32; 3]) -> Option<follow_camera::RayHit> {
+        if self.worlds.is_empty() {
+            return follow_camera::triangle_hit(&self.triangles, from, to);
+        }
+        let squared = |p: [f32; 3]| (0..3).map(|i| (p[i] - from[i]).powi(2)).sum::<f32>();
+        self.worlds
+            .iter()
+            .filter_map(|w| w.camera_ray(from, to))
+            .min_by(|a, b| squared(a.point).total_cmp(&squared(b.point)))
+            .map(|hit| follow_camera::RayHit {
+                point: hit.point,
+                normal: hit.normal,
+                surface: hit.surface,
+            })
+    }
 }
 
 /// Scene (Y up) to game world (Y down) and back; the map is converted with
@@ -2684,6 +2787,7 @@ fn load(
                 None => None,
             };
             Some(HudSource {
+                field: hud::load(source, &l.index, l.ordinal, l.name_hash, b"fiel")?,
                 sheets,
                 iris,
                 stats: hud::starting_stats(bar_entry(&battle, b"plrp")?)?,
@@ -2694,9 +2798,12 @@ fn load(
     };
     let ptya_bytes = bar_entry(&battle, b"ptya")?;
     // The six spells' tables and cast motions (magc, pref/magi, cmd).
-    let magic_src = magic_room::load(&battle, pref, &system, 70.)
+    let mut magic_src = magic_room::load(&battle, pref, &system, 70.)
         .map_err(|e| format!("magic tables: {e}"))
         .ok();
+    if let Some(m) = magic_src.as_mut() {
+        magic_room::load_effects(source, m);
+    }
     let spell_ids = magic_src
         .as_ref()
         .map(|m| magic_room::motion_ids(&m.records))
@@ -2769,6 +2876,7 @@ fn load(
     )?;
     let sora_body = kit.body.clone();
     let (sora_target_radius, sora_target_lift) = (kit.target_radius, kit.target_lift);
+    let (sora_body_lift, sora_heal_lift) = (kit.body_lift, kit.heal_lift);
     let forms = drive_room::FormSources::new(
         &system,
         &battle,
@@ -3096,6 +3204,8 @@ fn load(
     };
     let magic_src = magic_src.map(|mut m| {
         m.target_lift = sora_target_lift;
+        m.body_lift = sora_body_lift;
+        m.heal_lift = sora_heal_lift;
         m
     });
     // The spells' names for the Magic submenu (cmd +8 message ids).
@@ -3106,6 +3216,8 @@ fn load(
                 .iter()
                 .filter_map(|r| m.commands.get(&r.command).map(|c| (r.command, c.name)))
                 .collect();
+            // The party list's names (message 0x851e + the character id).
+            wanted.extend((0..3).map(|i| (magic_room::MEMBER_NAMES + i, 0x51f + i as u32)));
             // The item commands (execute 3) for the Items submenu.
             wanted.extend(
                 m.commands
@@ -3252,6 +3364,7 @@ fn load(
                 let mut kinds = Vec::new();
                 if let Ok(mut library) = data::path_lookup::Library::open(source) {
                     let lvup = bar_entry(&battle, b"lvup").unwrap_or(&[]);
+                    let plrp = bar_entry(&battle, b"plrp").unwrap_or(&[]);
                     for (name, character, records) in [
                         ("P_EX020", 2, &player::party_members::DONALD[..]),
                         ("P_EX030", 3, &player::party_members::GOOFY[..]),
@@ -3261,6 +3374,7 @@ fn load(
                             &mut library,
                             &system,
                             lvup,
+                            plrp,
                             name,
                             character,
                             records,
@@ -3437,11 +3551,16 @@ fn load_enemy(
                 )
             })
             .collect();
-        let bone_list: Vec<usize> = body
+        // The bones of the HIT shapes, the claws and the TARGET shapes (the
+        // lock-on and the party's spells read the last).
+        let mut bone_list: Vec<usize> = body
             .iter()
             .map(|b| b.0)
             .chain(claws.values().flatten().map(|c| c.0))
+            .chain(targets.iter().map(|t| t.0))
             .collect();
+        bone_list.sort_unstable();
+        bone_list.dedup();
         for offset in 0..=clip.end {
             let (pose, evaluated) = model
                 .skinning
@@ -3907,11 +4026,7 @@ fn area_transition(
     game.ambient = room_ambient(&game.step_info, next.world, next.area);
     let (position, yaw) = next.player;
     game.player = Player::new(position.to_array(), yaw);
-    rig.collision = room
-        .camera_triangles
-        .iter()
-        .map(|t| t.map(|p| to_world(p.to_array())))
-        .collect();
+    rig.collision = CameraCollision::new(&room);
     rig.camera = FollowCamera::new(
         follow_camera::OUTDOOR,
         &camera_input(&game.player, game.player.position, game.params.run_speed),
@@ -4690,6 +4805,7 @@ fn setup(
     let enemy_model = startup.enemy_model.take();
     if let Some(HudSource {
         sheets,
+        field,
         iris,
         stats: (hp, mp),
         menu,
@@ -4741,12 +4857,19 @@ fn setup(
             ));
             compose.white_sheet = Some(frame.add_sheet(&mut images, vec![255; 16], [2, 2], 1.));
         }
+        let mut slots = visual::hud_slots::HudSlots::default();
         commands.insert_resource(Hud {
             panels: Default::default(),
             gauge: Gauge::new(
                 &sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(),
                 &stats,
             ),
+            enemy_gauge: EnemyGauge::new(&sheets[0].sequence, &mut slots),
+            scan: Default::default(),
+            slots,
+            field,
+            reticle: Default::default(),
+            reticle_draw: None,
             sheets,
             iris,
             menu: menu.map(|(sheet, font, labels)| {
@@ -5538,6 +5661,8 @@ const AUTOPLAY_GUARDS: [u64; 3] = [1170, 1340, 1720];
 /// The index that holds the item pictures.
 const PICTURE_INDEX: &str = "Image/dt/kh2_fifth.hed";
 const AUTOPLAY_END: u64 = 9400;
+/// A shown-pose change above this many units in one frame is logged.
+const POSE_JUMP_LOG: f32 = 6.;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 #[allow(clippy::too_many_arguments)]
@@ -5552,7 +5677,11 @@ fn simulate(
     mut targeting: ResMut<enemy_target::Targeting>,
 ) {
     let tick = game.tick;
-    let (up, down) = if game.ability_tour.is_some() || game.enemy_tour || game.enemy_battle_tour {
+    let (up, down) = if game.ability_tour.is_some()
+        || game.enemy_tour
+        || game.enemy_battle_tour
+        || game.magic_tour
+    {
         (false, false)
     } else if game.autoplay.is_some() {
         // (7690: back to Attack for the Drive forms' combos.)
@@ -5571,6 +5700,12 @@ fn simulate(
         )
     } else if game.enemy_tour {
         (Vec2::ZERO, false, false)
+    } else if game.magic_tour {
+        (
+            Vec2::ZERO,
+            magic_tour::jump(tick, game.magic_shift),
+            magic_tour::attack(tick, game.magic_shift),
+        )
     } else if let Some(tour) = &game.ability_tour {
         (
             Vec2::ZERO,
@@ -5814,10 +5949,72 @@ fn simulate(
                     .and_then(|it| it.menu_slots.get(index).copied());
             }
             Decision::ExecuteSub { row: 1, index } => {
+                // A spell whose command opens a submenu (Cure, submenu 4)
+                // first asks for the party member (FUN_1403f22e0).
+                let picked = game.magic.as_ref().and_then(|mg| {
+                    let t = *mg.menu_types.get(index)?;
+                    let cmd = mg.src.commands.get(&mg.current(t)?.command)?;
+                    Some((t, cmd.submenu))
+                });
+                match picked {
+                    Some((_, 4)) if !game.party.is_empty() => {
+                        let mg = game.magic.as_ref().expect("magic");
+                        let name = |id: u16| mg.src.names.get(&id).cloned().unwrap_or_default();
+                        let mut items = vec![Item {
+                            label: name(magic_room::MEMBER_NAMES),
+                            icon: 0,
+                            colour: 0,
+                        }];
+                        for (i, member) in game.party.iter().enumerate() {
+                            items.push(Item {
+                                label: name(magic_room::MEMBER_NAMES + 1 + i as u16),
+                                icon: 0,
+                                colour: if member.stored || member.hp <= 0 {
+                                    5
+                                } else {
+                                    0
+                                },
+                            });
+                        }
+                        game.cure_pick = Some(index);
+                        m.menu.open_sub(4, items);
+                    }
+                    _ => {
+                        menu_cast = game
+                            .magic
+                            .as_ref()
+                            .and_then(|mg| mg.menu_types.get(index).copied());
+                    }
+                }
+            }
+            // The party list: the picked member is the Cure's target.
+            Decision::ExecuteSub { row: 0, index } if game.cure_pick.is_some() => {
+                let pick = game.cure_pick.take();
                 menu_cast = game
                     .magic
                     .as_ref()
-                    .and_then(|mg| mg.menu_types.get(index).copied());
+                    .and_then(|mg| mg.menu_types.get(pick?).copied());
+                game.cure_target = index;
+            }
+            // Backing out of the list returns to the Magic list.
+            Decision::Closed if game.cure_pick.take().is_some() => {
+                let mp = game.player.mp;
+                if let Some(mg) = game.magic.as_mut() {
+                    let list = mg.menu_list(&mp);
+                    let items = list
+                        .iter()
+                        .map(|&(t, colour)| {
+                            let cmd = mg.current(t).map(|r| r.command).unwrap_or(0);
+                            Item {
+                                label: mg.src.names.get(&cmd).cloned().unwrap_or_default(),
+                                icon: mg.src.commands.get(&cmd).map_or(0, |c| c.icon),
+                                colour,
+                            }
+                        })
+                        .collect();
+                    mg.menu_types = list.iter().map(|l| l.0).collect();
+                    m.menu.open_sub(1, items);
+                }
             }
             Decision::Open(3) => {
                 let gauge = game.player.drive;
@@ -5862,7 +6059,7 @@ fn simulate(
     // Guard (Square): F or the pad's west button; unattended runs guard
     // just before two of the Shadow's claws.
     let guard = if game.autoplay.is_some() {
-        AUTOPLAY_GUARDS.contains(&tick)
+        !game.magic_tour && AUTOPLAY_GUARDS.contains(&tick)
     } else {
         std::mem::take(&mut game.guard_queued)
     } && !talking;
@@ -5880,6 +6077,25 @@ fn simulate(
         game.event(serde_json::json!({"event":"target_changed","tick":tick,"target":format!("{:?}",selected.id),"locked":selected.locked}));
     }
     game.selected_target = selected.target.map(|t| t.centre);
+    // The lock plays se000 #7 as it engages (also when the lock moves to
+    // another actor) and #8 when the toggle or an untargetable target releases it.
+    let other_actor = match (before, selected.id) {
+        (
+            Some(enemy_target::TargetId::Gallery(a, _)),
+            Some(enemy_target::TargetId::Gallery(b, _)),
+        ) => a != b,
+        (Some(old), Some(new)) => std::mem::discriminant(&old) != std::mem::discriminant(&new),
+        _ => false,
+    };
+    if selected.locked && (!game.target_locked || other_actor) {
+        game.sound_queue.push((SE_LOCK, "lock_on"));
+    } else if !selected.locked
+        && game.target_locked
+        && (toggle
+            || before.is_some_and(|id| enemy_target::untargetable_but_present(&game, &gallery, id)))
+    {
+        game.sound_queue.push((SE_UNLOCK, "lock_off"));
+    }
     game.target_locked = selected.locked;
     let target = selected.target.map(|s| {
         let p = game.player.position;
@@ -5952,8 +6168,19 @@ fn simulate(
                 menu_item.or_else(|| game.items.as_ref().and_then(|it| it.slot_for_command(cmd)));
         }
     }
+    if game.magic_tour {
+        // The Magic Lock-On probes switch the ability the tick before.
+        match magic_tour::lock_on(tick, game.magic_shift) {
+            Some(true) => game.player.abilities.set(abilities::bit::MAGIC_LOCK_ON),
+            Some(false) => game.player.abilities.clear(abilities::bit::MAGIC_LOCK_ON),
+            None => {}
+        }
+        cast = magic_tour::cast(tick, game.magic_shift);
+        game.cure_target = magic_tour::cure_target(tick, game.magic_shift);
+    }
     if game.autoplay.is_some()
         && !game.enemy_battle_tour
+        && !game.magic_tour
         && game.ability_tour.is_none()
         && game.autoplay_end != AUTOPLAY_TALK_END
     {
@@ -5969,6 +6196,7 @@ fn simulate(
     }
     if game.autoplay.is_some()
         && !game.enemy_battle_tour
+        && !game.magic_tour
         && game.ability_tour.is_none()
         && game.autoplay_end != AUTOPLAY_TALK_END
     {
@@ -5988,6 +6216,38 @@ fn simulate(
         ),
         None => (cast, menu_item),
     };
+    // Magic Lock-On (FUN_1403aa560 from FUN_1403c5170): Fire, Blizzard,
+    // Thunder and Magnet without a target choose one as an attack does and
+    // lock it.
+    if let Some(t) = cast
+        && !talking
+        && matches!(
+            t,
+            magic::FIRE | magic::BLIZZARD | magic::THUNDER | magic::MAGNET
+        )
+        && game.player.abilities.has(abilities::bit::MAGIC_LOCK_ON)
+        && game.selected_target.is_none()
+    {
+        let chosen = enemy_target::acquire(&game, &gallery, &mut targeting);
+        game.selected_target = chosen.target.map(|s| s.centre);
+        game.target_locked = chosen.locked;
+        let count = enemy_target::candidates(&game, &gallery).len();
+        let enemy_state = game.enemy.as_ref().map(|r| {
+            (
+                r.enabled,
+                r.enemy.targetable(),
+                r.enemy.hp,
+                r.enemy.motion,
+                r.targets.len(),
+                r.clips.0.contains_key(&r.enemy.motion),
+            )
+        });
+        game.event(serde_json::json!({"event":"magic_lock_on","tick":tick,
+            "target":format!("{:?}", chosen.id),"locked":chosen.locked,
+            "candidates":count,
+            "params":gallery.target_params.is_some(),
+            "enemy":enemy_state}));
+    }
     if let Some(t) = cast
         && !talking
     {
@@ -6102,6 +6362,15 @@ fn simulate(
     }
     combat_tick(&mut game, tick);
     prize_room::tick(&mut game, tick);
+    if game.magic_tour
+        && let Some((member, spell, heal)) = magic_tour::party_cast(tick, game.magic_shift)
+    {
+        let ordered = party_room::order_cast(&mut game, member, spell, heal);
+        game.event(
+            serde_json::json!({"event":"party_cast_order","tick":tick,"member":member,
+            "spell":format!("{spell:?}"),"heal":heal,"ordered":ordered}),
+        );
+    }
     party_room::tick(&mut game, tick);
     // Drive: requests, the form change, the form gauge (after the player
     // tick, like FUN_1403a92c0 / FUN_140404a40).
@@ -6171,7 +6440,7 @@ fn simulate(
     } = &mut *rig;
     let hits = std::cell::Cell::new(0);
     follow.tick(&camera, &|a, b| {
-        let hit = follow_camera::segment_hit(collision, a, b);
+        let hit = collision.cast(a, b);
         hits.set(hits.get() + hit.is_some() as u64);
         hit
     });
@@ -6204,7 +6473,7 @@ fn simulate(
         game.event(
             serde_json::json!({"event":"state","tick":tick,"position":position,"yaw":yaw,
             "action":format!("{action:?}"),"camera_eye":rig.camera.eye,"camera_yaw":rig.camera.yaw,
-            "camera_collision_triangles":rig.collision.len(),"camera_collision_hits":rig.collision_hits,
+            "camera_collision_triangles":rig.collision.polygons(),"camera_collision_hits":rig.collision_hits,
             "enemy":enemy,
             "npcs":area.as_deref().map(|a| a.current.npcs.iter().map(|n| serde_json::json!({
                 "kind":a.source.kinds[n.kind].name,"position":n.position.to_array(),"yaw":n.yaw,
@@ -6339,6 +6608,27 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
                         owner: 0xfa,
                     },
                     anchor: drive_fx::Anchor::Actor(actor),
+                });
+                continue;
+            }
+            EffectRequest::ActorElementAt { object, id, at } => {
+                let pax = if object == 0 {
+                    fx.enemy.clone()
+                } else {
+                    fx.enemy_paxes.get(&object).cloned()
+                };
+                let Some(pax) = pax else { continue };
+                game.fx_queue.push(drive_fx::Placed {
+                    req: drive_fx::FxRequest {
+                        pax,
+                        id,
+                        owner: 0xfa,
+                    },
+                    anchor: drive_fx::Anchor::World {
+                        at,
+                        pitch: 0.,
+                        yaw: 0.,
+                    },
                 });
                 continue;
             }
@@ -7100,7 +7390,14 @@ fn play_sounds(mut game: ResMut<Game>, mut audio: ResMut<Audio>, hud: Option<Res
 
 /// HUD frame: test-room debug keys (F4 blow hit, F5/F6 HP -/+2, F7/F8 MP -/+10, F9 drive +10)
 /// or the unattended script change stats, then the gauge logic runs.
-fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option<ResMut<Hud>>) {
+fn hud_tick(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut game: ResMut<Game>,
+    hud: Option<ResMut<Hud>>,
+    gallery: Res<enemy_gallery::EnemyGallery>,
+    targeting: Res<enemy_target::Targeting>,
+    rig: Option<Res<CameraRig>>,
+) {
     if keys.just_pressed(KeyCode::F4) && game.autoplay.is_none() {
         game.debug_blow = true;
     }
@@ -7168,12 +7465,36 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
         sheets,
         gauge,
         menu,
+        enemy_gauge,
+        scan,
+        slots,
         ..
     } = &mut *hud;
     if let Some(m) = menu {
         m.menu.update(&m.sheet.sequence);
     }
     gauge.update(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(), &s);
+    // The Scan gauge follows the lock manager's target (priority 7000, after
+    // the player's gauge).
+    scan.step(
+        enemy_gauge,
+        &sheets[0].sequence,
+        slots,
+        enemy_target::scan_view(&game, &gallery, &targeting),
+    );
+    // The reticle (priority 4000) follows the held target's TARGET shape,
+    // projected through the camera as last applied.
+    let held = rig.as_ref().and_then(|rig| {
+        enemy_target::reticle_view(&game, &gallery, &targeting)
+            .map(|(held, at)| (held, rig.camera.project(at)))
+    });
+    let Hud {
+        reticle,
+        field,
+        reticle_draw,
+        ..
+    } = &mut *hud;
+    *reticle_draw = reticle.step(&field.sequence, held, 0);
     // Form levels gained this frame queue their panels (FUN_1403edb90).
     if let Some(d) = game.drive.as_mut() {
         for up in std::mem::take(&mut d.level_ups) {
@@ -7220,8 +7541,6 @@ fn hud_present(
     skate: Res<crate::skate::Skate>,
     debug: Res<debug_menu::DebugMenu>,
     gallery: Res<enemy_gallery::EnemyGallery>,
-    targeting: Res<enemy_target::Targeting>,
-    game: Res<Game>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut hud) = hud else { return };
@@ -7231,6 +7550,9 @@ fn hud_present(
     let Hud {
         sheets,
         gauge,
+        enemy_gauge,
+        field,
+        reticle_draw,
         canvas,
         image,
         menu,
@@ -7245,6 +7567,16 @@ fn hud_present(
             texel_scale: s.texel_scale as f32,
         })
         .collect();
+    let field_sheet = textures.len();
+    textures.push(Texture {
+        rgba: &field.texture_rgba,
+        size: field.texture_size.map(|v| v as usize),
+        texel_scale: field.texel_scale as f32,
+    });
+    let mut lock_on = reticle_draw.take();
+    if let Some(Draw::Quads { sheet, .. }) = lock_on.as_mut() {
+        *sheet = field_sheet;
+    }
     // The command menu (priorities 0x14b5..0x14b7) draws before the gauge
     // (7000).
     let mut draws: Vec<Draw> = Vec::new();
@@ -7279,7 +7611,12 @@ fn hud_present(
         };
     }
     if !skate.replaces_hud() {
+        // The reticle (priority 4000) draws before the command menu.
+        if let Some(reticle) = lock_on {
+            draws.insert(0, reticle);
+        }
         draws.extend(gauge.draw(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>()));
+        draws.extend(enemy_gauge.draw(&sheets[0].sequence, 0));
         if let Some((font_sheet, widths)) = menu_font.as_ref() {
             draws.extend(panels.draw(
                 &sheets[0].sequence,
@@ -7358,25 +7695,6 @@ fn hud_present(
             sheet: *sheet,
         });
     }
-    if !debug.open
-        && let Some((sheet, widths)) = menu_font.as_ref()
-    {
-        let white = textures.len();
-        textures.push(Texture {
-            rgba: &debug_menu::WHITE,
-            size: [1, 1],
-            texel_scale: 1.,
-        });
-        draws.extend(enemy_target::draws(
-            &game,
-            &gallery,
-            &targeting,
-            white,
-            *sheet,
-            widths,
-            Some(enemy_target::SCAN_BIT),
-        ));
-    }
     // The debug menu (F3) draws over everything.
     if debug.open
         && let Some((sheet, widths)) = menu_font.as_ref()
@@ -7443,6 +7761,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
         log,
         sound_queue,
         effect_queue,
+        fx_calls,
         magic,
         debug_blow,
         drive,
@@ -7450,16 +7769,31 @@ fn combat_tick(game: &mut Game, tick: u64) {
         sora_attack,
         hero_hit_tick,
         enemy_battle_tour,
+        magic_tour,
+        magic_shift,
         ..
     } = game;
     let Some(rt) = enemy.as_mut() else { return };
     let debug_blow = std::mem::take(debug_blow)
-        || (autoplay.is_some() && !*enemy_battle_tour && AUTOPLAY_BLOWS.contains(&tick));
+        || (autoplay.is_some()
+            && !*enemy_battle_tour
+            && !*magic_tour
+            && AUTOPLAY_BLOWS.contains(&tick));
     let act_at_start = rt.enemy.current_act();
-    if autoplay.is_some() && !*enemy_battle_tour && tick == 380 {
+    let place = if *magic_tour {
+        magic_tour::place(tick, *magic_shift)
+    } else {
+        tick == 380
+    };
+    if autoplay.is_some() && !*enemy_battle_tour && place {
         // Unattended runs place the target just ahead of Sora.
         let f = Vec3::new(player.yaw.sin(), 0., player.yaw.cos());
-        let at = Vec3::from_array(player.position) + f * 110.;
+        let distance = if *magic_tour {
+            magic_tour::place_distance(tick, *magic_shift)
+        } else {
+            110.
+        };
+        let at = Vec3::from_array(player.position) + f * distance;
         rt.enemy.position = at.to_array();
         rt.enemy.spawn = at.to_array();
     }
@@ -7715,7 +8049,13 @@ fn combat_tick(game: &mut Game, tick: u64) {
             }
             // Spark at the contact point on the target's hit shape
             // (FUN_1403d1b40; a sphere here, so height = radius).
-            if let Some(&(effect, random)) = rt.hit_effects.get(&atkp)
+            // A spell's row names its own spark.
+            let spark = rt
+                .hit_effects
+                .get(&atkp)
+                .copied()
+                .or_else(|| key.map(|_| (rows[row].hit_effect, rows[row].hit_effect_random)));
+            if let Some((effect, random)) = spark
                 && effect != 0
             {
                 let v = attack_centre - target;
@@ -7724,12 +8064,22 @@ fn combat_tick(game: &mut Game, tick: u64) {
                 let across = Vec3::new(v.x, 0., v.z).normalize_or_zero()
                     * target_radius
                     * (1. - (y / h) * (y / h)).max(0.).sqrt();
-                effect_queue.push(EffectRequest::Hit {
-                    effect,
-                    random,
-                    contact: target + across + Vec3::Y * y,
-                    direction: dir,
+                let contact = target + across + Vec3::Y * y;
+                // A spell's spark comes from the spell's own PAX.
+                let spell_spark = key.and_then(|k| {
+                    magic.as_mut().and_then(|m| {
+                        magic_room::spark(m, k, effect, contact.to_array(), dir.to_array())
+                    })
                 });
+                match spell_spark {
+                    Some(calls) => fx_calls.extend(calls),
+                    None => effect_queue.push(EffectRequest::Hit {
+                        effect,
+                        random,
+                        contact,
+                        direction: dir,
+                    }),
+                }
             }
             if let (Some(k), Some(m)) = (key, magic.as_mut()) {
                 m.feedback.hit.push(k);
@@ -8141,8 +8491,9 @@ fn present_spells(
         .as_ref()
         .map(|m| m.volumes.clone())
         .unwrap_or_default();
+    let shown = game.show_collision;
     for (slot, mut transform, mut visibility, material) in &mut volumes {
-        match live.get(slot.0) {
+        match live.get(slot.0).filter(|_| shown) {
             Some(v) => {
                 *visibility = Visibility::Visible;
                 transform.translation = Vec3::from_array(v.centre);
@@ -8620,31 +8971,85 @@ fn present(
 ) {
     let action = game.player.action;
     let started = game.action_started;
+    let previous = game.shown_action;
     if game.shown_action != Some((action, started)) {
         if game.shown_action.is_some() {
             game.blend_from = Some((game.display.clone(), game.display_hand, game.action_started));
+            game.blend_from_joints = std::mem::take(&mut game.display_joints);
         }
         game.shown_action = Some((action, started));
     }
     let frame = game.player.motion_frame(&game.clips) as usize;
     let clip = game.poses[&(action, game.player.armed)];
+    let skin = game.clip_poses[clip].skin.clone();
+    let target_joints: Option<Vec<data::motion_eval::World>> = {
+        let joints = &game.clip_poses[clip].joints;
+        joints
+            .get(frame.min(joints.len().saturating_sub(1)))
+            .cloned()
+    };
     let target = &game.clip_poses[clip].frames;
     let target = &target[frame.min(target.len() - 1)];
+    // Unattended runs log how far each switch of action moves the shown
+    // pose when it is not blended (the first frame of the new motion
+    // against the pose left behind).
+    let switched = if game.autoplay.is_some()
+        && let Some((from, _)) = previous
+        && previous != Some((action, started))
+        && game.display.len() == target.len()
+    {
+        let jump = target
+            .iter()
+            .zip(&game.display)
+            .map(|(a, b)| a.distance(*b))
+            .fold(0f32, f32::max);
+        Some((format!("{from:?}"), jump, game.display_frame))
+    } else {
+        None
+    };
     let mut display = target.clone();
     let weapons = &game.clip_poses[clip].weapon;
     let mut hand = Transform::from_matrix(weapons[frame.min(weapons.len() - 1)]);
     // Crossfade measured in simulation ticks (plus the fixed-step overstep),
-    // applied to the body and the Keyblade alike.
+    // applied to the body and the Keyblade alike. The reference starts a
+    // blend's clock at 2 and counts one tick before the first shown frame
+    // (FUN_1403c8a40, FUN_1403c6740), and takes durations of 2 or less as no
+    // blend; the weight is that clock over the duration.
+    let mut shown_joints = target_joints.clone().unwrap_or_default();
     if let Some((from, from_hand, start)) = &game.blend_from {
         let elapsed = (game.tick - start) as f32 + fixed.overstep_fraction();
         let blend = game.player.blend;
-        let weight = if blend > 0. {
-            (elapsed / blend).clamp(0., 1.)
+        let weight = if blend > 2. {
+            ((elapsed + 3.) / blend).clamp(0., 1.)
         } else {
             1.
         };
         if weight >= 1. {
             game.blend_from = None;
+            game.blend_from_joints.clear();
+        } else if let (Some(skin), Some(to)) = (&skin, &target_joints)
+            && game.blend_from_joints.len() == to.len()
+            && let Ok(pose) = {
+                shown_joints = data::motion_eval::blend_poses(
+                    &skin.parents,
+                    &game.blend_from_joints,
+                    to,
+                    weight,
+                );
+                skin.skinning.pose_from_worlds(&shown_joints)
+            }
+        {
+            // Joint by joint, as the reference blends (FUN_1401c3970): the
+            // body's joints turn between the two poses instead of the
+            // skinned points sliding past each other.
+            display = pose
+                .position_bits
+                .iter()
+                .map(|p| Vec3::from_array(p.map(f32::from_bits)))
+                .collect();
+            if let Some(m) = pose.matrix_bits.get(skin.weapon_joint) {
+                hand = Transform::from_matrix(Mat4::from_cols_array(&m.map(f32::from_bits)));
+            }
         } else {
             for (d, f) in display.iter_mut().zip(from) {
                 *d = f.lerp(*d, weight);
@@ -8654,8 +9059,10 @@ fn present(
                 rotation: from_hand.rotation.slerp(hand.rotation, weight),
                 scale: from_hand.scale.lerp(hand.scale, weight),
             };
+            shown_joints.clear();
         }
     }
+    game.display_joints = shown_joints;
     game.display_hand = hand;
     if let Ok((mut transform, mut visibility)) = hands.single_mut() {
         *transform = hand;
@@ -8674,7 +9081,29 @@ fn present(
             visual::room::update_positions(&mut mesh, positions);
         }
     }
+    if let Some((from, jump, from_frame)) = switched {
+        let (tick, blend) = (game.tick, game.player.blend);
+        game.event(serde_json::json!({"event":"pose_switch","tick":tick,"from":from,
+            "to":format!("{action:?}"),"jump":jump,"blend":blend,"from_frame":from_frame,"frame":frame}));
+    }
+    // Unattended runs log every sudden change of the shown pose, with the
+    // action, its frame and the blend, to find abrupt motion ends.
+    if game.autoplay.is_some() && game.display.len() == display.len() {
+        let jump = display
+            .iter()
+            .zip(&game.display)
+            .map(|(a, b)| a.distance(*b))
+            .fold(0f32, f32::max);
+        if jump > POSE_JUMP_LOG {
+            let (tick, frame, blend) = (game.tick, frame, game.player.blend);
+            game.event(
+                serde_json::json!({"event":"pose_jump","tick":tick,"action":format!("{action:?}"),
+                "frame":frame,"jump":jump,"blend":blend}),
+            );
+        }
+    }
     game.display = display;
+    game.display_frame = frame;
     // The Keyblade's own motion (key chain and blade) at the same frame.
     let weapon_frames = &game.clip_poses[clip].weapon_frames;
     if !weapon_frames.is_empty() {
@@ -9238,6 +9667,9 @@ fn camp_tick(
     if game.autoplay.is_some() {
         let logical = if let Some(tour) = &game.ability_tour {
             tour.logical(game.tick)
+        } else if game.magic_tour {
+            // The magic tour never opens the camp.
+            0
         } else {
             AUTOPLAY_CAMP
                 .iter()
@@ -10093,12 +10525,16 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut gear_tour_quick = false;
     let mut enemy_tour = false;
     let mut enemy_battle_tour = false;
+    let mut magic_tour = false;
+    let mut magic_form = 0u8;
     let mut growth_tour = false;
     let mut prize_tour = false;
     let mut npc_tour = false;
     let mut badge_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
+    // Capture ticks replacing the unattended run's own list (research).
+    let mut capture_at: Option<Vec<u64>> = None;
     let mut options = args[3..].iter();
     while let Some(option) = options.next() {
         match option.to_str() {
@@ -10120,6 +10556,17 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 )
             }
             Some("--autoplay") if autoplay.is_none() => autoplay = options.next().cloned(),
+            Some("--capture-at") if capture_at.is_none() => {
+                capture_at = Some(
+                    options
+                        .next()
+                        .and_then(|v| v.to_str())
+                        .ok_or("capture ticks absent")?
+                        .split(',')
+                        .map(str::parse)
+                        .collect::<Result<_, _>>()?,
+                )
+            }
             Some("--enemy-tour") if autoplay.is_none() => {
                 enemy_tour = true;
                 autoplay = Some(
@@ -10136,6 +10583,22 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("enemy combat tour capture directory absent")?,
+                );
+            }
+            Some("--magic-form") => {
+                magic_form = options
+                    .next()
+                    .and_then(|v| v.to_str())
+                    .ok_or("magic form absent")?
+                    .parse::<u8>()?;
+            }
+            Some("--magic-tour") if autoplay.is_none() => {
+                magic_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("magic tour capture directory absent")?,
                 );
             }
             Some(flag @ ("--gear-tour" | "--gear-tour-quick")) if autoplay.is_none() => {
@@ -10335,8 +10798,12 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     } else {
         None
     };
+    // A form's change takes about 260 ticks before the first cast.
+    let magic_shift = if magic_form != 0 { 260 } else { 0 };
     let captures = if npc_tour {
         NPC_TOUR_CAPTURES.to_vec()
+    } else if magic_tour {
+        magic_tour::captures(magic_shift)
     } else if prize_tour {
         prize_room::CAPTURES.to_vec()
     } else if growth_tour {
@@ -10354,12 +10821,16 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 if talk_room {
                     AUTOPLAY_TALK_CAPTURES.to_vec()
                 } else {
-                    AUTOPLAY_CAPTURES.to_vec()
+                    capture_at
+                        .clone()
+                        .unwrap_or_else(|| AUTOPLAY_CAPTURES.to_vec())
                 }
             })
     };
     let autoplay_end = if npc_tour {
         NPC_TOUR_END
+    } else if magic_tour {
+        magic_tour::END + magic_shift
     } else if prize_tour {
         prize_room::END
     } else if growth_tour {
@@ -10374,6 +10845,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         tour.as_ref().map_or(
             if talk_room {
                 AUTOPLAY_TALK_END
+            } else if let Some(last) = capture_at.as_ref().and_then(|c| c.last()) {
+                last + 2
             } else {
                 AUTOPLAY_END
             },
@@ -10391,6 +10864,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     if let Some(h) = &loaded.hud {
         player.mp = magic::Mp::new(h.stats.1);
     }
+    let spell_fx_resource =
+        spell_fx::SpellFx::new(loaded.magic.as_ref().and_then(|m| m.texcommon.clone()));
     // The room's stock with every Keyblade, armor and accessory it owns.
     let owned_stock = gear::with_owned_equipment(room_stock(), &loaded.abilities.owned);
     let mut game = Game {
@@ -10401,6 +10876,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         ability_tour: tour,
         enemy_tour,
         enemy_battle_tour,
+        magic_tour,
+        magic_form,
+        magic_shift,
         growth_tour,
         prize_tour,
         npc_tour,
@@ -10420,6 +10898,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         poses,
         clip_poses: loaded.kit.clip_poses,
         part_indices: Vec::new(),
+        display_frame: 0,
         tick: 0,
         log,
         limit,
@@ -10434,7 +10913,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         shortcut_queued: 0,
         back_queued: false,
         debug_blow: false,
-        cheats: debug_menu::Cheats::default(),
+        cheats: debug_menu::Cheats {
+            invincible: magic_tour,
+            enemy_frozen: magic_tour,
+        },
         shortcuts: ROOM_SHORTCUTS,
         drive: None,
         voices: loaded.voices.take(),
@@ -10452,6 +10934,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             .into_iter()
             .enumerate()
             .map(|(i, kind)| party_room::MemberRt {
+                hp: kind.hp,
+                max_hp: kind.hp,
+                mp: player::magic::Mp::new(kind.mp),
                 kind,
                 follower: player::party_members::Follower::spawn(
                     loaded.spawn.to_array(),
@@ -10460,6 +10945,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 ),
                 started: 0,
                 stored: false,
+                cast: None,
+                casts: 0,
+                armed: false,
+                forced: None,
             })
             .collect(),
         items: loaded.items.map(|src| {
@@ -10485,12 +10974,19 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         enemy: None,
         display: Vec::new(),
         blend_from: None,
+        display_joints: Vec::new(),
+        blend_from_joints: Vec::new(),
         display_hand: Transform::IDENTITY,
         weapon_indices: Vec::new(),
         weapon2_indices: Vec::new(),
         weapon_pax: None,
         weapon_pax_changed: false,
         weapon_display: Vec::new(),
+        fx_calls: Vec::new(),
+        party_spells: true,
+        fx_live: HashMap::new(),
+        cure_target: 0,
+        cure_pick: None,
         shown_action: None,
         action_started: 0,
         exit_code: None,
@@ -10761,12 +11257,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         pending_turn: 0.,
         recenter_queued: false,
         collision_hits: 0,
-        collision: loaded
-            .room
-            .camera_triangles
-            .iter()
-            .map(|t| t.map(|p| to_world(p.to_array())))
-            .collect(),
+        collision: CameraCollision::new(&loaded.room),
     };
     eprintln!(
         "Test room ready (the original PC bindings). WASD moves (Left Alt walks), Space/Backspace jump, Enter/left-click decides (Attack), Up/Down choose a command, right-click/Right Shift guards, F/Right Ctrl reacts (Talk), M opens the menu, the mouse turns the camera, middle-click/Right Alt recentres, F3 opens the debug menu, Esc exits."
@@ -10874,6 +11365,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .insert_resource(settings)
         .insert_resource(effects)
         .insert_resource(drive_fx)
+        .insert_resource(spell_fx_resource)
         .insert_resource(drop_view)
         .insert_resource(gallery)
         .init_resource::<enemy_target::Targeting>()
@@ -10924,6 +11416,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                     talk_tick,
                     effects_tick,
                     drive_fx::tick,
+                    spell_fx::tick,
                     hud_tick,
                     play_sounds,
                     music_tick,
@@ -10964,7 +11457,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 drive_room::party_visibility,
                 present_npc,
                 present_effects,
-                drive_fx::present,
+                (drive_fx::present, spell_fx::present).chain(),
                 item_drop_view::present,
                 hud_present,
                 resize_scene,

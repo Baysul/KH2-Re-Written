@@ -103,6 +103,9 @@ pub mod bit {
     /// Item 0x194 "No Experience" (stats +0x1dc bit 20): FUN_1403ed110
     /// refuses a kill's EXP (the Winner's Proof's ability).
     pub const NO_EXPERIENCE: u16 = 0x74;
+    /// Item 0x193 "Magic Lock-On" (FUN_1403c5170 tests ability 115):
+    /// Fire, Blizzard, Thunder and Magnet lock a target when there is none.
+    pub const MAGIC_LOCK_ON: u16 = 0x73;
 }
 
 /// Ability items whose effect FUN_140401730 applies beyond setting the bit
@@ -241,6 +244,15 @@ impl Abilities {
         }
     }
 
+    /// Takes a bit away (a room's switch; the executable never clears one
+    /// alone).
+    pub fn clear(&mut self, bit: u16) {
+        let word = (bit >> 5) as usize;
+        if word < self.bits.len() {
+            self.bits[word] &= !(1 << (bit & 31));
+        }
+    }
+
     /// FUN_140401730: one ability item (id) with its bit (item +4).
     pub fn add(&mut self, item: u16, bit: u16, sstm: &Rates) {
         match item {
@@ -345,6 +357,16 @@ mod tests {
         put16(&mut r, 0x134, 50);
         put16(&mut r, 0x14c, 20);
         Rates::read(&r).unwrap()
+    }
+
+    #[test]
+    fn a_cleared_bit_leaves_its_neighbours() {
+        let mut a = Abilities::default();
+        a.set(bit::MAGIC_LOCK_ON);
+        a.set(bit::MAGIC_LOCK_ON + 1);
+        a.clear(bit::MAGIC_LOCK_ON);
+        assert!(!a.has(bit::MAGIC_LOCK_ON));
+        assert!(a.has(bit::MAGIC_LOCK_ON + 1));
     }
 
     #[test]

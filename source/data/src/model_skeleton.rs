@@ -12,7 +12,7 @@ const MAX_BLOCKS: usize = 16;
 const MAX_BONES: usize = 2048;
 const MAX_GROUPS: usize = 4096;
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct BoneRecord {
     pub header_i32: [i32; 4],
     pub header_i16: [i16; 8],
