@@ -31,3 +31,10 @@ PASS fmt, clippy (warnings denied), `cargo test --workspace --locked` for the fi
 
 ## Still missing (next)
 Ribbon tails (155 Tail2X, 153, 154), mega-model colour/snapshot buffers (0x101/0x106), ribbon pair modes (0x241/0x243), lens flare family (188/189/191/221/223/224/225), RyjMatrixWorldXYZ (99), MegaBirth user-control variants; ground dust (frame trigger 19 with map PAX categories), enemy motion sounds/effects for non-Shadow enemies, KO/revive/guard/level-up effects, field objects (chests, save point), pickup sparkles and orb models. Magic thread owns spell VFX/SFX and four VM programs (DrawMdlLoop, MatrixLoopYXZ, VertexApLcLoop, KeZCrct mode 3).
+
+## Gaps that cannot be closed from the exe alone (2026-10-16)
+- Lens flare family (programs 188, 189, 191, 221, 223, 224, 225; 118 effects): visibility comes from a GPU depth read-back (FUN_1404d7120 draws the sun and counts pixels). A collision-ray stand-in would not be 1:1.
+- Ribbon pair mode (0x4000_0241) and object spaces 2/3 (0x4000_0243), 40 effects: they need two bone or object positions handed over by whatever starts the effect, not traced.
+- pppRyjMatrixWorldXYZ (99, 20 effects), pppKeShpTail2 (154, 3), pppRyjMegaBirthUserCtrl/3 (239/242, 6), ModelFilter (229, 1): not translated.
+- Spell-owned programs (DrawMdlLoop, MatrixLoopYXZ, VertexApLcLoop, KeZCrct mode 3; 433 effects): the magic work.
+- KO, revive, guard and field-object effects: only the party KO effect (system element 14) is traced; the test room has no party KO, chests or save points.
