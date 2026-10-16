@@ -25,6 +25,9 @@ pub(super) struct KitInputs<'a> {
     /// The two Keyblades' ATTACK spheres by collision group (their mdlx
     /// object-collision tables, bone 2): offset, radius.
     pub blades: [Blade; 2],
+    /// The slot 0 Keyblade's own effects (`obj/<model>.a.us`), when the kit
+    /// was built for a chosen Keyblade.
+    pub weapon_pax: Option<data::object_effect::Pax>,
     /// Actor joints carrying weapon slots 0 and 1 (SKLT primary and
     /// secondary bone); slot 1 only for forms with a second Keyblade.
     pub weapon_joint: usize,
@@ -101,6 +104,7 @@ pub(super) struct Kit {
     pub weapon: model_inspection::InspectionModel,
     pub weapon2: Option<model_inspection::InspectionModel>,
     pub blades: [Blade; 2],
+    pub weapon_pax: Option<data::object_effect::Pax>,
     /// HIT spheres (bone, offset, radius, high) and the TARGET shape's
     /// radius and height.
     pub body: Vec<(usize, Vec3, f32, bool)>,
@@ -157,6 +161,7 @@ pub(super) fn load_kit(
         weapon,
         weapon2,
         blades,
+        weapon_pax,
         weapon_joint,
         second_joint,
         motion_set,
@@ -764,6 +769,7 @@ pub(super) fn load_kit(
         weapon,
         weapon2,
         blades,
+        weapon_pax,
         body,
         attack,
         target_radius,
