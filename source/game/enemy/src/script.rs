@@ -155,6 +155,19 @@ pub struct Instance {
 const BIG_STACK_NAMES: [&[u8]; 3] = [b"b_ex240", b"b_ex330", b"blizzard"];
 
 impl Instance {
+    /// An empty stand-in used while the real instance is lent to the interpreter.
+    pub fn placeholder() -> Self {
+        Self {
+            id: 0,
+            code: Vec::new(),
+            work: Vec::new(),
+            work_bytes: 0,
+            stack_bytes: 0,
+            temp_bytes: 0,
+            scratch: 0,
+        }
+    }
+
     pub fn new(id: u32, payload: &[u8]) -> Option<Self> {
         if payload.len() < 36 {
             return None;

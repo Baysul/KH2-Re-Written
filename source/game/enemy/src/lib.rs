@@ -7,4 +7,7 @@
 
 pub mod act;
 pub mod script;
+pub mod sysobj;
 pub mod trap_table;
+pub mod traps;
+pub mod world;
