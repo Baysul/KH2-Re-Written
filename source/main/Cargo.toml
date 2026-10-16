@@ -49,6 +49,16 @@ test = false
 bench = false
 
 [[bin]]
+name = "motion_audit"
+test = false
+bench = false
+
+[[bin]]
+name = "pose_sheet"
+test = false
+bench = false
+
+[[bin]]
 name = "motion_ik_probe"
 test = false
 bench = false
