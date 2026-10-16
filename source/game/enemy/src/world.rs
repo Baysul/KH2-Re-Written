@@ -117,6 +117,13 @@ pub enum Event {
         object: ObjId,
         handle: u32,
     },
+    /// `magic_start_thread`: an enemy spell thread the magic system starts.
+    MagicStart {
+        object: ObjId,
+        id: i32,
+        arguments: [i32; 4],
+        handle: u32,
+    },
     /// A service the executable provides that this build does not translate yet.
     Unsupported(&'static str),
 }
@@ -140,6 +147,9 @@ pub struct World {
     next_effect: u32,
     /// Copies of target records (`trap_target_dup`), by slot.
     pub target_dups: Vec<Option<crate::sysobj::Target>>,
+    /// `teamwork_alloc` blocks by key (DAT_142ae75d0).
+    pub teamwork: HashMap<i32, u32>,
+    next_magic: u32,
 }
 
 impl Default for World {
@@ -155,6 +165,8 @@ impl Default for World {
             tolerate_missing: false,
             next_effect: 0,
             target_dups: Vec::new(),
+            teamwork: HashMap::new(),
+            next_magic: 0,
         }
     }
 }
@@ -172,6 +184,12 @@ impl World {
     pub fn next_effect_handle(&mut self) -> u32 {
         self.next_effect += 1;
         EFFECT_HANDLES + self.next_effect * 16
+    }
+
+    /// A fresh handle for a magic thread the host will create.
+    pub fn next_magic_handle(&mut self) -> u32 {
+        self.next_magic += 1;
+        MAGIC_HANDLES + self.next_magic * 16
     }
 
     /// The static cell if some trap already allocated it.
@@ -220,6 +238,7 @@ pub const OBJECT_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0100_0000;
 pub const PLAYER_HANDLE: u32 = script::EXTERN_SEGMENT + 0x00f0_0000;
 /// Effect handles scripts keep, and copies of target records.
 pub const EFFECT_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0200_0000;
+pub const MAGIC_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0500_0000;
 pub const TARGET_DUP_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0300_0000;
 /// The engine object's target record (sys+0xbf8) is this far into its handle range.
 pub const TARGET_RECORD_OFFSET: u32 = 0x800;

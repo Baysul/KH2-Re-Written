@@ -41,6 +41,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         55 => jump,
         56 => is_culling,
         57 => is_jump,
+        58 => fly,
         60 => is_air,
         61 => motion_frame_start,
         62 => get_moved,
@@ -358,6 +359,18 @@ fn is_jump(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(),
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let jumping = ctx.object(id)?.sys.is_jump();
     int(args, jumping as i32);
+    Ok(())
+}
+
+/// 1:58 FUN_14042eec0 -> FUN_140421ce0: `obj_fly(ai, v, inertia)` enters physics
+/// mode 5 with the velocity `normalize(v.xyz) * v.w`.
+fn fly(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let v = read_sanitized(ctx, m, args[1].value)?;
+    let inertia = args[2].as_float();
+    ctx.object(id)?
+        .sys
+        .start_steer([v[0], v[1], v[2]], v[3], inertia);
     Ok(())
 }
 

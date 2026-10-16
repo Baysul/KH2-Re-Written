@@ -68,6 +68,16 @@ pub struct PendingFly {
     pub speed: f32,
 }
 
+/// Physics mode 5 (`trap_obj_fly`): a free velocity that follows the object's
+/// move request. The routine is FUN_140421c80 with FUN_1403b7ad0 as its
+/// steering step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Steer {
+    pub velocity: Vec3,
+    /// +0x108: the share of the velocity kept each step.
+    pub inertia: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fly {
     pub arc: actor_physics::Arc,
@@ -206,8 +216,20 @@ pub struct Sysobj {
     pub event_parameter: u32,
     pub pattern_a: u32,
     pub pattern_b: u32,
+    /// +0x4dc: the team (`obj_set_team`).
+    pub team: i32,
+    /// +0xd4c: the karma limit (`enemy_set_karma_limit`).
+    pub karma_limit: i32,
+    /// +0x5a8: the collision shape masks `obj_disable_collision` and
+    /// `obj_reset_collision` edit (word `n` of shapes 32n..).
+    pub collision: Vec<u32>,
+    /// The object entry's id (`obj_get_entry_id`).
+    pub entry_id: u32,
     pub(crate) pending_fly: Option<PendingFly>,
     pub(crate) fly: Option<Fly>,
+    /// Physics mode 5 state, and +0x124 bit 27 (the last step moved).
+    pub(crate) steer: Option<Steer>,
+    pub steer_moving: bool,
     /// A plain jump (FUN_1403cbb00): the arc and its horizontal velocity.
     pub(crate) jump: Option<(actor_physics::Arc, [f32; 2])>,
     pub(crate) blow: Option<actor_physics::Blow>,
@@ -298,8 +320,14 @@ impl Sysobj {
             event_parameter: 0,
             pattern_a: 0,
             pattern_b: 0,
+            team: 0,
+            karma_limit: 0,
+            collision: Vec::new(),
+            entry_id: 0,
             pending_fly: None,
             fly: None,
+            steer: None,
+            steer_moving: false,
             jump: None,
             blow: None,
             knock: None,
@@ -466,6 +494,7 @@ impl Sysobj {
             3 => {
                 if let Some(launch) = self.pending_fly.take() {
                     let floor = env.floor(self.position[0], self.position[2], self.position[1]);
+                    self.steer = None;
                     self.fly = Some(Fly {
                         arc: actor_physics::Arc::launch(self.position[1], launch.height),
                         velocity: [
@@ -506,6 +535,8 @@ impl Sysobj {
         }
         if self.fly.is_some() {
             self.update_fly(clips, env);
+        } else if let Some(steer) = self.steer {
+            self.update_steer(steer, env);
         } else if let Some((arc, velocity)) = self.jump {
             self.update_jump(arc, velocity, env);
         } else if !reacting {
@@ -522,6 +553,51 @@ impl Sysobj {
             };
             self.apply_movement(wished, env);
         }
+    }
+
+    /// FUN_140421c80: one step of physics mode 5. Like every mode routine it
+    /// runs every `PHYSICS_STEP` frames (FUN_1403b89a0) and its displacement is
+    /// spread over them.
+    fn update_steer(&mut self, mut steer: Steer, env: &dyn Env) {
+        if self.sampler.due(self.move_speed) {
+            let dt = actor_physics::PHYSICS_STEP;
+            // FUN_1403b7ad0: toward the request keeping `inertia` of the
+            // velocity, or the velocity scaled by `inertia` without one.
+            steer.velocity = if self.move_speed > 0. {
+                let target = self.move_direction.map(|c| c * self.move_speed);
+                [0, 1, 2]
+                    .map(|k| target[k] * (1. - steer.inertia) + steer.velocity[k] * steer.inertia)
+            } else {
+                steer.velocity.map(|c| c * steer.inertia)
+            };
+            let step = steer.velocity.map(|c| c * dt);
+            self.steer_moving = step[0] * step[0] + step[1] * step[1] + step[2] * step[2] > 1.0e-4;
+            self.sampler.store(step);
+        }
+        self.steer = Some(steer);
+        let d = self.sampler.displacement();
+        self.apply_movement(d, env);
+    }
+
+    /// `trap_obj_fly` (FUN_140421ce0): enter physics mode 5 with a velocity of
+    /// `direction` (normalised) × `speed`.
+    pub fn start_steer(&mut self, direction: Vec3, speed: f32, inertia: f32) {
+        let len = (direction[0] * direction[0]
+            + direction[1] * direction[1]
+            + direction[2] * direction[2])
+            .sqrt();
+        let velocity = if len != 0. {
+            direction.map(|c| c / len * speed)
+        } else {
+            direction.map(|c| c * speed)
+        };
+        self.jump = None;
+        self.fly = None;
+        self.pending_fly = None;
+        self.pending_mode = 0;
+        self.steer = Some(Steer { velocity, inertia });
+        self.sampler.reset();
+        self.airborne = true;
     }
 
     fn update_jump(&mut self, mut arc: actor_physics::Arc, mut velocity: [f32; 2], env: &dyn Env) {
@@ -656,6 +732,7 @@ impl Sysobj {
         } else {
             [0.; 2]
         };
+        self.steer = None;
         self.jump = Some((
             actor_physics::Arc::launch(self.position[1], height),
             [dir[0] * speed, dir[1] * speed],
@@ -689,6 +766,7 @@ impl Sysobj {
     /// Physics mode entry for a fall (FUN_1403b8150): the parabola continues
     /// from the given Y-up vertical speed with no horizontal velocity.
     pub fn start_fall(&mut self, vertical_up: f32) {
+        self.steer = None;
         self.jump = Some((
             actor_physics::Arc::fall(self.position[1], vertical_up),
             [0.; 2],
@@ -699,12 +777,14 @@ impl Sysobj {
 
     /// Read a word of the engine object that scripts access directly through
     /// its handle (`.d` addressing). Only the offsets found in installed
-    /// scripts are mapped: +0x30..+0x38 is the scale.
+    /// scripts are mapped: +0x30..+0x38 is the scale, +0x134 the turn rate
+    /// (word 12 of the spec `obj_spec` returns).
     pub fn peek_word(&self, offset: u32) -> Option<u32> {
         match offset {
             0x30 => Some(self.scale[0].to_bits()),
             0x34 => Some(self.scale[1].to_bits()),
             0x38 => Some(self.scale[2].to_bits()),
+            0x134 => Some(self.turn_rate.to_bits()),
             _ => None,
         }
     }
@@ -715,9 +795,30 @@ impl Sysobj {
             0x30 => self.scale[0] = f32::from_bits(value),
             0x34 => self.scale[1] = f32::from_bits(value),
             0x38 => self.scale[2] = f32::from_bits(value),
+            0x134 => self.turn_rate = f32::from_bits(value),
             _ => return false,
         }
         true
+    }
+
+    /// FUN_1403f1f80: disable collision shape `index` (bit in the second word of
+    /// its pair).
+    pub fn disable_collision(&mut self, index: u32) {
+        let w = (index >> 5) as usize + 1;
+        if self.collision.len() <= w {
+            self.collision.resize(w + 1, 0);
+        }
+        self.collision[w] |= 1 << (index & 31);
+    }
+
+    /// FUN_1403f2000: reset collision shape `index` (clears the bit in both words).
+    pub fn reset_collision(&mut self, index: u32) {
+        let w = (index >> 5) as usize;
+        if self.collision.len() <= w + 1 {
+            self.collision.resize(w + 2, 0);
+        }
+        self.collision[w] &= !(1 << (index & 31));
+        self.collision[w + 1] &= !(1 << (index & 31));
     }
 
     /// Pool `index` of the battle sheet (0 is the object's HP).
@@ -763,6 +864,7 @@ impl Sysobj {
     pub fn to_ground_mode(&mut self) {
         self.jump = None;
         self.fly = None;
+        self.steer = None;
         self.pending_fly = None;
         self.airborne = false;
         self.sampler.reset();
@@ -770,6 +872,6 @@ impl Sysobj {
 
     /// `trap_obj_is_jump`: the physics state byte at +0xc bit 0.
     pub fn is_jump(&self) -> bool {
-        self.jump.is_some() || self.fly.is_some()
+        self.jump.is_some() || self.fly.is_some() || self.steer.is_some()
     }
 }
