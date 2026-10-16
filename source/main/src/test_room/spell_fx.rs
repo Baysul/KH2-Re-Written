@@ -128,7 +128,8 @@ struct Frames {
     hand: Option<Mat4>,
     tip: Vec3,
     bones: Option<HashMap<usize, Mat4>>,
-    lift: f32,
+    body_lift: f32,
+    heal_lift: f32,
     members: Vec<(Vec3, f32)>,
 }
 
@@ -148,12 +149,22 @@ impl Frames {
         let bones = clip
             .and_then(|c| c.body.get(frame.min(c.body.len().saturating_sub(1))))
             .cloned();
-        // The Keyblade's top: the weapon vertex farthest from the grip.
+        // The Keyblade's top (WEAPON_TOP, FUN_1403b5450): the end of bone 2's
+        // reach, bone 2's origin plus its 78-unit offset along the blade
+        // (Kingdom Key, measured: the farthest vertex lies 77.96 from the
+        // bone). Without the weapon's own motion it is the vertex farthest
+        // from the grip.
+        let origin = clip
+            .and_then(|c| c.blade.get(frame.min(c.blade.len().saturating_sub(1))))
+            .map_or(Vec3::ZERO, |b| b.w_axis.truncate());
         let tip = game
             .weapon_display
             .iter()
             .copied()
-            .max_by(|a, b| a.length_squared().total_cmp(&b.length_squared()))
+            .max_by(|a, b| {
+                a.distance_squared(origin)
+                    .total_cmp(&b.distance_squared(origin))
+            })
             .unwrap_or(Vec3::ZERO);
         let members = game
             .party
@@ -165,7 +176,8 @@ impl Frames {
             hand: hand.copied(),
             tip,
             bones,
-            lift: game.magic.as_ref().map_or(70., |m| m.src.target_lift),
+            body_lift: game.magic.as_ref().map_or(85., |m| m.src.body_lift),
+            heal_lift: game.magic.as_ref().map_or(105., |m| m.src.heal_lift),
             members,
         }
     }
@@ -182,12 +194,13 @@ impl Frames {
         let own = matches!(anchor, Anchor::Caster | Anchor::Party(0));
         match bone {
             0x4000 => root,
-            0x4001 | 0x4009 => root * Mat4::from_translation(Vec3::new(0., self.lift, 0.)),
+            0x4001 => root * Mat4::from_translation(Vec3::new(0., self.body_lift, 0.)),
+            0x4009 => root * Mat4::from_translation(Vec3::new(0., self.heal_lift, 0.)),
             0x4003 | 0x4004 if own => match self.hand {
                 Some(h) => root * h * Mat4::from_translation(self.tip),
-                None => root * Mat4::from_translation(Vec3::new(0., self.lift, 0.)),
+                None => root * Mat4::from_translation(Vec3::new(0., self.body_lift, 0.)),
             },
-            0x4003..=0x4009 => root * Mat4::from_translation(Vec3::new(0., self.lift, 0.)),
+            0x4003..=0x4009 => root * Mat4::from_translation(Vec3::new(0., self.body_lift, 0.)),
             b if b >= 0 && own => match self.bones.as_ref().and_then(|m| m.get(&(b as usize))) {
                 // The bone read through FUN_1401a7af0 negates its y and z
                 // columns.
@@ -759,7 +772,8 @@ mod tests {
             hand: Some(Mat4::from_translation(Vec3::new(0., 40., 0.))),
             tip: Vec3::new(0., 0., 30.),
             bones: None,
-            lift: 70.,
+            body_lift: 70.,
+            heal_lift: 90.,
             members: vec![(Vec3::new(-200., 0., 0.), 0.)],
         }
     }
@@ -827,7 +841,7 @@ mod tests {
             &f,
         );
         close(pos(&m), [-200., 0., 0.]);
-        // 0x4001 / 0x4009 are the body centre.
+        // 0x4001 is the body centre (70 here), 0x4009 the heal point (90).
         let m = element_world(
             1,
             Some(Anchor::Party(1)),
@@ -838,7 +852,7 @@ mod tests {
             None,
             &f,
         );
-        close(pos(&m), [-200., 70., 0.]);
+        close(pos(&m), [-200., 90., 0.]);
     }
 
     #[test]

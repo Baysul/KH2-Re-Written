@@ -109,6 +109,8 @@ pub(super) struct Kit {
     pub target_radius: f32,
     pub target_shape: Option<object_collision::Entry>,
     pub target_lift: f32,
+    pub body_lift: f32,
+    pub heal_lift: f32,
     pub summary: serde_json::Value,
     pub set: Vec<ptya::PtyaEntry>,
     pub pax: Option<data::object_effect::Pax>,
@@ -305,6 +307,9 @@ pub(super) fn load_kit(
     let mut target_radius = 0f32;
     let mut target_shape = None;
     let mut target_lift = 70f32;
+    // Bone codes 0x4001 and 0x4009 (FUN_1403b50f0): the first type-1 and
+    // type-9 collision entries' centres, here above the object's origin.
+    let (mut body_lift, mut heal_lift) = (85f32, 105f32);
     let body: Vec<(usize, Vec3, f32, bool)> = match &collision_archive {
         Some(archive) => {
             let shapes = object_collision::read(super::bar_entry_typed(archive, 23)?)?;
@@ -318,6 +323,12 @@ pub(super) fn load_kit(
                 target_shape = Some(*c);
                 target_radius = c.radius as f32;
                 target_lift = c.position_height as f32;
+            }
+            if let Some(c) = shapes.iter().find(|c| c.kind == 1 && c.group == 0) {
+                body_lift = c.position_height as f32;
+            }
+            if let Some(c) = shapes.iter().find(|c| c.kind == 9 && c.group == 0) {
+                heal_lift = c.position_height as f32;
             }
             shapes
                 .iter()
@@ -758,6 +769,8 @@ pub(super) fn load_kit(
         target_radius,
         target_shape,
         target_lift,
+        body_lift,
+        heal_lift,
         summary,
         set,
         pax,

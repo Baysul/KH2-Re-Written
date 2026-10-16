@@ -2767,6 +2767,7 @@ fn load(
     )?;
     let sora_body = kit.body.clone();
     let (sora_target_radius, sora_target_lift) = (kit.target_radius, kit.target_lift);
+    let (sora_body_lift, sora_heal_lift) = (kit.body_lift, kit.heal_lift);
     let forms = drive_room::FormSources::new(
         &system,
         &battle,
@@ -3094,6 +3095,8 @@ fn load(
     };
     let magic_src = magic_src.map(|mut m| {
         m.target_lift = sora_target_lift;
+        m.body_lift = sora_body_lift;
+        m.heal_lift = sora_heal_lift;
         m
     });
     // The spells' names for the Magic submenu (cmd +8 message ids).
@@ -5926,6 +5929,38 @@ fn simulate(
         ),
         None => (cast, menu_item),
     };
+    // Magic Lock-On (FUN_1403aa560 from FUN_1403c5170): Fire, Blizzard,
+    // Thunder and Magnet without a target choose one as an attack does and
+    // lock it.
+    if let Some(t) = cast
+        && !talking
+        && matches!(
+            t,
+            magic::FIRE | magic::BLIZZARD | magic::THUNDER | magic::MAGNET
+        )
+        && game.player.abilities.has(abilities::bit::MAGIC_LOCK_ON)
+        && game.selected_target.is_none()
+    {
+        let chosen = enemy_target::acquire(&game, &gallery, &mut targeting);
+        game.selected_target = chosen.target.map(|s| s.centre);
+        game.target_locked = chosen.locked;
+        let count = enemy_target::candidates(&game, &gallery).len();
+        let enemy_state = game.enemy.as_ref().map(|r| {
+            (
+                r.enabled,
+                r.enemy.targetable(),
+                r.enemy.hp,
+                r.enemy.motion,
+                r.targets.len(),
+                r.clips.0.contains_key(&r.enemy.motion),
+            )
+        });
+        game.event(serde_json::json!({"event":"magic_lock_on","tick":tick,
+            "target":format!("{:?}", chosen.id),"locked":chosen.locked,
+            "candidates":count,
+            "params":gallery.target_params.is_some(),
+            "enemy":enemy_state}));
+    }
     if let Some(t) = cast
         && !talking
     {

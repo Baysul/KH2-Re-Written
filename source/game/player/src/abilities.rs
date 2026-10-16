@@ -103,6 +103,9 @@ pub mod bit {
     /// Item 0x194 "No Experience" (stats +0x1dc bit 20): FUN_1403ed110
     /// refuses a kill's EXP (the Winner's Proof's ability).
     pub const NO_EXPERIENCE: u16 = 0x74;
+    /// Item 0x193 "Magic Lock-On" (FUN_1403c5170 tests ability 115):
+    /// Fire, Blizzard, Thunder and Magnet lock a target when there is none.
+    pub const MAGIC_LOCK_ON: u16 = 0x73;
 }
 
 /// Ability items whose effect FUN_140401730 applies beyond setting the bit

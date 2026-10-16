@@ -55,32 +55,27 @@ tour logs and captures in `runs/`). Nothing from the game is in Git: the effect 
   MP charge; 3 in `spell_fx` for placement, bind modes and direction), PASS `cargo build --workspace --locked`.
 - PASS release `--magic-tour` runs (base form, `--magic-form 2` and `5`): every spell starts its effect sequence,
   element sounds and cast voice; casts carry the form's row (14 and 34); no effect program is reported unsupported
-  except pppSRandUpFV (76) in Thunder's hit spark.
+  (pppSRandUpFV, Thunder's hit spark, arrived from main).
 - Compared with the executable (static): the combo gate `FUN_1403d6ca0` / `FUN_1403d6fc0` / `FUN_1403d7780` /
   `FUN_1403a9dd0`, the cast start `FUN_1403c5170`, the effect start and bind routines, and the window data the
   gate reads (the installed P_EX100 motions' range triggers, logged as `motion_windows`: motion 151's combo
   window is frames 23–48, and a cast pressed at frame 21 is refused, at 26 accepted).
 - Compared only in the test room (no capture or run of the installed game): effect placement, timing and look,
   the finisher sequence, chaining after a cast, form casts.
-- NOT RUN: owner playtest; frame-by-frame comparison with the installed game; the Master form's tour.
+- PASS release `--magic-tour --magic-form 4` (Master rows 24 and 25 cast with effects); the second pass adds the exact Keyblade tip, body-centre and heal-point bones, Final Thunder's position draw and Magic Lock-On.
+- NOT RUN: owner playtest; frame-by-frame comparison with the installed game.
 
 ## Uncertainty
 
-- Bone 0x4003 (the Keyblade's top) is the farthest vertex of the posed Keyblade, not
-  the weapon's WEAPON_TOP collision entry with its offset (`FUN_1403d7600`). Bone 0x4001
-  and 0x4009 use the TARGET shape's lift, not the type-1 and type-9 collision entries.
+- Keyblade tip (bone 0x4003): bone 2's origin plus its offset along the blade, taken as the posed vertex farthest from bone 2 (measured 77.96 against the 78-unit offset in the original's tables), not read from the collision entry. Bones 0x4001 and 0x4009 use Sora's own type-1 (85) and type-9 (105) collision entries; party members use the same lifts.
 - pppKeZCrct mode 3's cross-product order is inferred.
 - Effect fade-out frames are treated as 30 Hz frames (2 ticks); unverified against a capture.
-- Magnet's sphere scale (the sin ease) assumes `effect_set_scale` sets the whole scale
-  vector.
-- Not modelled: Magic Lock-On (ability 115), `bg_get_random_pos_air` for Final Thunder
-  (a fixed ring is used), Cure's target menu and party members' casts, spell hit sounds
-  other than the element sounds, and which party slot Cure heals.
-- Which behavior the owner saw as "magic does not use the combo system" was not
-  reproduced; see the report in the project thread.
+- Magnet's sphere scale (the sin ease) assumes `effect_set_scale` sets the whole scale vector.
+- Final Thunder's extra bolts use the original's draw (radius, eight-sector angle order, height) on the spell's own random stream, not the shared script stream, and without the background test.
+- Magic Lock-On is wired (the cast acquires and locks a target as an attack does) but not shown working: the test room's Shadow is not returned as a candidate by the targeting layer, so the tour logs zero candidates.
+- Not modelled: Cure's target menu and party members' casts, controller vibration on casts, which party slot Cure heals.
+- Which behavior the owner saw as "magic does not use the combo system" was not reproduced.
 
 ## Verdict / next
 
-PARTIAL: the spells show their own effects, animations and variants and join the combo as
-the executable's gate does. Next: pppSRandUpFV for Thunder's spark, the exact WEAPON_TOP
-and collision-entry bones, Magic Lock-On, owner playtest of each spell in each form.
+PARTIAL: the spells show their own effects, animations and variants in the base, Wisdom, Master and Final forms and join the combo as the executable's gate does. Open: owner playtest of each spell in each form, a comparison with the installed game, Magic Lock-On with a real candidate, Cure's target menu and party casts.

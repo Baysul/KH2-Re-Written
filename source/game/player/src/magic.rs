@@ -380,6 +380,8 @@ pub struct Context<'a> {
     pub facing: [f32; 2],
     /// The caster's TARGET shape centre (blizzard start).
     pub caster_centre: Vec3,
+    /// The caster's body centre (bone 0x4001), where Cure's heal effect sits.
+    pub body_centre: Vec3,
     pub airborne: bool,
     /// The caster is still in the cast motion (spells wait on it).
     pub casting: bool,
@@ -567,6 +569,47 @@ struct Counter {
     left: f32,
     tier: u8,
     centre: Vec3,
+}
+
+/// `bg_get_random_pos_air` (FUN_1403f4080 → FUN_1403f44a0), without the
+/// background test: a radius drawn between the limits, an angle in one of
+/// eight π/4 sectors taken in the order 0, 2, 4, 6, 1, 3, 5, 7 plus a draw
+/// inside the sector, and a height draw. The draws are the script RNG's
+/// multipliers (`DAT_140783ca0 · 0x10dcd`, 2^-32 scaled); the stream is the
+/// spell's own, not the shared one, and the sector counter starts at 0 for
+/// each spell (the exe's counter is global) [I].
+#[derive(Clone, Debug, PartialEq)]
+pub struct RandomAir {
+    state: u32,
+    sector: u32,
+}
+
+impl RandomAir {
+    pub fn new(seed: u64) -> Self {
+        RandomAir {
+            state: (seed as u32).wrapping_mul(0x9e37_79b1) | 1,
+            sector: 0,
+        }
+    }
+
+    pub fn next(&mut self, centre: Vec3, r0: f32, r1: f32, y0: f32, y1: f32) -> Vec3 {
+        const UNIT: f32 = 2.328_306_4e-10;
+        let u1 = self.state.wrapping_mul(0x10dcd);
+        self.state = self.state.wrapping_mul(0x1c58_7629);
+        let radius = u1 as f32 * UNIT * (r1 - r0) + r0;
+        let k = self.sector;
+        let v = (k >> 2 & 1) | k.wrapping_mul(2);
+        let angle = v as f32 * std::f32::consts::FRAC_PI_4
+            + self.state as f32 * UNIT * std::f32::consts::FRAC_PI_4;
+        self.sector = (k + 1) & 7;
+        self.state = self.state.wrapping_mul(0x10dcd);
+        let y = self.state as f32 * UNIT * (y1 - y0) + y0;
+        [
+            centre[0] + angle.sin() * radius,
+            centre[1] + y,
+            centre[2] + angle.cos() * radius,
+        ]
+    }
 }
 
 /// The slot of an effect handle among a spell's keys (the volume keys use
@@ -1053,10 +1096,12 @@ impl Spell {
                     if fin {
                         let r = 2.5 * row.f(9);
                         let n = if odd { 8 } else { 3 };
+                        // bg_get_random_pos_air(P, 0.4R, R, −0.1R, 0.1R) per
+                        // bolt: the draws of FUN_1403f4080 on a generator
+                        // of the script RNG's kind, seeded by the cast.
+                        let mut rng = RandomAir::new(serial);
                         for k in 1..n {
-                            // bg_get_random_pos_air [U]: a fixed ring.
-                            let a = k as f32 * std::f32::consts::TAU / n as f32;
-                            let q = [p[0] + a.cos() * r * 0.7, p[1], p[2] + a.sin() * r * 0.7];
+                            let q = rng.next(p, 0.4 * r, r, -0.1 * r, 0.1 * r);
                             queue.push((at + 8. * k as f32, q, 330.));
                         }
                     }
@@ -1155,7 +1200,7 @@ impl Spell {
                     release_effect(&mut out, fk(1), 1);
                     // The heal centre is the target (Sora himself here):
                     // `obj_apply_bone_matrix(target, 0x4001, origin)`.
-                    let heal = ctx.caster_centre;
+                    let heal = ctx.body_centre;
                     out.fx.push(Fx::Start {
                         key: fk(2),
                         id: 2,
@@ -1518,6 +1563,7 @@ mod tests {
             caster: [0., 0., 0.],
             facing: [0., 1.],
             caster_centre: [0., 70., 0.],
+            body_centre: [0., 85., 0.],
             airborne: false,
             casting: true,
             target: None,
@@ -2065,5 +2111,23 @@ mod tests {
         let o = s.tick(&ctx, &fb);
         assert_eq!(o.barrier_count, Some(2));
         assert!(s.finished());
+    }
+
+    #[test]
+    fn random_air_positions_stay_in_the_ring_and_cover_the_sectors() {
+        let mut rng = RandomAir::new(3);
+        let c = [100., 50., -20.];
+        let mut sectors = [false; 8];
+        for _ in 0..8 {
+            let p = rng.next(c, 100., 250., -25., 25.);
+            let (dx, dz) = (p[0] - c[0], p[2] - c[2]);
+            let d = dx.hypot(dz);
+            assert!((100. ..=250.).contains(&d), "{d}");
+            assert!((-25. ..=25.).contains(&(p[1] - c[1])));
+            let a = dx.atan2(dz).rem_euclid(std::f32::consts::TAU);
+            sectors[(a / std::f32::consts::FRAC_PI_4) as usize % 8] = true;
+        }
+        // Eight draws visit eight different sectors.
+        assert!(sectors.iter().all(|&s| s));
     }
 }

@@ -27,6 +27,10 @@ pub struct MagicSource {
     pub names: HashMap<u16, Vec<u8>>,
     /// Sora's TARGET shape lift above his origin (Blizzard starts there).
     pub target_lift: f32,
+    /// The body centre (bone 0x4001) and heal point (0x4009) above Sora's
+    /// origin.
+    pub body_lift: f32,
+    pub heal_lift: f32,
     /// The effect container (PAX, BAR entry type 18) of each spell file
     /// by the `magc` record's file name, and the resident common textures.
     pub paxes: HashMap<String, Arc<object_effect::Pax>>,
@@ -84,6 +88,8 @@ pub fn load(
         commands,
         names: HashMap::new(),
         target_lift,
+        body_lift: 85.,
+        heal_lift: 105.,
         paxes: HashMap::new(),
         texcommon: None,
     })
@@ -384,6 +390,11 @@ pub fn request(game: &mut Game, magic_type: u8, tick: u64) -> bool {
                 player.position[1] + m.src.target_lift,
                 player.position[2],
             ],
+            body_centre: [
+                player.position[0],
+                player.position[1] + m.src.body_lift,
+                player.position[2],
+            ],
             airborne: false,
             casting: true,
             target: None,
@@ -428,6 +439,8 @@ pub fn tick(game: &mut Game, tick: u64) {
         // triggers 11, 50 and 0-2, frame trigger 17), the data the combo gate
         // reads.
         if *magic_tour && tick == 1 {
+            // The tour owns Magic Lock-On so Thunder and the rest find the enemy.
+            player.abilities.set(player::abilities::bit::MAGIC_LOCK_ON);
             let window = |c: &player::Clip| {
                 serde_json::json!({"end":c.end,"combo":c.combo_windows,
                     "finisher":c.finisher_windows,"actionable":c.actionable})
@@ -472,6 +485,7 @@ pub fn tick(game: &mut Game, tick: u64) {
                 caster: pos,
                 facing,
                 caster_centre: centre,
+                body_centre: [pos[0], pos[1] + m.src.body_lift, pos[2]],
                 airborne,
                 casting,
                 target,
