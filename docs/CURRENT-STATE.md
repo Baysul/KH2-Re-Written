@@ -69,7 +69,7 @@ Unfinished:
 - Spells show the effects of their own effect files since T136 (the old stand-in shapes appear only with F1); no voices play.
 - Heal effects, prize models and sparkles are not drawn; item drops are only logged.
 - Level-up messages, fanfare and HP/MP/Drive growth are not reproduced.
-- The game-over flow is not modelled.
+- Game over: Sora's death event, the Continue / Load Game list over his lying pose and Continue's reload are built (T140); Load Game, the other game-over modes and the Drive-form KO are not.
 - Only one enemy exists, so targeting between several enemies is untested.
 
 ### Twilight Town (T097)

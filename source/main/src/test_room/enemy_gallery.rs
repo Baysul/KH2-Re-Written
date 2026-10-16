@@ -212,6 +212,18 @@ impl EnemyGallery {
             b.brain.defeat();
         }
     }
+    /// Every summoned actor stands again (a game-over Continue).
+    pub fn respawn_all(&mut self) {
+        for a in &mut self.actors {
+            if let Some(b) = a.battle.as_mut() {
+                b.brain.respawn();
+                b.contacts = super::enemy_battle_hits::ContactState::default();
+                b.error = None;
+            }
+            a.error = None;
+        }
+    }
+
     pub fn respawn_selected(&mut self) {
         if let Some(a) = self.selected_actor_mut()
             && let Some(b) = a.battle.as_mut()
