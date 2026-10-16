@@ -81,6 +81,7 @@ mod gear;
 mod gear_tour;
 mod item_drop_view;
 mod item_room;
+mod journal_tour;
 mod level_growth;
 mod magic_room;
 mod party_room;
@@ -836,6 +837,8 @@ struct Game {
     prize_tour: bool,
     /// The unattended `--npc-tour` (Sora walks into a townsperson).
     npc_tour: bool,
+    /// The unattended `--journal-tour` (the journal's Limits pages).
+    journal_tour: bool,
     /// The unattended `--badge-tour` (an item pickup, then the camp's NEW! badges).
     badge_tour: bool,
     hero_hit_tick: Option<u64>,
@@ -1570,6 +1573,9 @@ struct JournalSource {
     texts: HashMap<u16, Vec<u8>>,
     flags: Vec<u16>,
     reports: Vec<data::journal_table::Report>,
+    limits: Vec<data::journal_table::Limit>,
+    quests: Vec<data::journal_table::Quest>,
+    minigames: Vec<data::journal_table::Minigame>,
     treasures: Vec<data::journal_table::Treasure>,
     item_names: HashMap<u16, journal::TreasureItem>,
     opened_bits: Vec<u16>,
@@ -1603,6 +1609,9 @@ fn load_journal(
     let diag = journal_table::read_diag(bar_entry(&tables, b"diag")?)?;
     let albums = journal_table::read_albums(bar_entry(&tables, b"albu")?)?;
     let reports = journal_table::read_reports(bar_entry(&tables, b"anse")?)?;
+    let limits = journal_table::read_limits(bar_entry(&tables, b"limi")?)?;
+    let quests = journal_table::read_quests(bar_entry(&tables, b"ques")?)?;
+    let minigames = journal_table::read_minigames(bar_entry(&tables, b"mini")?)?;
     let mut ids: Vec<u32> = journal::MESSAGES.iter().map(|&i| i as u32).collect();
     ids.extend(journal::PAGE_MESSAGES.map(u32::from));
     for c in &chars {
@@ -1613,6 +1622,15 @@ fn load_journal(
     }
     for r in &reports {
         ids.extend([r.title, r.text].map(u32::from));
+    }
+    for l in &limits {
+        ids.extend([l.name, l.description].map(u32::from));
+    }
+    for q in &quests {
+        ids.extend([q.heading, q.text].map(u32::from));
+    }
+    for m in &minigames {
+        ids.extend([m.name, m.label].map(u32::from));
     }
     for w in &worlds {
         ids.extend([w.names[0], w.alt_names[0], w.names[1], w.alt_names[1]].map(u32::from));
@@ -1687,6 +1705,9 @@ fn load_journal(
         texts,
         flags: j.flags.clone(),
         reports,
+        limits,
+        quests,
+        minigames,
         treasures,
         item_names,
         opened_bits: j.opened_bits.clone(),
@@ -8816,11 +8837,12 @@ fn finish(
                 "motion_choice":a.motion_choice,"frame":a.frame,"error":a.error})).collect::<Vec<_>>(),
             "installed_comparison":"NOT RUN"}));
     }
-    // The badge tour (its Sora has the unattended run's extra ability) has
-    // no ability verdict.
+    // The badge and journal tours (their Sora has the unattended run's extra
+    // ability) have no ability verdict.
     if autoplay_done
         && game.exit_code.is_none()
         && !game.badge_tour
+        && !game.journal_tour
         && let Some(tour) = &game.ability_tour
     {
         let expected = game
@@ -8902,6 +8924,9 @@ struct CampRes {
     /// The journal's seen `char` and `albu` rows (save+0x4c38 / 0x4c7c).
     seen_chars: Vec<u16>,
     seen_albums: Vec<u16>,
+    seen_limits: Vec<u16>,
+    seen_quests: Vec<u16>,
+    seen_minigames: Vec<u16>,
     picture_sheets: HashMap<u16, Option<usize>>,
     notice_sheets: HashMap<String, usize>,
     /// The menus' language code (`menu/<lang>/` notice and photo files).
@@ -9582,12 +9607,22 @@ fn camp_tick(
                     world: 2,
                     worlds: j.worlds.clone(),
                     stories: j.stories.clone(),
-                    flags: j.flags.clone(),
+                    flags: {
+                        let mut f = j.flags.clone();
+                        // The tour shows everything (story flag 0x4837).
+                        if game.journal_tour {
+                            f.extend(journal_tour::STORY_FLAGS);
+                        }
+                        f
+                    },
                     // FUN_140339500 counts each `limi` command's limit in
                     // save+0x3d48 (FUN_1403e7c30 / FUN_1403e8150): none
                     // in this save; no reports, pieces, missions, minigames
                     // or synthesis either [test-room values].
-                    unlocks: journal::Unlocks::default(),
+                    unlocks: journal::Unlocks {
+                        limits: game.journal_tour,
+                        ..Default::default()
+                    },
                     texts: j.texts.clone(),
                     tops: j.tops.iter().map(|(code, _)| code.clone()).collect(),
                     world_icons: !j.world_icons.is_empty(),
@@ -9601,6 +9636,30 @@ fn camp_tick(
                     owned_items: j.owned_items.clone(),
                     seen_chars: c.seen_chars.clone(),
                     seen_albums: c.seen_albums.clone(),
+                    // No limit has been used in this save [test-room value].
+                    limit_counts: (0..j.limits.len())
+                        .map(|i| {
+                            if game.journal_tour {
+                                journal_tour::LIMIT_COUNTS.get(i).copied().unwrap_or(0)
+                            } else {
+                                0
+                            }
+                        })
+                        .collect(),
+                    limits: j.limits.clone(),
+                    seen_limits: c.seen_limits.clone(),
+                    quests: j.quests.clone(),
+                    minigames: j.minigames.clone(),
+                    // No minigame has been played and no menu flag is set
+                    // in this save [test-room values].
+                    minigame_records: if game.journal_tour {
+                        journal_tour::minigame_records()
+                    } else {
+                        Vec::new()
+                    },
+                    menu_flags: Vec::new(),
+                    seen_quests: c.seen_quests.clone(),
+                    seen_minigames: c.seen_minigames.clone(),
                 };
                 let (opened, s) = Journal::open(&j.book.layout, data);
                 game.event(serde_json::json!({"event":"journal_open","tick":tick,
@@ -9627,6 +9686,8 @@ fn camp_tick(
         game.tick += 1;
         if open.closed {
             (c.seen_chars, c.seen_albums) = open.seen();
+            c.seen_limits = open.seen_limits();
+            (c.seen_quests, c.seen_minigames) = open.seen_lists();
             c.journal = None;
             game.event(serde_json::json!({"event":"journal_close","tick":tick}));
             // FUN_140304ea0: the camp is rebuilt (its open sound) and the
@@ -10097,6 +10158,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut prize_tour = false;
     let mut npc_tour = false;
     let mut badge_tour = false;
+    let mut journal_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
     let mut options = args[3..].iter();
@@ -10165,6 +10227,16 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("npc tour capture directory absent")?,
+                );
+            }
+            Some("--journal-tour") if autoplay.is_none() => {
+                ability_tour = true;
+                journal_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("journal tour capture directory absent")?,
                 );
             }
             Some("--badge-tour") if autoplay.is_none() => {
@@ -10320,7 +10392,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             .camp
             .as_ref()
             .ok_or("ability tour requires camp assets")?;
-        Some(if badge_tour {
+        Some(if journal_tour {
+            journal_tour::tour(&loaded.abilities.inventory)
+        } else if badge_tour {
             prize_room::badge_tour(&loaded.abilities.inventory)
         } else if gear_tour {
             gear_tour::tour(
@@ -10335,7 +10409,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let captures = if npc_tour {
+    let captures = if journal_tour {
+        journal_tour::CAPTURES.to_vec()
+    } else if npc_tour {
         NPC_TOUR_CAPTURES.to_vec()
     } else if prize_tour {
         prize_room::CAPTURES.to_vec()
@@ -10358,7 +10434,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 }
             })
     };
-    let autoplay_end = if npc_tour {
+    let autoplay_end = if journal_tour {
+        journal_tour::END
+    } else if npc_tour {
         NPC_TOUR_END
     } else if prize_tour {
         prize_room::END
@@ -10405,6 +10483,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         prize_tour,
         npc_tour,
         badge_tour,
+        journal_tour,
         hero_hit_tick: None,
         enemy_incoming_hits: 0,
         enemy_outgoing_hits: 0,
@@ -10829,6 +10908,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             picture_source: Some(source),
             seen_chars: Vec::new(),
             seen_albums: Vec::new(),
+            seen_limits: Vec::new(),
+            seen_quests: Vec::new(),
+            seen_minigames: Vec::new(),
             picture_sheets: HashMap::new(),
             notice_sheets: HashMap::new(),
             lang: settings.loaded_or("us"),

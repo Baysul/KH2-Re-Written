@@ -92,6 +92,63 @@ pub fn read_limits(bytes: &[u8]) -> io::Result<Vec<Limit>> {
         .collect())
 }
 
+/// A `ques` record (16 B): one Mission row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Quest {
+    /// +0: journal world.
+    pub world: u16,
+    /// +2 / +4: the category heading and the row text.
+    pub heading: u16,
+    pub text: u16,
+    /// +6: flag bits (1 A is a story flag; 4 record B non-zero; 0x10 / 0x20
+    /// complete by story / menu flag D; 0x100 time limit C; 0x200 score C;
+    /// 0x1000 / 0x2000 record state).
+    pub flags: u16,
+    /// +8 availability flag, +0xa minigame record, +0xc threshold, +0xe
+    /// completion flag.
+    pub available: u16,
+    pub record: u16,
+    pub threshold: u16,
+    pub done: u16,
+}
+
+pub fn read_quests(bytes: &[u8]) -> io::Result<Vec<Quest>> {
+    Ok(records(bytes, 16)?
+        .map(|r| Quest {
+            world: u16_at(r, 0),
+            heading: u16_at(r, 2),
+            text: u16_at(r, 4),
+            flags: u16_at(r, 6),
+            available: u16_at(r, 8),
+            record: u16_at(r, 0xa),
+            threshold: u16_at(r, 0xc),
+            done: u16_at(r, 0xe),
+        })
+        .collect())
+}
+
+/// A `mini` record (8 B): one Minigame row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Minigame {
+    pub world: u16,
+    /// +2: the name; +4 the value's label.
+    pub name: u16,
+    pub label: u16,
+    /// +6: the minigame record (save+0x3db4 + 8 * record).
+    pub record: u16,
+}
+
+pub fn read_minigames(bytes: &[u8]) -> io::Result<Vec<Minigame>> {
+    Ok(records(bytes, 8)?
+        .map(|r| Minigame {
+            world: u16_at(r, 0),
+            name: u16_at(r, 2),
+            label: u16_at(r, 4),
+            record: u16_at(r, 6),
+        })
+        .collect())
+}
+
 /// A `char` record (36 B): a Journal character.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Char {
@@ -317,6 +374,21 @@ mod tests {
         let l = [0x1a, 0x01, 0xd4, 0x4a, 0xd5, 0x4a, 0, 0];
         assert_eq!(read_limits(&table(1, &l)).unwrap()[0].id, 0x11a);
         assert!(read_limits(&table(2, &l)).is_err());
+        let mut q = [0u8; 16];
+        q[2..4].copy_from_slice(&0x4b0bu16.to_le_bytes());
+        q[6..8].copy_from_slice(&0x1041u16.to_le_bytes());
+        q[0xa..0xc].copy_from_slice(&0x000eu16.to_le_bytes());
+        let quests = read_quests(&table(1, &q)).unwrap();
+        assert_eq!(
+            (quests[0].heading, quests[0].flags, quests[0].record),
+            (0x4b0b, 0x1041, 0xe)
+        );
+        let m = [0, 0, 0x0b, 0x4b, 0x35, 0x4b, 0x0e, 0];
+        let minis = read_minigames(&table(1, &m)).unwrap();
+        assert_eq!(
+            (minis[0].name, minis[0].label, minis[0].record),
+            (0x4b0b, 0x4b35, 0xe)
+        );
     }
 
     #[test]
