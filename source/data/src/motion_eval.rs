@@ -94,6 +94,54 @@ fn to_euler(q: Quat) -> Vec3 {
     [r21.atan2(r22), (-r20).clamp(-1., 1.).asin(), r10.atan2(r00)]
 }
 
+/// Wraps an angle into [-pi, pi] (FUN_1401a90c0).
+fn wrap_angle(mut x: f32) -> f32 {
+    let tau = std::f32::consts::TAU;
+    if x <= 0. {
+        while x < -std::f32::consts::PI {
+            x += tau;
+        }
+    } else {
+        while x > std::f32::consts::PI {
+            x -= tau;
+        }
+    }
+    x
+}
+
+/// The Euler angles (R = Rz * Ry * Rx) of `q` nearest the previous angles
+/// `prev`, the way the reference rewrites a joint's rotation channels from
+/// its solved matrix (FUN_1401ab290): the principal solution or its
+/// alternate (x + pi, pi - y, z + pi), whichever turns less from `prev`,
+/// accumulated onto `prev` so angles continue past +-pi.
+fn euler_near(q: Quat, prev: Vec3) -> Vec3 {
+    let [x, y, z, w] = qnorm(q);
+    let r00 = 1. - 2. * (y * y + z * z);
+    let r10 = 2. * (x * y + w * z);
+    let r20 = 2. * (x * z - w * y);
+    let r21 = 2. * (y * z + w * x);
+    let r22 = 1. - 2. * (x * x + y * y);
+    let r01 = 2. * (x * y - w * z);
+    let r11 = 1. - 2. * (x * x + z * z);
+    let s = r20.clamp(-1., 1.);
+    let asin_neg = (-s).clamp(-1., 1.).asin();
+    let e = if (r00 * r00 + r10 * r10).abs().sqrt() > 1.907_348_6e-6 {
+        [r21.atan2(r22), asin_neg, r10.atan2(r00)]
+    } else if s <= 0. {
+        let a = r01.atan2(r11) * 0.5;
+        [a, asin_neg, -a]
+    } else {
+        let a = (-r01).atan2(r11) * 0.5;
+        [a, asin_neg, a]
+    };
+    let pi = std::f32::consts::PI;
+    let alt = [e[0] + pi, pi - e[1], e[2] + pi];
+    let d1: Vec3 = std::array::from_fn(|k| wrap_angle(e[k] - prev[k]));
+    let d2: Vec3 = std::array::from_fn(|k| wrap_angle(alt[k] - prev[k]));
+    let d = if dot(d2, d2) < dot(d1, d1) { d2 } else { d1 };
+    std::array::from_fn(|k| prev[k] + d[k])
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Local {
     pub scale: Vec3,
@@ -252,7 +300,8 @@ struct Constraint {
     constrained: usize,
     source: usize,
     limiter: Option<usize>,
-    /// Validated but unused: the reference gates on `temporary_active` only.
+    /// Validated but unused: the reference gates on `temporary_active` only
+    /// (timed windows were tried against the reference and matched worse).
     _activations: Vec<(f32, bool)>,
     temporary_active: bool,
 }
@@ -581,12 +630,52 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
     }
 
     let mut stats = EvaluationStats::default();
-    let mut done = vec![false; total];
+    // Chains solved when their top joint's turn came (the reference solves a
+    // chain there, so a joint ordered between top and end already reads the
+    // solved limb). `solved_end[j]` marks the end joint, `solved_mid[j]` the
+    // middle joint, whose pose must not be rebuilt from its channels.
+    let mut solved_end = vec![false; total];
+    let mut solved_mid = vec![false; total];
     let order: Vec<usize> = if joint_flags.len() == total {
         joint_flags.iter().map(|&(j, _)| j).collect()
     } else {
         (0..total).collect()
     };
+    let mut order_pos = vec![usize::MAX; total];
+    for (at, &j) in order.iter().enumerate() {
+        order_pos[j] = at;
+    }
+    // Flag 128: an aim chain's target joint comes from the motion's external
+    // effector list, taken in joint order, instead of the next joint index.
+    let effectors: Vec<usize> = m
+        .external_effectors
+        .bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter_map(|b| usize::try_from(i16::from_le_bytes(*b)).ok())
+        .collect();
+    let mut aim_target = vec![None::<usize>; total];
+    let mut taken = 0;
+    for &j in &order {
+        if flags[j] & 3 == 1 {
+            aim_target[j] = if flags[j] & 128 != 0 {
+                let t = effectors.get(taken).copied();
+                taken += 1;
+                t
+            } else {
+                Some(j + 1)
+            };
+        } else if flags[j] & 128 != 0 {
+            taken += 1;
+        }
+    }
+    let mut aimed_by = vec![false; total];
+    for t in aim_target.iter().flatten() {
+        if *t < total {
+            aimed_by[*t] = true;
+        }
+    }
     for &j in &order {
         // Expressions override this joint's local channels first.
         for &(joint, channel, node) in &expressions {
@@ -595,8 +684,6 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
                     nodes: &nodes,
                     locals: &locals,
                     world: &world,
-                    parents: &parents,
-                    done: &done,
                     frame,
                 };
                 if let Some(v) = ctx.eval(node, 0).filter(|v| v.is_finite()) {
@@ -612,12 +699,143 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
             }
         }
         let parent = parents[j];
-        world[j] = if parent < 0 {
-            World::compose(&root_world, &locals[j])
-        } else {
-            World::compose(&world[parent as usize], &locals[j])
-        };
+        if !solved_mid[j] {
+            world[j] = if parent < 0 {
+                World::compose(&root_world, &locals[j])
+            } else {
+                World::compose(&world[parent as usize], &locals[j])
+            };
+        }
         let mut first_position: Option<Vec3> = None;
+        // IK level 1: the joint turns its +X toward the position target of
+        // the next joint (index + 1), facing the pole of an up-vector
+        // constraint on itself, rolled by its own animated X rotation. Its
+        // position stays forward kinematics; its own position constraint
+        // is the previous joint's target (FUN_1401d3b80, ik branch 0x10000).
+        let aims = aim_target[j].is_some();
+        let aimed_at = aimed_by[j];
+        // A rotation-flag joint with no translation flag keeps its own
+        // rotation in character space.
+        if flags[j] & 12 == 8 {
+            world[j].rotation = from_euler(locals[j].rotation);
+        }
+        if aimed_at && flags[j] & 8 != 0 {
+            // The end of an aim chain with the rotation flag keeps its own
+            // rotation in character space.
+            world[j].rotation = from_euler(locals[j].rotation);
+        }
+        if aims
+            && let Some(target) = constraints
+                .iter()
+                .find(|c| Some(c.constrained) == aim_target[j] && c.temporary_active && c.kind == 0)
+                .map(|c| world[c.source].translation)
+        {
+            let (pr, pt, ps) = if parent < 0 {
+                (IDENTITY, [0.; 3], [1.; 3])
+            } else {
+                let w = world[parent as usize];
+                (w.rotation, w.translation, w.scale)
+            };
+            let inv = qconj(pr);
+            let origin: Vec3 = std::array::from_fn(|k| locals[j].translation[k] * ps[k]);
+            let to = sub(rotate(inv, sub(target, pt)), origin);
+            let pole = constraints
+                .iter()
+                .find(|c| c.kind == 4 && c.constrained == j && c.temporary_active)
+                .map(|c| sub(rotate(inv, sub(world[c.source].translation, pt)), origin));
+            if let Some(x) = normalize(to) {
+                let (y, z) = aim_axes(x, pole);
+                let aim = qmul(
+                    from_basis(x, y, z),
+                    axis_angle([1., 0., 0.], locals[j].rotation[0]),
+                );
+                world[j].rotation = qnorm(qmul(pr, aim));
+                stats.constraints_applied += 1;
+            }
+        }
+        // An up-vector constraint on a chain's top joint names the pole the
+        // chain's bend plane faces.
+        let pole_of = |joint: usize| -> Option<usize> {
+            constraints
+                .iter()
+                .find(|c| c.kind == 4 && c.constrained == joint && c.temporary_active)
+                .map(|c| c.source)
+        };
+        // IK chain top (levels 2 and 3): the chain is solved here, with the
+        // position constraint of the joint two indices on as its target
+        // (FUN_1401d3b80: end = top + 2, mid = top + 1).
+        if flags[j] & 3 >= 2 && j + 2 < total {
+            let (mid, end) = (j + 1, j + 2);
+            let targets: Vec<usize> = constraints
+                .iter()
+                .filter(|c| c.constrained == end && c.temporary_active && c.kind == 0)
+                .map(|c| c.source)
+                .collect();
+            if parents[end] == mid as i32
+                && parents[mid] == j as i32
+                && flags[end] & 4 != 0
+                && flags[mid] & 32 != 0
+                && !targets.is_empty()
+                // A target the order has not reached yet is read when the
+                // end joint's turn comes instead.
+                && targets.iter().all(|&t| order_pos[t] < order_pos[j])
+                // Only when other joints are ordered between top and end
+                // (they may read the limb); chains processed in a row are
+                // solved at the end joint's turn, which matched the
+                // reference in every such case checked.
+                && order_pos[end] > order_pos[j] + 2
+            {
+                let target = if targets.len() >= 2 {
+                    add(world[targets[0]].translation, world[targets[1]].translation)
+                        .map(|v| v * 0.5)
+                } else {
+                    world[targets[0]].translation
+                };
+                // The chain's own expressions (roll channels) take effect
+                // before the solve reads them.
+                for &(joint, channel, node) in &expressions {
+                    if joint == mid || joint == end {
+                        let ctx = ExprContext {
+                            nodes: &nodes,
+                            locals: &locals,
+                            world: &world,
+                            frame,
+                        };
+                        if let Some(v) = ctx.eval(node, 0).filter(|v| v.is_finite()) {
+                            let v = if (3..=5).contains(&channel) {
+                                v * 0.017_453_3
+                            } else {
+                                v
+                            };
+                            set_channel(&mut locals[joint], channel, v);
+                        }
+                    }
+                }
+                let parent_frame = if parent >= 0 {
+                    world[parent as usize]
+                } else {
+                    root_world
+                };
+                let pole = pole_of(j).map(|p| world[p].translation);
+                let reach = [
+                    lengths[j] * world[j].scale[0],
+                    lengths[mid] * world[mid].scale[0],
+                ];
+                solve_two_joint(
+                    &mut world,
+                    &locals,
+                    reach,
+                    parent_frame,
+                    flags[j] & 3 == 3,
+                    [j, mid, end],
+                    target,
+                    pole,
+                );
+                stats.ik_chains_solved += 1;
+                solved_end[end] = true;
+                solved_mid[mid] = true;
+            }
+        }
         // The reference collects a joint's constraints first and then applies
         // them in a fixed order: position sources, the position limit, the
         // rotation limit, then rotation constraints (opt1_fk_translation
@@ -636,6 +854,16 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
             }
             let source = world[c.source];
             match c.kind {
+                // The position constraint of an aiming joint, and of the
+                // joint an aiming joint points at, is that aim's target.
+                0 if (aims && flags[j] & 128 == 0) || aimed_at => {}
+                0 if solved_end[j] => {
+                    if flags[j] & 8 != 0 {
+                        // The end joint keeps its own rotation in character
+                        // space.
+                        world[j].rotation = from_euler(locals[j].rotation);
+                    }
+                }
                 0 => {
                     let chain_end = flags[j] & 4 != 0;
                     let mid = parents[j];
@@ -652,14 +880,20 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
                         } else {
                             root_world
                         };
+                        let pole = pole_of(top as usize).map(|p| world[p].translation);
+                        let reach = [
+                            lengths[top as usize] * world[top as usize].scale[0],
+                            lengths[mid as usize] * world[mid as usize].scale[0],
+                        ];
                         solve_two_joint(
                             &mut world,
                             &locals,
-                            [lengths[top as usize], lengths[mid as usize]],
+                            reach,
                             parent_frame,
                             flags[top as usize] & 3 == 3,
                             [top as usize, mid as usize, j],
                             source.translation,
+                            pole,
                         );
                         stats.ik_chains_solved += 1;
                         if flags[j] & 8 != 0 {
@@ -731,6 +965,8 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
                         world[j].rotation = qnorm(qmul(parent_rotation, from_euler(e)));
                     }
                 }
+                // Up vector: read by the chain solve of its joint.
+                4 => {}
                 _ => {
                     stats.unsupported_constraints += 1;
                     continue;
@@ -738,7 +974,46 @@ pub fn evaluate(bones: &[BoneRecord], m: &InterpolatedMotion, frame: f32) -> io:
             }
             stats.constraints_applied += 1;
         }
-        done[j] = true;
+        // A position constraint moves the joint; its translation channels
+        // then read as the solved local offset (an expression reading them
+        // sees the constrained position).
+        if constraints
+            .iter()
+            .any(|c| c.constrained == j && c.temporary_active && c.kind == 0)
+            && !aims
+            && !aimed_at
+            && !solved_end[j]
+        {
+            let (pr, pt, ps) = match parents[j] {
+                p if p < 0 => (IDENTITY, [0.; 3], [1.; 3]),
+                p => {
+                    let w = world[p as usize];
+                    (w.rotation, w.translation, w.scale)
+                }
+            };
+            let t = rotate(qconj(pr), sub(world[j].translation, pt));
+            locals[j].translation = std::array::from_fn(|k| {
+                if ps[k].abs() > 1e-6 {
+                    t[k] / ps[k]
+                } else {
+                    t[k]
+                }
+            });
+        }
+        // Flag 64: a joint whose rotation a constraint set rewrites its
+        // rotation channels from the solved matrix (FUN_1401d3b80, bit 0x16
+        // after the orientation branch), so later expressions read them.
+        if flags[j] & 64 != 0
+            && constraints
+                .iter()
+                .any(|c| c.constrained == j && c.temporary_active && matches!(c.kind, 2 | 3 | 5))
+        {
+            let (pr, _) = match parents[j] {
+                p if p < 0 => (IDENTITY, [0.; 3]),
+                p => (world[p as usize].rotation, world[p as usize].translation),
+            };
+            locals[j].rotation = euler_near(qmul(qconj(pr), world[j].rotation), locals[j].rotation);
+        }
     }
     if world.iter().any(|w| {
         w.rotation
@@ -812,6 +1087,7 @@ fn solve_two_joint(
     arm: bool,
     [a, b, c]: [usize; 3],
     target: Vec3,
+    pole: Option<Vec3>,
 ) {
     let [l1, l2] = lengths;
     if l1 < 1e-4 || l2 < 1e-4 {
@@ -825,8 +1101,10 @@ fn solve_two_joint(
     let Some(dir) = normalize(delta) else {
         return;
     };
-    let y = normalize([-dir[1], dir[0], 0.]).unwrap_or([0., 1., 0.]);
-    let z = normalize(cross(dir, y)).unwrap_or([0., 0., 1.]);
+    let (y, z) = aim_axes(
+        dir,
+        pole.map(|p| sub(rotate(inv, sub(p, parent.translation)), p0)),
+    );
     let frame = qmul(
         from_basis(dir, y, z),
         axis_angle([1., 0., 0.], locals[a].rotation[0]),
@@ -855,6 +1133,103 @@ fn solve_two_joint(
     world[c] = World::compose(&world[b], &locals[c]);
 }
 
+/// The aim frame the reference builds from the direction to the target and,
+/// when a pole exists, the direction to it: X toward the target; with a pole
+/// Z = X x pole and Y = Z x X (Y faces the pole), without one Y = (-X.y,
+/// X.x, 0) and Z = X x Y.
+fn aim_axes(dir: Vec3, pole: Option<Vec3>) -> (Vec3, Vec3) {
+    pole.and_then(|p| {
+        let z = normalize(cross(dir, normalize(p)?))?;
+        Some((normalize(cross(z, dir))?, z))
+    })
+    .unwrap_or_else(|| {
+        let y = normalize([-dir[1], dir[0], 0.]).unwrap_or([0., 1., 0.]);
+        (y, normalize(cross(dir, y)).unwrap_or([0., 0., 1.]))
+    })
+}
+
+/// Cross-fades two evaluated skeletons joint by joint, the way the
+/// reference blends a motion switch (FUN_1401c3a30 with FUN_1401c3970):
+/// each joint's local matrix is the parent-relative transform of each pose;
+/// the blended translation is the linear mix, the blended axes are the
+/// linear mix of the X and Y axes (re-normalised), Z = X x Y and Y = Z x X
+/// again. `weight` 0 gives `from` (the motion being left) and 1 gives `to`.
+/// `parents` is each joint's parent index (negative for roots), parents
+/// first. The reference's special handling of IK-flagged joints is not
+/// reproduced; both poses' joints are blended as plain local matrices.
+pub fn blend_poses(parents: &[i32], from: &[World], to: &[World], weight: f32) -> Vec<World> {
+    let n = from.len().min(to.len()).min(parents.len());
+    let root = World {
+        rotation: IDENTITY,
+        translation: [0.; 3],
+        scale: [1.; 3],
+    };
+    let lerp =
+        |a: Vec3, b: Vec3| -> Vec3 { std::array::from_fn(|k| a[k] + (b[k] - a[k]) * weight) };
+    // A pose's parent-relative rotation and translation of joint `j`.
+    let local = |pose: &[World], j: usize| -> (Quat, Vec3) {
+        let parent = parents[j];
+        let p = if parent < 0 {
+            &root
+        } else {
+            &pose[parent as usize]
+        };
+        let inv = qconj(p.rotation);
+        let t = rotate(inv, sub(pose[j].translation, p.translation));
+        (
+            qnorm(qmul(inv, pose[j].rotation)),
+            std::array::from_fn(|k| {
+                if p.scale[k].abs() > 1e-6 {
+                    t[k] / p.scale[k]
+                } else {
+                    t[k]
+                }
+            }),
+        )
+    };
+    let mut out = vec![root; n];
+    let mut done = vec![false; n];
+    let mut remaining = n;
+    while remaining > 0 {
+        let before = remaining;
+        for j in 0..n {
+            let parent = parents[j];
+            if done[j] || (parent >= 0 && !done.get(parent as usize).copied().unwrap_or(true)) {
+                continue;
+            }
+            let (ra, ta) = local(from, j);
+            let (rb, tb) = local(to, j);
+            let x = normalize(lerp(rotate(ra, [1., 0., 0.]), rotate(rb, [1., 0., 0.])));
+            let y = normalize(lerp(rotate(ra, [0., 1., 0.]), rotate(rb, [0., 1., 0.])));
+            let rotation = match (x, y) {
+                (Some(x), Some(y)) => match normalize(cross(x, y)) {
+                    Some(z) => normalize(cross(z, x)).map_or(rb, |y| from_basis(x, y, z)),
+                    None => rb,
+                },
+                _ => rb,
+            };
+            let translation = lerp(ta, tb);
+            let p = if parent < 0 || parent as usize >= n {
+                root
+            } else {
+                out[parent as usize]
+            };
+            let scaled: Vec3 = std::array::from_fn(|k| translation[k] * p.scale[k]);
+            out[j] = World {
+                rotation: qnorm(qmul(p.rotation, rotation)),
+                translation: add(p.translation, rotate(p.rotation, scaled)),
+                scale: lerp(from[j].scale, to[j].scale),
+            };
+            done[j] = true;
+            remaining -= 1;
+        }
+        if remaining == before {
+            break;
+        }
+    }
+    out
+}
+
 /// Degree/radian factors used by the reference (0x1405b15b4, 0x1405b4a18).
 const DEG_TO_RAD: f32 = 0.017_453_3;
 const RAD_TO_DEG: f32 = 57.295_776;
@@ -863,29 +1238,14 @@ struct ExprContext<'a> {
     nodes: &'a [Node],
     locals: &'a [Local],
     world: &'a [World],
-    parents: &'a [i32],
-    done: &'a [bool],
     frame: f32,
 }
 impl ExprContext<'_> {
-    /// Current local channels of `j`: derived from the evaluated world when
-    /// the joint has been processed (so constraints are reflected).
+    /// Current local channels of `j`: the stored channel values, as the
+    /// reference reads them. Constraints do not rewrite them, except a
+    /// rotation limit (in place) and the flag-64 write-back.
     fn local(&self, j: usize) -> Local {
-        if !self.done[j] {
-            return self.locals[j];
-        }
-        let parent = self.parents[j];
-        let (pr, pt) = if parent < 0 {
-            (IDENTITY, [0.; 3])
-        } else {
-            let p = &self.world[parent as usize];
-            (p.rotation, p.translation)
-        };
-        Local {
-            scale: self.world[j].scale,
-            rotation: to_euler(qmul(qconj(pr), self.world[j].rotation)),
-            translation: rotate(qconj(pr), sub(self.world[j].translation, pt)),
-        }
+        self.locals[j]
     }
     fn child(&self, index: i16, depth: usize) -> Option<f32> {
         usize::try_from(index)
@@ -1079,6 +1439,7 @@ mod tests {
             false,
             [0, 1, 2],
             target,
+            None,
         );
         let d = length(sub(world[2].translation, target));
         assert!(d < 1e-3, "end misses target by {d}");
@@ -1093,8 +1454,92 @@ mod tests {
             false,
             [0, 1, 2],
             [0., -100., 0.],
+            None,
         );
         assert!((length(sub(world[2].translation, world[0].translation)) - 70.).abs() < 0.01);
+    }
+
+    #[test]
+    fn blend_poses_ends_and_keeps_bone_lengths() {
+        // A two-joint chain; the pose swings its second joint a quarter turn.
+        let parents = [-1, 0];
+        let pose = |angle: f32| {
+            let root = World {
+                rotation: IDENTITY,
+                translation: [0., 100., 0.],
+                scale: [1.; 3],
+            };
+            let child = World::compose(
+                &root,
+                &Local {
+                    scale: [1.; 3],
+                    rotation: [0., 0., angle],
+                    translation: [40., 0., 0.],
+                },
+            );
+            [root, child]
+        };
+        let (a, b) = (pose(0.), pose(std::f32::consts::FRAC_PI_2));
+        let at0 = blend_poses(&parents, &a, &b, 0.);
+        let at1 = blend_poses(&parents, &a, &b, 1.);
+        for k in 0..3 {
+            assert!((at0[1].translation[k] - a[1].translation[k]).abs() < 1e-4);
+            assert!((at1[1].translation[k] - b[1].translation[k]).abs() < 1e-4);
+        }
+        let dot = |p: Quat, q: Quat| p.iter().zip(&q).map(|(x, y)| x * y).sum::<f32>().abs();
+        assert!(dot(at1[1].rotation, b[1].rotation) > 0.9999);
+        // Halfway the rotation is a half-way turn (nlerp of two axes) and
+        // the root offset still holds: a plain mix of the joints would
+        // shorten the bone.
+        let mid = blend_poses(&parents, &a, &b, 0.5);
+        let reach = length(sub(mid[1].translation, mid[0].translation));
+        assert!((reach - 40.).abs() < 1e-3, "{reach}");
+        let turn = (std::f32::consts::FRAC_PI_4 / 2.).sin();
+        assert!(
+            (mid[1].rotation[2] - turn).abs() < 5e-3,
+            "{:?}",
+            mid[1].rotation
+        );
+    }
+
+    #[test]
+    fn aim_axes_default_and_pole() {
+        // Aiming along +X with no pole: Y = (-0, 1, 0), Z = X x Y.
+        let (y, z) = aim_axes([1., 0., 0.], None);
+        assert!(
+            (y[1] - 1.).abs() < 1e-6 && (z[2] - 1.).abs() < 1e-6,
+            "{y:?} {z:?}"
+        );
+        // A pole off to +Z (perpendicular to the aim) becomes Y; Z = X x Y.
+        let (y, z) = aim_axes([1., 0., 0.], Some([0., 0., 5.]));
+        assert!((y[2] - 1.).abs() < 1e-6, "{y:?}");
+        assert!((z[1] + 1.).abs() < 1e-6, "{z:?}");
+        // Only the pole's part perpendicular to the aim counts.
+        let (y, _) = aim_axes([1., 0., 0.], Some([3., 4., 0.]));
+        assert!((y[1] - 1.).abs() < 1e-6, "{y:?}");
+    }
+
+    #[test]
+    fn euler_near_keeps_the_previous_branch() {
+        // A solved rotation is written back as the angles nearest the old
+        // ones, so a channel that sat past a half turn keeps counting.
+        let q = from_euler([0.3, -0.2, 0.4]);
+        let e = euler_near(q, [0.3 + std::f32::consts::TAU, -0.2, 0.4]);
+        assert!((e[0] - (0.3 + std::f32::consts::TAU)).abs() < 1e-4, "{e:?}");
+        // The alternate solution (x + pi, pi - y, z + pi) is taken when it
+        // is the shorter turn from the previous angles.
+        let pi = std::f32::consts::PI;
+        let e = euler_near(q, [0.3 + pi, pi + 0.2, 0.4 + pi]);
+        assert!((e[0] - (0.3 + pi)).abs() < 1e-4, "{e:?}");
+        assert!((e[1] - (pi + 0.2)).abs() < 1e-4, "{e:?}");
+        assert!((e[2] - (0.4 + pi)).abs() < 1e-4, "{e:?}");
+        // Gimbal lock (y = +-90 degrees): the angles still rebuild the
+        // rotation.
+        let q = from_euler([0.5, std::f32::consts::FRAC_PI_2, 0.2]);
+        let e = euler_near(q, [0.; 3]);
+        let again = from_euler(e);
+        let dot = q.iter().zip(&again).map(|(a, b)| a * b).sum::<f32>().abs();
+        assert!(dot > 0.9999, "{e:?} {dot}");
     }
 
     #[test]

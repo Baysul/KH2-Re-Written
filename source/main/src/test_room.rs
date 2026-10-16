@@ -494,9 +494,22 @@ const DISARM_TICKS: u32 = 360;
 const PARTY_STAND: u32 = 1 << 0;
 const PARTY_COLLIDE: u32 = 1 << 4;
 
+/// What a joint-space blend of two shown poses needs: the actor's skinning
+/// and parents, and the joint carrying the Keyblade.
+struct Skin {
+    skinning: data::model_pose::Skinning,
+    parents: Vec<i32>,
+    weapon_joint: usize,
+}
+
 /// Precomputed skinned positions for every frame of one clip.
 struct ClipPoses {
     frames: Vec<Vec<Vec3>>,
+    /// The evaluated joints of each frame with the root motion removed
+    /// (empty for basic FK), blended joint by joint when a motion switch
+    /// cross-fades.
+    joints: Vec<Vec<data::motion_eval::World>>,
+    skin: Option<Arc<Skin>>,
     /// Model-space matrix of the objentry weapon joint for each frame.
     weapon: Vec<Mat4>,
     /// The same for weapon slot 1's joint (forms with two Keyblades).
@@ -915,8 +928,14 @@ struct Game {
     menu_down_queued: bool,
     enemy: Option<EnemyRuntime>,
     display: Vec<Vec3>,
+    /// The clip frame the shown pose came from (research logging).
+    display_frame: usize,
     /// Pose, Keyblade transform and start tick of the active crossfade.
     blend_from: Option<(Vec<Vec3>, Transform, u64)>,
+    /// The joints behind `display` and behind `blend_from`'s pose (empty
+    /// when the shown clip has none), for joint-space blends.
+    display_joints: Vec<data::motion_eval::World>,
+    blend_from_joints: Vec<data::motion_eval::World>,
     display_hand: Transform,
     weapon_indices: Vec<Vec<u32>>,
     /// The same for slot 1's Keyblade (the form's own).
@@ -5609,6 +5628,8 @@ const AUTOPLAY_GUARDS: [u64; 3] = [1170, 1340, 1720];
 /// The index that holds the item pictures.
 const PICTURE_INDEX: &str = "Image/dt/kh2_fifth.hed";
 const AUTOPLAY_END: u64 = 9400;
+/// A shown-pose change above this many units in one frame is logged.
+const POSE_JUMP_LOG: f32 = 6.;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 #[allow(clippy::too_many_arguments)]
@@ -8759,31 +8780,85 @@ fn present(
 ) {
     let action = game.player.action;
     let started = game.action_started;
+    let previous = game.shown_action;
     if game.shown_action != Some((action, started)) {
         if game.shown_action.is_some() {
             game.blend_from = Some((game.display.clone(), game.display_hand, game.action_started));
+            game.blend_from_joints = std::mem::take(&mut game.display_joints);
         }
         game.shown_action = Some((action, started));
     }
     let frame = game.player.motion_frame(&game.clips) as usize;
     let clip = game.poses[&(action, game.player.armed)];
+    let skin = game.clip_poses[clip].skin.clone();
+    let target_joints: Option<Vec<data::motion_eval::World>> = {
+        let joints = &game.clip_poses[clip].joints;
+        joints
+            .get(frame.min(joints.len().saturating_sub(1)))
+            .cloned()
+    };
     let target = &game.clip_poses[clip].frames;
     let target = &target[frame.min(target.len() - 1)];
+    // Unattended runs log how far each switch of action moves the shown
+    // pose when it is not blended (the first frame of the new motion
+    // against the pose left behind).
+    let switched = if game.autoplay.is_some()
+        && let Some((from, _)) = previous
+        && previous != Some((action, started))
+        && game.display.len() == target.len()
+    {
+        let jump = target
+            .iter()
+            .zip(&game.display)
+            .map(|(a, b)| a.distance(*b))
+            .fold(0f32, f32::max);
+        Some((format!("{from:?}"), jump, game.display_frame))
+    } else {
+        None
+    };
     let mut display = target.clone();
     let weapons = &game.clip_poses[clip].weapon;
     let mut hand = Transform::from_matrix(weapons[frame.min(weapons.len() - 1)]);
     // Crossfade measured in simulation ticks (plus the fixed-step overstep),
-    // applied to the body and the Keyblade alike.
+    // applied to the body and the Keyblade alike. The reference starts a
+    // blend's clock at 2 and counts one tick before the first shown frame
+    // (FUN_1403c8a40, FUN_1403c6740), and takes durations of 2 or less as no
+    // blend; the weight is that clock over the duration.
+    let mut shown_joints = target_joints.clone().unwrap_or_default();
     if let Some((from, from_hand, start)) = &game.blend_from {
         let elapsed = (game.tick - start) as f32 + fixed.overstep_fraction();
         let blend = game.player.blend;
-        let weight = if blend > 0. {
-            (elapsed / blend).clamp(0., 1.)
+        let weight = if blend > 2. {
+            ((elapsed + 3.) / blend).clamp(0., 1.)
         } else {
             1.
         };
         if weight >= 1. {
             game.blend_from = None;
+            game.blend_from_joints.clear();
+        } else if let (Some(skin), Some(to)) = (&skin, &target_joints)
+            && game.blend_from_joints.len() == to.len()
+            && let Ok(pose) = {
+                shown_joints = data::motion_eval::blend_poses(
+                    &skin.parents,
+                    &game.blend_from_joints,
+                    to,
+                    weight,
+                );
+                skin.skinning.pose_from_worlds(&shown_joints)
+            }
+        {
+            // Joint by joint, as the reference blends (FUN_1401c3970): the
+            // body's joints turn between the two poses instead of the
+            // skinned points sliding past each other.
+            display = pose
+                .position_bits
+                .iter()
+                .map(|p| Vec3::from_array(p.map(f32::from_bits)))
+                .collect();
+            if let Some(m) = pose.matrix_bits.get(skin.weapon_joint) {
+                hand = Transform::from_matrix(Mat4::from_cols_array(&m.map(f32::from_bits)));
+            }
         } else {
             for (d, f) in display.iter_mut().zip(from) {
                 *d = f.lerp(*d, weight);
@@ -8793,8 +8868,10 @@ fn present(
                 rotation: from_hand.rotation.slerp(hand.rotation, weight),
                 scale: from_hand.scale.lerp(hand.scale, weight),
             };
+            shown_joints.clear();
         }
     }
+    game.display_joints = shown_joints;
     game.display_hand = hand;
     if let Ok((mut transform, mut visibility)) = hands.single_mut() {
         *transform = hand;
@@ -8813,7 +8890,29 @@ fn present(
             visual::room::update_positions(&mut mesh, positions);
         }
     }
+    if let Some((from, jump, from_frame)) = switched {
+        let (tick, blend) = (game.tick, game.player.blend);
+        game.event(serde_json::json!({"event":"pose_switch","tick":tick,"from":from,
+            "to":format!("{action:?}"),"jump":jump,"blend":blend,"from_frame":from_frame,"frame":frame}));
+    }
+    // Unattended runs log every sudden change of the shown pose, with the
+    // action, its frame and the blend, to find abrupt motion ends.
+    if game.autoplay.is_some() && game.display.len() == display.len() {
+        let jump = display
+            .iter()
+            .zip(&game.display)
+            .map(|(a, b)| a.distance(*b))
+            .fold(0f32, f32::max);
+        if jump > POSE_JUMP_LOG {
+            let (tick, frame, blend) = (game.tick, frame, game.player.blend);
+            game.event(
+                serde_json::json!({"event":"pose_jump","tick":tick,"action":format!("{action:?}"),
+                "frame":frame,"jump":jump,"blend":blend}),
+            );
+        }
+    }
     game.display = display;
+    game.display_frame = frame;
     // The Keyblade's own motion (key chain and blade) at the same frame.
     let weapon_frames = &game.clip_poses[clip].weapon_frames;
     if !weapon_frames.is_empty() {
@@ -10238,6 +10337,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut badge_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
+    // Capture ticks replacing the unattended run's own list (research).
+    let mut capture_at: Option<Vec<u64>> = None;
     let mut options = args[3..].iter();
     while let Some(option) = options.next() {
         match option.to_str() {
@@ -10259,6 +10360,17 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 )
             }
             Some("--autoplay") if autoplay.is_none() => autoplay = options.next().cloned(),
+            Some("--capture-at") if capture_at.is_none() => {
+                capture_at = Some(
+                    options
+                        .next()
+                        .and_then(|v| v.to_str())
+                        .ok_or("capture ticks absent")?
+                        .split(',')
+                        .map(str::parse)
+                        .collect::<Result<_, _>>()?,
+                )
+            }
             Some("--enemy-tour") if autoplay.is_none() => {
                 enemy_tour = true;
                 autoplay = Some(
@@ -10493,7 +10605,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 if talk_room {
                     AUTOPLAY_TALK_CAPTURES.to_vec()
                 } else {
-                    AUTOPLAY_CAPTURES.to_vec()
+                    capture_at
+                        .clone()
+                        .unwrap_or_else(|| AUTOPLAY_CAPTURES.to_vec())
                 }
             })
     };
@@ -10513,6 +10627,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         tour.as_ref().map_or(
             if talk_room {
                 AUTOPLAY_TALK_END
+            } else if let Some(last) = capture_at.as_ref().and_then(|c| c.last()) {
+                last + 2
             } else {
                 AUTOPLAY_END
             },
@@ -10559,6 +10675,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         poses,
         clip_poses: loaded.kit.clip_poses,
         part_indices: Vec::new(),
+        display_frame: 0,
         tick: 0,
         log,
         limit,
@@ -10624,6 +10741,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         enemy: None,
         display: Vec::new(),
         blend_from: None,
+        display_joints: Vec::new(),
+        blend_from_joints: Vec::new(),
         display_hand: Transform::IDENTITY,
         weapon_indices: Vec::new(),
         weapon2_indices: Vec::new(),

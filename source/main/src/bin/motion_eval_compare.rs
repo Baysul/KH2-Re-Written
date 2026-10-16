@@ -46,7 +46,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .map(|b| b.parse())
             .collect::<Result<_, _>>()?
     };
-    let mut worst = vec![(0f32, 0f32); cnt1];
+    // HELPERS=1 also compares the IK helper joints (the reference holds all
+    // `total` joints in its first block).
+    let compared = if std::env::var_os("HELPERS").is_some() {
+        m.total_bone_count
+    } else {
+        cnt1
+    };
+    let mut worst = vec![(0f32, 0f32); compared];
     for (sample, &tick) in ticks.iter().enumerate() {
         let e = motion_eval::evaluate(&skinning.bones, &m, tick * scale)?;
         if let Ok(list) = std::env::var("SHOW_JOINTS") {
@@ -116,7 +123,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             for record in m.joints.bytes.as_chunks::<4>().0 {
                 let j = i16::from_le_bytes([record[0], record[1]]);
                 let Ok(b) = usize::try_from(j) else { continue };
-                if b >= cnt1 {
+                if b >= compared {
                     println!("  order helper {b} flags {}", record[2]);
                     continue;
                 }
