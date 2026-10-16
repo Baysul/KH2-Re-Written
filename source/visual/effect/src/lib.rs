@@ -12,6 +12,7 @@ pub mod math;
 mod mega_birth;
 mod mega_model;
 mod models;
+pub mod prize;
 mod programs;
 mod ribbon;
 mod shipoly;

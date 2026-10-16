@@ -21,6 +21,8 @@ pub struct ItemInfo {
 
 pub struct ItemSource {
     pub items: HashMap<u16, ItemInfo>,
+    /// Every item's treasure box style (record byte +0x16).
+    pub box_styles: HashMap<u16, u8>,
 }
 
 /// 03system `item`: the consumables (type 0 and 1) that name a command.
@@ -40,7 +42,8 @@ pub fn load(system: &[u8]) -> Result<ItemSource, Box<dyn std::error::Error>> {
             )
         })
         .collect();
-    Ok(ItemSource { items })
+    let box_styles = table.iter().map(|r| (r.id, r.box_style)).collect();
+    Ok(ItemSource { items, box_styles })
 }
 
 pub struct ItemRt {

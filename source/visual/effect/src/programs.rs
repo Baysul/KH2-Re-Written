@@ -747,10 +747,23 @@ fn draw_shape(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
 /// frame `index` of the shape at `anim`, through matrix `m`, modulated by
 /// the packet colour bytes (0x80 = 1.0).
 pub(crate) fn emit_sprites(ctx: &mut Ctx, anim: usize, index: usize, m: &Mat, packet: [u8; 4]) {
-    let b = &ctx.dpd.bytes;
+    let quads = sprite_quads(&ctx.dpd.bytes, anim, index, m, packet);
+    ctx.quads.extend(quads);
+}
+
+/// The quads of flip-book frame `index` of the shape at `anim` (see
+/// [`emit_sprites`]).
+pub(crate) fn sprite_quads(
+    b: &[u8],
+    anim: usize,
+    index: usize,
+    m: &Mat,
+    packet: [u8; 4],
+) -> Vec<Quad> {
+    let mut out = Vec::new();
     let packet: [f32; 4] = packet.map(|c| c as f32 / 128.);
     let Ok(sprites) = object_effect::shape_frame(b, anim, index) else {
-        return;
+        return out;
     };
     let address = i16_at(b, anim + 0x10 + index * 8).unwrap_or(0) as isize;
     let frame = (anim as isize + address) as usize;
@@ -770,7 +783,7 @@ pub(crate) fn emit_sprites(ctx: &mut Ctx, anim: usize, index: usize, m: &Mat, pa
             [su / 16., (tv + h) / 8.],
         ];
         let colour = std::array::from_fn(|i| s.colour[i] as f32 / 128. * packet[i]);
-        ctx.quads.push(Quad {
+        out.push(Quad {
             corners,
             uv,
             colour,
@@ -780,6 +793,7 @@ pub(crate) fn emit_sprites(ctx: &mut Ctx, anim: usize, index: usize, m: &Mat, pa
             tex0,
         });
     }
+    out
 }
 
 /// FUN_1404d4ea0 → FUN_1404e1780 → FUN_1404d4f80: every `interval` ticks

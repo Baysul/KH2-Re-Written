@@ -49,6 +49,16 @@ pub fn effect(kind: u8) -> Effect {
     }
 }
 
+/// How many ticks the heal effect (system element 6) lasts after the prize
+/// is collected (table 0x1405c7420, float at +0): none for munny.
+pub fn heal_ticks(kind: u8) -> f32 {
+    match kind {
+        kind::SMALL_HP | kind::SMALL_MP | kind::SMALL_DRIVE => 30.,
+        kind::BIG_HP | kind::BIG_MP | kind::BIG_DRIVE => 60.,
+        _ => 0.,
+    }
+}
+
 /// The pickup centre's height above the prize's origin (descriptor +4).
 pub fn centre_height(kind: u8) -> f32 {
     const H: [f32; 9] = [12.6, 27., 38.4, 25.6, 12.8, 16., 28.8, 14.4, 27.2];
@@ -118,6 +128,10 @@ pub struct Orb {
     /// Ground bounces so far (FUN_1404132d0 +0x40): the first two play the
     /// descriptor's bounce sound.
     pub bounces: u8,
+    /// Ticks since the prize appeared (its sprite's flip-book step).
+    pub age: u32,
+    /// The starting point of a looping flip-book, from the spawn draws.
+    pub seed: f32,
 }
 
 impl Orb {
@@ -134,6 +148,8 @@ impl Orb {
             ],
             landed: false,
             bounces: 0,
+            age: 0,
+            seed: r[1],
         }
     }
 
@@ -141,6 +157,7 @@ impl Orb {
     /// not traced; gravity is the actors' 0.408 and a bounce keeps half the
     /// speed]. `floor` is the ground height below the orb.
     pub fn tick(&mut self, floor: f32) -> Option<u32> {
+        self.age = self.age.saturating_add(1);
         if self.landed {
             return None;
         }
@@ -186,6 +203,85 @@ impl Orb {
             centre[2] - body[2],
         ];
         d[1].abs() <= 30. && d[0].hypot(d[2]) <= 120. + draw
+    }
+}
+
+/// The treasure box an item drops as (table 0x1405c96c0, indexed by the
+/// item record's byte +0x16): the object id of the box and its scale.
+/// Objects 0x3b8..0x3bb are the yellow, red, blue and green boxes.
+pub fn box_style(index: u8) -> Option<(u32, f32)> {
+    const TABLE: [(u32, f32); 12] = [
+        (0x3b9, 1.6),
+        (0x3b9, 2.3),
+        (0x3b9, 3.2),
+        (0x3bb, 1.6),
+        (0x3bb, 2.3),
+        (0x3bb, 3.2),
+        (0x3ba, 1.6),
+        (0x3ba, 2.3),
+        (0x3ba, 3.2),
+        (0x3b8, 1.6),
+        (0x3b8, 2.3),
+        (0x3b8, 3.2),
+    ];
+    TABLE.get(index as usize).copied()
+}
+
+/// An item dropped by a kill (FUN_1403f8170): a treasure box that lands and
+/// waits to be picked up, which adds the item (FUN_1403f8770).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ItemDrop {
+    /// Unique within a room, for the presenter.
+    pub id: u32,
+    pub item: u16,
+    /// The box's object id and scale (`box_style`).
+    pub object: u32,
+    pub scale: f32,
+    pub position: Vec3,
+    pub velocity: f32,
+    /// A random heading (FUN_1403f8170: a draw of 2π − π).
+    pub yaw: f32,
+    pub landed: bool,
+}
+
+impl ItemDrop {
+    /// `r` is a draw in [0, 1) for the heading.
+    pub fn spawn(id: u32, item: u16, style: (u32, f32), at: Vec3, r: f32) -> ItemDrop {
+        ItemDrop {
+            id,
+            item,
+            object: style.0,
+            scale: style.1,
+            position: at,
+            velocity: 0.,
+            yaw: r * std::f32::consts::TAU - std::f32::consts::PI,
+            landed: false,
+        }
+    }
+
+    /// One tick of the fall to `floor` [I: the box actor's state 0xc was
+    /// not traced; it falls with the actors' gravity and rests].
+    pub fn tick(&mut self, floor: f32) {
+        if self.landed {
+            return;
+        }
+        self.velocity -= actor_physics::G;
+        self.position[1] += self.velocity;
+        if self.position[1] <= floor {
+            self.position[1] = floor;
+            self.landed = true;
+        }
+    }
+
+    /// FUN_1403f7df0 → FUN_1403dc500 with its defaults: within 120
+    /// horizontally and 30 vertically of the box's position.
+    pub fn collected_by(&self, body: Vec3) -> bool {
+        let d = [
+            self.position[0] - body[0],
+            self.position[1] - body[1],
+            self.position[2] - body[2],
+        ];
+        self.landed && d[1].abs() <= 30. && d[0].hypot(d[2]) <= 120.
     }
 }
 
@@ -254,6 +350,28 @@ mod tests {
         assert_eq!(level_for(39, 1, need), 1);
         assert_eq!(level_for(40, 1, need), 2);
         assert_eq!(level_for(190, 1, need), 4);
+    }
+
+    #[test]
+    fn item_boxes_follow_the_style_table_and_are_picked_up_in_range() {
+        assert_eq!(box_style(0), Some((0x3b9, 1.6)));
+        assert_eq!(box_style(11), Some((0x3b8, 3.2)));
+        assert_eq!(box_style(12), None);
+        let mut d = ItemDrop::spawn(1, 280, (0x3b9, 1.6), [0., 50., 0.], 0.5);
+        assert!(!d.collected_by([0., 0., 0.]));
+        for _ in 0..100 {
+            d.tick(0.);
+        }
+        assert!(d.landed && d.position[1] == 0.);
+        assert!(d.collected_by([100., 0., 0.]));
+        assert!(!d.collected_by([130., 0., 0.]));
+    }
+
+    #[test]
+    fn only_hp_mp_and_drive_prizes_start_the_heal_effect() {
+        assert_eq!(heal_ticks(kind::SMALL_HP), 30.);
+        assert_eq!(heal_ticks(kind::BIG_DRIVE), 60.);
+        assert_eq!(heal_ticks(kind::BIG_MUNNY), 0.);
     }
 
     #[test]
