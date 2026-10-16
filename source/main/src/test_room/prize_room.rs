@@ -5,7 +5,7 @@ use super::*;
 use player::enemy_prizes::{self, Orb};
 
 /// One line of the unattended log.
-fn log_event(log: &mut Option<std::fs::File>, record: serde_json::Value) {
+pub fn log_event(log: &mut Option<std::fs::File>, record: serde_json::Value) {
     if let Some(file) = log.as_mut() {
         let _ = serde_json::to_writer(&mut *file, &record);
         let _ = std::io::Write::write_all(file, b"\n");
@@ -151,6 +151,16 @@ pub fn grant_exp(rt: &mut EnemyRuntime, exp: u32, log: &mut Option<std::fs::File
         // Each level's row sets Strength, Magic, Defence and AP; the
         // room's equipment bonuses stay on top.
         let (old, new) = (levels[l as usize - 2], levels[l as usize - 1]);
+        // The level's panel (FUN_1403ed7d0): the raised stats, then the
+        // growth ability of the first path [I: no save picks one].
+        let critical = rt.difficulty == combat::Difficulty::Critical;
+        rt.panels.push(super::level_growth::Panel {
+            kind: visual::level_up::Kind::Level,
+            character: 0,
+            level: l,
+            lines: super::level_growth::level_lines(&old, &new, critical, 0),
+        });
+        rt.level_effect = true;
         rt.sora.strength += new.strength as i32 - old.strength as i32;
         rt.sora.magic += new.magic as i32 - old.magic as i32;
         rt.sora_target.defense += new.defense as i32 - old.defense as i32;

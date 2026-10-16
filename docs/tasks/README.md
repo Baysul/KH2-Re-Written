@@ -140,3 +140,4 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T130](T130-source-folder.md) | Group app folders under source and rename the validator | NOT RUN for the final merge; engineering checks above PASS on the branch. |
 | [T131](T131-source-group-data-effect-audio-extras.md) | Move data, effect, audio and extras under source | NOT RUN for the final merge; the build check above passes on the branch. |
 | [T140](T140-game-over.md) | Sora's game over | PARTIAL. |
+| [T160](T160-level-up-and-bonus-levels.md) | Sora's level-up panels, level-up effect and bonus levels | PARTIAL. |
