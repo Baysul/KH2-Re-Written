@@ -58,6 +58,9 @@ pub struct MemberAbilities {
     pub slots: Vec<u16>,
     pub ap_max: i32,
     pub weapon_ability: u16,
+    /// The abilities of the Valor, Master and Final Form weapons
+    /// (FUN_140361200 lists each owned form's own weapon too), 0 = none.
+    pub form_weapon_abilities: Vec<u16>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -128,14 +131,17 @@ pub fn entries(table: &[ItemInfo], m: &MemberAbilities) -> Vec<Entry> {
             cost: (param >> 8) as i32,
         });
     }
-    if m.weapon_ability != 0 {
-        out.push(Entry {
-            id: m.weapon_ability,
-            equipped: true,
-            slot: None,
-            cat: 3,
-            cost: 0,
-        });
+    for ability in std::iter::once(m.weapon_ability).chain(m.form_weapon_abilities.iter().copied())
+    {
+        if ability != 0 {
+            out.push(Entry {
+                id: ability,
+                equipped: true,
+                slot: None,
+                cat: 3,
+                cost: 0,
+            });
+        }
     }
     let n = out.len();
     for a in 0..n {
@@ -1191,6 +1197,7 @@ mod tests {
             slots: vec![0x89, 0xa2 | 0x8000, 0x52 | 0x8000, 0x5e],
             ap_max: 5,
             weapon_ability: 0x21e,
+            form_weapon_abilities: Vec::new(),
         };
         let e = entries(&table, &m);
         let ids: Vec<u16> = e.iter().map(|e| e.id).collect();

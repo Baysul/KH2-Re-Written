@@ -425,6 +425,8 @@ pub struct BattleActor {
     pub paused: bool,
     pub error: Option<String>,
 }
+/// The supported enemies' objentry ids and model names.
+pub const SUPPORTED: [(u32, &str); 3] = [(301, "M_EX010"), (302, "M_EX020"), (318, "M_EX990")];
 pub fn supported(e: &Entry) -> bool {
     matches!(
         (e.object_id, e.model_name.as_str(), e.character),

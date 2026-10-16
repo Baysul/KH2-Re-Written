@@ -19,6 +19,12 @@ pub(super) struct KitInputs<'a> {
     pub form: u8,
     pub actor: model_inspection::InspectionModel,
     pub weapon: model_inspection::InspectionModel,
+    /// Slot 1's Keyblade (the form's own); the same model as slot 0 when
+    /// absent.
+    pub weapon2: Option<model_inspection::InspectionModel>,
+    /// The two Keyblades' ATTACK spheres by collision group (their mdlx
+    /// object-collision tables, bone 2): offset, radius.
+    pub blades: [Blade; 2],
     /// Actor joints carrying weapon slots 0 and 1 (SKLT primary and
     /// secondary bone); slot 1 only for forms with a second Keyblade.
     pub weapon_joint: usize,
@@ -51,6 +57,40 @@ pub(super) struct KitInputs<'a> {
     pub scripted: Vec<u16>,
 }
 
+/// A Keyblade's attack spheres by collision group: offset, radius.
+pub(super) type Blade = HashMap<u8, Vec<(Vec3, f32)>>;
+
+/// The ATTACK spheres of a weapon object's collision table (kind 6, the
+/// Keyblade bone 2) from its mdlx archive.
+pub(super) fn blade_spheres(archive: &[u8]) -> Blade {
+    let table = data::bar::read_bar(archive).ok();
+    let collision = table
+        .as_ref()
+        .and_then(|t| {
+            t.entries
+                .iter()
+                .find(|e| e.entry_type == 23 && e.offset > 0 && e.size > 0)
+        })
+        .and_then(|e| archive.get(e.offset as usize..e.offset as usize + e.size as usize))
+        .and_then(|b| object_collision::read(b).ok())
+        .unwrap_or_default();
+    let mut blade = Blade::new();
+    for e in collision
+        .iter()
+        .filter(|e| e.kind == object_collision::ATTACK && e.bone == 2)
+    {
+        blade.entry(e.group).or_default().push((
+            Vec3::new(
+                e.position[0] as f32,
+                e.position[1] as f32,
+                e.position[2] as f32,
+            ),
+            e.radius as f32,
+        ));
+    }
+    blade
+}
+
 /// A built kit.
 pub(super) struct Kit {
     pub params: Params,
@@ -59,6 +99,8 @@ pub(super) struct Kit {
     pub clip_poses: Vec<ClipPoses>,
     pub actor: model_inspection::InspectionModel,
     pub weapon: model_inspection::InspectionModel,
+    pub weapon2: Option<model_inspection::InspectionModel>,
+    pub blades: [Blade; 2],
     /// HIT spheres (bone, offset, radius, high) and the TARGET shape's
     /// radius and height.
     pub body: Vec<(usize, Vec3, f32, bool)>,
@@ -111,6 +153,8 @@ pub(super) fn load_kit(
         form,
         actor,
         weapon,
+        weapon2,
+        blades,
         weapon_joint,
         second_joint,
         motion_set,
@@ -134,6 +178,12 @@ pub(super) fn load_kit(
         .flat_map(|p| &p.elements)
         .filter(|e| e.flags & 1 != 0 && (0..0x4000).contains(&e.bone))
         .map(|e| e.bone as usize)
+        .chain(
+            pax.iter()
+                .flat_map(|p| &p.elements)
+                .filter(|e| e.flags & 0x10000 != 0)
+                .flat_map(|e| [e.bone_pos.bone_a as usize, e.bone_pos.bone_b as usize]),
+        )
         .filter(|&b| b < actor.skinning.bones.len())
         .collect();
     if weapon_joint >= actor.skinning.bones.len()
@@ -399,6 +449,27 @@ pub(super) fn load_kit(
                     .get(&selected.slot)
                     .map(own_hits)
                     .unwrap_or_default();
+                // The weapon motion's range trigger 12 marks the swing trail.
+                let trails: Vec<(u32, u32)> = weapon_motions[0]
+                    .get(&selected.slot)
+                    .map(|m| {
+                        m.triggers
+                            .iter()
+                            .flat_map(|t| &t.records.ranges)
+                            .filter(|r| r.trigger == 12)
+                            .map(|r| {
+                                (
+                                    r.start_frame.max(0) as u32,
+                                    if r.end_frame < 0 {
+                                        clip.end
+                                    } else {
+                                        r.end_frame as u32
+                                    },
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 for offset in 0..=clip.end {
                     let frame = key_start + offset;
                     for (k, (frames_k, blade_k)) in [
@@ -409,9 +480,13 @@ pub(super) fn load_kit(
                     .enumerate()
                     {
                         if let Some(own) = weapon_motions[k].get(&selected.slot) {
-                            let (pose, _) = weapon
-                                .skinning
-                                .sample_evaluated(&own.motion, frame as f32)?;
+                            let model = if k == 1 {
+                                weapon2.as_ref().unwrap_or(&weapon)
+                            } else {
+                                &weapon
+                            };
+                            let (pose, _) =
+                                model.skinning.sample_evaluated(&own.motion, frame as f32)?;
                             frames_k.push(
                                 pose.position_bits
                                     .iter()
@@ -493,6 +568,7 @@ pub(super) fn load_kit(
                     blade2,
                     hits,
                     hits2,
+                    trails,
                     actor_hits: own_hits(selected),
                     body: body_frames,
                     sounds: weapon_motions[0]
@@ -675,6 +751,8 @@ pub(super) fn load_kit(
         clip_poses,
         actor,
         weapon,
+        weapon2,
+        blades,
         body,
         attack,
         target_radius,
