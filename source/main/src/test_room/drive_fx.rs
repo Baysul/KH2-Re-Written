@@ -133,6 +133,8 @@ fn to_game(m: Mat4) -> Mat {
 #[derive(Resource, Default)]
 pub struct DriveFx {
     common: Option<Arc<Dpd>>,
+    /// `obj/PRIZE.mdlx`'s sprites for the prizes on the ground.
+    prize: Option<(Arc<Dpd>, ::effect::prize::Prize)>,
     running: Vec<Running>,
     rng: Rng,
     models: HashMap<(usize, i16), Option<ParsedModel>>,
@@ -147,9 +149,16 @@ pub struct DriveFx {
 }
 
 impl DriveFx {
-    pub fn new(common: Option<Dpd>) -> Self {
+    pub fn new(common: Option<Dpd>, prize: Option<Arc<Pax>>) -> Self {
+        let prize = prize.and_then(|pax| {
+            let dpd = pax.dpds.first()?.clone();
+            let sprites = ::effect::prize::Prize::new(&dpd)?;
+            Some((dpd, sprites))
+        });
         DriveFx {
             common: common.map(Arc::new),
+            dpds: prize.iter().map(|(d, _)| d.clone()).collect(),
+            prize,
             ..Default::default()
         }
     }
@@ -377,6 +386,26 @@ pub fn tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<DriveFx>
         }
     }
     fx.running.retain(|r| !r.instance.finished());
+    // The prizes on the ground (obj/PRIZE.mdlx, program 203): billboards at
+    // each prize's centre.
+    if let (Some((dpd, prize)), Some(rt)) = (&fx.prize, game.enemy.as_ref()) {
+        let mut list = Vec::new();
+        for orb in &rt.orbs {
+            let Some(frame) = prize.frame(orb.kind, orb.age, orb.seed) else {
+                continue;
+            };
+            let centre = to_world([
+                orb.position[0],
+                orb.position[1] + player::enemy_prizes::centre_height(orb.kind),
+                orb.position[2],
+            ]);
+            let v = ::effect::math::apply(&view, [centre[0], centre[1], centre[2], 1.]);
+            list.extend(prize.quads(dpd, orb.kind, frame, [v[0], v[1], v[2]]));
+        }
+        if !list.is_empty() {
+            quads.push((dpd.clone(), 0, list));
+        }
+    }
     for k in unsupported {
         game.event(serde_json::json!({"event":"drive_effect_unsupported","tick":tick,"program":k}));
     }

@@ -33,6 +33,9 @@ pub struct Item {
     pub slot: u16,
     /// +0x14: `itempic/item-%03d.imd`.
     pub picture: u16,
+    /// +0x16: which treasure box the item drops as (FUN_1403f8170 indexes
+    /// the table at 0x1405c96c0: colour and size).
+    pub box_style: u8,
     /// +0x17: the inline icon glyph before the name.
     pub icon: u8,
 }
@@ -83,6 +86,7 @@ pub fn read(bytes: &[u8]) -> io::Result<Vec<Item>> {
                 command: h(0x10),
                 slot: h(0x12),
                 picture: h(0x14),
+                box_style: r[0x16],
                 icon: r[0x17],
             }
         })
