@@ -101,6 +101,8 @@ const CARD_PITCH: f32 = 72.;
 /// The card group's own translation (its y, 0x1405ba..: A213 T=(244,106)).
 const CARD_ORIGIN_Y: f32 = 106.;
 const TEXT_SIZE: f32 = 15.;
+/// Centre of the message window (the talk window sits at 256, 336).
+const DIALOG_AT: [f32; 2] = [256., 190.];
 const CARD_TEXT_SIZE: f32 = 13.;
 /// Card text slots (x, y, align) from table 0x1405bbbd0: level, munny,
 /// difficulty, place, time, message.
@@ -147,6 +149,7 @@ pub struct FileMenu {
     list_start: usize,
     dialog: Vec<Id>,
     dialog_rows: Vec<Id>,
+    dialog_text: Vec<Id>,
     help: Option<Id>,
     frames: u32,
 }
@@ -186,6 +189,7 @@ impl FileMenu {
             list_start: usize::MAX,
             dialog: Vec::new(),
             dialog_rows: Vec::new(),
+            dialog_text: Vec::new(),
             help: None,
             frames: 0,
         }
@@ -229,6 +233,9 @@ impl FileMenu {
     fn clear_dialog(&mut self) {
         for id in self.dialog.drain(..).chain(self.dialog_rows.drain(..)) {
             self.s0.kill(id);
+        }
+        for id in self.dialog_text.drain(..) {
+            self.s2.kill(id);
         }
         self.dialog_key = None;
     }
@@ -325,7 +332,7 @@ impl FileMenu {
             self.clear_dialog();
             self.dialog_key = dialog_key;
             if let Some(d) = dialog {
-                self.build_dialog(seq0, d);
+                self.build_dialog(seq0, &layout.sequences[2], d);
             }
         }
         if let Some(Dialog::Ask { cursor, .. }) = dialog {
@@ -549,17 +556,26 @@ impl FileMenu {
         }
     }
 
-    fn build_dialog(&mut self, seq0: &Sequence, dialog: Dialog) {
+    fn build_dialog(&mut self, seq0: &Sequence, seq2: &Sequence, dialog: Dialog) {
         let (message_id, ask) = match dialog {
             Dialog::Ask { message, .. } => (message, true),
             Dialog::Info { message } | Dialog::Notice { message } => (message, false),
         };
         if message_id != 0 {
+            // The message window: the dialogue box groups (67 + 3t, t 0 for
+            // information, 2 for a question) with the message's lines drawn
+            // over it from a text-only sprite (the box art is not sized to
+            // the text yet).
             let body = self.texts.message(message_id);
-            let t = Self::text(body, TEXT_SIZE, 0);
-            let id = self.s0.create(seq0, PRIO_DIALOG, 0, 22, None, Some(t));
-            self.s0.get_mut(id).hidden = true;
+            let (open, idle) = if ask { (73, 74) } else { (67, 68) };
+            let id = self.s0.create(seq0, PRIO_DIALOG, 0, open, Some(idle), None);
+            self.s0.get_mut(id).base = DIALOG_AT;
             self.dialog.push(id);
+            let mut t = Self::text(body, TEXT_SIZE, 0);
+            t.anim_colour = false;
+            t.offset = [DIALOG_AT[0] - 150., DIALOG_AT[1] - 40.];
+            let text = self.s2.create(seq2, PRIO_DIALOG + 1, 2, 0, None, Some(t));
+            self.dialog_text.push(text);
         }
         match dialog {
             Dialog::Ask { cursor, .. } => {

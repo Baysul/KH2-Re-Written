@@ -106,18 +106,12 @@ const AUTOPLAY_END: u64 = 1450;
 const FILES_PRESSES: &[(u64, u64)] = &[
     (700, pad_bits::DOWN),
     (760, pad_bits::DECIDE),
-    (900, pad_bits::DOWN),
-    (930, pad_bits::DOWN),
-    (960, pad_bits::DOWN),
-    (1020, 0x4000),
-    (1080, 0x1000),
-    (1150, pad_bits::CANCEL),
-    (1200, pad_bits::CANCEL),
-    (1260, pad_bits::DECIDE),
-    (1330, pad_bits::DECIDE),
+    (900, 0x1000),
+    (1000, pad_bits::CANCEL),
+    (1060, pad_bits::DECIDE),
 ];
-const FILES_CAPTURES: &[u64] = &[700, 820, 880, 990, 1050, 1110, 1190, 1240, 1290, 1360, 1480];
-const FILES_END: u64 = 1500;
+const FILES_CAPTURES: &[u64] = &[700, 880, 940, 1040, 1075, 1200];
+const FILES_END: u64 = 1250;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
 
 mod pad_bits {
