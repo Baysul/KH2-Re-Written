@@ -95,6 +95,8 @@ pub struct FormSources {
     /// `effect/texcommon.dpd`.
     pub system_pax: Option<Arc<data::object_effect::Pax>>,
     pub texcommon: Option<data::object_effect::Dpd>,
+    /// `obj/PRIZE.mdlx`'s effect: the prizes' sprites.
+    pub prize_pax: Option<Arc<data::object_effect::Pax>>,
 }
 
 /// The Keyblade items a kit holds: slot 0's (the member's equipped weapon)
@@ -107,7 +109,12 @@ pub struct Weapons {
 
 /// An object's own effects: the PAX (entry type 18) of `obj/<name>.a.us`.
 pub fn object_pax(library: &mut Library, name: &str) -> Option<data::object_effect::Pax> {
-    let bytes = library.read(&format!("obj/{name}.a.us")).ok()?;
+    file_pax(library, &format!("obj/{name}.a.us"))
+}
+
+/// The first PAX of an installed BAR file.
+pub fn file_pax(library: &mut Library, path: &str) -> Option<data::object_effect::Pax> {
+    let bytes = library.read(path).ok()?;
     let table = data::bar::read_bar(&bytes).ok()?;
     let e = table
         .entries
@@ -204,6 +211,7 @@ impl FormSources {
             drive_label: Vec::new(),
             system_pax: None,
             texcommon: None,
+            prize_pax: None,
             revert_label: Vec::new(),
         })
     }
