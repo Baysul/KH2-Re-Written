@@ -380,6 +380,10 @@ impl Sysobj {
         m.blend_duration = m.blend as u32;
         m.blend_elapsed = 0;
         m.root_step = [0.; 3];
+        // FUN_1403c8a40 rewrites the flag word when a motion starts, so the end
+        // pulse of the previous motion does not carry over to the new one.
+        m.flags.word &= !motion::flag::ENDED;
+        m.flags.pulses = 0;
         true
     }
 

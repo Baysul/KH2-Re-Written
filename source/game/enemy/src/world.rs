@@ -169,6 +169,10 @@ pub struct World {
     static_words: Vec<u32>,
     /// Traps a script called that nothing implements yet.
     pub missing: Vec<(u16, u16)>,
+    /// Every trap called, newest last, when `trace` is on (development aid).
+    pub trace: Option<Vec<(u16, u16)>>,
+    /// The act names scripts started or queued, when tracing.
+    pub act_log: Option<Vec<String>>,
     pub events: Vec<Event>,
     /// Keep running when a script calls a trap with no translation (the call
     /// returns zero and is listed in `missing`). Development aid.
@@ -203,6 +207,8 @@ impl Default for World {
             statics: HashMap::new(),
             static_words: Vec::new(),
             missing: Vec::new(),
+            trace: None,
+            act_log: None,
             events: Vec::new(),
             tolerate_missing: false,
             next_effect: 0,
@@ -533,6 +539,9 @@ impl Host for Machine<'_> {
         index: u16,
         args: &mut [Slot; 16],
     ) -> Result<(), Fault> {
+        if let Some(t) = self.ctx.world.trace.as_mut() {
+            t.push((table, index));
+        }
         match crate::traps::lookup(table, index) {
             Some(f) => f(&mut self.ctx, memory, args),
             None => {

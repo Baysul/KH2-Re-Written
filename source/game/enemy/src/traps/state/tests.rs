@@ -109,3 +109,28 @@ fn scale_w_is_word_0x3c() {
     assert!(s.poke_word(0x3c, 2.4f32.to_bits()));
     assert_eq!(s.scale_w, 2.4);
 }
+
+struct ThirtyTicks;
+impl crate::env::Clips for ThirtyTicks {
+    fn length(&self, _: usize) -> u32 {
+        30
+    }
+    fn loop_start(&self, _: usize) -> u32 {
+        0
+    }
+    fn root_delta(&self, _: usize, _: u32) -> crate::sysobj::Vec3 {
+        [0.; 3]
+    }
+    fn events(&self, _: usize) -> Option<&crate::motion::MotionEvents> {
+        None
+    }
+}
+
+#[test]
+fn starting_a_motion_clears_the_end_pulse_of_the_previous_one() {
+    let mut s = Sysobj::bare();
+    s.motion.flags.word |= crate::motion::flag::ENDED;
+    assert!(s.motion_ended());
+    assert!(s.motion_start(5, 0., &ThirtyTicks));
+    assert!(!s.motion_ended(), "a new motion has not ended yet");
+}

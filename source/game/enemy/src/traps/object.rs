@@ -185,6 +185,9 @@ fn act_name(m: &Memory<'_>, handle: u32) -> Result<Vec<u8>, Fault> {
 /// 1:8 FUN_14042c6b0 -> FUN_1403cae60.
 fn act_start(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let name = act_name(m, args[1].value)?;
+    if let Some(log) = ctx.world.act_log.as_mut() {
+        log.push(format!("start {}", String::from_utf8_lossy(&name)));
+    }
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let obj = ctx.object(id)?;
     let actions = obj.acts.start(&name);
@@ -195,6 +198,9 @@ fn act_start(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(
 /// 1:9 FUN_14042c6f0 -> FUN_1403cab00.
 fn act_push(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let name = act_name(m, args[1].value)?;
+    if let Some(log) = ctx.world.act_log.as_mut() {
+        log.push(format!("push {}", String::from_utf8_lossy(&name)));
+    }
     let id = ctx.sys_of_ai(m, args[0].value)?;
     ctx.object(id)?.acts.push(&name);
     Ok(())
