@@ -5,6 +5,7 @@ pub mod dialogue;
 pub mod effects;
 pub mod fade;
 pub mod field_command_menu;
+pub mod file_menu;
 pub mod footsteps;
 pub mod gauge;
 pub mod hud;

@@ -67,8 +67,8 @@ Built (all in the test room, against the one Shadow):
 
 Unfinished:
 - Spells show the effects of their own effect files since T136 (the old stand-in shapes appear only with F1); no voices play.
-- Heal effects, prize models and sparkles are not drawn; item drops are only logged.
-- Level-up messages, fanfare and HP/MP/Drive growth are not reproduced.
+- Prize sprites, the heal effect and item treasure boxes are drawn and picked up (T161); their physics, the box flight and pickup message are not.
+- Level-up panels, the level-up effect and bonus-level HP/MP/Drive growth are built (T160); the EXP popup and encounter bonus ids are not.
 - Game over: Sora's death event, the Continue / Load Game list over his lying pose and Continue's reload are built (T140); Load Game, the other game-over modes and the Drive-form KO are not.
 - Only one enemy exists, so targeting between several enemies is untested.
 

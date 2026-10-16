@@ -12,6 +12,10 @@ Owner Claude, 2026-10-16. Gate: P22 (field and combat presentation), PROGRESS on
 - Keyblade swing trail (pppRyjDrawShipolyBone): ring, natural cubic spline, quad strip with fade, per-corner quad colours, BonePos feed from the blade bone.
 - `cargo run -p main --example effect_census` lists the programs the VM lacks.
 
+## Update (second pass)
+- Effect VM: pppKeShpTailX (153) and pppKeShpTail2X (155) sprite tails (FUN_1404cc750/cc960, FUN_1404cd550/cd760). Census: hidden installed effects 775 -> 643 (433 of those belong to the magic work's four programs).
+- Ground dust: frame trigger 19 starts the map PAX category element for the floor's attribute (table 0x1405d4ff0) and the foot id, at Sora's position turned along his heading. Not seen in a run (Twilight Town's early floors have no dust element); foot offset and ray test are not modelled.
+
 ## Checks
 PASS fmt, clippy (warnings denied), `cargo test --workspace --locked` for the first batch; effect crate tests and clippy PASS for the later batches. PASS unattended arena run (hit sparks 201016/17, item 100..103, prize 11/12/15/16, trail element 10 drawn). NOT RUN: listening or capture comparison with the installed game.
 

@@ -78,7 +78,9 @@ mod enemy_tour;
 mod game_over;
 mod gear;
 mod gear_tour;
+mod item_drop_view;
 mod item_room;
+mod level_growth;
 mod magic_room;
 mod magic_tour;
 mod party_room;
@@ -832,6 +834,10 @@ struct Game {
     /// ticks its change takes before the first cast.
     magic_form: u8,
     magic_shift: u64,
+    /// The unattended `--growth-tour` (level-up and bonus panels).
+    growth_tour: bool,
+    /// The unattended `--prize-tour` (prize sprites and the heal effect).
+    prize_tour: bool,
     hero_hit_tick: Option<u64>,
     enemy_incoming_hits: u64,
     enemy_outgoing_hits: u64,
@@ -891,6 +897,9 @@ struct Game {
     ambient: Option<u32>,
     steps: visual::footsteps::Steps,
     step_scan: Option<(u64, Action, u32)>,
+    /// The map's own effects, whose category elements are the ground dust.
+    map_pax: Option<Arc<object_effect::Pax>>,
+    dust_scan: Option<(u64, Action, u32)>,
     /// The scan of the actor's own frame-8 sounds.
     move_se_scan: Option<(u64, Action, u32)>,
     /// The shown kit's attack shapes by collision group (bone, offset,
@@ -971,7 +980,7 @@ struct Hud {
     image: Handle<Image>,
     updated: bool,
     /// The form level-up panels (sprite priority 9000, after the gauge).
-    panels: visual::level_up::FormPanels,
+    panels: visual::level_up::Panels,
 }
 
 /// The original's default follow camera, ticked with the simulation in the
@@ -1242,6 +1251,12 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
             1 => {
                 if let Some(&n) = record.parameters.first() {
                     clip.effects.push((frame, n));
+                }
+            }
+            // Ground dust (FUN_140424c60): p0 is the foot id.
+            19 => {
+                if let Some(&p0) = record.parameters.first() {
+                    clip.dust.push((frame, p0));
                 }
             }
             // A footstep (FUN_1403b4fc0): p0 picks the step within the
@@ -2048,11 +2063,21 @@ struct EnemyRuntime {
     exp_total: u32,
     munny: u32,
     orbs: Vec<player::enemy_prizes::Orb>,
+    /// Treasure boxes of dropped items waiting on the ground.
+    drops: Vec<player::enemy_prizes::ItemDrop>,
+    next_drop: u32,
     was_dead: bool,
     /// Ability items learned by level-ups, waiting for the camp.
     learned: Vec<u16>,
     /// Status numbers changed (level-up): the camp refreshes them.
     numbers_dirty: bool,
+    /// Level-up and bonus panels waiting for the HUD, whether the level-up
+    /// effect is due, and the bonus levels taken.
+    panels: Vec<level_growth::Panel>,
+    level_effect: bool,
+    /// Ticks left of the heal effect on Sora (FUN_1403d7bd0: +0xd40).
+    heal_ticks: f32,
+    bonus_taken: Vec<u8>,
     /// Last frame's attack sphere centres by (window instance, sphere).
     previous: HashMap<(u64, usize), Vec3>,
     indices: Vec<Vec<u32>>,
@@ -2085,20 +2110,6 @@ fn spell_tint(atkp: u16) -> [f32; 4] {
         573 | 1247 => [0.9, 0.9, 1., 0.3],
         574..=578 | 667..=669 => [0.9, 0.5, 1., 0.4],
         _ => [1., 1., 1., 0.3],
-    }
-}
-
-/// A placeholder for a prize on the ground (the orb models are not
-/// drawn): a small sphere tinted by kind.
-#[derive(Component)]
-struct OrbMarker(usize);
-
-fn orb_tint(kind: u8) -> [f32; 4] {
-    match kind {
-        0 | 1 => [0.3, 1., 0.4, 1.],
-        2..=4 => [1., 0.85, 0.2, 1.],
-        5 | 6 => [0.4, 0.6, 1., 1.],
-        _ => [1., 0.5, 0.15, 1.],
     }
 }
 
@@ -2713,15 +2724,16 @@ fn load(
     };
     // Sora's object effects (obj/P_EX100.a.us), 00effect's and the
     // resident common effect textures.
-    let (base_pax, texcommon) = match data::path_lookup::Library::open(source) {
+    let (base_pax, texcommon, prize_pax) = match data::path_lookup::Library::open(source) {
         Ok(mut library) => (
             drive_room::object_pax(&mut library, &config.player_object_name),
             library
                 .read("effect/texcommon.dpd")
                 .ok()
                 .and_then(|b| object_effect::read_dpd(&b).ok()),
+            drive_room::file_pax(&mut library, "obj/PRIZE.mdlx"),
         ),
-        Err(_) => (None, None),
+        Err(_) => (None, None, None),
     };
     let system_pax = config
         .effects
@@ -2772,6 +2784,7 @@ fn load(
     .map(|mut f| {
         f.system_pax = system_pax.map(Arc::new);
         f.texcommon = texcommon;
+        f.prize_pax = prize_pax.map(Arc::new);
         f
     });
     // The forms' and Revert's names for the command menu.
@@ -2807,6 +2820,14 @@ fn load(
             let mut items: Vec<u16> = drive_room::FORM_ITEMS.to_vec();
             items.extend(player::forms::GROWTH_ITEMS.iter().flatten());
             items.extend(f.fmlv.iter().map(|r| r.ability).filter(|&a| a != 0));
+            // Sora's level rows and bonus levels teach abilities (types
+            // 0x12..=0x14): their names are panel lines.
+            items.extend(
+                table
+                    .iter()
+                    .filter(|r| (0x12..=0x14).contains(&r.kind))
+                    .map(|r| r.id),
+            );
             items.sort_unstable();
             items.dedup();
             let rows: Vec<_> = items
@@ -2815,6 +2836,9 @@ fn load(
                 .collect();
             let mut ids: Vec<u32> = rows.iter().map(|r| r.name as u32).collect();
             ids.extend([0x43f2, 0x51f]);
+            ids.extend(level_growth::STAT_MESSAGES);
+            ids.extend(level_growth::BONUS_MESSAGES);
+            ids.extend(level_growth::NAME_MESSAGES);
             let texts = hud::load_messages_optional(
                 source,
                 &menu.messages.index,
@@ -2830,6 +2854,16 @@ fn load(
             let n = rows.len();
             f.gauge_up = texts.get(n).cloned().flatten().unwrap_or_default();
             f.sora_title = texts.get(n + 1).cloned().flatten().unwrap_or_default();
+            let text = |k: usize| texts.get(k).cloned().flatten().unwrap_or_default();
+            for (i, t) in f.growth.stat.iter_mut().enumerate() {
+                *t = text(n + 2 + i);
+            }
+            for (i, t) in f.growth.bonus.iter_mut().enumerate() {
+                *t = text(n + 6 + i);
+            }
+            for (i, t) in f.growth.names.iter_mut().enumerate() {
+                *t = text(n + 12 + i);
+            }
             Some(f)
         }
         (f, _) => f,
@@ -4732,22 +4766,6 @@ fn setup(
             Visibility::Hidden,
         ));
     }
-    // A pool of prize markers.
-    let orb_mesh = meshes.add(Sphere::new(1.).mesh().ico(2).unwrap());
-    for i in 0..16 {
-        commands.spawn((
-            OrbMarker(i),
-            ChildOf(world),
-            Mesh3d(orb_mesh.clone()),
-            MeshMaterial3d(plain_materials.add(StandardMaterial {
-                base_color: Color::srgb(1., 1., 1.),
-                unlit: true,
-                ..default()
-            })),
-            Transform::default(),
-            Visibility::Hidden,
-        ));
-    }
     commands.insert_resource(SceneRoot(world));
     let mut actor = startup.actor.take().expect("actor retained for setup");
     let weapon = startup.weapon.take().expect("weapon retained for setup");
@@ -5930,6 +5948,7 @@ fn simulate(
         && let Some(a) = area.as_deref()
     {
         game.map_fx_pending = false;
+        game.map_pax = a.current.pax.clone();
         if let Some(pax) = a.current.pax.clone() {
             start_map_effects(&mut game, &pax, a.bg_mask, None);
         }
@@ -6113,6 +6132,7 @@ fn simulate(
         );
     }
     sora_sounds(&mut game);
+    sora_dust(&mut game);
     if tick.is_multiple_of(60) {
         let (position, yaw, action) = (game.player.position, game.player.yaw, game.player.action);
         let enemy = game.enemy.as_ref().map(|e| {
@@ -6869,6 +6889,57 @@ fn sora_sounds(game: &mut Game) {
     }
 }
 
+/// The map-effect category bit of a ground attribute (the table at
+/// 0x1405d4ff0, 0 = no dust).
+fn dust_ground_bit(ground: u8) -> u8 {
+    const TABLE: [u8; 28] = [
+        0, 1, 0, 2, 3, 4, 5, 0, 0, 0, 6, 7, 8, 9, 10, 11, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 13,
+    ];
+    TABLE.get(ground as usize).copied().unwrap_or(0)
+}
+
+/// Frame trigger 19 (FUN_140424c60): the map's category element for this
+/// ground and foot starts at the foot, turned along Sora's heading.
+fn sora_dust(game: &mut Game) {
+    let key = (game.action_started, game.player.action);
+    let looped = game.player.motion_frame(&game.clips);
+    let from = match game.dust_scan {
+        Some((s, a, f)) if (s, a) == key && f <= looped => Some(f),
+        _ => None,
+    };
+    game.dust_scan = Some((key.0, key.1, looped));
+    let (Some(pax), RoomWorld::Map(map)) = (game.map_pax.clone(), &game.world) else {
+        return;
+    };
+    let bit = dust_ground_bit(map.floor_ground());
+    if bit == 0 {
+        return;
+    }
+    let clip = game.player.clip(&game.clips).clone();
+    for &(at, p0) in &clip.dust {
+        if !(0..32).contains(&p0) || !from.is_none_or(|f| at > f) || at > looped {
+            continue;
+        }
+        let mask = (1u64 << bit) | (1u64 << (32 + p0 as u64));
+        let Some(element) = pax.by_category(mask) else {
+            continue;
+        };
+        let heading = to_world([game.player.yaw.sin(), 0., game.player.yaw.cos()]);
+        game.fx_queue.push(drive_fx::Placed {
+            req: drive_fx::FxRequest {
+                pax: pax.clone(),
+                id: element.id,
+                owner: 0xfb,
+            },
+            anchor: drive_fx::Anchor::World {
+                at: Vec3::from_array(game.player.position),
+                pitch: 0.,
+                yaw: heading[0].atan2(heading[2]),
+            },
+        });
+    }
+}
+
 /// Plays this tick's requests and keeps the low-HP alarm (system sound 9,
 /// looped) in step with the gauge's low-HP state: started when HP <= max/4
 /// and stopped when HP recovers or Sora is KO (FUN_14017f050).
@@ -7023,6 +7094,31 @@ fn hud_tick(keys: Res<ButtonInput<KeyCode>>, mut game: ResMut<Game>, hud: Option
     if let Some(d) = game.drive.as_mut() {
         for up in std::mem::take(&mut d.level_ups) {
             for e in drive_room::level_panels(&d.src, &up) {
+                hud.panels.push(e);
+            }
+        }
+    }
+    if game.growth_tour {
+        level_growth::tour(&mut game);
+    }
+    if game.prize_tour {
+        prize_room::tour(&mut game);
+    }
+    // Level-ups and bonus levels queue theirs (FUN_1403eda60 / FUN_1403edb20)
+    // and the first level of a kill starts the level-up effect
+    // (FUN_1403ecf30: system element 15 on Sora).
+    if let Some(rt) = game.enemy.as_mut() {
+        let waiting = std::mem::take(&mut rt.panels);
+        let effect = std::mem::take(&mut rt.level_effect);
+        if let Some(d) = game.drive.as_mut() {
+            if effect && let Some(p) = d.src.system_pax.clone() {
+                d.fx_requests.push(drive_fx::FxRequest {
+                    pax: p,
+                    id: 15,
+                    owner: 0xff,
+                });
+            }
+            for e in level_growth::entries(&d.src, &waiting) {
                 hud.panels.push(e);
             }
         }
@@ -7999,44 +8095,6 @@ fn present_spells(
                 if let Some(mut m) = materials.get_mut(&material.0) {
                     let c = spell_tint(v.atkp);
                     m.base_color = Color::srgba(c[0], c[1], c[2], c[3]);
-                }
-            }
-            None => *visibility = Visibility::Hidden,
-        }
-    }
-}
-
-/// Places the prize markers on the live orbs.
-fn present_orbs(
-    game: Res<Game>,
-    mut markers: Query<(
-        &OrbMarker,
-        &mut Transform,
-        &mut Visibility,
-        &MeshMaterial3d<StandardMaterial>,
-    )>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let orbs = game
-        .enemy
-        .as_ref()
-        .map(|e| e.orbs.as_slice())
-        .unwrap_or(&[]);
-    for (slot, mut transform, mut visibility, material) in &mut markers {
-        match orbs.get(slot.0) {
-            Some(o) => {
-                *visibility = Visibility::Visible;
-                let lift = player::enemy_prizes::centre_height(o.kind);
-                transform.translation =
-                    Vec3::new(o.position[0], o.position[1] + lift, o.position[2]);
-                transform.scale = Vec3::splat(if o.kind % 3 == 2 || o.kind == 8 {
-                    9.
-                } else {
-                    6.
-                });
-                if let Some(mut m) = materials.get_mut(&material.0) {
-                    let c = orb_tint(o.kind);
-                    m.base_color = Color::srgb(c[0], c[1], c[2]);
                 }
             }
             None => *visibility = Visibility::Hidden,
@@ -9973,6 +10031,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut enemy_battle_tour = false;
     let mut magic_tour = false;
     let mut magic_form = 0u8;
+    let mut growth_tour = false;
+    let mut prize_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
     let mut options = args[3..].iter();
@@ -10048,6 +10108,24 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("game over tour capture directory absent")?,
+                );
+            }
+            Some("--prize-tour") if autoplay.is_none() => {
+                prize_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("prize tour capture directory absent")?,
+                );
+            }
+            Some("--growth-tour") if autoplay.is_none() => {
+                growth_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("growth tour capture directory absent")?,
                 );
             }
             Some("--ability-tour") if autoplay.is_none() => {
@@ -10192,6 +10270,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let magic_shift = if magic_form != 0 { 260 } else { 0 };
     let captures = if magic_tour {
         magic_tour::captures(magic_shift)
+    } else if prize_tour {
+        prize_room::CAPTURES.to_vec()
+    } else if growth_tour {
+        level_growth::CAPTURES.to_vec()
     } else if game_over_tour {
         game_over::CAPTURES.to_vec()
     } else if enemy_battle_tour {
@@ -10211,6 +10293,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     };
     let autoplay_end = if magic_tour {
         magic_tour::END + magic_shift
+    } else if prize_tour {
+        prize_room::END
+    } else if growth_tour {
+        level_growth::END
     } else if game_over_tour {
         game_over::END
     } else if enemy_battle_tour {
@@ -10253,6 +10339,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         magic_tour,
         magic_form,
         magic_shift,
+        growth_tour,
+        prize_tour,
         hero_hit_tick: None,
         enemy_incoming_hits: 0,
         enemy_outgoing_hits: 0,
@@ -10294,6 +10382,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         step_info: loaded.step_info.take(),
         steps: visual::footsteps::Steps::default(),
         step_scan: None,
+        map_pax: None,
+        dust_scan: None,
         move_se_scan: None,
         sora_attack: std::mem::take(&mut loaded.kit.attack),
         party: loaded
@@ -10365,9 +10455,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     game.refresh_gear();
     game.event(serde_json::json!({"event":"ability_inventory","slots":game.ability_slots,
         "ap_budget":game.ability_source.inventory.ap,"growth_tiers":game.ability_source.inventory.growth}));
+    let drop_view = item_drop_view::load(&source);
     let mut drive_fx = drive_fx::DriveFx::default();
     if let Some(mut src) = loaded.forms.take() {
-        drive_fx = drive_fx::DriveFx::new(src.texcommon.take());
+        drive_fx = drive_fx::DriveFx::new(src.texcommon.take(), src.prize_pax.take());
         let mut d = drive_room::DriveRt::new(src, Arc::clone(&source), loaded.enemy_character);
         if let Some(p) = loaded.kit.pax.take() {
             d.paxes.insert(0, Arc::new(p));
@@ -10577,9 +10668,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             exp_total: 0,
             munny: 0,
             orbs: Vec::new(),
+            drops: Vec::new(),
+            next_drop: 0,
             was_dead: false,
             learned: Vec::new(),
             numbers_dirty: false,
+            panels: Vec::new(),
+            level_effect: false,
+            heal_ticks: 0.,
+            bonus_taken: Vec::new(),
             previous: HashMap::new(),
             indices: Vec::new(),
             hit_sounds: e.hit_sounds,
@@ -10712,6 +10809,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .insert_resource(effects)
         .insert_resource(drive_fx)
         .insert_resource(spell_fx_resource)
+        .insert_resource(drop_view)
         .insert_resource(gallery)
         .init_resource::<enemy_target::Targeting>()
         .insert_resource(Time::<Fixed>::from_hz(60.))
@@ -10798,12 +10896,12 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 skate_present,
                 present_enemy,
                 (enemy_gallery::present, present_spells).chain(),
-                present_orbs,
                 party_room::present,
                 drive_room::party_visibility,
                 present_npc,
                 present_effects,
                 (drive_fx::present, spell_fx::present).chain(),
+                item_drop_view::present,
                 hud_present,
                 resize_scene,
                 afterimage.run_if(resource_exists::<Afterimage>),
