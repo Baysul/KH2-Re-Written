@@ -18,6 +18,22 @@ pub fn log_event(log: &mut Option<std::fs::File>, record: serde_json::Value) {
 pub const CAPTURES: [u64; 8] = [70, 110, 150, 160, 175, 190, 220, 260];
 pub const END: u64 = 300;
 
+/// The `--badge-tour`: a box lands on Sora at tick 20 (the item is picked
+/// up at once), START opens the camp at tick 100 (the Items row shows
+/// NEW!), DECIDE enters Items at 180 (the Stock row's badge).
+pub fn badge_tour(
+    inventory: &super::ability_inventory::Inventory,
+) -> super::ability_inventory::Tour {
+    super::ability_inventory::Tour {
+        inputs: vec![(100, 2), (180, 4)],
+        captures: vec![150, 230],
+        close: 10_000,
+        end: 260,
+        expected_slots: inventory.slots.clone(),
+        attacks: Vec::new(),
+    }
+}
+
 pub fn tour(game: &mut Game) {
     let tick = game.tick;
     let Game {
@@ -28,6 +44,22 @@ pub fn tour(game: &mut Game) {
     } = game;
     let Some(rt) = enemy.as_mut() else { return };
     let at = player.position;
+    if game.badge_tour {
+        if tick == 20 {
+            let id = rt.next_drop;
+            rt.next_drop += 1;
+            if let Some(s) = enemy_prizes::box_style(0) {
+                rt.drops.push(enemy_prizes::ItemDrop::spawn(
+                    id,
+                    280,
+                    s,
+                    [at[0], at[1] + 5., at[2]],
+                    0.5,
+                ));
+            }
+        }
+        return;
+    }
     if tick == 20 {
         for kind in 0..9u8 {
             let angle = (kind as f32 - 4.) * 0.35;
