@@ -239,6 +239,20 @@ pub fn object_from_handle(handle: u32) -> Option<ObjId> {
     (o % 0x1000 == 0 && o < 0x0100_0000).then_some(o / 0x1000)
 }
 
+/// A word of a target record (sys+0xbf8): +0 and +8 hold the target's engine
+/// handle (0 = nobody), +4 is zero and +0xc the search kind.
+fn target_record_word(t: crate::sysobj::Target, offset: u32) -> u32 {
+    match offset {
+        0 | 8 => match t.id {
+            0 => 0,
+            crate::traps::target::PLAYER_TARGET => PLAYER_HANDLE,
+            id => object_handle(id),
+        },
+        0xc => t.kind as u32,
+        _ => 0,
+    }
+}
+
 /// What a trap sees: the calling object and the shared world.
 pub struct Ctx<'a> {
     pub world: &'a mut World,
@@ -337,6 +351,17 @@ impl Host for Machine<'_> {
 
     fn peek(&self, address: u32) -> Option<u32> {
         if let Some((id, offset)) = object_field(address) {
+            if (TARGET_RECORD_OFFSET..TARGET_RECORD_OFFSET + 16).contains(&offset) {
+                let sys = if id == self.ctx.me.id {
+                    &self.ctx.me.sys
+                } else {
+                    &self.ctx.world.objects.get(id as usize)?.as_deref()?.sys
+                };
+                return Some(target_record_word(
+                    sys.target,
+                    offset - TARGET_RECORD_OFFSET,
+                ));
+            }
             if id == self.ctx.me.id {
                 return self.ctx.me.sys.peek_word(offset);
             }
