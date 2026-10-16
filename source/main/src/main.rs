@@ -14,6 +14,7 @@ mod cutscene;
 mod keyblade_board;
 mod launcher;
 mod npcs;
+mod save_files;
 mod skate;
 #[cfg(feature = "skate3")]
 mod skate_hud;

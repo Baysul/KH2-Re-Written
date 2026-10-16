@@ -98,6 +98,8 @@ const CHOICE: [usize; 4] = [25, 27, 26, 24];
 /// Where the rows and cards sit.
 const TOP_PITCH: f32 = 34.;
 const CARD_PITCH: f32 = 72.;
+/// The card group's own translation (its y, 0x1405ba..: A213 T=(244,106)).
+const CARD_ORIGIN_Y: f32 = 106.;
 const TEXT_SIZE: f32 = 15.;
 const CARD_TEXT_SIZE: f32 = 13.;
 /// Card text slots (x, y, align) from table 0x1405bbbd0: level, munny,
@@ -456,7 +458,7 @@ impl FileMenu {
         let seq2 = &layout.sequences[2];
         for i in 0..ROWS {
             let slot = (start + i) % SLOT_COUNT;
-            let base = [0., CARD_PITCH * i as f32];
+            let base = [0., CARD_ORIGIN_Y + CARD_PITCH * i as f32];
             // Drop the old text sprites.
             for t in std::mem::take(&mut self.cards[i].texts) {
                 self.s2.kill(t);
@@ -489,7 +491,7 @@ impl FileMenu {
         purpose: Purpose,
     ) -> (usize, usize, Vec<(Vec<u8>, (f32, f32, u8))>) {
         let number = encode_number(&format!("{:02}", slot + 1));
-        let mut out = vec![(number, (60., 0., 0))];
+        let mut out = vec![(number, (50., -8., 2))];
         let Some(card) = self.menu.slots().get(slot) else {
             return (0, 0, out);
         };
