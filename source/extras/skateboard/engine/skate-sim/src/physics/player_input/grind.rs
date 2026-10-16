@@ -6,8 +6,6 @@ mod post;
 mod pre;
 mod publication;
 mod settings;
-#[cfg(any())]
-mod tests;
 pub(crate) mod world;
 
 use crate::{grind_world::StaticProvider, physics::grind::ManagerObservation};

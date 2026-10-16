@@ -301,26 +301,3 @@ fn authored_path(a: &Attributes<'_>) -> String {
 fn required_text(a: &Attributes<'_>, name: &str) -> String {
     a.text(name).unwrap_or("").to_owned()
 }
-
-#[cfg(any())]
-mod tests {
-    use super::MovingObjectRegistry;
-
-    #[test]
-    fn moving_object_paths_use_stock_separator_normalization() {
-        let mut registry = MovingObjectRegistry::default();
-        registry.register("ram:/world/objects/car");
-        registry.begin("ram:\\world\\objects\\car").unwrap();
-        assert!(registry.active());
-        assert!(registry.update("ram:/world/objects/car").unwrap());
-        registry.end();
-        assert!(!registry.active());
-    }
-
-    #[test]
-    fn unknown_moving_object_is_an_explicit_producer_error() {
-        let mut registry = MovingObjectRegistry::default();
-        let error = registry.begin("ram:/missing").unwrap_err();
-        assert!(error.contains("not registered"));
-    }
-}

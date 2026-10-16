@@ -235,39 +235,3 @@ pub(super) fn constrain_ground(
     // Do not replace the actor's velocity with obstacle velocity here: native
     // contact reports must see the real relative impact speed for wipeout.
 }
-
-#[cfg(any())]
-mod tests {
-    use super::*;
-    fn obstacle() -> Vec<(usize, SolidBody)> {
-        let mut world = skate_dynamics::DynamicsWorld::default();
-        world
-            .spawn(skate_dynamics::BodyDesc {
-                shape: skate_dynamics::Shape::Box {
-                    half_extents: [0.5, 2., 2.],
-                },
-                ..Default::default()
-            })
-            .unwrap();
-        world.solid_bodies().into_iter().enumerate().collect()
-    }
-    #[test]
-    fn a_walk_step_cannot_cross_the_whole_object() {
-        let end = constrained_position(&obstacle(), Vec3::new(-3., 0., 0.), Vec3::new(3., 0., 0.));
-        assert!(end.x < -0.77);
-    }
-    #[test]
-    fn walking_away_is_not_blocked() {
-        let end = constrained_position(
-            &obstacle(),
-            Vec3::new(-0.80, 0., 0.),
-            Vec3::new(-2., 0., 0.),
-        );
-        assert!((end.x + 2.).abs() < 1e-4);
-    }
-    #[test]
-    fn deep_inside_start_is_recovered() {
-        let end = constrained_position(&obstacle(), Vec3::ZERO, Vec3::ZERO);
-        assert!(end.x.abs() > 0.77);
-    }
-}

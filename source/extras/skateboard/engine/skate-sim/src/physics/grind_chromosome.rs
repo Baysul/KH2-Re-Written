@@ -244,7 +244,3 @@ impl Chromosome {
         orientation
     }
 }
-
-#[cfg(any())]
-#[path = "grind_chromosome/tests.rs"]
-mod tests;

@@ -88,7 +88,3 @@ impl HandServices {
         false
     }
 }
-
-#[cfg(any())]
-#[path = "motion_hand_services/tests.rs"]
-mod tests;

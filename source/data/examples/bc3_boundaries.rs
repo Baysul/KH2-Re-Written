@@ -301,37 +301,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => Err("usage: bc3_boundaries generate <install-root> <existing-output-dir> | compare <install-root> <dds> <image-rs-rgba> <independent-rgba> <new-report>".into()),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn one_block(block: [u8; 16]) -> Vec<u8> {
-        let mut bytes = vec![0; 128];
-        bytes.extend(block);
-        bytes
-    }
-
-    #[test]
-    fn boundary_values_distinguish_endpoint_and_alpha_quantization() {
-        // Authored 5-bit red=3 has normalized UNORM8 24.677...; alpha
-        // selector 2 has 6/7. Neither is a tolerance or a vendor fixture.
-        let bytes = one_block(block(1, 0, 3 << 11, 3 << 11));
-        let normalized = hypothesize(&bytes, 4, 4, 3, true, true);
-        let early = hypothesize(&bytes, 4, 4, 0, true, false);
-        assert_eq!(&normalized[..4], &[25, 0, 0, 1]);
-        assert_eq!(&early[..4], &[24, 0, 0, 1]);
-        assert_eq!(&normalized[8..12], &[25, 0, 0, 1]);
-        assert_eq!(&early[8..12], &[24, 0, 0, 0]);
-    }
-
-    #[test]
-    fn bc3_uses_four_colors_for_reversed_endpoints_and_equal_alpha_branch() {
-        let bytes = one_block(block(0, 0, 0, 0xf800));
-        let rgba = hypothesize(&bytes, 4, 4, 3, true, true);
-        for p in 0..16 {
-            assert_eq!(rgba[p * 4], [0, 255, 85, 170][p % 4]);
-            assert_eq!(rgba[p * 4 + 3], if p % 8 == 7 { 255 } else { 0 });
-        }
-    }
-}

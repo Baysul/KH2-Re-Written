@@ -168,46 +168,6 @@ impl SimulationExchange {
     }
 }
 
-#[cfg(any())]
-mod exchange_tests {
-    use super::*;
-
-    #[test]
-    fn exchange_keeps_events_on_the_authoritative_tick() {
-        let mut exchange = SimulationExchange::new(8);
-        assert!(
-            exchange
-                .emit_event(
-                    7,
-                    skate_core::physics::phase::PhysicsEvent::StateChanged {
-                        from: skate_core::player::state::PhysicalStateId::PhysicsGround,
-                        to: skate_core::player::state::PhysicalStateId::PhysicsAir,
-                    },
-                )
-                .is_err()
-        );
-        assert!(
-            exchange
-                .emit_event(
-                    8,
-                    skate_core::physics::phase::PhysicsEvent::StateChanged {
-                        from: skate_core::player::state::PhysicalStateId::PhysicsGround,
-                        to: skate_core::player::state::PhysicalStateId::PhysicsAir,
-                    },
-                )
-                .is_ok()
-        );
-        assert!(
-            exchange
-                .request_state(skate_core::player::state::PhysicalStateId::PhysicsAir)
-                .is_ok()
-        );
-        assert_eq!(exchange.commands.tick(), 8);
-        assert_eq!(exchange.commands.commands().len(), 1);
-        assert_eq!(exchange.events().len(), 1);
-    }
-}
-
 impl GamePhysics {
     pub(crate) fn set_gesture_preferences(&mut self, gestures: Option<[u32; 4]>) {
         self.animation_profile.gesture_selections = Some(

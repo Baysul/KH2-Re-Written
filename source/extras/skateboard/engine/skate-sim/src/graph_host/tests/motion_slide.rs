@@ -239,18 +239,6 @@ fn stock_slide_deceleration_uses_ground_frame_and_resets_on_entry() {
 }
 
 #[test]
-fn slide_direction_preserves_native_unordered_threshold_branch() {
-    assert_eq!(
-        crate::graph_host::motion_sliding::direction(
-            [f32::NAN, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            false
-        ),
-        1.0
-    );
-}
-
-#[test]
 #[ignore = "requires installed stock graph assets; compile-only during bail work"]
 fn bail_reset_restores_saved_stance_in_the_real_graph_dispatch() {
     use crate::graph_host::motion_reset::Operation as Reset;

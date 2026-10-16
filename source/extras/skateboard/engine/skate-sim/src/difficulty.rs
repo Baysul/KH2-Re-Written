@@ -73,22 +73,3 @@ impl Difficulty {
 struct Saved {
     difficulty: Difficulty,
 }
-
-#[cfg(any())]
-mod tests {
-    use super::*;
-    #[test]
-    fn retail_indices_and_saved_names_agree() {
-        for (index, d) in Difficulty::ALL.into_iter().enumerate() {
-            assert_eq!(d as usize, index);
-            assert_eq!(Difficulty::parse(d.label()).unwrap(), d);
-            let bytes = serde_json::to_vec(&Saved { difficulty: d }).unwrap();
-            assert_eq!(
-                serde_json::from_slice::<Saved>(&bytes).unwrap().difficulty,
-                d
-            );
-        }
-        assert!(Difficulty::parse("test").is_err());
-        assert!(serde_json::from_str::<Saved>(r#"{"difficulty":"made-up"}"#).is_err());
-    }
-}

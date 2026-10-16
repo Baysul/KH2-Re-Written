@@ -2,8 +2,6 @@
 //! Parent owns the Air facade and phase schedule. Native completion is explicit,
 //! so a synchronous fixed-step backend never adds an automatic frame delay.
 mod settings;
-#[cfg(any())]
-mod tests;
 use super::{contact_toolkit::StaticScene, ground_query::with_world_scene};
 pub(crate) use settings::Settings;
 use skate_core::{

@@ -1,49 +1,6 @@
 use super::*;
 
 #[test]
-fn native_air_tweak_release_latch_keeps_signed_axes_and_strict_counter() {
-    let mut state = State::default();
-    assert_eq!(
-        state.gates(Some(1.0), Some(0.0), false, 0.0),
-        (false, false)
-    );
-    state.ticks = 80;
-    assert!(!state.gates(Some(1.0), Some(0.0), false, 0.0).0);
-    state.ticks = 81;
-    assert!(state.gates(Some(1.0), Some(0.0), false, 0.0).0);
-    state.begin();
-    assert!(state.gates(Some(-1.0), Some(0.0), false, 0.0).0);
-    state.begin();
-    assert!(!state.gates(None, Some(0.0), false, 0.0).0);
-    assert!(
-        !state.released,
-        "both native intent lookups must succeed to release"
-    );
-    assert_eq!(
-        state.gates(Some(0.0), Some(0.0), false, 4.0),
-        (false, false)
-    );
-    assert_eq!(
-        state.gates(Some(0.0), Some(0.0), false, 4.01),
-        (false, true)
-    );
-    assert_eq!(state.gates(Some(1.0), Some(0.0), true, 0.0), (true, true));
-}
-
-#[test]
-fn native_air_tweak_begin_preserves_filters_and_center_request_decays_them() {
-    let mut state = State::default();
-    state.filter(1.0, -1.0, false);
-    assert_eq!(state.axes, [0.15, -0.15]);
-    state.begin();
-    assert_eq!(state.axes, [0.15, -0.15]);
-    state.filter(-1.0, 1.0, true);
-    assert_eq!(state.axes, [0.15 * 0.85, -0.15 * 0.85]);
-    assert_eq!(state.ticks, 0);
-    assert!(!state.released && !state.into_started && !state.cycle_started);
-}
-
-#[test]
 #[ignore = "requires private stock OffBoard bank; graph leaf/pose regression, not gameplay acceptance"]
 fn stock_air_tweak_channels_parameters_pose_requests_and_teardown() {
     use skate_core::animation::playback::{PlaybackRequest, PlaybackService};

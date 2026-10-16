@@ -10,6 +10,3 @@ pub(super) fn effective_root(mut frame: Frame, flags_2476: u32) -> Frame {
     }
     frame
 }
-
-#[cfg(any())]
-mod tests;

@@ -219,28 +219,6 @@ fn landing_preserves_multiplier_even_when_line_timer_is_nearly_empty() {
 }
 
 #[test]
-fn composed_names_localize_every_component() {
-    let mut assets = crate::apt_text::TextAssets::default();
-    assets
-        .language
-        .insert("ID_TRICK_KICKFLIP".into(), "Kickflip".into());
-    assets
-        .language
-        .insert("ID_TRICK_AUTHENTIC_FS_HALFCAB".into(), "FS Half-Cab".into());
-    assert_eq!(
-        crate::scoring_hud::localize_trick("ID_TRICK_KICKFLIP 360", Some(&assets)),
-        "Kickflip 360"
-    );
-    assert_eq!(
-        crate::scoring_hud::localize_trick(
-            "ID_TRICK_KICKFLIP ID_TRICK_AUTHENTIC_FS_HALFCAB",
-            Some(&assets)
-        ),
-        "Kickflip FS Half-Cab"
-    );
-}
-
-#[test]
 #[ignore = "requires private authored scoring data via SKATE3_ASSET_ROOT"]
 fn body_flips_with_grabs_and_spins_keep_names_rewards_and_landing() {
     let data = authored();

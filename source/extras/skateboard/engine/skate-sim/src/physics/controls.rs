@@ -286,11 +286,3 @@ fn normalize_camera_axis(v: [f32; 3]) -> [f32; 3] {
     }
     v.map(|component| component * inverse)
 }
-
-#[cfg(any())]
-#[path = "controls/offboard_tests.rs"]
-mod offboard_tests;
-
-#[cfg(any())]
-#[path = "controls/bail_tests.rs"]
-mod bail_tests;

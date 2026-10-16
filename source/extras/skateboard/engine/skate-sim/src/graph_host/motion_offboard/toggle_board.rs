@@ -137,7 +137,3 @@ fn attribute(animation: &mut MotionAnimation, name: &str, value: f32) {
         sequence_id: -1,
     });
 }
-
-#[cfg(any())]
-#[path = "toggle_board/tests.rs"]
-mod tests;

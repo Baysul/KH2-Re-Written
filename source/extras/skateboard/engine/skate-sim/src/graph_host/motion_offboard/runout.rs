@@ -92,7 +92,3 @@ impl State {
         Ok(())
     }
 }
-
-#[cfg(any())]
-#[path = "runout/tests.rs"]
-mod tests;

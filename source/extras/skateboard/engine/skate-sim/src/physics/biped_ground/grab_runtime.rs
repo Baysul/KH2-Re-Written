@@ -1,8 +1,6 @@
 //! PlayerGrabSpline82D73FC0/74270/740F8/749D0, distinct from possession.
 //! Scene execution is concrete; retained results become visible only at Sync.
 mod selection;
-#[cfg(any())]
-mod tests;
 use crate::physics::offboard::grab_scene::Scene;
 use skate_core::player::offboard::{
     grab_scene::{Descriptor, Hit, Line, Query, Record, closest_point},

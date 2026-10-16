@@ -77,6 +77,3 @@ impl GroundQueryScene for Scene<'_> {
         lines::query(self, packet)
     }
 }
-
-#[cfg(any())]
-mod tests;
