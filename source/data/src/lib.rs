@@ -44,6 +44,7 @@ pub mod ogg;
 pub mod original_payload;
 pub mod party_records;
 pub mod path_lookup;
+pub mod pause_definition;
 pub mod probe_source;
 pub mod ptya;
 pub mod raw_motion;

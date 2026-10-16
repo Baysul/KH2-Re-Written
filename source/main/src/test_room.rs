@@ -75,6 +75,7 @@ mod enemy_combat;
 mod enemy_gallery;
 mod enemy_target;
 mod enemy_tour;
+mod game_over;
 mod gear;
 mod gear_tour;
 mod item_room;
@@ -82,6 +83,7 @@ mod magic_room;
 mod party_room;
 mod prize_room;
 mod settings_room;
+mod weapon_trail;
 
 fn player_object_default() -> String {
     "P_EX100".into()
@@ -283,6 +285,8 @@ struct EffectConfig {
 struct EffectSources {
     weapon: object_effect::Pax,
     enemy: Option<object_effect::Pax>,
+    /// The other battle enemies' object effects by objentry id.
+    enemy_paxes: Vec<(u32, object_effect::Pax)>,
     system: Option<object_effect::Pax>,
     atlas: visual::effects::Atlas,
 }
@@ -292,6 +296,16 @@ enum EffectRequest {
     /// Keyblade hit spark (FUN_1403d1b40): ATKP hit effect and random
     /// count, contact point and hit direction in scene coordinates.
     Hit {
+        effect: u8,
+        random: u8,
+        contact: Vec3,
+        direction: Vec3,
+    },
+    /// An enemy attack landing on Sora (FUN_1403d1b40 with the attacker's
+    /// own container): `object` is the attacker's objentry id (0 = the
+    /// room's enemy); the spark starts at the contact point.
+    EnemyHit {
+        object: u32,
         effect: u8,
         random: u8,
         contact: Vec3,
@@ -316,6 +330,7 @@ struct RunningEffect {
 struct Effects {
     weapon: Option<Arc<object_effect::Pax>>,
     enemy: Option<Arc<object_effect::Pax>>,
+    enemy_paxes: HashMap<u32, Arc<object_effect::Pax>>,
     system: Option<Arc<object_effect::Pax>>,
     running: Vec<RunningEffect>,
     rng: ::effect::Rng,
@@ -488,6 +503,8 @@ struct ClipPoses {
     /// (start, end, ATKP id, collision group), in clip ticks; then slot 1's.
     hits: Vec<(u32, u32, u16, u8)>,
     hits2: Vec<(u32, u32, u16, u8)>,
+    /// Trail windows (the weapon motion's range trigger 12), in clip ticks.
+    trails: Vec<(u32, u32)>,
     /// The actor motion's own range-10 windows (the drive motions' ATKP
     /// 124 / 125), on the object's attack shapes.
     actor_hits: Vec<(u32, u32, u16, u8)>,
@@ -889,6 +906,18 @@ struct Game {
     /// Action start tick and clip tick already scanned for sound triggers.
     sound_frame: Option<(u64, u32)>,
     effect_queue: Vec<EffectRequest>,
+    /// Elements to start next tick at a place other than Sora's own.
+    fx_queue: Vec<drive_fx::Placed>,
+    /// Weapon trail: the action tick and clip frame last scanned, and the
+    /// calibrated bone length.
+    trail_scan: Option<(u64, u32)>,
+    trail_length: Option<f32>,
+    /// Map effect groups to end (None = all of them).
+    fx_clear_map: Vec<Option<u8>>,
+    /// The area's map effects still to be started (a new area).
+    map_fx_pending: bool,
+    /// Looping sound requests to stop (a map effect that ended).
+    sound_stops: Vec<u32>,
     /// Field talk: control locked, and this tick's reaction / advance
     /// presses (Triangle; decide, back or Triangle).
     talking: bool,
@@ -956,6 +985,28 @@ fn from_world(p: [f32; 3]) -> Vec3 {
     Vec3::new(p[0], -p[1], -p[2])
 }
 
+/// Starts the map elements of every background group set in `mask`, in
+/// bit order and then table order (FUN_1402c7010 per set bit).
+fn start_map_effects(game: &mut Game, pax: &Arc<object_effect::Pax>, mask: u64, only: Option<u8>) {
+    for bit in 0..64u8 {
+        if mask >> bit & 1 == 0 || only.is_some_and(|o| o != bit) {
+            continue;
+        }
+        for (index, element) in pax.elements.iter().enumerate() {
+            if element.group == bit {
+                game.fx_queue.push(drive_fx::Placed {
+                    req: drive_fx::FxRequest {
+                        pax: pax.clone(),
+                        id: element.id,
+                        owner: 0xfd,
+                    },
+                    anchor: drive_fx::Anchor::Map { index },
+                });
+            }
+        }
+    }
+}
+
 fn camera_input(player: &Player, previous: [f32; 3], speed: f32) -> CameraInput {
     let [s, c] = [player.yaw.sin(), player.yaw.cos()];
     CameraInput {
@@ -979,6 +1030,11 @@ struct WeaponRoot;
 struct CollisionOverlay;
 
 impl Game {
+    /// The game-over tour's scripted knock-out tick.
+    fn tour_defeat_due(&self) -> bool {
+        self.tick == game_over::TOUR_DEFEAT
+    }
+
     fn event(&mut self, value: serde_json::Value) {
         if let Some(log) = &mut self.log {
             serde_json::to_writer(&mut *log, &value).expect("test room log write");
@@ -1464,6 +1520,8 @@ struct Loaded {
     npc: Option<NpcSource>,
     camp: Option<CampSource>,
     journal: Option<JournalSource>,
+    /// The game-over sequence's files (absent when the install lacks any).
+    game_over: Option<game_over::Source>,
     /// The menus' configured files, for a text language change.
     language: Option<settings_room::LanguageSources>,
     /// Field and battle music SCD bytes.
@@ -2942,6 +3000,16 @@ fn load(
             Some(EffectSources {
                 weapon: pax(&e.weapon)?,
                 enemy: e.enemy.as_ref().map(pax).transpose()?,
+                enemy_paxes: data::path_lookup::Library::open(source)
+                    .map(|mut library| {
+                        enemy_battle::SUPPORTED
+                            .iter()
+                            .filter_map(|&(id, name)| {
+                                drive_room::object_pax(&mut library, name).map(|p| (id, p))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 system: e.system.as_ref().map(pax).transpose()?,
                 atlas: load_atlas(source, &e.atlas.index, e.atlas.ordinal, e.atlas.name_hash)?,
             })
@@ -3096,6 +3164,24 @@ fn load(
             .ok()?
             .pop()
     });
+    // The game-over sequence (obj/GAMEOVER.mset, pause.2ld, the death event).
+    let game_over = {
+        let joint = objects
+            .iter()
+            .find(|o| o.model_name == b"P_EX100")
+            .map_or(1, |o| o.weapon_joint);
+        match data::path_lookup::Library::open(source)
+            .map_err(|e| e.to_string())
+            .and_then(|mut library| {
+                game_over::Source::load(source, &mut library, joint).map_err(|e| e.to_string())
+            }) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                eprintln!("Game over assets unavailable: {e}");
+                None
+            }
+        }
+    };
     Ok(Loaded {
         board_motion,
         keyblades,
@@ -3158,6 +3244,7 @@ fn load(
         npc,
         camp,
         journal,
+        game_over,
         language: match (&config.camp, &config.menu) {
             (Some(camp), Some(menu)) => Some(settings_room::LanguageSources {
                 camp: camp.clone(),
@@ -3796,6 +3883,9 @@ fn area_transition(
         .map(|t| (t.clone(), 120));
     area.bg_mask = next.state.setup.bg_mask;
     area.current = next;
+    // The old area's effects end with it; the new area's start next tick.
+    game.fx_clear_map.push(None);
+    game.map_fx_pending = true;
     if let Some(t) = area.transition.as_mut() {
         t.stage = Stage::Opening;
         t.iris = hud
@@ -5036,9 +5126,12 @@ struct MenuModel {
 
 /// While the camp shows its members, render Sora's walk at the menu time
 /// (root motion kept, camp-03 §3).
+#[allow(clippy::too_many_arguments)]
 fn menu_model_present(
     camp: Option<Res<CampRes>>,
     model: Option<Res<MenuModel>>,
+    game_over: Option<Res<game_over::GameOverRes>>,
+    sora_rig: Option<Res<SoraRig>>,
     game: Res<Game>,
     mut cameras: Query<&mut Camera, With<MenuCamera>>,
     mut roots: Query<&mut Visibility, With<MenuModelRoot>>,
@@ -5046,7 +5139,11 @@ fn menu_model_present(
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let Some(model) = model else { return };
-    let time = camp.and_then(|c| c.open.as_ref().and_then(|m| m.model_time));
+    // The game-over list shows Sora on the GAMEOVER set's motion.
+    let over = game_over.as_ref().and_then(|g| g.model_time());
+    let time = camp
+        .and_then(|c| c.open.as_ref().and_then(|m| m.model_time))
+        .or(over);
     if let Ok(mut camera) = cameras.single_mut() {
         camera.is_active = time.is_some();
     }
@@ -5061,6 +5158,17 @@ fn menu_model_present(
         }
     }
     let Some(t) = time else { return };
+    if let (Some(t), Some(g), Some(rig)) = (over, game_over.as_ref(), sora_rig.as_ref()) {
+        if let Some(positions) = game_over::pose(g, rig, t) {
+            for (part, handle) in &parts {
+                let positions = model.indices[part.0].iter().map(|&i| positions[i as usize]);
+                if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+                    visual::room::update_positions(&mut mesh, positions);
+                }
+            }
+        }
+        return;
+    }
     // The member model is base Sora's walk; in a Drive form the room's
     // clips are the form's.
     if game.drive.as_ref().is_some_and(|d| d.shown != 0) {
@@ -5113,13 +5221,16 @@ struct Afterimage {
 fn afterimage(
     mut after: ResMut<Afterimage>,
     game: Res<Game>,
+    game_over: Option<Res<game_over::GameOverRes>>,
     mut cameras: Query<&mut Camera>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
+    // The death event's SeqBlur (alpha 56/128) feeds the same pass.
     let alpha = game
         .drive
         .as_ref()
-        .and_then(drive_room::DriveRt::afterimage);
+        .and_then(drive_room::DriveRt::afterimage)
+        .or(game_over.and_then(|g| g.blur()));
     let weight = alpha.map(|a| if after.on { a } else { 0. });
     after.on = alpha.is_some();
     after.blur.feed(weight, &mut cameras, &mut meshes);
@@ -5168,6 +5279,7 @@ fn compose_2d(
     settings: Res<settings_room::SettingsRes>,
     game: Res<Game>,
     after: Option<Res<Afterimage>>,
+    game_over: Option<Res<game_over::GameOverRes>>,
 ) {
     let Some(c) = compose else { return };
     // Brightness tints the scene; the HUD setting hides the field HUD. A
@@ -5191,7 +5303,7 @@ fn compose_2d(
     {
         frame.full_screen(s, [1., 1., 1., t.dissolve as f32 / DISSOLVE_FRAMES as f32]);
     }
-    let camp_open = camp.is_some_and(|c| c.menu_up());
+    let camp_open = camp.is_some_and(|c| c.menu_up()) || game_over.is_some_and(|g| g.hides_hud());
     if let Some(h) = c.hud_sheet
         && !camp_open
         && settings.current.show_hud
@@ -5225,12 +5337,14 @@ fn compose_2d(
 /// presses queue the field actions: jump 0x100 (back button), decide 0x4,
 /// guard 0x200 (Square), reaction 0x400 (Triangle), talk advance 0x40c and
 /// the command menu's up/down 0x4000/0x8000.
+#[allow(clippy::too_many_arguments)]
 fn read_pad(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     pads: Query<(&Gamepad, Option<&Name>)>,
     camp: Option<Res<CampRes>>,
     debug: Res<debug_menu::DebugMenu>,
+    game_over: Option<Res<game_over::GameOverRes>>,
     mut game: ResMut<Game>,
     mut targeting: ResMut<enemy_target::Targeting>,
 ) {
@@ -5238,7 +5352,7 @@ fn read_pad(
         return;
     }
     let (data, _, _) = input::read_devices(&keys, &mouse, 0., &pads);
-    let menu = camp.is_some_and(|c| c.menu_up());
+    let menu = camp.is_some_and(|c| c.menu_up()) || game_over.is_some_and(|g| g.menu_up());
     let mode = if menu {
         controller::MODE_TITLE
     } else {
@@ -5782,6 +5896,14 @@ fn simulate(
         ..
     } = &mut *game;
     let step = player.tick(&input, params, clips, world);
+    if game.map_fx_pending
+        && let Some(a) = area.as_deref()
+    {
+        game.map_fx_pending = false;
+        if let Some(pax) = a.current.pax.clone() {
+            start_map_effects(&mut game, &pax, a.bg_mask, None);
+        }
+    }
     magic_room::tick(&mut game, tick);
     // Wisdom's shots join the spell volumes before the hits are tested.
     drive_room::shots(&mut game);
@@ -5852,6 +5974,15 @@ fn simulate(
                         }
                         if let RoomWorld::Map(w) = &mut game.world {
                             w.set_group(bit, state);
+                        }
+                        // FUN_140162a00 spawns the group's elements,
+                        // FUN_1401629b0 destroys them.
+                        if state {
+                            if let Some(pax) = a.current.pax.clone() {
+                                start_map_effects(&mut game, &pax, 1 << bit, Some(bit));
+                            }
+                        } else {
+                            game.fx_clear_map.push(Some(bit));
                         }
                     }
                 }
@@ -6004,6 +6135,7 @@ fn bound_world(
 /// and keeps the quads they drew.
 fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effects>) {
     let tick = game.tick;
+    weapon_trail::tick(&mut game, fx.weapon.as_ref());
     let view = game_view(rig.camera.eye, rig.camera.look_at);
     for request in std::mem::take(&mut game.effect_queue) {
         let (pax, element, world, label, bound) = match request {
@@ -6038,15 +6170,59 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
                 );
                 (pax, element, world, "hit", None)
             }
+            EffectRequest::EnemyHit {
+                object,
+                effect,
+                random,
+                contact,
+                direction,
+            } => {
+                let pax = if object == 0 {
+                    fx.enemy.clone()
+                } else {
+                    fx.enemy_paxes.get(&object).cloned()
+                };
+                let Some(pax) = pax else { continue };
+                if random != 0 {
+                    game.event(serde_json::json!({"event":"effect_random_unmodelled","tick":tick,"count":random}));
+                }
+                // mask = (1 << (32 + hitEffect − 1)) | 1 on the attacker's
+                // own container; a hit with no such element starts nothing.
+                let mask = (1u64 << (32 + effect as u64 - 1)) | 1;
+                let Some(element) = pax.by_category(mask) else {
+                    game.event(serde_json::json!({"event":"effect_missing","tick":tick,"object":object,"mask":format!("{mask:#x}")}));
+                    continue;
+                };
+                let d = to_world(direction.to_array());
+                game.fx_queue.push(drive_fx::Placed {
+                    req: drive_fx::FxRequest {
+                        pax: pax.clone(),
+                        id: element.id,
+                        owner: 0xfe,
+                    },
+                    anchor: drive_fx::Anchor::World {
+                        at: contact,
+                        pitch: (-d[1]).atan2((d[0] * d[0] + d[2] * d[2]).sqrt()),
+                        yaw: d[0].atan2(d[2]),
+                    },
+                });
+                continue;
+            }
             EffectRequest::EnemyDead => {
-                let (Some(pax), Some(rt)) = (fx.enemy.clone(), game.enemy.as_ref()) else {
+                // effect_start_bind(obj, 2): the enemy's own element 2,
+                // bound to its object, with its own sound.
+                let Some(pax) = fx.enemy.clone() else {
                     continue;
                 };
-                let Some(element) = pax.by_id(2).cloned() else {
-                    continue;
-                };
-                let world = bound_world(rt.enemy.position, rt.enemy.yaw, &element);
-                (pax, element.clone(), world, "enemy_dead", Some(element))
+                game.fx_queue.push(drive_fx::Placed {
+                    req: drive_fx::FxRequest {
+                        pax,
+                        id: 2,
+                        owner: 0xfe,
+                    },
+                    anchor: drive_fx::Anchor::Enemy,
+                });
+                continue;
             }
             EffectRequest::System { id, at } => {
                 let Some(pax) = fx.system.clone() else {
@@ -6669,6 +6845,15 @@ fn sora_sounds(game: &mut Game) {
 fn play_sounds(mut game: ResMut<Game>, mut audio: ResMut<Audio>, hud: Option<Res<Hud>>) {
     let tick = game.tick;
     let mut requests = std::mem::take(&mut game.sound_queue);
+    // A map effect that ended fades its sound over half a second
+    // (FUN_1401de500 with 0x78 units).
+    for id in std::mem::take(&mut game.sound_stops) {
+        if let Some(output) = &audio.output
+            && let Ok(mut mixer) = output.mixer.lock()
+        {
+            mixer.fade(id, 0., 0.5, audio::FadeEnd::Stop);
+        }
+    }
     if let Some(hud) = hud {
         let s = hud.stats;
         let low = s.hp > 0 && s.hp <= s.max_hp / 4;
@@ -7442,11 +7627,16 @@ fn combat_tick(game: &mut Game, tick: u64) {
                     }
                     if sora_hit.is_none()
                         && clash.is_none_or(|k| k.0 != instance)
-                        && let Some(&(_, _, high)) = sora_spheres
+                        && let Some(&(body, body_radius, high)) = sora_spheres
                             .iter()
                             .find(|(b, r, _)| combat::spheres_overlap(c, radius, b.to_array(), *r))
                     {
-                        sora_hit = Some((instance, atkp, high));
+                        sora_hit = Some((
+                            instance,
+                            atkp,
+                            high,
+                            (Vec3::from_array(c), body, body_radius),
+                        ));
                     }
                 }
             }
@@ -7539,7 +7729,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
     if player.range_invulnerable(clips) || cheats.invincible {
         rt.sora_invulnerable = rt.sora_invulnerable.max(1.);
     }
-    if let Some((instance, atkp, _)) = sora_hit
+    if let Some((instance, atkp, _, _)) = sora_hit
         && rt.sora_invulnerable > 0.
     {
         // FUN_1403d65a0: no damage while +0xd70 runs (the hit is still
@@ -7552,7 +7742,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
             let _ = serde_json::to_writer(&mut *file, &record);
             let _ = std::io::Write::write_all(file, b"\n");
         }
-    } else if let Some((instance, atkp, high)) = sora_hit
+    } else if let Some((instance, atkp, high, (claw_at, body_at, body_radius))) = sora_hit
         && let Some(rows) = rt.steps.get(&(atkp, 0))
         && let Some(&(aid, group)) = rt.instance_ids.get(&instance)
         && rt.sora_hp > 0
@@ -7569,6 +7759,23 @@ fn combat_tick(game: &mut Game, tick: u64) {
             && id >= 0
         {
             sound_queue.push((id as u32, "sora_hit"));
+        }
+        // The claw's spark on Sora's hit shape, from the Shadow's own
+        // effects (FUN_1403d1b40; a sphere here, so height = radius).
+        if counted && rows[row].hit_effect != 0 {
+            let v = claw_at - body_at;
+            let y = v.y.clamp(-body_radius, body_radius);
+            let across = Vec3::new(v.x, 0., v.z).normalize_or_zero()
+                * body_radius
+                * (1. - (y / body_radius).powi(2)).max(0.).sqrt();
+            let heading = (sora_at - enemy_at) * Vec3::new(1., 0., 1.);
+            effect_queue.push(EffectRequest::EnemyHit {
+                object: 0,
+                effect: rows[row].hit_effect,
+                random: rows[row].hit_effect_random,
+                contact: body_at + across + Vec3::Y * y,
+                direction: heading.normalize_or(Vec3::Z),
+            });
         }
         let ab = &player.abilities;
         let state = combat::TargetState {
@@ -8781,8 +8988,12 @@ fn upload_camp_sheets(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asset
     }
 }
 
-fn field_running(camp: Option<Res<CampRes>>, debug: Res<debug_menu::DebugMenu>) -> bool {
-    camp.is_none_or(|c| !c.menu_up()) && !debug.open
+fn field_running(
+    camp: Option<Res<CampRes>>,
+    debug: Res<debug_menu::DebugMenu>,
+    game_over: Option<Res<game_over::GameOverRes>>,
+) -> bool {
+    camp.is_none_or(|c| !c.menu_up()) && !debug.open && game_over.is_none_or(|g| g.field_runs())
 }
 
 /// START (logical 0x2 in the field's pad mode) opens the camp
@@ -9699,6 +9910,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut gear_tour_quick = false;
     let mut enemy_tour = false;
     let mut enemy_battle_tour = false;
+    let mut game_over_tour = false;
     let mut enemy_audit = None;
     let mut options = args[3..].iter();
     while let Some(option) = options.next() {
@@ -9748,6 +9960,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("gear tour capture directory absent")?,
+                );
+            }
+            Some("--game-over-tour") if autoplay.is_none() => {
+                game_over_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("game over tour capture directory absent")?,
                 );
             }
             Some("--ability-tour") if autoplay.is_none() => {
@@ -9888,7 +10109,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let captures = if enemy_battle_tour {
+    let captures = if game_over_tour {
+        game_over::CAPTURES.to_vec()
+    } else if enemy_battle_tour {
         enemy_battle_tour::CAPTURES.to_vec()
     } else if enemy_tour {
         enemy_tour::CAPTURES.to_vec()
@@ -9903,7 +10126,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 }
             })
     };
-    let autoplay_end = if enemy_battle_tour {
+    let autoplay_end = if game_over_tour {
+        game_over::END
+    } else if enemy_battle_tour {
         enemy_battle_tour::END
     } else if enemy_tour {
         enemy_tour::END
@@ -10029,6 +10254,12 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         sound_queue: Vec::new(),
         sound_frame: None,
         effect_queue: Vec::new(),
+        fx_queue: Vec::new(),
+        trail_scan: None,
+        trail_length: None,
+        fx_clear_map: Vec::new(),
+        map_fx_pending: true,
+        sound_stops: Vec::new(),
         talking: false,
         rc_queued: false,
         advance_queued: false,
@@ -10168,6 +10399,11 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 Effects {
                     weapon: Some(Arc::new(e.weapon)),
                     enemy: e.enemy.map(Arc::new),
+                    enemy_paxes: e
+                        .enemy_paxes
+                        .into_iter()
+                        .map(|(id, p)| (id, Arc::new(p)))
+                        .collect(),
                     system: e.system.map(Arc::new),
                     running: Vec::new(),
                     rng: ::effect::Rng::default(),
@@ -10183,6 +10419,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             Effects {
                 weapon: None,
                 enemy: None,
+                enemy_paxes: HashMap::new(),
                 system: None,
                 running: Vec::new(),
                 rng: ::effect::Rng::default(),
@@ -10339,6 +10576,13 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             lang: settings.loaded_or("us"),
         });
     }
+    if let Some(src) = loaded.game_over.take() {
+        app.insert_resource(game_over::GameOverRes::new(
+            src,
+            (loaded.spawn.to_array(), loaded.yaw),
+            game_over_tour,
+        ));
+    }
     Ok(app
         .insert_resource(game)
         .insert_resource(Startup {
@@ -10397,7 +10641,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .init_resource::<debug_menu::DebugMenu>()
         .init_resource::<enemy_battle_tour::Checks>()
         .add_plugins(SkatePlugins)
-        .add_systems(Startup, (setup, pause_for_autoplay, camp_setup))
+        .add_systems(
+            Startup,
+            (setup, pause_for_autoplay, camp_setup, game_over::setup),
+        )
         .add_systems(Update, crate::skate::toggle)
         .add_systems(Update, settings_room::apply_settings)
         .add_systems(
@@ -10405,6 +10652,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             (
                 read_pad,
                 camp_tick,
+                game_over::tick,
                 (
                     simulate,
                     skate_tick,
@@ -10442,6 +10690,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 field_npc_present,
                 dissolve_present,
                 camera_control,
+                game_over::camera,
                 skate_camera,
             )
                 .chain(),
@@ -10463,7 +10712,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 afterimage.run_if(resource_exists::<Afterimage>),
                 compose_2d,
                 menu_model_present,
-                camp_present,
+                (camp_present, game_over::present, game_over::snap).chain(),
                 finish,
                 frame_stats,
             )

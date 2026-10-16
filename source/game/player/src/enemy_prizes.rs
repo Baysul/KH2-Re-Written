@@ -55,6 +55,17 @@ pub fn centre_height(kind: u8) -> f32 {
     H.get(kind as usize).copied().unwrap_or(0.)
 }
 
+/// The prize descriptor's sounds (table 0x1405c7390, bytes +8 and +0xc):
+/// se000 ids played on a ground bounce and on pickup.
+pub fn sounds(kind: u8) -> (u32, u32) {
+    match kind {
+        kind::SMALL_HP | kind::BIG_HP => (12, 16),
+        kind::BIG_MUNNY | kind::MEDIUM_MUNNY | kind::SMALL_MUNNY => (11, 15),
+        kind::SMALL_MP | kind::BIG_MP => (13, 17),
+        _ => (30, 31),
+    }
+}
+
 /// Munny turns into drive with Drive Converter: big and medium into big
 /// drive, small into small drive (table 0x1405c7978).
 fn converted(kind: u8) -> u8 {
@@ -104,6 +115,9 @@ pub struct Orb {
     pub position: Vec3,
     pub velocity: Vec3,
     pub landed: bool,
+    /// Ground bounces so far (FUN_1404132d0 +0x40): the first two play the
+    /// descriptor's bounce sound.
+    pub bounces: u8,
 }
 
 impl Orb {
@@ -119,16 +133,18 @@ impl Orb {
                 (r[0] * 40. - 20.) * VELOCITY_SCALE,
             ],
             landed: false,
+            bounces: 0,
         }
     }
 
     /// One tick of the fall and bounce [I: the exe's bounce constants were
     /// not traced; gravity is the actors' 0.408 and a bounce keeps half the
     /// speed]. `floor` is the ground height below the orb.
-    pub fn tick(&mut self, floor: f32) {
+    pub fn tick(&mut self, floor: f32) -> Option<u32> {
         if self.landed {
-            return;
+            return None;
         }
+        let mut sound = None;
         self.velocity[1] -= actor_physics::G;
         for i in 0..3 {
             self.position[i] += self.velocity[i];
@@ -142,8 +158,15 @@ impl Orb {
                 self.velocity[1] = -self.velocity[1] * 0.5;
                 self.velocity[0] *= 0.5;
                 self.velocity[2] *= 0.5;
+                // FUN_1404132d0: each bounce while the counter is below 2
+                // requests the descriptor's sound at the prize.
+                if self.bounces < 2 {
+                    sound = Some(sounds(self.kind).0);
+                }
+                self.bounces = self.bounces.saturating_add(1);
             }
         }
+        sound
     }
 
     /// FUN_1403dc500: within 120 (+ Draw) horizontally and 30 vertically

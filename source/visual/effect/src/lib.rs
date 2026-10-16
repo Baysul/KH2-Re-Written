@@ -7,12 +7,14 @@
 //! update pass every game frame, programs gated to even part frames, and a
 //! draw pass that advances part frames and instance time by 0x1000 every
 //! second game frame (one VM tick = 2.0 frame units, 30 Hz at 60 fps).
+mod extra;
 pub mod math;
 mod mega_birth;
 mod mega_model;
 mod models;
 mod programs;
 mod ribbon;
+mod shipoly;
 mod tail;
 mod thunder;
 
@@ -68,6 +70,9 @@ pub struct Quad {
     pub colour: [f32; 4],
     /// GS ALPHA register byte: 0x48 additive, 0x44 alpha blend.
     pub blend: u8,
+    /// Per-corner colours (same scale as `colour`) when the quad fades
+    /// along itself, as the swing trail does.
+    pub corner_colours: Option<[[f32; 4]; 4]>,
     /// Texture base pointer from the frame's TEX0 (selects the atlas).
     pub tbp: u16,
     /// The frame's full TEX0 register (TBP, CBP, size, format).
@@ -124,6 +129,8 @@ pub(crate) struct Part {
     pub vertex_override: Option<Arc<Vec<[i16; 3]>>>,
     /// pppEiDrawShipoly ribbon state by work offset u3.
     pub ribbons: std::collections::HashMap<usize, ribbon::Ribbon>,
+    /// pppRyjDrawShipolyBone swing trails by program use-value offset.
+    pub shipoly: std::collections::HashMap<usize, shipoly::Trail>,
     /// pppKeTh bolt pools by KeThRes work offset.
     pub thunder: std::collections::HashMap<usize, thunder::Pool>,
     /// Handle serial (the exe's generational handles, FUN_1404ad240).
@@ -230,6 +237,8 @@ pub(crate) struct Ctx<'a> {
     /// Instance flag bytes set by pppRyjMngFlag: draw layer (+0xc0),
     /// pause (+0xc1), camera offset (+0xc2).
     pub flags: &'a mut [u8; 3],
+    /// The trail's two world points of this frame (see [`Instance::trail`]).
+    pub trail: Option<[[f32; 3]; 2]>,
 }
 
 /// A running effect.
@@ -255,6 +264,10 @@ pub struct Instance {
     /// Screen units per view unit at depth 1 (x, y) for screen-space
     /// widths ([`DEFAULT_SCREEN_SCALE`] unless the camera says otherwise).
     pub screen_scale: [f32; 2],
+    /// The two world-space points a swing trail (pppRyjDrawShipolyBone)
+    /// follows this frame: the element's BonePos pair on its bone. The
+    /// host sets it before [`Instance::frame`].
+    pub trail: Option<[[f32; 3]; 2]>,
     /// pppRyjMngFlag bytes: draw layer, pause, camera offset.
     flags: [u8; 3],
     next_serial: u64,
@@ -297,6 +310,7 @@ impl Instance {
             model_draws: Vec::new(),
             triangles: Vec::new(),
             screen_scale: DEFAULT_SCREEN_SCALE,
+            trail: None,
             flags: [0; 3],
             next_serial: 1,
             released: false,
@@ -421,6 +435,7 @@ impl Instance {
             unsupported: &mut unsupported,
             catch_up: false,
             flags: &mut flags,
+            trail: self.trail,
         };
         self.update_pass(&mut ctx);
         self.draw_pass(&mut ctx, true);
@@ -471,6 +486,7 @@ impl Instance {
             mega_model: Default::default(),
             vertex_override: None,
             ribbons: Default::default(),
+            shipoly: Default::default(),
             thunder: Default::default(),
             serial,
             parent,

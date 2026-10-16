@@ -545,13 +545,16 @@ impl Fx {
                         layer,
                     })
                     .or_default();
-                let colour = [
-                    q.colour[0].clamp(0., 1.99).powf(2.2),
-                    q.colour[1].clamp(0., 1.99).powf(2.2),
-                    q.colour[2].clamp(0., 1.99).powf(2.2),
-                    q.colour[3].clamp(0., 1.),
-                ];
+                let grade = |c: [f32; 4]| {
+                    [
+                        c[0].clamp(0., 1.99).powf(2.2),
+                        c[1].clamp(0., 1.99).powf(2.2),
+                        c[2].clamp(0., 1.99).powf(2.2),
+                        c[3].clamp(0., 1.),
+                    ]
+                };
                 for i in [0, 1, 2, 0, 2, 3] {
+                    let colour = grade(q.corner_colours.map_or(q.colour, |c| c[i]));
                     batch.positions.push(scene(q.corners[i]));
                     batch
                         .uvs

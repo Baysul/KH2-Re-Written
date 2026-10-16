@@ -178,6 +178,12 @@ pub(super) fn load_kit(
         .flat_map(|p| &p.elements)
         .filter(|e| e.flags & 1 != 0 && (0..0x4000).contains(&e.bone))
         .map(|e| e.bone as usize)
+        .chain(
+            pax.iter()
+                .flat_map(|p| &p.elements)
+                .filter(|e| e.flags & 0x10000 != 0)
+                .flat_map(|e| [e.bone_pos.bone_a as usize, e.bone_pos.bone_b as usize]),
+        )
         .filter(|&b| b < actor.skinning.bones.len())
         .collect();
     if weapon_joint >= actor.skinning.bones.len()
@@ -443,6 +449,27 @@ pub(super) fn load_kit(
                     .get(&selected.slot)
                     .map(own_hits)
                     .unwrap_or_default();
+                // The weapon motion's range trigger 12 marks the swing trail.
+                let trails: Vec<(u32, u32)> = weapon_motions[0]
+                    .get(&selected.slot)
+                    .map(|m| {
+                        m.triggers
+                            .iter()
+                            .flat_map(|t| &t.records.ranges)
+                            .filter(|r| r.trigger == 12)
+                            .map(|r| {
+                                (
+                                    r.start_frame.max(0) as u32,
+                                    if r.end_frame < 0 {
+                                        clip.end
+                                    } else {
+                                        r.end_frame as u32
+                                    },
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 for offset in 0..=clip.end {
                     let frame = key_start + offset;
                     for (k, (frames_k, blade_k)) in [
@@ -541,6 +568,7 @@ pub(super) fn load_kit(
                     blade2,
                     hits,
                     hits2,
+                    trails,
                     actor_hits: own_hits(selected),
                     body: body_frames,
                     sounds: weapon_motions[0]

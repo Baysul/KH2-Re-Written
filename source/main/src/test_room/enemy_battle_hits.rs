@@ -565,16 +565,18 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                     }
                     if incoming.is_none()
                         && *hero_hit_tick != Some(tick)
-                        && let Some(&(_, _, high)) = sora_body.iter().find(|(body, radius, _)| {
-                            combat::spheres_overlap(c, shape.radius, body.to_array(), *radius)
-                        })
+                        && let Some(&(body, body_radius, high)) =
+                            sora_body.iter().find(|(body, radius, _)| {
+                                combat::spheres_overlap(c, shape.radius, body.to_array(), *radius)
+                            })
                     {
-                        incoming = Some((ids, rows.clone(), high, w.id));
+                        incoming =
+                            Some((ids, rows.clone(), high, w.id, (centre, body, body_radius)));
                     }
                 }
             }
         }
-        if let Some(((aid, group), rows, high, atkp)) = incoming {
+        if let Some(((aid, group), rows, high, atkp, (claw_at, body_at, body_radius))) = incoming {
             *hero_hit_tick = Some(tick);
             if rt.sora_invulnerable > 0. || player.range_invulnerable(clips) || cheats.invincible {
                 rt.sora_record.hit(aid, group, false, |_| (0, 0));
@@ -643,6 +645,22 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
             }
             if counted && rows[row].hit_sound >= 0 {
                 sound_queue.push((rows[row].hit_sound as u32, "sora_hit"));
+            }
+            // The attacker's spark on Sora's hit shape (FUN_1403d1b40; a
+            // sphere, so height = radius), from the attacker's own effects.
+            if counted && rows[row].hit_effect != 0 {
+                let v = claw_at - body_at;
+                let y = v.y.clamp(-body_radius, body_radius);
+                let across = Vec3::new(v.x, 0., v.z).normalize_or_zero()
+                    * body_radius
+                    * (1. - (y / body_radius).powi(2)).max(0.).sqrt();
+                effect_queue.push(EffectRequest::EnemyHit {
+                    object: battle.assets.object_id,
+                    effect: rows[row].hit_effect,
+                    random: rows[row].hit_effect_random,
+                    contact: body_at + across + Vec3::Y * y,
+                    direction,
+                });
             }
             if rt.sora_hp == 0 && player.die(clips).is_some() {
                 *action_started = tick;

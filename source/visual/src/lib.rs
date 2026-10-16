@@ -13,6 +13,7 @@ pub mod level_up;
 pub mod menu_screen;
 pub mod new_game;
 pub mod overlay;
+pub mod pause_definition;
 pub mod pause_menu;
 pub mod room;
 pub mod scenery;

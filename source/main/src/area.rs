@@ -119,6 +119,8 @@ pub struct LoadedArea {
     pub lines: HashMap<u32, Vec<u8>>,
     /// Player spawn in scene coordinates (Y up) and scene yaw.
     pub player: (Vec3, f32),
+    /// The map's own effects (its first BAR entry of type 18, FUN_1401613c0).
+    pub pax: Option<Arc<data::object_effect::Pax>>,
 }
 
 /// What the field and battle music slots must do on entering an area
@@ -385,6 +387,7 @@ impl AreaSource {
             }
         });
         let collision = map_collision(&map, state.setup.bg_mask)?;
+        let pax = map_pax(&map).map(Arc::new);
         let player = Area::player_spawn(&spawns)
             .map(|s| {
                 let [x, y, z] = s.entity.position;
@@ -409,6 +412,7 @@ impl AreaSource {
                 scripts,
                 lines,
                 player,
+                pax,
             },
         ))
     }
@@ -676,6 +680,17 @@ impl script::Game for Flags<'_> {
 
 /// The map BAR's first type-6 COCT as the body collision world
 /// (FUN_1401613c0 +0x68 → FUN_1401722f0 with the area's group mask).
+/// The map's effect container: the first type-18 entry of the map BAR.
+fn map_pax(map: &[u8]) -> Option<data::object_effect::Pax> {
+    let table = data::bar::read_bar(map).ok()?;
+    let e = table
+        .entries
+        .iter()
+        .find(|e| e.entry_type == 18 && e.size > 0)?;
+    let bytes = map.get(e.offset as usize..e.offset as usize + e.size as usize)?;
+    data::object_effect::read_pax(bytes).ok()
+}
+
 fn map_collision(map: &[u8], mask: u64) -> Result<collision::World> {
     let table = bar::read_bar(map)?;
     let e = table
