@@ -281,6 +281,8 @@ struct EffectConfig {
 struct EffectSources {
     weapon: object_effect::Pax,
     enemy: Option<object_effect::Pax>,
+    /// The other battle enemies' object effects by objentry id.
+    enemy_paxes: Vec<(u32, object_effect::Pax)>,
     system: Option<object_effect::Pax>,
     atlas: visual::effects::Atlas,
 }
@@ -290,6 +292,16 @@ enum EffectRequest {
     /// Keyblade hit spark (FUN_1403d1b40): ATKP hit effect and random
     /// count, contact point and hit direction in scene coordinates.
     Hit {
+        effect: u8,
+        random: u8,
+        contact: Vec3,
+        direction: Vec3,
+    },
+    /// An enemy attack landing on Sora (FUN_1403d1b40 with the attacker's
+    /// own container): `object` is the attacker's objentry id (0 = the
+    /// room's enemy); the spark starts at the contact point.
+    EnemyHit {
+        object: u32,
         effect: u8,
         random: u8,
         contact: Vec3,
@@ -314,6 +326,7 @@ struct RunningEffect {
 struct Effects {
     weapon: Option<Arc<object_effect::Pax>>,
     enemy: Option<Arc<object_effect::Pax>>,
+    enemy_paxes: HashMap<u32, Arc<object_effect::Pax>>,
     system: Option<Arc<object_effect::Pax>>,
     running: Vec<RunningEffect>,
     rng: ::effect::Rng,
@@ -882,6 +895,14 @@ struct Game {
     /// Action start tick and clip tick already scanned for sound triggers.
     sound_frame: Option<(u64, u32)>,
     effect_queue: Vec<EffectRequest>,
+    /// Elements to start next tick at a place other than Sora's own.
+    fx_queue: Vec<drive_fx::Placed>,
+    /// Map effect groups to end (None = all of them).
+    fx_clear_map: Vec<Option<u8>>,
+    /// The area's map effects still to be started (a new area).
+    map_fx_pending: bool,
+    /// Looping sound requests to stop (a map effect that ended).
+    sound_stops: Vec<u32>,
     /// Field talk: control locked, and this tick's reaction / advance
     /// presses (Triangle; decide, back or Triangle).
     talking: bool,
@@ -947,6 +968,28 @@ fn to_world(p: [f32; 3]) -> [f32; 3] {
 }
 fn from_world(p: [f32; 3]) -> Vec3 {
     Vec3::new(p[0], -p[1], -p[2])
+}
+
+/// Starts the map elements of every background group set in `mask`, in
+/// bit order and then table order (FUN_1402c7010 per set bit).
+fn start_map_effects(game: &mut Game, pax: &Arc<object_effect::Pax>, mask: u64, only: Option<u8>) {
+    for bit in 0..64u8 {
+        if mask >> bit & 1 == 0 || only.is_some_and(|o| o != bit) {
+            continue;
+        }
+        for (index, element) in pax.elements.iter().enumerate() {
+            if element.group == bit {
+                game.fx_queue.push(drive_fx::Placed {
+                    req: drive_fx::FxRequest {
+                        pax: pax.clone(),
+                        id: element.id,
+                        owner: 0xfd,
+                    },
+                    anchor: drive_fx::Anchor::Map { index },
+                });
+            }
+        }
+    }
 }
 
 fn camera_input(player: &Player, previous: [f32; 3], speed: f32) -> CameraInput {
@@ -2898,6 +2941,16 @@ fn load(
             Some(EffectSources {
                 weapon: pax(&e.weapon)?,
                 enemy: e.enemy.as_ref().map(pax).transpose()?,
+                enemy_paxes: data::path_lookup::Library::open(source)
+                    .map(|mut library| {
+                        enemy_battle::SUPPORTED
+                            .iter()
+                            .filter_map(|&(id, name)| {
+                                drive_room::object_pax(&mut library, name).map(|p| (id, p))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 system: e.system.as_ref().map(pax).transpose()?,
                 atlas: load_atlas(source, &e.atlas.index, e.atlas.ordinal, e.atlas.name_hash)?,
             })
@@ -3753,6 +3806,9 @@ fn area_transition(
         .map(|t| (t.clone(), 120));
     area.bg_mask = next.state.setup.bg_mask;
     area.current = next;
+    // The old area's effects end with it; the new area's start next tick.
+    game.fx_clear_map.push(None);
+    game.map_fx_pending = true;
     if let Some(t) = area.transition.as_mut() {
         t.stage = Stage::Opening;
         t.iris = hud
@@ -5735,6 +5791,14 @@ fn simulate(
         ..
     } = &mut *game;
     let step = player.tick(&input, params, clips, world);
+    if game.map_fx_pending
+        && let Some(a) = area.as_deref()
+    {
+        game.map_fx_pending = false;
+        if let Some(pax) = a.current.pax.clone() {
+            start_map_effects(&mut game, &pax, a.bg_mask, None);
+        }
+    }
     magic_room::tick(&mut game, tick);
     // Wisdom's shots join the spell volumes before the hits are tested.
     drive_room::shots(&mut game);
@@ -5805,6 +5869,15 @@ fn simulate(
                         }
                         if let RoomWorld::Map(w) = &mut game.world {
                             w.set_group(bit, state);
+                        }
+                        // FUN_140162a00 spawns the group's elements,
+                        // FUN_1401629b0 destroys them.
+                        if state {
+                            if let Some(pax) = a.current.pax.clone() {
+                                start_map_effects(&mut game, &pax, 1 << bit, Some(bit));
+                            }
+                        } else {
+                            game.fx_clear_map.push(Some(bit));
                         }
                     }
                 }
@@ -5991,15 +6064,59 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
                 );
                 (pax, element, world, "hit", None)
             }
+            EffectRequest::EnemyHit {
+                object,
+                effect,
+                random,
+                contact,
+                direction,
+            } => {
+                let pax = if object == 0 {
+                    fx.enemy.clone()
+                } else {
+                    fx.enemy_paxes.get(&object).cloned()
+                };
+                let Some(pax) = pax else { continue };
+                if random != 0 {
+                    game.event(serde_json::json!({"event":"effect_random_unmodelled","tick":tick,"count":random}));
+                }
+                // mask = (1 << (32 + hitEffect − 1)) | 1 on the attacker's
+                // own container; a hit with no such element starts nothing.
+                let mask = (1u64 << (32 + effect as u64 - 1)) | 1;
+                let Some(element) = pax.by_category(mask) else {
+                    game.event(serde_json::json!({"event":"effect_missing","tick":tick,"object":object,"mask":format!("{mask:#x}")}));
+                    continue;
+                };
+                let d = to_world(direction.to_array());
+                game.fx_queue.push(drive_fx::Placed {
+                    req: drive_fx::FxRequest {
+                        pax: pax.clone(),
+                        id: element.id,
+                        owner: 0xfe,
+                    },
+                    anchor: drive_fx::Anchor::World {
+                        at: contact,
+                        pitch: (-d[1]).atan2((d[0] * d[0] + d[2] * d[2]).sqrt()),
+                        yaw: d[0].atan2(d[2]),
+                    },
+                });
+                continue;
+            }
             EffectRequest::EnemyDead => {
-                let (Some(pax), Some(rt)) = (fx.enemy.clone(), game.enemy.as_ref()) else {
+                // effect_start_bind(obj, 2): the enemy's own element 2,
+                // bound to its object, with its own sound.
+                let Some(pax) = fx.enemy.clone() else {
                     continue;
                 };
-                let Some(element) = pax.by_id(2).cloned() else {
-                    continue;
-                };
-                let world = bound_world(rt.enemy.position, rt.enemy.yaw, &element);
-                (pax, element.clone(), world, "enemy_dead", Some(element))
+                game.fx_queue.push(drive_fx::Placed {
+                    req: drive_fx::FxRequest {
+                        pax,
+                        id: 2,
+                        owner: 0xfe,
+                    },
+                    anchor: drive_fx::Anchor::Enemy,
+                });
+                continue;
             }
             EffectRequest::System { id, at } => {
                 let Some(pax) = fx.system.clone() else {
@@ -6622,6 +6739,15 @@ fn sora_sounds(game: &mut Game) {
 fn play_sounds(mut game: ResMut<Game>, mut audio: ResMut<Audio>, hud: Option<Res<Hud>>) {
     let tick = game.tick;
     let mut requests = std::mem::take(&mut game.sound_queue);
+    // A map effect that ended fades its sound over half a second
+    // (FUN_1401de500 with 0x78 units).
+    for id in std::mem::take(&mut game.sound_stops) {
+        if let Some(output) = &audio.output
+            && let Ok(mut mixer) = output.mixer.lock()
+        {
+            mixer.fade(id, 0., 0.5, audio::FadeEnd::Stop);
+        }
+    }
     if let Some(hud) = hud {
         let s = hud.stats;
         let low = s.hp > 0 && s.hp <= s.max_hp / 4;
@@ -7396,11 +7522,16 @@ fn combat_tick(game: &mut Game, tick: u64) {
                     }
                     if sora_hit.is_none()
                         && clash.is_none_or(|k| k.0 != instance)
-                        && let Some(&(_, _, high)) = sora_spheres
+                        && let Some(&(body, body_radius, high)) = sora_spheres
                             .iter()
                             .find(|(b, r, _)| combat::spheres_overlap(c, radius, b.to_array(), *r))
                     {
-                        sora_hit = Some((instance, atkp, high));
+                        sora_hit = Some((
+                            instance,
+                            atkp,
+                            high,
+                            (Vec3::from_array(c), body, body_radius),
+                        ));
                     }
                 }
             }
@@ -7493,7 +7624,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
     if player.range_invulnerable(clips) || cheats.invincible {
         rt.sora_invulnerable = rt.sora_invulnerable.max(1.);
     }
-    if let Some((instance, atkp, _)) = sora_hit
+    if let Some((instance, atkp, _, _)) = sora_hit
         && rt.sora_invulnerable > 0.
     {
         // FUN_1403d65a0: no damage while +0xd70 runs (the hit is still
@@ -7506,7 +7637,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
             let _ = serde_json::to_writer(&mut *file, &record);
             let _ = std::io::Write::write_all(file, b"\n");
         }
-    } else if let Some((instance, atkp, high)) = sora_hit
+    } else if let Some((instance, atkp, high, (claw_at, body_at, body_radius))) = sora_hit
         && let Some(rows) = rt.steps.get(&(atkp, 0))
         && let Some(&(aid, group)) = rt.instance_ids.get(&instance)
         && rt.sora_hp > 0
@@ -7523,6 +7654,23 @@ fn combat_tick(game: &mut Game, tick: u64) {
             && id >= 0
         {
             sound_queue.push((id as u32, "sora_hit"));
+        }
+        // The claw's spark on Sora's hit shape, from the Shadow's own
+        // effects (FUN_1403d1b40; a sphere here, so height = radius).
+        if counted && rows[row].hit_effect != 0 {
+            let v = claw_at - body_at;
+            let y = v.y.clamp(-body_radius, body_radius);
+            let across = Vec3::new(v.x, 0., v.z).normalize_or_zero()
+                * body_radius
+                * (1. - (y / body_radius).powi(2)).max(0.).sqrt();
+            let heading = (sora_at - enemy_at) * Vec3::new(1., 0., 1.);
+            effect_queue.push(EffectRequest::EnemyHit {
+                object: 0,
+                effect: rows[row].hit_effect,
+                random: rows[row].hit_effect_random,
+                contact: body_at + across + Vec3::Y * y,
+                direction: heading.normalize_or(Vec3::Z),
+            });
         }
         let ab = &player.abilities;
         let state = combat::TargetState {
@@ -9872,6 +10020,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         sound_queue: Vec::new(),
         sound_frame: None,
         effect_queue: Vec::new(),
+        fx_queue: Vec::new(),
+        fx_clear_map: Vec::new(),
+        map_fx_pending: true,
+        sound_stops: Vec::new(),
         talking: false,
         rc_queued: false,
         advance_queued: false,
@@ -10010,6 +10162,11 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 Effects {
                     weapon: Some(Arc::new(e.weapon)),
                     enemy: e.enemy.map(Arc::new),
+                    enemy_paxes: e
+                        .enemy_paxes
+                        .into_iter()
+                        .map(|(id, p)| (id, Arc::new(p)))
+                        .collect(),
                     system: e.system.map(Arc::new),
                     running: Vec::new(),
                     rng: ::effect::Rng::default(),
@@ -10025,6 +10182,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             Effects {
                 weapon: None,
                 enemy: None,
+                enemy_paxes: HashMap::new(),
                 system: None,
                 running: Vec::new(),
                 rng: ::effect::Rng::default(),
