@@ -40,7 +40,12 @@ pub(crate) const VERTEX_AP: u32 = 174;
 /// pppVertexApLc (FUN_1404d3e00): VertexAp with raw (untransformed) vertices.
 pub(crate) const VERTEX_AP_LC: u32 = 177;
 pub(crate) const DRAW_MATRIX_LOOP: u32 = 217;
+/// pppDrawMdlLoop (218): the scroll update FUN_1404c8f00 (the code of
+/// FUN_1404c9350) and draw FUN_1404c90f0.
+pub(crate) const DRAW_MDL_LOOP: u32 = 218;
 pub(crate) const DRAW_MDL_LOOP_Z: u32 = 219;
+/// pppVertexApLcLoop (236): the table points at FUN_1404d3e00 like 177.
+pub(crate) const VERTEX_AP_LC_LOOP: u32 = 236;
 pub(crate) const SNO_MDL_DTT_NORM: u32 = 238;
 
 /// x86 `cvttss2si`: out-of-range and NaN give 0x80000000.
@@ -117,8 +122,8 @@ pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx)
             part.draw = math::mul(&ctx.ede0, &math::mul(&ctx.ed60, &part.cur));
         }
         DRAW_MDL_TS3 => ts3_update(p, cursor, part, ctx),
-        DRAW_MDL_LOOP_Z => loop_z_update(p, cursor, part, ctx),
-        VERTEX_AP | VERTEX_AP_LC => vertex_ap(p, cursor, part, ctx),
+        DRAW_MDL_LOOP | DRAW_MDL_LOOP_Z => loop_z_update(p, cursor, part, ctx),
+        VERTEX_AP | VERTEX_AP_LC | VERTEX_AP_LC_LOOP => vertex_ap(p, cursor, part, ctx),
         _ => {}
     }
 }
@@ -145,6 +150,20 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
             let u0 = use_val(ctx, p, 0);
             let s = use_val(ctx, p, 2);
             let b = (byte(ctx, cursor + 0x26) != 0).then(|| read_matrix(part, use_val(ctx, p, 3)));
+            let mode = (byte(ctx, cursor + 0x20) != 0xff)
+                .then(|| i16_at(&ctx.dpd.bytes, cursor + 0x20).unwrap_or(0) as u16);
+            let scroll = [
+                cvtt(part.f32(s + 4) * 65536.),
+                cvtt(part.f32(s + 0x10) * 65536.),
+            ];
+            push_draw(ctx, part, word(ctx, cursor + 4), u0, b, scroll, mode);
+        }
+        // FUN_1404c90f0: the same scroll pair; the extra matrix (byte +0x25)
+        // is the parent × cur, the mode word +0x20 unless its low byte is 0xff.
+        DRAW_MDL_LOOP => {
+            let u0 = use_val(ctx, p, 0);
+            let s = use_val(ctx, p, 2);
+            let b = (byte(ctx, cursor + 0x25) != 0).then(|| math::mul(&ctx.ed60, &part.cur));
             let mode = (byte(ctx, cursor + 0x20) != 0xff)
                 .then(|| i16_at(&ctx.dpd.bytes, cursor + 0x20).unwrap_or(0) as u16);
             let scroll = [

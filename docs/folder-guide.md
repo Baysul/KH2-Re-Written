@@ -22,8 +22,9 @@ established.
 | Rooms, scenery or 2D drawing | `source/visual/src/room.rs`, `scenery.rs`, `overlay.rs` |
 | Keyboard/controller mapping | [source/visual/src/input.rs](../source/visual/src/input.rs), [controller.rs](../source/visual/src/controller.rs) |
 | Particle/model effects | [source/visual/effect/src/](../source/visual/effect/src/) |
+| Spell effects and the magic tour | `source/main/src/test_room/spell_fx.rs`, `magic_room.rs`, `magic_tour.rs` |
 | Mixing and Windows sound output | [source/audio/src/](../source/audio/src/) |
-| Which sounds a scene requests | `source/visual/src/sound.rs`, `footsteps.rs`, `spell_sound.rs` |
+| Which sounds a scene requests | `source/visual/src/sound.rs`, `footsteps.rs` |
 | Reading a game file format | [source/data/src/](../source/data/src/); descriptive model, motion, room and table prefixes |
 | Supported-source checks | [validation/src/lib.rs](../validation/src/lib.rs) |
 | Model/image viewers or motion probes | [source/main/src/bin/](../source/main/src/bin/) |
