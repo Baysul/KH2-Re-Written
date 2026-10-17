@@ -24,7 +24,7 @@ const MOTIONS: [u16; 5] = [0, 1, 2, 151, 152];
 /// The reaction motions, loaded when the set holds them: the flinches and
 /// air flinches, the blows and their land motions, the guard bounce, the
 /// DEAD motion and the get-up.
-const REACTIONS: [u16; 14] = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 41, 54, 55, 43];
+const REACTIONS: [u16; 15] = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 41, 54, 55, 43, 5];
 
 /// One motion, sampled per tick (60 Hz).
 pub struct MotionData {
@@ -53,6 +53,8 @@ pub struct MotionData {
     /// Range 2's start: the tick the member can act again after a
     /// reaction (`obj+0x18c` bits 2-4).
     pub actionable: Option<u32>,
+    /// Frame trigger 14: (tick, voice n) (FUN_14040dd70 to FUN_1403d69b0).
+    pub voices: Vec<(u32, i16)>,
 }
 
 impl MotionData {
@@ -102,6 +104,9 @@ pub struct PartyKind {
     /// SSTM (the knock-back and blow constants) and the KO rates.
     pub sstm: actor_physics::Sstm,
     pub rates: party_hit::Rates,
+    /// The member character id (2 Donald, 3 Goofy) and its battle voices.
+    pub character: u8,
+    pub voices: Option<drive_room::Voices>,
 }
 
 /// A member in the room.
@@ -134,6 +139,10 @@ pub struct MemberRt {
     /// waits) and whether its shot was clashed by a guard last tick.
     pub cast_motion: u16,
     pub reflected: bool,
+    /// The member voices and the motion and tick its frame triggers were
+    /// last scanned at.
+    pub voices: Option<drive_room::Voices>,
+    pub voice_at: (u16, u32),
 }
 
 fn matrix(m: &[u32; 16], root: Vec3) -> Mat4 {
@@ -195,6 +204,13 @@ fn build_motion(
             }),
         staff: Vec::new(),
         hit: Vec::new(),
+        voices: selected
+            .triggers
+            .iter()
+            .flat_map(|t| &t.records.frames)
+            .filter(|f| f.trigger == 14)
+            .filter_map(|f| Some((f.frame.max(0) as u32, *f.parameters.first()? as i16)))
+            .collect(),
         actionable: selected
             .triggers
             .iter()
@@ -506,6 +522,8 @@ pub fn load(
         ko_time,
         sstm,
         rates,
+        character: character as u8,
+        voices: None,
     })
 }
 
@@ -769,6 +787,42 @@ impl BattleMode {
 const KO_FX: u64 = FX_BASE | 1 << 39;
 
 impl MemberRt {
+    /// FUN_1403d69b0: a battle voice, picked from the vtbl rows of the
+    /// character.
+    pub fn say(&mut self, n: i16, sound_queue: &mut Vec<(u32, &'static str)>) {
+        let character = self.kind.character;
+        if let Some(id) = self.voices.as_mut().and_then(|v| v.pick(character, n)) {
+            sound_queue.push((id, "party_voice"));
+        }
+    }
+
+    /// Frame trigger 14 of the motion playing: the voices whose tick the
+    /// motion has reached since the last scan.
+    fn motion_voices(&mut self, sound_queue: &mut Vec<(u32, &'static str)>) {
+        let motion = self.follower.motion();
+        let tick = self.follower.tick;
+        let from = match self.voice_at {
+            (m, t) if m == motion && t <= tick => Some(t),
+            _ => None,
+        };
+        self.voice_at = (motion, tick);
+        let due: Vec<i16> = self
+            .kind
+            .motions
+            .get(&motion)
+            .map(|d| {
+                d.voices
+                    .iter()
+                    .filter(|&&(at, _)| from.is_none_or(|f| at > f) && at <= tick)
+                    .map(|&(_, n)| n)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for n in due {
+            self.say(n, sound_queue);
+        }
+    }
+
     pub fn down(&self) -> bool {
         self.follower.down.is_some()
     }
@@ -849,6 +903,9 @@ struct Taken {
     counted: bool,
     reaction: Option<u16>,
     ko: bool,
+    /// Voices the hit calls for: 9 when HP first falls to a quarter
+    /// (FUN_1403c34d0), 2 at the KO (FUN_1403d5dc0).
+    voices: Vec<i16>,
 }
 
 /// The enemy side of a hit on a member, from the attack's own tables.
@@ -887,6 +944,7 @@ fn take_hit<W: player::World>(
                 counted,
                 reaction: None,
                 ko: false,
+                voices: Vec::new(),
             },
             row,
         );
@@ -909,6 +967,15 @@ fn take_hit<W: player::World>(
     if ko {
         m.follower.ko(m.kind.ko_time);
     }
+    // FUN_1403c1d30: HP at or under a quarter of the maximum.
+    let quarter = |hp: i32| hp <= m.max_hp / 4;
+    let mut voices = Vec::new();
+    if !quarter(before) && quarter(m.hp) {
+        voices.push(9);
+    }
+    if ko {
+        voices.push(2);
+    }
     let away = ((blow.body.0 - blow.from) * Vec3::new(1., 0., 1.)).normalize_or(Vec3::Z);
     let hit = player::Hit {
         reaction: attack.reaction,
@@ -927,6 +994,7 @@ fn take_hit<W: player::World>(
             counted,
             reaction,
             ko,
+            voices,
         },
         row,
     )
@@ -1056,6 +1124,9 @@ pub fn receive<W: player::World>(
         let (taken, row) = take_hit(src, m, &blow, world);
         if !taken.counted {
             return None;
+        }
+        for n in &taken.voices {
+            m.say(*n, sound_queue);
         }
         let rows = &claw.rows;
         if rows[row].hit_sound >= 0 {
@@ -1285,6 +1356,7 @@ pub fn tick(game: &mut Game, tick: u64) {
         };
         let was = m.follower.attack.is_some();
         m.follower.tick(kind.records, &scene);
+        m.motion_voices(sound_queue);
         // FUN_1403c3660: the KO timer ran out; FUN_1403c3bd0 heals through
         // FUN_1403d2eb0, which revives the member.
         if m.follower.revive_due() {
@@ -1364,6 +1436,18 @@ pub fn tick(game: &mut Game, tick: u64) {
             );
             m.cast_motion = a.motion;
             m.reflected = false;
+            // The act first call, trap (1,262): 6 for Donald attack spells,
+            // 21 when Cure heals himself and 3 for another member.
+            match spell {
+                party_members::Spell::Cure => m.say(
+                    if a.heal as usize == index + 1 { 21 } else { 3 },
+                    sound_queue,
+                ),
+                party_members::Spell::Fire
+                | party_members::Spell::Blizzard
+                | party_members::Spell::Thunder => m.say(6, sound_queue),
+                _ => {}
+            }
             log_event(
                 log,
                 serde_json::json!({"event":"party_cast","tick":tick,"member":kind.name,
@@ -1599,6 +1683,9 @@ pub fn tick(game: &mut Game, tick: u64) {
             }
         }
     }
+    // The guard spheres are read once, by the tick that follows their
+    // making.
+    enemy_guards.clear();
     // attack_strike on the chosen member: Cure's heal is an ATKP Type 6 row,
     // (Power x Magic + 99) / 100 with the healer's Magic, clamped to the
     // maximum HP.

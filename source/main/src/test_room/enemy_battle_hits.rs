@@ -111,7 +111,6 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         enemy_guards,
         ..
     } = game;
-    enemy_guards.clear();
     let Some(rt) = enemy.as_mut() else { return };
     let sora_at = Vec3::from_array(player.position);
     let sora_turn = Quat::from_rotation_y(player.yaw);
@@ -554,7 +553,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 priors.push(prior);
                 // A Type 3 attack is a super guard: what a Type 1 shot
                 // clashes with (CLASH pair 1-3).
-                if rows[0].kind == 3 {
+                if rows[0].kind == 3 && !party.is_empty() {
                     enemy_guards.push((centre, radius));
                 }
                 member_samples.push(party_room::ClawSample {

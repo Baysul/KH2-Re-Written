@@ -3428,8 +3428,24 @@ fn load(
                             character,
                             records,
                         ) {
-                            Ok(k) => {
+                            Ok(mut k) => {
                                 eprintln!("party member {} loaded", k.name);
+                                // The member's battle voices: the same vtbl rows
+                                // and `voice/us/battle/<world>0_<name>` (the
+                                // exe's `%s%d_%s` with sora, donald, goofy).
+                                let who = if character == 2 { "donald" } else { "goofy" };
+                                k.voices = library
+                                    .read(&format!(
+                                        "voice/us/battle/{voice_world}0_{who}.win32.scd"
+                                    ))
+                                    .ok()
+                                    .and_then(|bytes| banks.insert(bytes).ok())
+                                    .and_then(|bank| {
+                                        drive_room::Voices::read(
+                                            bar_entry(&battle, b"vtbl").ok()?,
+                                            bank,
+                                        )
+                                    });
                                 kinds.push(std::sync::Arc::new(k));
                             }
                             Err(e) => eprintln!("party member {name}: {e}"),
@@ -11117,7 +11133,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 hp: kind.hp,
                 max_hp: kind.hp,
                 mp: player::magic::Mp::new(kind.mp),
-                kind,
+                kind: kind.clone(),
                 follower: player::party_members::Follower::spawn(
                     loaded.spawn.to_array(),
                     loaded.yaw,
@@ -11129,6 +11145,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 casts: 0,
                 armed: false,
                 forced: None,
+                voices: kind.voices.clone(),
+                voice_at: (u16::MAX, 0),
                 record: combat::HitRecord::new(true),
                 ko_fx: false,
                 cast_motion: 0,

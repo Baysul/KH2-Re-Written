@@ -59,6 +59,11 @@ enum Case {
     Shield {
         member: usize,
     },
+    /// Donald's Blizzard flies into a Type 3 guard sphere (an enemy's super
+    /// guard) 300 ahead of him: the shot ends.
+    Reflect {
+        member: usize,
+    },
     /// The Shadow fights on its own, the party's AI casts.
     Fight,
 }
@@ -92,6 +97,8 @@ const CASES: &[Case] = &[
     Case::KoHit { member: GOOFY },
     Case::Wait(60),
     Case::Shield { member: GOOFY },
+    Case::Wait(60),
+    Case::Reflect { member: DONALD },
     Case::Wait(60),
     Case::Enemy(true),
     Case::CastHit {
@@ -339,6 +346,37 @@ pub fn drive(game: &mut Game, tick: u64) {
                 state.mark = tick;
             }
             1 => done = free(game, member) && tick > state.mark + 20,
+            _ => {}
+        },
+        Case::Reflect { member } => match state.stage {
+            0 if free(game, member) => {
+                stage(game, member, None);
+                let ordered = party_room::order_cast(game, member, Spell::Blizzard, 0);
+                log(
+                    game,
+                    tick,
+                    index,
+                    "reflect_cast",
+                    serde_json::json!({"member":member,"ordered":ordered}),
+                );
+                capture(game, tick, &[40, 52, 60]);
+                state.stage = 1;
+                state.mark = tick;
+            }
+            1 => {
+                // The guard sphere stands in the shot's path every tick.
+                if let Some(m) = game.party.get(member) {
+                    let (s, c) = m.follower.yaw.sin_cos();
+                    let p = m.follower.position;
+                    let at = Vec3::new(p[0] + s * 300., p[1] + 90., p[2] + c * 300.);
+                    game.enemy_guards.push((at, 80.));
+                }
+                if tick > state.mark + 8 && free(game, member) {
+                    done = true;
+                } else if tick > state.mark + PATIENCE {
+                    done = true;
+                }
+            }
             _ => {}
         },
         Case::Fight => {

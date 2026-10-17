@@ -38,6 +38,9 @@ pub mod motion {
     /// The guard bounce (`FUN_1403d4650`, motion -1): ground and air.
     pub const BOUNCE: u16 = 41;
     pub const BOUNCE_AIR: u16 = 43;
+    /// The land motion of the mode-1 landing (`obj+0x11c` = 5, set by
+    /// `FUN_1403cbec0`), played after an air flinch.
+    pub const LAND: u16 = 5;
     /// 0x36 and 0x37 (`FUN_1403c3660`, `FUN_1403c3c30`).
     pub const DEAD: u16 = 54;
     pub const REVIVE: u16 = 55;
@@ -376,7 +379,19 @@ impl Reaction {
                 let d = self.sampler.displacement();
                 let moved = env.world.collide(position, d, true, &env.body);
                 position = moved.position;
-                (position, moved.on_floor)
+                if moved.on_floor {
+                    // The landing plays the land motion when the set has it.
+                    if (env.length)(motion::LAND).is_some() {
+                        self.phase = Phase::Land;
+                        self.motion = motion::LAND;
+                        self.tick = 0;
+                        self.arc = None;
+                        self.sampler = Sampler::default();
+                        return (position, false);
+                    }
+                    return (position, true);
+                }
+                (position, false)
             }
         }
     }
@@ -524,6 +539,54 @@ mod tests {
             &ALL,
         );
         assert_eq!(back.reaction.unwrap().motion, 18);
+    }
+
+    #[test]
+    fn an_air_flinch_hops_falls_and_lands_on_the_land_motion() {
+        let s = sstm();
+        let started = start(&hit(3, [0., -1.], true), &s, [0., 1.], 100., true, &ALL);
+        let mut r = started.reaction.unwrap();
+        assert_eq!((r.phase, r.motion), (Phase::Air, 14));
+        // Turned to the attacker.
+        assert!(started.yaw.is_some());
+        let env = Env {
+            world: &Flat,
+            body: Body {
+                radius: 20.,
+                height: 100.,
+                step: 40.,
+            },
+            length: &|_| Some(40),
+            actionable: &|_| Some(20),
+        };
+        let mut pos = [0., 100., 0.];
+        for _ in 0..300 {
+            pos = r.step(pos, &env).0;
+            if r.phase == Phase::Land {
+                break;
+            }
+        }
+        assert_eq!((r.phase, r.motion), (Phase::Land, 5));
+        assert!(pos[1].abs() < 1e-3);
+        // Without a land motion the reaction simply ends.
+        let mut r = start(&hit(3, [0., -1.], true), &s, [0., 1.], 100., true, &ALL)
+            .reaction
+            .unwrap();
+        let env = Env {
+            length: &|m| (m != 5).then_some(40),
+            ..env
+        };
+        let mut pos = [0., 100., 0.];
+        let mut done = false;
+        for _ in 0..300 {
+            let (p, d) = r.step(pos, &env);
+            pos = p;
+            if d {
+                done = true;
+                break;
+            }
+        }
+        assert!(done);
     }
 
     #[test]
