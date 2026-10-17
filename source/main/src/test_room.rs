@@ -91,6 +91,7 @@ mod party_room;
 mod prize_room;
 mod settings_room;
 mod spell_fx;
+mod victim_hit;
 mod wall_hit;
 mod weapon_trail;
 
@@ -330,6 +331,10 @@ enum EffectRequest {
     /// A system (00effect) element at a point, unrotated
     /// (FUN_1403d0f00 clash effects).
     System { id: u16, at: Vec3 },
+    /// The victim's own hit sound (FUN_140410d60 -> FUN_1403dadf0): bank of
+    /// the victim's effects x 1000 + an alternating bit + a class from the
+    /// ATKP reaction. `key` tells victims apart for the alternation.
+    VictimSound { object: u32, reaction: u8, key: u64 },
     /// A Keyblade swing that met the map (FUN_1403d1960): the weapon's hit
     /// element of the ATKP effect on this surface class at the contact,
     /// turned by the polygon normal's pitch and yaw (engine space).
@@ -968,6 +973,8 @@ struct Game {
     sora_attack: HashMap<u8, Vec<(usize, Vec3, f32)>>,
     /// The Keyblade swings' environment test (wall_hit.rs).
     wall: wall_hit::WallHit,
+    /// Hits each victim has taken, for the alternating hit sound.
+    victim_hits: HashMap<u64, u8>,
     menu_up_queued: bool,
     menu_down_queued: bool,
     enemy: Option<EnemyRuntime>,
@@ -6630,6 +6637,23 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
                 );
                 (pax, element, world, "hit", None)
             }
+            EffectRequest::VictimSound {
+                object,
+                reaction,
+                key,
+            } => {
+                let pax = if object == 0 {
+                    fx.enemy.clone()
+                } else {
+                    fx.enemy_paxes.get(&object).cloned()
+                };
+                if let Some(pax) = pax
+                    && let Some(id) = victim_hit::sound(&pax, reaction, &mut game.victim_hits, key)
+                {
+                    game.sound_queue.push((id, "victim_hit"));
+                }
+                continue;
+            }
             EffectRequest::Wall {
                 effect,
                 material,
@@ -8128,6 +8152,11 @@ fn combat_tick(game: &mut Game, tick: u64) {
             // FUN_1403d12c0: the attacker's obj+0x120 bit 25, which lets
             // the next press chain the combo.
             player.connected = true;
+            effect_queue.push(EffectRequest::VictimSound {
+                object: 0,
+                reaction: rows[row].reaction,
+                key: 0,
+            });
             // FUN_1403a8800: the row's DriveDrain fills the gauge (the
             // Shadow is a ZAKO).
             let (mp_charging, boost) = (player.mp_charging, player.abilities.drive_boost);
@@ -11142,6 +11171,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             }
             magic_room::MagicRt::new(src, levels)
         }),
+        victim_hits: HashMap::new(),
         wall: wall_hit::WallHit::new(
             loaded.sstm,
             std::mem::take(&mut loaded.atkp),
