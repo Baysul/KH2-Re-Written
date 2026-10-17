@@ -21,37 +21,40 @@ Private evidence root: `%LOCALAPPDATA%/KH2FinalRewrite/research/combat-feel-2026
   (reactions 1 and 12 are class 1; 3, 6, 8, 10, 13, 16, 18 class 3; 4, 7, 9, 11,
   15, 17 class 4): classes 1, 3 and 5 add 0, class 4 adds 2, any other plays
   nothing. `bank` is the short at +2 of the resource record behind `obj+0xbb0`
-  (`FUN_14039da60`): the sound bank the victim's object was loaded with
-  (`FUN_14039df10` stores the bank argument of the object loader `FUN_1403e0660`
-  and `FUN_14039e900` loads it).
+  (`FUN_14039da60`). `FUN_14039e900` fills it: it passes the record's bank file to
+  the sound loader `FUN_1401dcef0`, which returns `FUN_1401e0d70`'s value for the
+  file and that is what the record keeps. For a `SEDBSSCF` bank that value is
+  the file's own number, the u16 in its table header (+0x36). The record's other
+  short (+0x68, the loader's third argument 4, 5, 7 or 0x1e) is the bank pool
+  slot kind, not the number.
 - The install has sounds 201000 to 201003, the four ids this scheme gives the
-  Shadow, and its effect sounds name bank 201 (201016, 201017, 201019). Banks
-  tried for Sora, the other enemies and the system (0, 100, 200, 202, 214, 999)
-  have no such ids except bank 0 and the Keyblade's 500.
+  Shadow, and its effect sounds name bank 201.
 
 ## Rewrite
 
 `test_room/victim_hit.rs` and `EffectRequest::VictimSound`: a counted hit by
-Sora on the room Shadow or a battle enemy asks for the sound; the bank is taken
-from the victim's own effect sounds (the most common thousand among sounds of
-100000 and up), the counter is kept per victim.
+Sora on the room Shadow or a battle enemy asks for the sound; the bank is the
+header number of the sound bank in the victim's own object archive (the
+`se/obj/seNNN` replacement asset, `visual::sound::object_bank`), read when the
+room loads and registered like the exe's loader does; the counter is kept per
+victim. The room now also registers the sound banks of the battle enemies so
+their own effect sounds and hit sounds resolve.
 
 ## Checks, uncertainty, verdict and next task
 
-PASS unit tests (reaction offsets; the bank from effect sounds; the alternating
-ids; a reaction with no sound leaves the counter). PASS the three-actor combat
-tour with the installed source (private `tour2`): the Shadow's hits played 201000
-and 201003 (resolved, one layer each). Engineering checks are recorded in the pull
-request.
+PASS unit tests (reaction offsets; the alternating ids; a reaction with no sound
+leaves the counter). PASS the three-actor combat tour with the installed source
+(private `tour3`): the Soldier played 200000, 200001, 200002, the Shadow 201000
+and 201003, the large enemy 214000 to 214002, each resolved to one layer of the
+enemy's own bank. Engineering checks are recorded in the pull request.
 
-[I] The bank. Where the object loader gets its bank argument was not traced; the
-rule above reproduces the one enemy whose sounds exist. For the other battle
-enemies the inferred bank (200, 214) has no ids 0 to 3 in the install, so they
-stay silent, which may be wrong. Sora as a victim is not built (his bank is
-unknown; the ids of banks 0 to 3 resolve but that is not evidence). The
-position of the sound and the 0x17-class object branch of the routine are not
-modelled.
+Not verified: that the object archive's `se/obj/seNNN` asset is the file the
+exe's record holds (it is the bank the exe's loader registers for the object by
+the same header number, and the ids exist in it, but the load argument itself,
+the pointer `FUN_1403e0660`'s callers pass, was not followed). Sora as a victim
+is not built (his bank is unknown). The position of the sound and the
+0x17-class object branch of the routine are not modelled.
 
-Verdict: PARTIAL. The victim hit sound follows the traced routine for the room
-Shadow; the bank source and Sora as victim remain open (issue #100).
-Next: trace the bank argument of `FUN_1403e0660`'s callers.
+Verdict: PARTIAL. The victim hit sound follows the traced routine for the three
+battle enemies; Sora as victim remains open (issue #100).
+Next: Sora's own bank, then frame triggers 16 and 31.

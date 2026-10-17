@@ -297,6 +297,9 @@ struct EffectSources {
     enemy: Option<object_effect::Pax>,
     /// The other battle enemies' object effects by objentry id.
     enemy_paxes: Vec<(u32, object_effect::Pax)>,
+    /// The sound bank number each enemy object carries (objentry id, 0 for
+    /// the room's own enemy), read from the bank's header like the exe.
+    enemy_banks: HashMap<u32, u16>,
     system: Option<object_effect::Pax>,
     atlas: visual::effects::Atlas,
 }
@@ -360,6 +363,7 @@ struct Effects {
     weapon: Option<Arc<object_effect::Pax>>,
     enemy: Option<Arc<object_effect::Pax>>,
     enemy_paxes: HashMap<u32, Arc<object_effect::Pax>>,
+    enemy_banks: HashMap<u32, u16>,
     system: Option<Arc<object_effect::Pax>>,
     running: Vec<RunningEffect>,
     rng: ::effect::Rng,
@@ -3222,10 +3226,32 @@ fn load(
     let effects = match &config.effects {
         Some(e) => {
             use visual::effects::{load_atlas, load_pax};
+            // Each enemy object's own sound bank (the `se/obj/seNNN` asset of
+            // its archive): registered under its header number, which is the
+            // thousand of the ids its hits play.
+            let mut enemy_banks = HashMap::new();
+            let mut register = |key: u32, index: &str, ordinal: usize, hash: [u8; 16]| {
+                if let Some(bytes) = sound::object_bank(source, index, ordinal, hash)
+                    && let Ok(number) = banks.insert(bytes)
+                {
+                    enemy_banks.insert(key, number);
+                }
+            };
+            if let Some(l) = &e.enemy {
+                register(0, &l.index, l.ordinal, l.name_hash);
+            }
+            if let Ok(library) = data::path_lookup::Library::open(source) {
+                for &(id, name) in &enemy_battle::SUPPORTED {
+                    if let Some(f) = library.find(&format!("obj/{name}.a.us")) {
+                        register(id, f.index, f.ordinal, f.name_hash);
+                    }
+                }
+            }
             let pax = |l: &Locator| load_pax(source, &l.index, l.ordinal, l.name_hash);
             Some(EffectSources {
                 weapon: pax(&e.weapon)?,
                 enemy: e.enemy.as_ref().map(pax).transpose()?,
+                enemy_banks,
                 enemy_paxes: data::path_lookup::Library::open(source)
                     .map(|mut library| {
                         enemy_battle::SUPPORTED
@@ -6642,13 +6668,8 @@ fn effects_tick(mut game: ResMut<Game>, rig: Res<CameraRig>, mut fx: ResMut<Effe
                 reaction,
                 key,
             } => {
-                let pax = if object == 0 {
-                    fx.enemy.clone()
-                } else {
-                    fx.enemy_paxes.get(&object).cloned()
-                };
-                if let Some(pax) = pax
-                    && let Some(id) = victim_hit::sound(&pax, reaction, &mut game.victim_hits, key)
+                if let Some(&bank) = fx.enemy_banks.get(&object)
+                    && let Some(id) = victim_hit::sound(bank, reaction, &mut game.victim_hits, key)
                 {
                     game.sound_queue.push((id, "victim_hit"));
                 }
@@ -11357,6 +11378,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .into_iter()
                         .map(|(id, p)| (id, Arc::new(p)))
                         .collect(),
+                    enemy_banks: e.enemy_banks,
                     system: e.system.map(Arc::new),
                     running: Vec::new(),
                     rng: ::effect::Rng::default(),
@@ -11373,6 +11395,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 weapon: None,
                 enemy: None,
                 enemy_paxes: HashMap::new(),
+                enemy_banks: HashMap::new(),
                 system: None,
                 running: Vec::new(),
                 rng: ::effect::Rng::default(),
