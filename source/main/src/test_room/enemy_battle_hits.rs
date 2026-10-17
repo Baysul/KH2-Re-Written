@@ -2,7 +2,7 @@
 //! context. The legacy battle step advances the shared player hit record first.
 use super::{
     EffectRequest, Game, abilities, enemy_combat::WorldShape, enemy_gallery::GalleryActor,
-    ensure_attack_rows, magic_room, params_of,
+    ensure_attack_rows, magic_room, params_of, party_room,
 };
 use bevy::prelude::*;
 use data::battle_tables;
@@ -107,8 +107,11 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         enemy_incoming_hits,
         enemy_outgoing_hits,
         world,
+        party,
+        enemy_guards,
         ..
     } = game;
+    enemy_guards.clear();
     let Some(rt) = enemy.as_mut() else { return };
     let sora_at = Vec3::from_array(player.position);
     let sora_turn = Quat::from_rotation_y(player.yaw);
@@ -515,6 +518,8 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 )],
             });
         }
+        // The spheres of this actor's attacks, for the party members.
+        let mut member_samples: Vec<party_room::ClawSample> = Vec::new();
         for cand in &candidates {
             let (window, w_id) = (cand.window, cand.atkp);
             if battle.brain.serial() != battle.serial || battle.error.is_some() {
@@ -534,11 +539,42 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 .incoming_ids
                 .entry((battle.serial, window))
                 .or_insert_with(|| allocate(&mut rt.ids, &mut rt.next_group, rows[0].combo_group));
+            // The sweep's start is kept for every sphere, whoever it hits.
+            let mut priors: Vec<Option<Vec3>> = Vec::with_capacity(cand.shapes.len());
+            for &(shape_kind, ordinal, centre, radius, forced_prior) in &cand.shapes {
+                if shape_kind != 3 {
+                    priors.push(None);
+                    continue;
+                }
+                let prior = battle
+                    .contacts
+                    .previous
+                    .insert((battle.serial, window, ordinal), centre);
+                let prior = forced_prior.or(prior);
+                priors.push(prior);
+                // A Type 3 attack is a super guard: what a Type 1 shot
+                // clashes with (CLASH pair 1-3).
+                if rows[0].kind == 3 {
+                    enemy_guards.push((centre, radius));
+                }
+                member_samples.push(party_room::ClawSample {
+                    instance: ids.0 as u64,
+                    atkp: w_id,
+                    aid: ids.0,
+                    group: ids.1,
+                    radius,
+                    centre,
+                    points: combat::swept(centre.to_array(), prior.map(|p| p.to_array()), radius),
+                    rows: rows.clone(),
+                    only: None,
+                });
+            }
             if rt.sora_record.has(ids.0) {
                 continue;
             }
             let mut blocked = false;
-            for &(shape_kind, ordinal, centre, radius, forced_prior) in &cand.shapes {
+            for (shape_index, &(shape_kind, _, centre, radius, _)) in cand.shapes.iter().enumerate()
+            {
                 if blocked {
                     break;
                 }
@@ -548,11 +584,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                     actor.error = Some(error);
                     continue;
                 }
-                let prior = battle
-                    .contacts
-                    .previous
-                    .insert((battle.serial, window, ordinal), centre);
-                let prior = forced_prior.or(prior);
+                let prior = priors[shape_index];
                 for c in combat::swept(centre.to_array(), prior.map(|p| p.to_array()), radius) {
                     let centre = Vec3::from_array(c);
                     let mut reflected = false;
@@ -644,6 +676,41 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                             cand.script_slot,
                         ));
                     }
+                }
+            }
+        }
+        // Donald and Goofy take the same attacks (FUN_1401b0290).
+        if !member_samples.is_empty() && !party.is_empty() {
+            let src = party_room::Source {
+                samples: &member_samples,
+                attacker: &battle.assets.attacker,
+                difficulty: rt.difficulty,
+                from: at,
+                object: battle.assets.object_id,
+            };
+            let assets = &battle.assets;
+            for (i, m) in party.iter_mut().enumerate() {
+                let row = |id: u16| {
+                    assets
+                        .attack_steps(id, 0)
+                        .ok()
+                        .and_then(|v| v.first().copied())
+                };
+                if let Some(r) = party_room::receive(
+                    &src,
+                    &row,
+                    m,
+                    i,
+                    &*world,
+                    tick,
+                    sound_queue,
+                    effect_queue,
+                    log,
+                ) && !battle.brain.reflect(r.motion as usize, r.hit_back as f32)
+                {
+                    let error = "this source brain's reflect reaction is unqualified".to_string();
+                    battle.error = Some(error.clone());
+                    actor.error = Some(error);
                 }
             }
         }
@@ -818,6 +885,9 @@ pub fn retire(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
     for id in expired {
         rt.enemy.record.clear_seen(id);
         rt.sora_record.clear_seen(id);
+        for m in &mut game.party {
+            m.record.clear_seen(id);
+        }
         for actor in actors.iter_mut() {
             if let Some(battle) = actor.battle.as_mut() {
                 battle.brain.record_mut().clear_seen(id)
