@@ -76,6 +76,10 @@ pub trait Env {
     }
     /// Position of a target actor (centre of its TARGET shape).
     fn target_position(&self, id: u32) -> Option<Vec3>;
+    /// The actor Sora has locked on to (`trap_obj_lockon_target`'s record).
+    fn lockon_target(&self) -> Option<u32> {
+        None
+    }
     /// The battle target table's choice for an actor (`None`: no entry).
     fn pick_target(&self, _kind: i32, _from: Vec3) -> Option<u32> {
         None

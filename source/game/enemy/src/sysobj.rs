@@ -225,6 +225,10 @@ pub struct Sysobj {
     /// The object entry's id and part id (`obj_get_entry_id`, `obj_part`).
     pub entry_id: u32,
     pub entry_part: u16,
+    /// The spawn record's serial (the ushort at +0x1e of the record +0x9f0
+    /// points to; `trap_obj_search_by_serial` matches it). 0 when the object
+    /// has no spawn record.
+    pub spawn_serial: u16,
     /// +0xccc: routine option flags (`rtn_option_flag`), and +0xcd8..+0xcfc:
     /// the routine time parameters (`set_rtn_time_param`; word 7 is `touch_zone`).
     pub rtn_flags: Vec<u32>,
@@ -257,6 +261,11 @@ pub struct Sysobj {
     pub record: combat::HitRecord,
     /// +0x18c bit 18: the act manager is paused (set by engine states).
     pub act_paused: bool,
+    /// Words of the engine object a script wrote through its handle at
+    /// offsets nothing else models (the spec block +0x128.., for one). They
+    /// read back as written; an engine reader maps its own offset to a field
+    /// above when it exists.
+    pub raw_words: std::collections::BTreeMap<u32, u32>,
 }
 
 impl Sysobj {
@@ -344,6 +353,7 @@ impl Sysobj {
             collision: Vec::new(),
             entry_id: 0,
             entry_part: 0,
+            spawn_serial: 0,
             rtn_flags: Vec::new(),
             rtn_time: [0; 9],
             scale_w: 1.,
@@ -363,6 +373,7 @@ impl Sysobj {
             sampler: actor_physics::Sampler::default(),
             record: combat::HitRecord::new(false),
             act_paused: false,
+            raw_words: std::collections::BTreeMap::new(),
         }
     }
 
@@ -824,7 +835,7 @@ impl Sysobj {
                 Some(self.velocity[((offset - 0x20) / 4) as usize].to_bits())
             }
             0x134 => Some(self.turn_rate.to_bits()),
-            _ => None,
+            _ => self.raw_words.get(&offset).copied(),
         }
     }
 
@@ -839,6 +850,9 @@ impl Sysobj {
                 self.velocity[((offset - 0x20) / 4) as usize] = f32::from_bits(value)
             }
             0x134 => self.turn_rate = f32::from_bits(value),
+            _ if offset < 0x1000 && offset.is_multiple_of(4) => {
+                self.raw_words.insert(offset, value);
+            }
             _ => return false,
         }
         true

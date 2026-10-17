@@ -40,9 +40,14 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
 enum Slot3 {
     Object(u32),
     Dup(usize),
+    /// Sora's lock-on record; the host decides what it names.
+    Lockon,
 }
 
 fn locate(handle: u32) -> Option<Slot3> {
+    if handle == crate::world::LOCKON_RECORD {
+        return Some(Slot3::Lockon);
+    }
     if let Some(d) = handle.checked_sub(TARGET_DUP_HANDLES)
         && d < 0x0100_0000
     {
@@ -62,12 +67,18 @@ fn record(ctx: &mut Ctx<'_>, handle: u32) -> Result<Target, Fault> {
             .copied()
             .flatten()
             .ok_or(Fault::Memory(handle)),
+        Slot3::Lockon => Ok(Target {
+            id: ctx.env.lockon_target().unwrap_or(0),
+            kind: -1,
+        }),
     }
 }
 
 pub(super) fn set_record(ctx: &mut Ctx<'_>, handle: u32, t: Target) -> Result<(), Fault> {
     match locate(handle).ok_or(Fault::Memory(handle))? {
         Slot3::Object(id) => ctx.object(id)?.sys.target = t,
+        // The player's lock-on belongs to the player.
+        Slot3::Lockon => {}
         Slot3::Dup(i) => {
             *ctx.world
                 .target_dups

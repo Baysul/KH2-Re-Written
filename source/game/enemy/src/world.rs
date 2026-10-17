@@ -157,6 +157,40 @@ pub enum Event {
     Unsupported(&'static str),
 }
 
+/// An object search a script made (kept while `World::trace` is on).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchRecord {
+    /// `entry`, `serial`, `part` or `unit_arg`.
+    pub kind: &'static str,
+    pub value: i32,
+    /// The unit argument index (`unit_arg` only).
+    pub index: i32,
+    pub found: bool,
+}
+
+/// A request to make an object of an entry appear (`sysobj_appear`,
+/// FUN_1403df930).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppearRequest {
+    /// The object entry id (the script's word, flag bits included).
+    pub entry: u32,
+    /// The object whose script asked.
+    pub by: ObjId,
+}
+
+/// An object the host built for an [`AppearRequest`].
+pub struct Appeared {
+    /// The object script (BAR type 3 payload); `None` builds a bare object.
+    pub payload: Option<Vec<u8>>,
+    pub sys: Sysobj,
+}
+
+/// The host side of `sysobj_appear`: it owns the object table (entry ids,
+/// models, scripts) this crate does not hold.
+pub trait Spawner {
+    fn appear(&mut self, request: &AppearRequest) -> Option<Appeared>;
+}
+
 /// Everything shared between objects.
 pub struct World {
     /// `DAT_140717480`: 1.0 at 60 fps and normal speed.
@@ -171,6 +205,8 @@ pub struct World {
     pub missing: Vec<(u16, u16)>,
     /// Every trap called, newest last, when `trace` is on (development aid).
     pub trace: Option<Vec<(u16, u16)>>,
+    /// The object searches scripts made, when `trace` is on.
+    pub searches: Vec<SearchRecord>,
     /// The act names scripts started or queued, when tracing.
     pub act_log: Option<Vec<String>>,
     pub events: Vec<Event>,
@@ -196,7 +232,13 @@ pub struct World {
     pub attack_serial: u64,
     /// `status_set_lockon_ratio`: the lock-on ratio scripts last set.
     pub lockon_ratio: f32,
+    /// How `sysobj_appear` makes objects (none: the script gets a null object).
+    pub spawner: Option<Box<dyn Spawner>>,
+    appear_depth: u32,
 }
+
+/// How many `sysobj_appear` calls may be inside each other's OBJ_INIT.
+const MAX_APPEAR_DEPTH: u32 = 4;
 
 impl Default for World {
     fn default() -> Self {
@@ -208,6 +250,7 @@ impl Default for World {
             static_words: Vec::new(),
             missing: Vec::new(),
             trace: None,
+            searches: Vec::new(),
             act_log: None,
             events: Vec::new(),
             tolerate_missing: false,
@@ -222,11 +265,76 @@ impl Default for World {
             combo_group: 0,
             attack_serial: 0,
             lockon_ratio: 0.,
+            spawner: None,
+            appear_depth: 0,
         }
     }
 }
 
 impl World {
+    /// FUN_1403df930 as the host sees it: build the object the spawner
+    /// describes, run its OBJ_INIT and put it in the object list. Returns its
+    /// id; `me` is the object whose script asked (never reused).
+    pub fn appear(&mut self, env: &dyn Env, me: ObjId, entry: u32) -> Option<ObjId> {
+        // An OBJ_INIT that makes objects of its own entry would recurse
+        // without end; the executable's object table is finite.
+        if self.appear_depth >= MAX_APPEAR_DEPTH {
+            return None;
+        }
+        let mut spawner = self.spawner.take()?;
+        let built = spawner.appear(&AppearRequest { entry, by: me });
+        self.spawner = Some(spawner);
+        let built = built?;
+        self.appear_depth += 1;
+        let made = self.appear_built(env, me, entry, built);
+        self.appear_depth -= 1;
+        made
+    }
+
+    fn appear_built(
+        &mut self,
+        env: &dyn Env,
+        me: ObjId,
+        entry: u32,
+        built: Appeared,
+    ) -> Option<ObjId> {
+        let id = (self.objects.len() as u32).max(me + 1).max(1);
+        let mut sys = built.sys;
+        sys.entry_id = entry;
+        let object = match built.payload {
+            Some(payload) => Object::spawn(self, env, id, &payload, sys).ok()?,
+            None => {
+                let mut o = Object::bare(id);
+                o.sys = sys;
+                o
+            }
+        };
+        if self.objects.len() <= id as usize {
+            self.objects.resize_with(id as usize + 1, || None);
+        }
+        self.objects[id as usize] = Some(Box::new(object));
+        Some(id)
+    }
+
+    /// One frame for every object in the list except `skip` (the one the host
+    /// is running itself).
+    pub fn tick_objects(&mut self, env: &dyn Env, skip: Option<ObjId>) {
+        for id in 0..self.objects.len() {
+            if skip == Some(id as ObjId) {
+                continue;
+            }
+            if let Some(mut object) = self.objects[id].take() {
+                object.tick(self, env);
+                if self.objects.len() <= id {
+                    self.objects.resize_with(id + 1, || None);
+                }
+                if !object.sys.gone {
+                    self.objects[id] = Some(object);
+                }
+            }
+        }
+    }
+
     /// `trap_memory_alloc`: a zeroed block in the shared static area.
     pub fn alloc(&mut self, bytes: u32) -> u32 {
         let words = bytes.div_ceil(4).max(1) as usize;
@@ -328,8 +436,19 @@ pub const EFFECT_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0200_0000;
 pub const ATTACK_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0700_0000;
 pub const MAGIC_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0500_0000;
 pub const TARGET_DUP_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0300_0000;
+/// Sora's lock-on target record (`trap_obj_lockon_target`: the record at +4 of
+/// the player's lock-on block, FUN_14042b9c0).
+pub const LOCKON_RECORD: u32 = TARGET_DUP_HANDLES + 0x00f0_0000;
 /// The engine object's target record (sys+0xbf8) is this far into its handle range.
 pub const TARGET_RECORD_OFFSET: u32 = 0x800;
+
+/// FUN_1403baa80: objects with any of these +0x120 flag bits are invisible to
+/// the engine's object searches.
+pub const SEARCH_SKIP_FLAGS: u32 = 0x1008_0000;
+
+/// The entry id of Sora's object (`trap_obj_search_by_entry` answers the
+/// player for it without walking the list: FUN_1403b4110).
+pub const PLAYER_ENTRY: u32 = 0x236;
 
 /// The id the player proxy answers to. Sora is not a script-driven object, but
 /// scripts call the same traps on her as on any object; those reach a stand-in
@@ -397,6 +516,43 @@ impl Ctx<'_> {
             .ok_or(Fault::Memory(object_handle(id)))
     }
 
+    /// FUN_1403bf4f0's walk of the engine's object list with a test (the
+    /// first object it accepts, in creation order). The walk skips objects
+    /// whose +0x120 flags (FUN_1403baa80: `flags & 0x10080000`) are set. The
+    /// calling object is part of the list; Sora is not (searches by entry id
+    /// answer her separately).
+    pub fn search(&self, mut test: impl FnMut(&Object) -> bool) -> Option<ObjId> {
+        let mut best: Option<ObjId> = None;
+        let mut consider = |o: &Object| {
+            if o.sys.flags & SEARCH_SKIP_FLAGS == 0 && best.is_none_or(|b| o.id < b) && test(o) {
+                best = Some(o.id);
+            }
+        };
+        consider(self.me);
+        for o in self.world.objects.iter().flatten() {
+            if o.id != self.me.id {
+                consider(o);
+            }
+        }
+        best
+    }
+
+    /// Bind the AI object `ai` to what a search found (FUN_1404ad240 of the
+    /// engine object into +4; a miss stores 0).
+    pub fn bind_ai(
+        &mut self,
+        memory: &mut Memory<'_>,
+        ai: u32,
+        found: Option<ObjId>,
+    ) -> Result<(), Fault> {
+        let handle = found.map_or(0, object_handle);
+        if self.write_u32(memory, ai + 4, handle) {
+            Ok(())
+        } else {
+            Err(Fault::Memory(ai))
+        }
+    }
+
     /// An engine-object argument (the trap received the handle itself).
     pub fn sys_of(&self, handle: u32) -> Result<ObjId, Fault> {
         if handle == PLAYER_HANDLE {
@@ -427,6 +583,14 @@ impl Ctx<'_> {
         memory
             .read_u32(handle)
             .or_else(|| self.world.static_read(handle))
+            .or_else(|| self.self_handle_word(handle))
+    }
+
+    /// Word 1 of an engine handle used as an AI object names the engine
+    /// object, which is the handle itself.
+    fn self_handle_word(&self, address: u32) -> Option<u32> {
+        let base = address.checked_sub(4)?;
+        (base == PLAYER_HANDLE || object_from_handle(base).is_some()).then_some(base)
     }
 
     pub fn read_f32(&self, memory: &Memory<'_>, handle: u32) -> Option<f32> {
@@ -478,9 +642,18 @@ impl Host for Machine<'_> {
 
     fn peek(&self, address: u32) -> Option<u32> {
         if let Some(offset) = address.checked_sub(PLAYER_HANDLE).filter(|o| *o < 0x1000) {
+            // An engine handle doubles as the AI object the scripts copy
+            // around (`memcpy` of the 16-byte struct): word 1 names the engine
+            // object, which here is the handle itself.
+            if offset < 16 {
+                return Some(if offset == 4 { PLAYER_HANDLE } else { 0 });
+            }
             return self.ctx.world.player_proxy.as_ref()?.sys.peek_word(offset);
         }
         if let Some((id, offset)) = object_field(address) {
+            if offset < 16 {
+                return Some(if offset == 4 { object_handle(id) } else { 0 });
+            }
             if (TARGET_RECORD_OFFSET..TARGET_RECORD_OFFSET + 16).contains(&offset) {
                 let sys = if id == self.ctx.me.id {
                     &self.ctx.me.sys
@@ -503,6 +676,29 @@ impl Host for Machine<'_> {
                 .as_deref()?
                 .sys
                 .peek_word(offset);
+        }
+        if let Some(offset) = address.checked_sub(LOCKON_RECORD).filter(|o| *o < 16) {
+            let t = crate::sysobj::Target {
+                id: self.ctx.env.lockon_target().unwrap_or(0),
+                kind: -1,
+            };
+            return Some(target_record_word(t, offset));
+        }
+        if let Some(d) = address
+            .checked_sub(TARGET_DUP_HANDLES)
+            .filter(|d| *d < 0x0100_0000)
+        {
+            // A copy of a target record (`trap_target_dup`): a slot is 16
+            // bytes. A slot nobody holds reads as an empty record.
+            let t = self
+                .ctx
+                .world
+                .target_dups
+                .get((d / 16) as usize)
+                .copied()
+                .flatten()
+                .unwrap_or_default();
+            return Some(target_record_word(t, d % 16));
         }
         self.ctx.world.static_read(address)
     }

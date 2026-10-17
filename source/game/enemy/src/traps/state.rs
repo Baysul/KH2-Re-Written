@@ -119,7 +119,8 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 85) | (1, 86) => texanm,
         (1, 101) => motion_is_capture,
         (1, 108) => show_part,
-        (1, 143) | (1, 210) => search_object,
+        (1, 143) => search_by_serial,
+        (1, 210) => search_by_part,
         (1, 145) => touch_zone,
         (1, 148) => set_pos,
         (1, 161) => is_attach,
@@ -184,13 +185,73 @@ fn hide_part(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), 
     Ok(())
 }
 
+/// Note a search in the trace (development aid) and bind its result.
+fn finish_search(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    ai: u32,
+    kind: &'static str,
+    value: i32,
+    index: i32,
+    found: Option<crate::world::ObjId>,
+) -> Result<(), Fault> {
+    if ctx.world.trace.is_some() && ctx.world.searches.len() < 256 {
+        ctx.world.searches.push(crate::world::SearchRecord {
+            kind,
+            value,
+            index,
+            found: found.is_some(),
+        });
+    }
+    ctx.bind_ai(m, ai, found)
+}
+
 /// 1:114 FUN_14042ddb0 -> FUN_1403b4110: bind the AI object to the engine
-/// object found by entry id. [U] Recorded only; the binding is left alone.
-fn search_by_entry(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
-    ctx.world
-        .events
-        .push(Event::Unsupported("obj_search_by_entry"));
-    Ok(())
+/// object whose entry is the given object id (0x236 is Sora). A miss binds
+/// nothing (+4 becomes 0).
+fn search_by_entry(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let entry = args[1].value;
+    let found = if entry == crate::world::PLAYER_ENTRY {
+        Some(crate::world::PLAYER_OBJECT)
+    } else {
+        ctx.search(|o| o.sys.entry_id == entry)
+    };
+    finish_search(ctx, m, args[0].value, "entry", entry as i32, 0, found)
+}
+
+/// 1:143 FUN_14042ddf0 -> FUN_1403b41e0: the object whose spawn record serial
+/// (the ushort at +0x1e) equals the argument, 0x70 when the argument is 0.
+/// Objects without a spawn record read as serial 0.
+fn search_by_serial(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let serial = if args[1].value == 0 {
+        0x70
+    } else {
+        args[1].value
+    };
+    let found = ctx.search(|o| u32::from(o.sys.spawn_serial) == serial);
+    finish_search(ctx, m, args[0].value, "serial", serial as i32, 0, found)
+}
+
+/// 1:210 FUN_14042de30 -> FUN_1403b4180: the object whose entry part id
+/// (+0x4c) equals the argument.
+fn search_by_part(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let part = args[1].value;
+    let found = ctx.search(|o| u32::from(o.sys.entry_part) == part);
+    finish_search(ctx, m, args[0].value, "part", part as i32, 0, found)
+}
+
+/// 1:292 FUN_14042de70: the object whose unit argument `index` (+0x9f4 + 4 *
+/// index) equals the value. The executable does not bound `index`; a script
+/// index past the stored arguments reads as no match.
+fn search_by_unit_arg(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let (index, value) = (args[1].as_int(), args[2].as_int());
+    let found = ctx.search(|o| {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| o.sys.spawn_args.get(i))
+            .is_some_and(|a| *a == value)
+    });
+    finish_search(ctx, m, args[0].value, "unit_arg", value, index, found)
 }
 
 /// 1:177 FUN_14042d8e0 -> FUN_1403b9de0: bind a path to the object. [U]
@@ -295,13 +356,6 @@ fn motion_is_capture(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> 
 /// 1:108 FUN_14042fd10 -> FUN_1403cd810: show a model part. [U] Recorded.
 fn show_part(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
     ctx.world.events.push(Event::Unsupported("obj_show_part"));
-    Ok(())
-}
-
-/// 1:143 and 1:210 FUN_14042ddf0 / FUN_14042de30: bind the AI object to the
-/// engine object with a serial or part id. [U] Recorded; the binding is kept.
-fn search_object(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
-    ctx.world.events.push(Event::Unsupported("obj_search"));
     Ok(())
 }
 
@@ -579,11 +633,19 @@ unsupported_vector_traps! {
     bg_press = (6, 24, "obj_get_bg_press");
 }
 
-/// 1:0 FUN_14042b130 -> FUN_1403df930: `sysobj_appear`, look up or make an
-/// object appear. [U] Recorded; the script gets a null object.
+/// 1:0 FUN_14042b130 -> FUN_1403df930: `sysobj_appear`, make an object of the
+/// entry appear (at the routine's default position; scripts place it
+/// afterwards). The host's [`crate::world::Spawner`] builds it; without one,
+/// or when it declines, the script gets a null object (the executable returns
+/// 0 for an entry it cannot make).
 fn sysobj_appear(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    ctx.world.events.push(Event::Unsupported("sysobj_appear"));
-    args[0] = Slot::address(0);
+    let entry = args[0].value & 0x0fff_ffff;
+    let me = ctx.me.id;
+    let id = ctx.world.appear(ctx.env, me, entry);
+    if id.is_none() {
+        ctx.world.events.push(Event::Unsupported("sysobj_appear"));
+    }
+    args[0] = Slot::address(id.map_or(0, object_handle));
     Ok(())
 }
 
@@ -811,7 +873,6 @@ recorded_traps! {
     obj_hook_stop = "obj_hook_stop";
     motion_unhook = "obj_motion_unhook";
     tex_fade_start = "obj_tex_fade_start";
-    search_by_unit_arg = "obj_search_by_unit_arg";
     dead_mark = "obj_dead_mark";
     set_pos_trans = "obj_set_pos_trans";
     vacuum_destroy = "vacuum_destroy";
@@ -850,7 +911,6 @@ unsupported_vector_traps! {
     camera_eye = (1, 305, "camera_eye");
     camera_at = (1, 306, "camera_at");
     path_dir = (5, 3, "get_path_dir");
-    lockon_target = (1, 191, "obj_lockon_target");
     target_attack = (1, 166, "target_attack");
 }
 
@@ -860,6 +920,13 @@ fn vacuum_create(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Resu
     ctx.world.events.push(Event::Unsupported("vacuum_create"));
     let handle = ctx.world.next_magic_handle();
     args[0] = Slot::address(handle);
+    Ok(())
+}
+
+/// 1:191 FUN_14042b9c0: the record at +4 of the object's lock-on block
+/// (+0xdc8). Only Sora has one; the host says what it names.
+fn lockon_target(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    args[0] = Slot::address(crate::world::LOCKON_RECORD);
     Ok(())
 }
 
