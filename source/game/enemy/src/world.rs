@@ -101,6 +101,19 @@ pub enum Event {
         name: &'static str,
         words: [u32; 3],
     },
+    /// A call into a subsystem this crate does not own (the camera, the
+    /// screen, the mission HUD, sound, the party): the trap's name with its
+    /// operands decoded as far as the executable does before it hands them
+    /// on. Objects are resolved; `words` are the trap's argument words in
+    /// order (floats as their bits); `vector` is the vector operand a trap
+    /// takes, in the engine's +Y-up frame.
+    Service {
+        name: &'static str,
+        object: Option<ObjId>,
+        other: Option<ObjId>,
+        words: [u32; 8],
+        vector: Option<[f32; 4]>,
+    },
     ScatterPrize {
         object: ObjId,
         count: i32,
@@ -139,8 +152,12 @@ pub enum Event {
     },
     /// `attack_strike`: a script applied an attack to a target directly.
     AttackStrike {
+        /// The attack's handle and its slot in [`World::attacks`].
         attack: u32,
-        target: u32,
+        slot: usize,
+        /// The object struck (Sora is [`PLAYER_OBJECT`]); `None` when the
+        /// script's AI object named nothing.
+        target: Option<ObjId>,
         arguments: [i32; 2],
     },
     /// `obj_dead`: the object finished dying and is removed.
@@ -155,6 +172,72 @@ pub enum Event {
     },
     /// A service the executable provides that this build does not translate yet.
     Unsupported(&'static str),
+}
+
+/// A shout waiting for the frame's shout job (`act_shout`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shout {
+    pub name: Vec<u8>,
+    pub shouter: ObjId,
+    /// 0 or less: delivered at once; otherwise each receiver waits a random
+    /// share of this many ticks.
+    pub delay: f32,
+}
+
+/// DAT_142a23d50 holds 64 shouts.
+pub const SHOUT_QUEUE: usize = 64;
+
+/// A light a script made (`light_create`, FUN_1403f6f80): a 0x28-byte block
+/// of the executable's light pool. The host draws what these say.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Light {
+    /// +0: the light's kind (the argument of `light_create`).
+    pub kind: i32,
+    /// +8: the fade, starting at full (1.0).
+    pub fade: crate::sysobj::Fade,
+    /// +0x10: flag bits (`light_set_flag`).
+    pub flags: Vec<u32>,
+    /// +0x14..+0x17: r, g, b and a (0x80 after `light_set_color`).
+    pub color: [u8; 4],
+    /// +0x18..+0x24: fog near, far, min and max.
+    pub fog: [f32; 4],
+}
+
+/// Light handles are 16 bytes apart from here.
+pub const LIGHT_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0800_0000;
+
+/// A vacuum a script made (`vacuum_create`, FUN_1403f8f20): a pull toward a
+/// point. The host applies the pull; scripts shape it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Vacuum {
+    /// +0: the point it pulls toward.
+    pub position: [f32; 4],
+    /// +0x10: flag bits (`vacuum_set_flag`).
+    pub flags: u32,
+    /// +0x14: the effective range (`vacuum_set_effective_range`).
+    pub effective_range: f32,
+    /// +0x18..+0x20: three values the constructor fills with its argument
+    /// and `vacuum_set` 2:81 replaces.
+    pub at_18: [f32; 3],
+    /// +0x24, +0x28 (100.0 at creation) and +0x2c (0.01 at creation), set by
+    /// 2:82 to 2:84.
+    pub at_24: f32,
+    pub at_28: f32,
+    pub at_2c: f32,
+}
+
+/// Vacuum handles are 16 bytes apart from here.
+pub const VACUUM_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0900_0000;
+
+/// Bits of the executable's global status word (DAT_142a11400) that scripts
+/// set and read.
+pub mod status {
+    /// `status_no_leave`: enemies may not leave.
+    pub const NO_LEAVE: u32 = 1 << 2;
+    /// `status_prize_drain_start` / `_end`.
+    pub const PRIZE_DRAIN: u32 = 1 << 3;
+    /// `status_force_leave_start` / `_end`: every enemy leaves.
+    pub const FORCE_LEAVE: u32 = 1 << 7;
 }
 
 /// An object search a script made (kept while `World::trace` is on).
@@ -187,7 +270,7 @@ pub struct Appeared {
 
 /// The host side of `sysobj_appear`: it owns the object table (entry ids,
 /// models, scripts) this crate does not hold.
-pub trait Spawner {
+pub trait Spawner: Send + Sync {
     fn appear(&mut self, request: &AppearRequest) -> Option<Appeared>;
 }
 
@@ -235,6 +318,26 @@ pub struct World {
     /// How `sysobj_appear` makes objects (none: the script gets a null object).
     pub spawner: Option<Box<dyn Spawner>>,
     appear_depth: u32,
+    /// The lights scripts made, by handle slot.
+    pub lights: Vec<Option<Light>>,
+    /// The vacuums scripts made, by handle slot.
+    pub vacuums: Vec<Option<Vacuum>>,
+    /// The shouts waiting for the frame's shout job.
+    pub shouts: Vec<Shout>,
+    /// The engine's own random generator (DAT_140783ca0), which the shout
+    /// delay draws from; the scripts' generator is [`World::rng`].
+    pub engine_rng: Lcg,
+    /// Where the last map line check crossed the map (`bghit_get_cross_pos`).
+    pub last_line_cross: Option<[f32; 3]>,
+    /// The hit mark's two vectors (DAT_14074c0d8 / DAT_14074c0e8), engine
+    /// frame: where the hit spark goes, and a second point.
+    pub hit_mark: [[f32; 4]; 2],
+    /// DAT_142a11400 bits scripts set (see [`status`]).
+    pub status: u32,
+    /// The mission timer's pause bit (DAT_140abb854 bit 1).
+    pub mission_timer_paused: bool,
+    /// Enemy units (spawn groups) scripts disabled (`unit_disable`).
+    pub units_disabled: std::collections::BTreeSet<u32>,
 }
 
 /// How many `sysobj_appear` calls may be inside each other's OBJ_INIT.
@@ -267,6 +370,15 @@ impl Default for World {
             lockon_ratio: 0.,
             spawner: None,
             appear_depth: 0,
+            lights: Vec::new(),
+            vacuums: Vec::new(),
+            shouts: Vec::new(),
+            engine_rng: Lcg::default(),
+            last_line_cross: None,
+            hit_mark: [[0.; 4]; 2],
+            status: 0,
+            mission_timer_paused: false,
+            units_disabled: Default::default(),
         }
     }
 }
@@ -314,6 +426,81 @@ impl World {
         }
         self.objects[id as usize] = Some(Box::new(object));
         Some(id)
+    }
+
+    /// Put every carried object on its holder (physics mode 3): at the
+    /// holder's bone when the host knows it, else the holder's origin. `me` is
+    /// the object the host runs itself, outside the list.
+    pub fn follow_attachments(&mut self, env: &dyn Env, me: Option<&mut Object>) {
+        let place = |holder: ObjId, bone: i32, world: &World, own: Option<&Object>| {
+            if let Some(p) = env.attach_point(holder, bone) {
+                return Some(p);
+            }
+            if holder == PLAYER_OBJECT {
+                return Some(env.player_position());
+            }
+            world
+                .objects
+                .get(holder as usize)
+                .and_then(|o| o.as_deref())
+                .or(own.filter(|o| o.id == holder))
+                .map(|o| o.sys.position)
+        };
+        // Carried objects of the list (the holder may be `me`).
+        for id in 0..self.objects.len() {
+            let Some(a) = self.objects[id].as_ref().and_then(|o| o.sys.attached) else {
+                continue;
+            };
+            if let Some(p) = place(a.to, a.bone, self, me.as_deref())
+                && let Some(o) = self.objects[id].as_mut()
+            {
+                o.sys.position = p;
+            }
+        }
+        if let Some(object) = me
+            && let Some(a) = object.sys.attached
+            && let Some(p) = place(a.to, a.bone, self, None)
+        {
+            object.sys.position = p;
+        }
+    }
+
+    /// The frame's shout job (FUN_1403c9d40): every queued shout goes to every
+    /// object of the list in turn, `me` (the object the host runs itself,
+    /// outside the list) included. With a delay each receiver draws a random
+    /// share of it from the engine's generator and waits; without one the
+    /// receiver's act of that name calls its timeout routine now.
+    pub fn deliver_shouts(&mut self, env: &dyn Env, mut me: Option<&mut Object>) {
+        for shout in std::mem::take(&mut self.shouts) {
+            let mut ids: Vec<ObjId> = self.objects.iter().flatten().map(|o| o.id).collect();
+            ids.sort_unstable();
+            if let Some(object) = me.as_deref_mut() {
+                self.shout_to(env, object, &shout);
+            }
+            for id in ids {
+                if let Some(mut object) = self.objects[id as usize].take() {
+                    self.shout_to(env, &mut object, &shout);
+                    self.objects[id as usize] = Some(object);
+                }
+            }
+        }
+    }
+
+    fn shout_to(&mut self, env: &dyn Env, object: &mut Object, shout: &Shout) {
+        if object.sys.flags & SEARCH_SKIP_FLAGS != 0 {
+            return;
+        }
+        if shout.delay > 0. {
+            // (float)rng * 2^-32 * delay (DAT_1405b4d30).
+            let draw = self.engine_rng.step() as f32 * 2.328_306_4e-10 * shout.delay;
+            object.acts.pending_shout = Some(crate::act::PendingShout {
+                name: shout.name.clone(),
+                shouter: object_handle(shout.shouter),
+                timer: draw,
+            });
+        } else {
+            object.deliver_shout(self, env, &shout.name, object_handle(shout.shouter));
+        }
     }
 
     /// One frame for every object in the list except `skip` (the one the host
@@ -373,12 +560,49 @@ impl World {
         }
     }
 
-    /// One frame for every attack object (timed shapes advance).
-    pub fn tick_attacks(&mut self) {
+    /// One frame for every attack object (FUN_1404376b0) and every light
+    /// (its fade runs). An attack bound to an effect follows it and goes when
+    /// the effect ends; a timed shape grows and goes when its time is up.
+    pub fn tick_attacks(&mut self, env: &dyn Env) {
         let frame_time = self.frame_time;
-        for a in self.attacks.iter_mut().flatten() {
-            a.advance(frame_time);
+        // DAT_142a11400 bit 5 holds the timers.
+        let held = self.status & (1 << 5) != 0;
+        for slot in self.attacks.iter_mut() {
+            let Some(a) = slot.as_mut() else {
+                continue;
+            };
+            if a.effect != 0 {
+                if !env.effect_active(a.effect) {
+                    a.flags |= crate::attack::flag::FREED;
+                    *slot = None;
+                    continue;
+                }
+                if let Some(p) = env.effect_position(a.effect) {
+                    a.follow(p, frame_time);
+                }
+            }
+            if !held && a.advance(frame_time) {
+                a.flags |= crate::attack::flag::FREED;
+                *slot = None;
+            }
         }
+        for light in self.lights.iter_mut().flatten() {
+            light.fade.step(frame_time);
+        }
+    }
+
+    /// The vacuum slot a handle names.
+    pub fn vacuum_slot(&self, handle: u32) -> Option<usize> {
+        let o = handle.checked_sub(VACUUM_HANDLES)?;
+        let i = (o / 16) as usize;
+        (o % 16 == 0 && self.vacuums.get(i)?.is_some()).then_some(i)
+    }
+
+    /// The light slot a handle names.
+    pub fn light_slot(&self, handle: u32) -> Option<usize> {
+        let o = handle.checked_sub(LIGHT_HANDLES)?;
+        let i = (o / 16) as usize;
+        (o % 16 == 0 && self.lights.get(i)?.is_some()).then_some(i)
     }
 
     /// A fresh handle for a magic thread the host will create.
@@ -482,6 +706,7 @@ fn target_record_word(t: crate::sysobj::Target, offset: u32) -> u32 {
             crate::traps::target::PLAYER_TARGET => PLAYER_HANDLE,
             id => object_handle(id),
         },
+        4 => t.group as u32,
         0xc => t.kind as u32,
         _ => 0,
     }
@@ -525,6 +750,33 @@ impl Ctx<'_> {
         let mut best: Option<ObjId> = None;
         let mut consider = |o: &Object| {
             if o.sys.flags & SEARCH_SKIP_FLAGS == 0 && best.is_none_or(|b| o.id < b) && test(o) {
+                best = Some(o.id);
+            }
+        };
+        consider(self.me);
+        for o in self.world.objects.iter().flatten() {
+            if o.id != self.me.id {
+                consider(o);
+            }
+        }
+        best
+    }
+
+    /// The next object of the list after `after` (the first when `None`)
+    /// that passes `test`, in creation order (FUN_1403bf4f0 steps; the walk
+    /// skips the objects FUN_1403baa80 hides).
+    pub fn next_object(
+        &self,
+        after: Option<ObjId>,
+        mut test: impl FnMut(&Object) -> bool,
+    ) -> Option<ObjId> {
+        let mut best: Option<ObjId> = None;
+        let mut consider = |o: &Object| {
+            if o.sys.flags & SEARCH_SKIP_FLAGS == 0
+                && after.is_none_or(|a| o.id > a)
+                && best.is_none_or(|b| o.id < b)
+                && test(o)
+            {
                 best = Some(o.id);
             }
         };
@@ -681,6 +933,7 @@ impl Host for Machine<'_> {
             let t = crate::sysobj::Target {
                 id: self.ctx.env.lockon_target().unwrap_or(0),
                 kind: -1,
+                group: 0,
             };
             return Some(target_record_word(t, offset));
         }

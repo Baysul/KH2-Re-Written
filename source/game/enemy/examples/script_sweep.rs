@@ -114,6 +114,8 @@ enum Partner {
 struct Outcome {
     faults: Vec<String>,
     other_faults: usize,
+    /// The first fault of a partner object: its entry id and the fault.
+    other_first: Option<String>,
     missing: BTreeSet<(u16, u16)>,
     unsupported: BTreeSet<&'static str>,
     wanted: BTreeSet<Partner>,
@@ -208,8 +210,10 @@ fn run(
                 .map(|t| t.iter().rev().take(10).rev().copied().collect())
                 .unwrap_or_default();
         }
-        world.tick_attacks();
+        world.tick_attacks(&env);
         world.tick_objects(&env, Some(0));
+        world.deliver_shouts(&env, Some(&mut object));
+        world.follow_attachments(&env, Some(&mut object));
         for event in std::mem::take(&mut world.events) {
             match event {
                 Event::Unsupported(name) => {
@@ -251,6 +255,12 @@ fn run(
         .flatten()
         .map(|o| o.script.faults.len())
         .sum();
+    out.other_first = world.objects.iter().flatten().find_map(|o| {
+        o.script
+            .faults
+            .first()
+            .map(|(pc, f)| format!("entry {} word {pc}: {f:?}", o.sys.entry_id))
+    });
     out.missing = world.missing.iter().copied().collect();
     Ok(out)
 }
@@ -322,12 +332,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let ok = o.faults.is_empty() && o.missing.is_empty();
                 clean += usize::from(ok);
                 println!(
-                    "{model}\t{}\tacts={}\tfaults={}\tafter={:?}\tpartner_faults={}\tmissing={:?}\tunsupported={:?}\tpartners={partners:?}",
+                    "{model}\t{}\tacts={}\tfaults={}\tafter={:?}\tpartner_faults={} {}\tmissing={:?}\tunsupported={:?}\tpartners={partners:?}",
                     if ok { "clean" } else { "NOT-CLEAN" },
                     o.acts,
                     o.faults.first().map_or(String::new(), Clone::clone),
                     o.fault_trace,
                     o.other_faults,
+                    o.other_first.as_deref().unwrap_or(""),
                     o.missing,
                     o.unsupported,
                 );
