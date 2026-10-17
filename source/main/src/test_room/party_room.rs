@@ -209,7 +209,7 @@ fn build_motion(
             .iter()
             .flat_map(|t| &t.records.frames)
             .filter(|f| f.trigger == 14)
-            .filter_map(|f| Some((f.frame.max(0) as u32, *f.parameters.first()? as i16)))
+            .filter_map(|f| Some((f.frame.max(0) as u32, *f.parameters.first()?)))
             .collect(),
         actionable: selected
             .triggers
@@ -722,6 +722,59 @@ pub struct ClawSample {
     pub rows: Vec<data::battle_tables::Attack>,
     /// The tour's synthetic claws name the one member they are for.
     pub only: Option<usize>,
+}
+
+/// The nearest enemy to a member: the Shadow, or a gallery enemy within the
+/// search radius (personality +0x68, 800) when it is nearer.
+fn pick_target(
+    shadow: Option<Target>,
+    shadow_centre: Option<[f32; 3]>,
+    gallery: &[GalleryTarget],
+    from: [f32; 3],
+) -> (Option<Target>, Option<[f32; 3]>) {
+    let dist =
+        |p: Vec3| Vec3::from_array(from).distance(p * Vec3::new(1., 0., 1.) + Vec3::Y * from[1]);
+    let mut best = shadow.map(|t| (dist(Vec3::from_array(t.position)), t, shadow_centre));
+    for g in gallery {
+        let d = dist(g.position);
+        if d > party_members::SEARCH_RADIUS || best.as_ref().is_some_and(|b| b.0 <= d) {
+            continue;
+        }
+        best = Some((
+            d,
+            Target {
+                position: g.position.to_array(),
+                radius: g.radius,
+            },
+            Some(g.centre.to_array()),
+        ));
+    }
+    best.map_or((None, None), |b| (Some(b.1), b.2))
+}
+
+/// One attack volume of a member this tick, for the gallery enemies: the
+/// same hit the Shadow takes, offered to the battle bridge.
+#[derive(Clone)]
+pub struct OutVolume {
+    pub member: usize,
+    pub key: u64,
+    pub atkp: u16,
+    pub sub: u8,
+    /// Centre, radius, height and the previous centre of each sphere.
+    pub spheres: Vec<(Vec3, f32, f32, Option<Vec3>)>,
+    pub moving: Option<Vec3>,
+    pub stats: combat::AttackerStats,
+    pub origin: Vec3,
+    /// A spell's volume sweeps as an ellipsoid from its previous centre.
+    pub spell: bool,
+}
+
+/// A gallery enemy a member may fight: where it stands and its TARGET point.
+#[derive(Clone, Copy, Debug)]
+pub struct GalleryTarget {
+    pub position: Vec3,
+    pub centre: Vec3,
+    pub radius: f32,
 }
 
 /// What one enemy offers a member this tick: its attack spheres and what
@@ -1268,8 +1321,11 @@ pub fn tick(game: &mut Game, tick: u64) {
         party_hit_tour,
         drive,
         enemy_guards,
+        party_volumes,
+        gallery_targets,
         ..
     } = game;
+    party_volumes.clear();
     // The battle flag follows an enemy near Sora or a live member attack
     // (FUN_1403ab4a0) after its delay; the KO timer reads it.
     let wanted = enemy.as_ref().is_some_and(|rt| {
@@ -1288,14 +1344,14 @@ pub fn tick(game: &mut Game, tick: u64) {
         height: params.height,
         step: params.step_height,
     };
-    let target = enemy
+    let shadow_target = enemy
         .as_ref()
         .filter(|rt| rt.enabled && rt.enemy.targetable())
         .map(|rt| Target {
             position: rt.enemy.position,
             radius: 40.,
         });
-    let centre = enemy
+    let shadow_centre = enemy
         .as_ref()
         .filter(|rt| rt.enabled && rt.enemy.targetable())
         .map(|rt| enemy_centre(rt).to_array());
@@ -1325,6 +1381,13 @@ pub fn tick(game: &mut Game, tick: u64) {
         m.record
             .tick(1., party_hit::motion::is_damage(m.follower.motion()));
         let kind = m.kind.clone();
+        // The nearest enemy: the Shadow or a gallery enemy within reach.
+        let (target, centre) = pick_target(
+            shadow_target,
+            shadow_centre,
+            gallery_targets,
+            m.follower.position,
+        );
         let length = |id: u16| kind.motions.get(&id).map(|d| d.end() + 1);
         let root = |id: u16, t: u32| {
             kind.motions
@@ -1531,6 +1594,29 @@ pub fn tick(game: &mut Game, tick: u64) {
             for strike in out.strikes {
                 heals.push((strike.party, strike.atkp, index));
             }
+            // The same volumes, offered to the gallery enemies.
+            for v in out
+                .volumes
+                .iter()
+                .filter(|v| v.role == player::magic::Role::Damage)
+            {
+                party_volumes.push(OutVolume {
+                    member: index,
+                    key: KEY_BASE | 1 << 47 | (v.key & 0x7fff_ffff_ffff),
+                    atkp: v.atkp,
+                    sub: v.sub,
+                    spheres: vec![(
+                        Vec3::from_array(v.centre),
+                        v.radius,
+                        v.height,
+                        v.previous.map(Vec3::from_array),
+                    )],
+                    moving: v.moving.map(Vec3::from_array),
+                    stats: attacker(&kind),
+                    origin: Vec3::from_array(pos),
+                    spell: true,
+                });
+            }
             // FUN_1403d08e0: the shot (Type 1) clashes with another team's
             // super guard (Type 3); attack_is_reflect ends it next tick.
             for v in out
@@ -1601,6 +1687,44 @@ pub fn tick(game: &mut Game, tick: u64) {
             };
             if let Some(r) = reflect {
                 rt.enemy.reflect(r.motion as usize, r.hit_back as f32);
+            }
+        }
+        // The weapon's attack windows, offered to the gallery enemies.
+        if let Some(a) = m.follower.attack
+            && let Some(data) = kind.motions.get(&a.motion)
+            && !data.blade.is_empty()
+        {
+            let f = (a.tick as usize).min(data.blade.len() - 1);
+            let turn = Quat::from_rotation_y(m.follower.yaw);
+            let at = Vec3::from_array(m.follower.position);
+            for (w, &(start, end, atkp, group)) in data.hits.iter().enumerate() {
+                let Some(list) = kind.spheres.get(&group) else {
+                    continue;
+                };
+                if a.tick < start || a.tick > end {
+                    continue;
+                }
+                party_volumes.push(OutVolume {
+                    member: index,
+                    key: KEY_BASE | (index as u64) << 48 | m.started << 4 | w as u64,
+                    atkp,
+                    sub: 0,
+                    spheres: list
+                        .iter()
+                        .map(|&(offset, radius)| {
+                            (
+                                at + turn * data.blade[f].transform_point3(offset),
+                                radius,
+                                radius,
+                                None,
+                            )
+                        })
+                        .collect(),
+                    moving: None,
+                    stats: attacker(&kind),
+                    origin: at,
+                    spell: false,
+                });
             }
         }
         // The weapon's attack windows against the enemy's body.

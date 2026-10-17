@@ -926,6 +926,10 @@ struct Game {
     /// The Type 3 guard spheres of the enemies' attacks this tick (centre,
     /// radius): what a party member's Type 1 shot clashes with.
     enemy_guards: Vec<(Vec3, f32)>,
+    /// The party's attack volumes of the last tick and the gallery enemies
+    /// a member may aim at (party_room, enemy_battle_hits).
+    party_volumes: Vec<party_room::OutVolume>,
+    gallery_targets: Vec<party_room::GalleryTarget>,
     fx_live: HashMap<u64, magic::FxLive>,
     /// The party slot the Magic menu's Cure target list picked (0 Sora)
     /// and the Magic row Cure was chosen from, while that list is open.
@@ -11190,6 +11194,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         party_hit_tour,
         party_hit_state: party_hit_tour::State::default(),
         enemy_guards: Vec::new(),
+        party_volumes: Vec::new(),
+        gallery_targets: Vec::new(),
         fx_live: HashMap::new(),
         cure_target: 0,
         cure_pick: None,

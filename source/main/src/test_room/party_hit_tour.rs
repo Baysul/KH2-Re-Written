@@ -371,9 +371,7 @@ pub fn drive(game: &mut Game, tick: u64) {
                     let at = Vec3::new(p[0] + s * 300., p[1] + 90., p[2] + c * 300.);
                     game.enemy_guards.push((at, 80.));
                 }
-                if tick > state.mark + 8 && free(game, member) {
-                    done = true;
-                } else if tick > state.mark + PATIENCE {
+                if (tick > state.mark + 8 && free(game, member)) || tick > state.mark + PATIENCE {
                     done = true;
                 }
             }

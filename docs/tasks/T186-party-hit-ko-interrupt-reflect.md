@@ -102,6 +102,22 @@ from the installation at run time.
   rows land on a member or its shield when each case says; the final nine
   hundred ticks are the Shadow's own fight.
 
+## Second pass (same task)
+
+- Voices: the members' hit voices come from the motions' frame trigger 14 (flinches, attacks, the
+  get-up), the low-HP voice 9 (`FUN_1403c34d0`), the KO voice 2 (`FUN_1403d5dc0`) and the casts'
+  first call, trap (1,262): 6, and 21 or 3 for Cure. They use the same vtbl rows and
+  `FUN_1403d69b0` path as Sora's, with `voice/us/battle/<world>0_donald|goofy` (the exe's
+  `%s%d_%s` and its name table sora, donald, goofy). Goofy's script has no voice trap.
+- The air flinch lands on motion 5 (the mode-1 land motion, `obj+0x11c`, `FUN_1403cbec0`).
+- Reflect in the room: `Game::enemy_guards` carries the Type 3 attack spheres of gallery
+  enemies; a Blizzard shot clashing with one ends (`party_reflect`), and the tour's reflect case puts
+  such a sphere in the shot's path.
+- Gallery enemies: a member aims at the nearest of the Shadow and the gallery enemies within 800
+  and its melee windows and spell volumes hit them through the bridge Sora's attacks use (the
+  member's own stats; Sora's combo and Drive are not fed). `--enemy-combat-tour` keeps the party out
+  (it is Sora's exercise) and still passes.
+
 ## Checks
 
 - PASS `cargo fmt --all --check`, PASS `cargo clippy --workspace --all-targets --locked -- -D warnings`,
@@ -130,22 +146,27 @@ from the installation at run time.
   `FUN_1403ca550/7c0/250`, `FUN_1403d2140`, `FUN_1403d1f40`, `FUN_1403ab4a0`, `FUN_1404371b0`,
   the Friend vtable slots, SSTM +0x54/+0x58/+0x5c (0.5, 0.5, 8.0), PRTY word 6, and Donald's BDX acts
   (`fire` L2003, `blizzard` L2571 and its shot L3166-L4712, `thunder` L5052, `cure` L5453).
+- PASS release `--party-hit-tour` (`run7`): 31 `party_voice` / `party_hit_taken` sound events with
+  Donald's and Goofy's banks (for example 9 then 2 at the KO tick), and the reflect case: Donald's
+  Blizzard cast at tick 1783 ended with `party_reflect` at 1808 when the shot met the guard sphere.
+- PASS release `--enemy-combat-tour` (`run10`, verdict pass with positive damage both ways), and a
+  run with the party in (`run8`): Donald's Fire hit a gallery actor (`gallery_hit` with `member` 0) and
+  gallery actors hit Donald and Goofy (`party_hit_taken` from ATKP 405 and 7, a blow with motion 18).
 - NOT RUN: owner playtest; comparison with the installed game's frames or timings.
 
 ## Not reproduced / uncertain
 
-- Voices: the member's hit voices (frame trigger 14 of the damage motions), the
-  low-HP voice 9 and the KO voice 2 are not played; the party has no voice banks
-  in the room.
+- A voice's priority (row byte 2) is not used, as for Sora's: two voices on one tick both play.
 - No HUD gauge for Donald and Goofy: their HP is in the log and the Cure menu's
-  colour only.
+  colour only. The original's `dk::GAUGE_FRIEND` (face, ring masks, state groups 0x40-0x4a,
+  `FUN_140182730` per frame) is a separate port.
 - The `patn` override (`FUN_14040a8e0`, `FUN_1403ee9b0`) is taken as absent for
   the party; reaction class 5 (Magnet's capture, `FUN_14040fbf0`) and 14 are not
   built for members.
-- Air hits on a member (Goofy's Tornado and Turbo hover) use a simple air
-  flinch: the hop and the horizontal speed are `Arc::launch(50)` and
-  `strength × HitBackToJump`, landing on the floor; the original's mode-1
-  physics for friends was not traced.
+- Air hits on a member (Goofy's Tornado and Turbo hover) use Sora's air-flinch data: the hop
+  and the horizontal speed are `Arc::launch(50)` and `strength × HitBackToJump` (the same
+  `FUN_1403d4800` call), landing on motion 5; the friend object's own mode-1 physics was not traced
+  separately.
 - Mode 4 (blow) is assumed for the friend's blow (`FUN_140409d30` can choose
   mode 8 or 0x21 for other flag states).
 - `FUN_140410100`'s counters (`DAT_142aea190`) belong to a mini-game manager and
@@ -156,12 +177,10 @@ from the installation at run time.
 - ATKP 139 (Goofy's shield) has ReflectRange 45, not 0 as `goofy-spec.md` §5.4 says: the
   shield only clashes with attackers within 45 degrees of his facing. The claws' own cone
   (0 for the Shadow's) is taken as met for other attackers.
-- The room's Shadow is the only enemy the party fights on purpose; gallery
-  enemies hit the members through the same `receive`, but members never target
-  them.
-- The reflect needs an enemy Type 3 attack sphere in reach; the Shadow has none,
-  so the end of a reflected shot is checked by unit tests and the guard feed, not
-  by a capture.
+- A member's hit on a gallery enemy shows the default spark, not the member's own spell effect.
+- The reflect needs an enemy Type 3 attack sphere in reach; the three supported gallery enemies
+  were not found to make one in the runs, so the reflect in the room was checked with a synthetic
+  guard sphere in the path of the real shot.
 - No comparison against the installed game's frames or timings.
 
 ## Verdict
