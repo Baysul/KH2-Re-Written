@@ -168,6 +168,7 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T190](T190-command-lockout-and-controller-vibration.md) | Frame triggers 16 and 31: the command lockout and controller vibration | PARTIAL. |
 | [T191](T191-hit-effect-ring.md) | The eight most recent hit effects stay, the displaced one fades | PARTIAL. |
 | [T192](T192-first-person-flags-and-commands.md) | First person: FUN_1403ba300's flag bits and what first person blocks | PARTIAL. |
+| [T200](T200-sephiroth-fight.md) | The Sephiroth fight: meeting, fight and aftermath | PARTIAL. The three parts run in order from the install; stats, reaction commands, revenge gauge, boss gauge and death are not the original yet. |
 | [T202](T202-second-command-deck-and-world-layouts.md) | The second command deck (Summon, Party, Limit) and the world command layouts | PARTIAL. |
 | [T203](T203-party-limit-scenes.md) | Party limits run from the second deck | PARTIAL. |
 | [T204](T204-summons.md) | Summons come, last their time and leave from the second deck | PARTIAL. |
