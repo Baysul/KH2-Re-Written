@@ -127,6 +127,50 @@ pub enum Phase {
     GetUp,
 }
 
+/// A member in the air: the jump arc and the horizontal velocity of the
+/// physics call `vt+0x18` (the same one `FUN_1403d4800` makes for a hit and
+/// `FUN_1401b0420` makes before an air attack), run by the mover
+/// `FUN_1403b89a0` every second frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Airborne {
+    arc: Arc,
+    velocity: [f32; 2],
+    sampler: Sampler,
+}
+
+impl Airborne {
+    /// A jump `height` high (Y-up) from `y` with the horizontal velocity
+    /// (units per tick).
+    pub fn launch(y: f32, height: f32, velocity: [f32; 2]) -> Self {
+        Airborne {
+            arc: Arc::launch(y, height),
+            velocity,
+            sampler: Sampler::default(),
+        }
+    }
+
+    /// One tick: the new position and whether the member reached the floor.
+    pub fn step<W: World>(
+        &mut self,
+        position: Vec3,
+        fall_max: f32,
+        world: &W,
+        body: &Body,
+    ) -> (Vec3, bool) {
+        if self.sampler.due(0.) {
+            let dy = self.arc.step(position[1], fall_max, false, PHYSICS_STEP);
+            self.sampler.store([
+                self.velocity[0] * PHYSICS_STEP,
+                dy,
+                self.velocity[1] * PHYSICS_STEP,
+            ]);
+            self.velocity = self.velocity.map(|c| c * AIR_DRAG.powf(PHYSICS_STEP));
+        }
+        let moved = world.collide(position, self.sampler.displacement(), true, body);
+        (moved.position, moved.on_floor)
+    }
+}
+
 /// A reaction motion in progress.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reaction {
@@ -137,8 +181,7 @@ pub struct Reaction {
     blow: Option<Blow>,
     sstm: Sstm,
     sampler: Sampler,
-    arc: Option<Arc>,
-    air: [f32; 2],
+    air: Option<Airborne>,
 }
 
 /// What a hit does to a member, from `FUN_1403d2fe0`.
@@ -203,8 +246,7 @@ pub fn start(
         blow: None,
         sstm: *sstm,
         sampler: Sampler::default(),
-        arc: None,
-        air: [0.; 2],
+        air: None,
     };
     let flinch = |knock: Option<Knock>| {
         // FUN_1403d43b0: FRONT/BACK by the facing, HIGH/LOW by the sphere,
@@ -242,8 +284,11 @@ pub fn start(
                 reaction: Some(Reaction {
                     phase: Phase::Air,
                     motion: motion::AIR[i],
-                    arc: Some(Arc::launch(height, crate::AIR_HIT_HOP)),
-                    air: [dir[0] * v, dir[1] * v],
+                    air: Some(Airborne::launch(
+                        height,
+                        crate::AIR_HIT_HOP,
+                        [dir[0] * v, dir[1] * v],
+                    )),
                     ..base
                 }),
                 slide: None,
@@ -301,9 +346,23 @@ pub fn bounce(
         blow: None,
         sstm: *sstm,
         sampler: Sampler::default(),
-        arc: None,
-        air: [0.; 2],
+        air: None,
     })
+}
+
+/// The land motion after an air attack (motion 5 once the member reaches
+/// the floor), played like the land after a blow.
+pub fn landing(sstm: &Sstm) -> Reaction {
+    Reaction {
+        phase: Phase::Land,
+        motion: motion::LAND,
+        tick: 0,
+        knock: None,
+        blow: None,
+        sstm: *sstm,
+        sampler: Sampler::default(),
+        air: None,
+    }
 }
 
 /// Motion 55 after a revive (`FUN_1403c3c30`).
@@ -316,8 +375,7 @@ pub fn get_up(sstm: &Sstm) -> Reaction {
         blow: None,
         sstm: *sstm,
         sampler: Sampler::default(),
-        arc: None,
-        air: [0.; 2],
+        air: None,
     }
 }
 
@@ -363,29 +421,18 @@ impl Reaction {
                 (position, false)
             }
             Phase::Air => {
-                let fall_max = self.sstm.fall_max;
-                if self.sampler.due(0.) {
-                    let dy = self
-                        .arc
-                        .as_mut()
-                        .map_or(0., |a| a.step(position[1], fall_max, false, PHYSICS_STEP));
-                    self.sampler.store([
-                        self.air[0] * PHYSICS_STEP,
-                        dy,
-                        self.air[1] * PHYSICS_STEP,
-                    ]);
-                    self.air = self.air.map(|c| c * AIR_DRAG.powf(PHYSICS_STEP));
-                }
-                let d = self.sampler.displacement();
-                let moved = env.world.collide(position, d, true, &env.body);
-                position = moved.position;
-                if moved.on_floor {
+                let Some(air) = self.air.as_mut() else {
+                    return (position, true);
+                };
+                let (p, landed) = air.step(position, self.sstm.fall_max, env.world, &env.body);
+                position = p;
+                if landed {
+                    self.air = None;
                     // The landing plays the land motion when the set has it.
                     if (env.length)(motion::LAND).is_some() {
                         self.phase = Phase::Land;
                         self.motion = motion::LAND;
                         self.tick = 0;
-                        self.arc = None;
                         self.sampler = Sampler::default();
                         return (position, false);
                     }

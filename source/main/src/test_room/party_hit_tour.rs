@@ -64,6 +64,12 @@ enum Case {
     Reflect {
         member: usize,
     },
+    /// The Shadow hangs 200 above the floor 150 ahead of the member, so only
+    /// an air attack (records 2/3, 6/7) is eligible: the member jumps,
+    /// strikes and lands.
+    Air {
+        member: usize,
+    },
     /// The Shadow fights on its own, the party's AI casts.
     Fight,
 }
@@ -107,6 +113,10 @@ const CASES: &[Case] = &[
         delay: 36,
     },
     Case::Wait(120),
+    Case::Air { member: DONALD },
+    Case::Wait(60),
+    Case::Air { member: GOOFY },
+    Case::Wait(60),
     Case::Fight,
 ];
 
@@ -142,6 +152,14 @@ fn stage(game: &mut Game, member: usize, enemy: Option<bool>) {
         rt.enemy.position = from.to_array();
         rt.enemy.spawn = from.to_array();
     }
+}
+
+/// Whether the member is in an air attack (record 2, 3, 6 or 7).
+fn record_seen(game: &Game, member: usize) -> bool {
+    game.party
+        .get(member)
+        .and_then(|m| m.follower.attack)
+        .is_some_and(|a| matches!(a.record, 2 | 3 | 6 | 7))
 }
 
 fn free(game: &Game, member: usize) -> bool {
@@ -377,6 +395,67 @@ pub fn drive(game: &mut Game, tick: u64) {
             }
             _ => {}
         },
+        Case::Air { member } => {
+            // The target hangs 150 ahead of the member, 200 above its feet.
+            let seen = game.party.get(member).map(|m| {
+                let f = &m.follower;
+                (f.attack.map(|a| a.record), f.position[1], f.motion())
+            });
+            match state.stage {
+                0 if free(game, member) => {
+                    stage(game, member, None);
+                    if let Some(rt) = game.enemy.as_mut() {
+                        rt.enabled = false;
+                    }
+                    if let Some(m) = game.party.get(member) {
+                        let (s, c) = m.follower.yaw.sin_cos();
+                        let p = m.follower.position;
+                        let at = Vec3::new(p[0] + s * 150., p[1] + 200., p[2] + c * 150.);
+                        game.party_fixed_target = Some(party_room::GalleryTarget {
+                            position: at,
+                            centre: at + Vec3::Y * 40.,
+                            radius: 40.,
+                        });
+                    }
+                    log(
+                        game,
+                        tick,
+                        index,
+                        "air_start",
+                        serde_json::json!({"member":member}),
+                    );
+                    capture(game, tick, &[20, 40, 60, 80]);
+                    state.stage = 1;
+                    state.mark = tick;
+                }
+                1 | 2 => {
+                    if tick % 6 == 0
+                        && let Some((record, y, motion)) = seen
+                    {
+                        let e = serde_json::json!({
+                            "member":member,"record":record,"y":y,"motion":motion});
+                        log(game, tick, index, "air_sample", e);
+                    }
+                    if state.stage == 1 && record_seen(game, member) {
+                        state.stage = 2;
+                        // One attack is enough: the target goes away.
+                        game.party_fixed_target = None;
+                    } else if state.stage == 1 && tick > state.mark + 600 {
+                        done = true;
+                    }
+                    if state.stage == 2 && free(game, member) && tick > state.mark + 20 {
+                        done = true;
+                    }
+                    if tick > state.mark + PATIENCE {
+                        done = true;
+                    }
+                }
+                _ => {}
+            }
+            if done {
+                game.party_fixed_target = None;
+            }
+        }
         Case::Fight => {
             if state.stage == 0 {
                 game.cheats.enemy_frozen = false;

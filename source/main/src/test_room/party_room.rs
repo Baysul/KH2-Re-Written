@@ -330,9 +330,11 @@ pub fn load(
             has_weapon: true,
         })
     };
-    // The base motions plus the cast motions of the member's spells.
+    // The base motions, the motion of every record (air attacks, spell
+    // acts) and the fall after an air attack.
     let mut wanted: Vec<u16> = MOTIONS.to_vec();
-    for r in records.iter().filter(|r| r.spell.is_some()) {
+    wanted.push(party_members::FALL);
+    for r in records {
         if !wanted.contains(&r.motion) {
             wanted.push(r.motion);
         }
@@ -618,6 +620,36 @@ pub fn order_cast(game: &mut Game, member: usize, spell: party_members::Spell, h
     true
 }
 
+/// The hit spark of a member's spell volume: the element of the member's own
+/// PAX chosen by the ATKP's hit-effect category (`attack_set_pax`,
+/// FUN_1402c6730), started at the contact point facing the hit.
+pub fn spell_spark(
+    pax: &Arc<data::object_effect::Pax>,
+    effect: u8,
+    contact: [f32; 3],
+    direction: [f32; 3],
+    key: u64,
+) -> Option<Vec<spell_fx::Call>> {
+    // mask = (1 << (32 + hitEffect - 1)) | 1 (a normal target).
+    let mask = (1u64 << (32 + effect as u64 - 1)) | 1;
+    let element = pax.by_category(mask)?;
+    Some(vec![
+        spell_fx::Call {
+            pax: Some(pax.clone()),
+            fx: player::magic::Fx::Start {
+                key,
+                id: element.id,
+                bound: None,
+                at: Some(contact),
+            },
+        },
+        spell_fx::Call {
+            pax: None,
+            fx: player::magic::Fx::Dir(key, direction),
+        },
+    ])
+}
+
 /// One volume of a cast against the enemy's body: the hit record, the
 /// ATKP step row and the damage with the caster's stats.
 #[allow(clippy::too_many_arguments)]
@@ -632,9 +664,9 @@ fn land_volume(
     tick: u64,
     sound_queue: &mut Vec<(u32, &'static str)>,
     log: &mut Option<File>,
-) {
+) -> Option<(Vec3, Vec3, u8)> {
     if !rt.enabled || !rt.enemy.targetable() || !ensure_attack_rows(rt, v.atkp, v.sub) {
-        return;
+        return None;
     }
     let bodies = enemy_bodies(rt);
     rt.instance_seen.insert(key, tick);
@@ -653,7 +685,7 @@ fn land_volume(
         )
     });
     if rt.enemy.record.has(aid) {
-        return;
+        return None;
     }
     let mut hit = None;
     for c in combat::swept_volume(v.centre, v.previous, v.radius, v.height) {
@@ -665,7 +697,7 @@ fn land_volume(
             hit = Some((Vec3::from_array(c), high));
         }
     }
-    let Some((at, high)) = hit else { return };
+    let Some((at, high)) = hit else { return None };
     let rows = rt.steps[&(v.atkp, v.sub)].clone();
     let cure = matches!(rows[0].kind, 5 | 6);
     let (counted, row) = rt.enemy.record.hit(aid, grp, cure, |count| {
@@ -673,7 +705,7 @@ fn land_volume(
         (r, rows[r].interval)
     });
     if !counted {
-        return;
+        return None;
     }
     let attack = params_of(&rows[row]);
     let enemy_at = Vec3::from_array(rt.enemy.position);
@@ -697,7 +729,9 @@ fn land_volume(
             serde_json::json!({"event":"party_hit","tick":tick,"member":name,
             "atkp":v.atkp,"step":row,"damage":damage,"enemy_hp":rt.enemy.hp}),
         );
+        return Some((at, dir, rows[row].hit_effect));
     }
+    None
 }
 
 /// The Shadow's last player-side attacker (obj+0xd40, FUN_140411300).
@@ -767,6 +801,8 @@ pub struct OutVolume {
     pub origin: Vec3,
     /// A spell's volume sweeps as an ellipsoid from its previous centre.
     pub spell: bool,
+    /// The member's effect container, for a spell's hit spark.
+    pub pax: Option<Arc<data::object_effect::Pax>>,
 }
 
 /// A gallery enemy a member may fight: where it stands and its TARGET point.
@@ -1323,9 +1359,11 @@ pub fn tick(game: &mut Game, tick: u64) {
         enemy_guards,
         party_volumes,
         gallery_targets,
+        party_fixed_target,
         ..
     } = game;
     party_volumes.clear();
+    let fixed: Vec<GalleryTarget> = party_fixed_target.iter().copied().collect();
     // The battle flag follows an enemy near Sora or a live member attack
     // (FUN_1403ab4a0) after its delay; the KO timer reads it.
     let wanted = enemy.as_ref().is_some_and(|rt| {
@@ -1385,7 +1423,7 @@ pub fn tick(game: &mut Game, tick: u64) {
         let (target, centre) = pick_target(
             shadow_target,
             shadow_centre,
-            gallery_targets,
+            &[gallery_targets.as_slice(), fixed.as_slice()].concat(),
             m.follower.position,
         );
         let length = |id: u16| kind.motions.get(&id).map(|d| d.end() + 1);
@@ -1615,6 +1653,7 @@ pub fn tick(game: &mut Game, tick: u64) {
                     stats: attacker(&kind),
                     origin: Vec3::from_array(pos),
                     spell: true,
+                    pax: kind.pax.clone(),
                 });
             }
             // FUN_1403d08e0: the shot (Type 1) clashes with another team's
@@ -1644,7 +1683,7 @@ pub fn tick(game: &mut Game, tick: u64) {
                 let stats = attacker(&kind);
                 for v in &out.volumes {
                     let key = KEY_BASE | 1 << 47 | (v.key & 0x7fff_ffff_ffff);
-                    land_volume(
+                    if let Some((at, dir, effect)) = land_volume(
                         rt,
                         index,
                         kind.name,
@@ -1655,7 +1694,18 @@ pub fn tick(game: &mut Game, tick: u64) {
                         tick,
                         sound_queue,
                         log,
-                    );
+                    ) && effect != 0
+                        && let Some(pax) = &kind.pax
+                        && let Some(calls) = spell_spark(
+                            pax,
+                            effect,
+                            at.to_array(),
+                            dir.to_array(),
+                            1 << 62 | tick << 8 | (index as u64) << 4,
+                        )
+                    {
+                        fx_calls.extend(calls);
+                    }
                 }
             }
         }
@@ -1724,6 +1774,7 @@ pub fn tick(game: &mut Game, tick: u64) {
                     stats: attacker(&kind),
                     origin: at,
                     spell: false,
+                    pax: None,
                 });
             }
         }

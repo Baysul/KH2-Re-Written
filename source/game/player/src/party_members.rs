@@ -18,6 +18,13 @@ use crate::actor_physics::{Knock, Sstm};
 use crate::party_hit;
 use crate::{Body, Hit, Vec3, World};
 
+/// The falling motion (id 4) a member plays after an air attack.
+pub const FALL: u16 = 4;
+/// The horizontal speed of an air attack's jump (`FUN_1401b0420`) and the
+/// highest jump (385, the top of the record's window).
+const AIR_SPEED: f32 = 8.;
+const AIR_MAX: f32 = 385.;
+
 /// Walk and run speeds per tick (PRTY words 0 and 1: 2.0 and 8.0).
 pub const WALK_SPEED: f32 = 2.;
 pub const RUN_SPEED: f32 = 8.;
@@ -70,7 +77,7 @@ pub struct Record {
     /// `[low − r, high + r]` (the exe's Y-down window, negated).
     pub low: f32,
     pub high: f32,
-    /// Air records jump first (+0x20 ≠ 0); not played yet.
+    /// Air records jump first (+0x20 ≠ 0, `FUN_1401b0420`).
     pub air: bool,
     /// MP cost (+8); 255 starts an MP Charge.
     pub cost: u8,
@@ -87,12 +94,23 @@ const fn ground(id: u8, motion: u16, far: f32) -> Record {
         motion,
         near: 0.,
         far,
-        low: -150.,
-        high: 100.,
+        low: -100.,
+        high: 150.,
         air: false,
         cost: 0,
         spell: None,
         heal_below: 0.,
+    }
+}
+
+/// An air attack: the target must stand 100-385 above the member (the
+/// exe's Y-down window -385/-100), and the member jumps up to it first.
+const fn air(id: u8, motion: u16, far: f32) -> Record {
+    Record {
+        low: 100.,
+        high: 385.,
+        air: true,
+        ..ground(id, motion, far)
     }
 }
 
@@ -113,30 +131,36 @@ const fn spell(id: u8, spell: Spell, motion: u16, window: [f32; 4], cost: u8) ->
     }
 }
 
-/// Donald's records (resource at 0x14071d850): the two ground attacks and
-/// the spells 57-60 (Fire 0-350, Blizzard 250-750, Thunder 0-500 with
-/// their height windows; Cure costs 255 and heals below 0.4 of the HP).
-/// The act motions are 192 (Fire, Thunder, Cure) and 191 (Blizzard).
-pub const DONALD: [Record; 6] = [
+/// Donald's records (resource at 0x14071d850): the two ground attacks, the
+/// two air attacks (ids 2, 3, motions 181 and 182) and the spells 57-60
+/// (Fire 0-350, Blizzard 250-750, Thunder 0-500 with their height windows;
+/// Cure costs 255 and heals below 0.4 of the HP). The act motions are 192
+/// (Fire, Thunder, Cure) and 191 (Blizzard).
+pub const DONALD: [Record; 8] = [
     ground(0, 151, 200.),
     ground(1, 152, 180.),
-    spell(57, Spell::Fire, 192, [0., 350., -200., 100.], 10),
-    spell(58, Spell::Blizzard, 191, [250., 750., -150., 100.], 10),
-    spell(59, Spell::Thunder, 192, [0., 500., -1000., 500.], 10),
+    air(2, 181, 150.),
+    air(3, 182, 130.),
+    spell(57, Spell::Fire, 192, [0., 350., -100., 200.], 10),
+    spell(58, Spell::Blizzard, 191, [250., 750., -100., 150.], 10),
+    spell(59, Spell::Thunder, 192, [0., 500., -500., 1000.], 10),
     Record {
         heal_below: 0.4,
         ..spell(60, Spell::Cure, 192, [0., 0., 0., 0.], 255)
     },
 ];
-/// Goofy's records (personality 1): the two ground attacks and the
-/// specials Tornado (id 92, range 0-500, height window -500/100 after the
-/// negation) and Turbo (id 94, 0-500, -150/100), 10 MP each. Bash (id 93,
-/// 250-750) needs the spawned shield object and is not built.
-pub const GOOFY: [Record; 4] = [
+/// Goofy's records (personality 1): the two ground attacks, the two air
+/// attacks (ids 6, 7) and the specials Tornado (id 92, range 0-500,
+/// height window -100/500 after the negation) and Turbo (id 94, 0-500,
+/// -100/150), 10 MP each. Bash (id 93, 250-750) is the shield throw, a
+/// separate act (`party_bash`).
+pub const GOOFY: [Record; 6] = [
     ground(4, 151, 220.),
     ground(5, 152, 300.),
-    spell(92, Spell::Tornado, 191, [0., 500., -500., 100.], 10),
-    spell(94, Spell::Turbo, 194, [0., 500., -150., 100.], 10),
+    air(6, 181, 100.),
+    air(7, 182, 80.),
+    spell(92, Spell::Tornado, 191, [0., 500., -100., 500.], 10),
+    spell(94, Spell::Turbo, 194, [0., 500., -100., 150.], 10),
 ];
 
 /// The enemy a member fights: its centre and radius.
@@ -212,6 +236,8 @@ pub struct Follower {
     pub reaction: Option<party_hit::Reaction>,
     /// A knock-slide that has no reaction motion (reaction class 1).
     slide: Option<Knock>,
+    /// The jump of an air attack (and the fall after it).
+    air: Option<party_hit::Airborne>,
     /// KO: the revive timer (obj+0xdc0) while the dead bit (obj+0x9b8 bit
     /// 2) is set.
     pub down: Option<f32>,
@@ -280,6 +306,7 @@ impl Follower {
             fall: 0.,
             reaction: None,
             slide: None,
+            air: None,
             down: None,
             laid: false,
         }
@@ -296,6 +323,10 @@ impl Follower {
         }
         if let Some(a) = self.attack {
             return a.motion;
+        }
+        if self.air.is_some() {
+            // Falling after the attack's motion has ended.
+            return FALL;
         }
         match self.gait {
             Gait::Stand => 0,
@@ -323,9 +354,6 @@ impl Follower {
 
     /// FUN_1401b2880's range test of one record against the target.
     pub fn eligible(&self, r: &Record, t: &Target) -> bool {
-        if r.air {
-            return false;
-        }
         // Cure's record reads 0-0 as a range, which the original's check
         // would turn into "touching the enemy"; the cast waits on the
         // heal target instead [U: the record's flags were not decoded].
@@ -430,6 +458,16 @@ impl Follower {
             spell: r.spell,
             heal,
         });
+        if r.air {
+            // The jump reaches the target's height (1 + rise, at most 385)
+            // and carries the member toward it at 8 a tick.
+            let rise = t.position[1] - self.position[1];
+            self.air = Some(party_hit::Airborne::launch(
+                self.position[1],
+                (1. + rise).clamp(0., AIR_MAX),
+                [self.yaw.sin() * AIR_SPEED, self.yaw.cos() * AIR_SPEED],
+            ));
+        }
         self.gait = Gait::Stand;
         self.tick = 0;
         self.special = Special::new();
@@ -616,6 +654,7 @@ impl Follower {
 
     fn begin_reaction(&mut self, r: party_hit::Reaction) {
         self.attack = None;
+        self.air = None;
         self.special = Special::new();
         self.gait = Gait::Stand;
         self.reaction = Some(r);
@@ -628,6 +667,7 @@ impl Follower {
     pub fn ko(&mut self, timer: f32) {
         self.down = Some(timer);
         self.attack = None;
+        self.air = None;
         self.special = Special::new();
         self.laid = false;
     }
@@ -681,10 +721,33 @@ impl Follower {
             }
             return;
         }
+        // An air attack's jump: the mover runs whatever the motion does, and
+        // the floor ends the attack with the land motion.
+        if let Some(mut air) = self.air {
+            let (position, landed) =
+                air.step(self.position, scene.sstm.fall_max, scene.world, &scene.body);
+            self.position = position;
+            if landed {
+                self.air = None;
+                self.attack = None;
+                if (scene.length)(party_hit::motion::LAND).is_some() {
+                    self.reaction = Some(party_hit::landing(&scene.sstm));
+                    self.tick = 0;
+                }
+                return;
+            }
+            self.air = Some(air);
+            if self.attack.is_none() {
+                self.tick += 1;
+                return;
+            }
+        }
         // An attack plays out its motion with root motion, then ends.
         if let Some(mut a) = self.attack {
             a.tick += 1;
-            if let Some(spell @ (Spell::Tornado | Spell::Turbo)) = a.spell {
+            if self.air.is_some() {
+                // The jump carries the member; the motion's root does not.
+            } else if let Some(spell @ (Spell::Tornado | Spell::Turbo)) = a.spell {
                 // The script moves the member; the motion's root does not.
                 self.special_step(&a, spell, scene);
             } else {
@@ -1072,7 +1135,7 @@ mod tests {
             position: [0., 0., 6000.],
             radius: 40.,
         };
-        f.begin(&GOOFY[3], &t, 0);
+        f.begin(&GOOFY[5], &t, 0);
         let scene = |t: Target| Scene {
             centre: Some(t.position),
             length: &|m| matches!(m, 194).then_some(400),
@@ -1223,5 +1286,103 @@ mod tests {
         assert!(f.reaction.is_none());
         // Facing +z, so the slide went toward -z.
         assert!(f.position[2] < -30.);
+    }
+
+    /// A flat floor at 0 that stops a fall.
+    struct Ground;
+    impl World for Ground {
+        fn floor(&self, _: f32, _: f32, _: f32) -> Option<f32> {
+            Some(0.)
+        }
+        fn resolve_walls(&self, p: [f32; 2], _: f32, _: f32, _: f32) -> [f32; 2] {
+            p
+        }
+        fn collide(&self, start: Vec3, d: Vec3, _: bool, _: &Body) -> Collided {
+            let y = start[1] + d[1];
+            Collided {
+                position: [start[0] + d[0], y.max(0.), start[2] + d[2]],
+                on_floor: y <= 0. && d[1] <= 0.,
+            }
+        }
+    }
+
+    /// The air attack's motion ends well before the jump does.
+    fn air_length(m: u16) -> Option<u32> {
+        Some(if m == 181 { 20 } else { 70 })
+    }
+
+    fn air_scene<'a>(world: &'a Ground, target: Option<Target>) -> Scene<'a, Ground> {
+        Scene {
+            leader: [0.; 3],
+            leader_yaw: 0.,
+            target,
+            world,
+            body: BODY,
+            length: &air_length,
+            root: &no_root,
+            busy: false,
+            spells: false,
+            centre: None,
+            leader_y: 0.,
+            range: &no_range,
+            mp: None,
+            hp: [None; 3],
+            actionable: &ready_at_58,
+            sstm: test_sstm(),
+            rates: test_rates(),
+            battle: true,
+        }
+    }
+
+    #[test]
+    fn an_air_attack_needs_a_target_above_and_jumps_to_it_then_lands() {
+        let high = Target {
+            position: [0., 200., 150.],
+            radius: 40.,
+        };
+        let level = Target {
+            position: [0., 0., 150.],
+            radius: 40.,
+        };
+        let mut f = Follower::spawn([0.; 3], 0., 0);
+        // 200 above is inside the air window (100-385) and outside the
+        // ground one (-100-150, each widened by the radius).
+        assert!(f.eligible(&DONALD[2], &high));
+        assert!(!f.eligible(&DONALD[0], &high));
+        assert!(!f.eligible(&DONALD[2], &level));
+        assert!(f.eligible(&DONALD[0], &level));
+        f.begin(&DONALD[2], &high, 0);
+        let mut peak = 0f32;
+        let mut played = Vec::new();
+        for _ in 0..400 {
+            f.tick(&DONALD, &air_scene(&Ground, Some(high)));
+            peak = peak.max(f.position[1]);
+            if played.last() != Some(&f.motion()) {
+                played.push(f.motion());
+            }
+        }
+        // The jump clears the target's height, carries the member toward
+        // it, and ends with the fall and land motions before the AI resumes.
+        assert!(peak >= 200., "{peak}");
+        assert!(f.position[2] > 100.);
+        assert_eq!(f.position[1], 0.);
+        assert!(f.air.is_none() && f.reaction.is_none());
+        assert_eq!(&played[..3], &[181, FALL, 5]);
+    }
+
+    #[test]
+    fn a_hit_in_the_air_cancels_the_air_attack() {
+        let high = Target {
+            position: [0., 200., 150.],
+            radius: 40.,
+        };
+        let mut f = Follower::spawn([0.; 3], 0., 0);
+        f.begin(&DONALD[2], &high, 0);
+        for _ in 0..10 {
+            f.tick(&DONALD, &air_scene(&Ground, Some(high)));
+        }
+        assert!(f.position[1] > 0. && f.air.is_some());
+        f.react(&claw_hit(), &test_sstm(), &Ground, &|m| m < 100);
+        assert!(f.attack.is_none() && f.air.is_none());
     }
 }

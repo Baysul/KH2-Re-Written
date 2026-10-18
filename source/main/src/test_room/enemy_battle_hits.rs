@@ -58,6 +58,7 @@ struct Volume {
     stats: Option<combat::AttackerStats>,
     origin: Option<Vec3>,
     swept: bool,
+    pax: Option<std::sync::Arc<data::object_effect::Pax>>,
 }
 type VolumeCentre = (Vec3, f32, f32, Option<Vec3>);
 
@@ -171,6 +172,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 stats: None,
                 origin: None,
                 swept: false,
+                pax: None,
             });
         }
     }
@@ -204,6 +206,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 stats: None,
                 origin: None,
                 swept: false,
+                pax: None,
             });
         }
     }
@@ -229,6 +232,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 stats: None,
                 origin: None,
                 swept: false,
+                pax: None,
             });
         }
     }
@@ -250,6 +254,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
             stats: Some(pv.stats),
             origin: Some(pv.origin),
             swept: pv.spell,
+            pax: pv.pax.clone(),
         });
     }
     gallery_targets.clear();
@@ -486,6 +491,18 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                                 rows[row].hit_effect,
                                 contact.to_array(),
                                 direction.to_array(),
+                            )
+                        })
+                    });
+                    // A member's spell starts the element of its own PAX.
+                    let spell_spark = spell_spark.or_else(|| {
+                        v.pax.as_ref().and_then(|p| {
+                            party_room::spell_spark(
+                                p,
+                                rows[row].hit_effect,
+                                contact.to_array(),
+                                direction.to_array(),
+                                1 << 62 | tick << 8 | (aid as u64),
                             )
                         })
                     });

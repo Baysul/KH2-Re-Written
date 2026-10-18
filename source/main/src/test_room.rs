@@ -930,6 +930,8 @@ struct Game {
     /// a member may aim at (party_room, enemy_battle_hits).
     party_volumes: Vec<party_room::OutVolume>,
     gallery_targets: Vec<party_room::GalleryTarget>,
+    /// A target the party tour hangs in the air (an enemy that stays put).
+    party_fixed_target: Option<party_room::GalleryTarget>,
     fx_live: HashMap<u64, magic::FxLive>,
     /// The party slot the Magic menu's Cure target list picked (0 Sora)
     /// and the Magic row Cure was chosen from, while that list is open.
@@ -11196,6 +11198,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         enemy_guards: Vec::new(),
         party_volumes: Vec::new(),
         gallery_targets: Vec::new(),
+        party_fixed_target: None,
         fx_live: HashMap::new(),
         cure_target: 0,
         cure_pick: None,
