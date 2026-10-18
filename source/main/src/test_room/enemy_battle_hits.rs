@@ -2,7 +2,7 @@
 //! context. The legacy battle step advances the shared player hit record first.
 use super::{
     EffectRequest, Game, abilities, enemy_combat::WorldShape, enemy_gallery::GalleryActor,
-    ensure_attack_rows, magic_room, params_of,
+    ensure_attack_rows, magic_room, params_of, party_room,
 };
 use bevy::prelude::*;
 use data::battle_tables;
@@ -54,6 +54,13 @@ struct Volume {
     moving: Option<Vec3>,
     magic: Option<u64>,
     guard: bool,
+    /// A party member's volume (party_room::OutVolume): the member, its
+    /// attacker stats and origin, and whether it sweeps like a spell's.
+    member: Option<usize>,
+    stats: Option<combat::AttackerStats>,
+    origin: Option<Vec3>,
+    swept: bool,
+    pax: Option<std::sync::Arc<data::object_effect::Pax>>,
 }
 type VolumeCentre = (Vec3, f32, f32, Option<Vec3>);
 
@@ -110,6 +117,12 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         enemy_outgoing_hits,
         world,
         wall,
+        party,
+        enemy_guards,
+        party_volumes,
+        party_struck,
+        gallery_targets,
+        enemy_battle_tour,
         ..
     } = game;
     let Some(rt) = enemy.as_mut() else { return };
@@ -159,6 +172,11 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 moving: None,
                 magic: None,
                 guard: matches!(rt.rows[&atkp].kind, 2 | 3),
+                member: None,
+                stats: None,
+                origin: None,
+                swept: false,
+                pax: None,
             });
         }
     }
@@ -188,6 +206,11 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 moving: None,
                 magic: None,
                 guard: matches!(rt.rows[&atkp].kind, 2 | 3),
+                member: None,
+                stats: None,
+                origin: None,
+                swept: false,
+                pax: None,
             });
         }
     }
@@ -209,9 +232,38 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 moving: v.moving.map(Vec3::from_array),
                 magic: Some(v.key),
                 guard: v.role == player::magic::Role::Guard,
+                member: None,
+                stats: None,
+                origin: None,
+                swept: false,
+                pax: None,
             });
         }
     }
+    // The party's attacks (party_room::tick, one tick old).
+    // The combat tour is Sora's exercise of three actors: the party stays out.
+    // `KH2RW_PARTY_COMBAT` lets the party fight in it for a one-off check.
+    let party_out = *enemy_battle_tour && std::env::var_os("KH2RW_PARTY_COMBAT").is_none();
+    for pv in party_volumes.iter().filter(|_| !party_out) {
+        if !ensure_attack_rows(rt, pv.atkp, pv.sub) {
+            continue;
+        }
+        volumes.push(Volume {
+            key: pv.key,
+            atkp: pv.atkp,
+            sub: pv.sub,
+            centres: pv.spheres.clone(),
+            moving: pv.moving,
+            magic: None,
+            guard: false,
+            member: Some(pv.member),
+            stats: Some(pv.stats),
+            origin: Some(pv.origin),
+            swept: pv.spell,
+            pax: pv.pax.clone(),
+        });
+    }
+    gallery_targets.clear();
     for volume in &volumes {
         rt.instance_seen.insert(volume.key, tick);
         if let std::collections::hash_map::Entry::Vacant(entry) = rt.instance_ids.entry(volume.key)
@@ -260,6 +312,17 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         };
         if battle.error.is_some() {
             continue;
+        }
+        // Where the party's AI may aim: the actor's TARGET point.
+        if !(*enemy_battle_tour && std::env::var_os("KH2RW_PARTY_COMBAT").is_none())
+            && battle.brain.targetable()
+            && let Some(shape) = battle.pose.targets.first()
+        {
+            gallery_targets.push(party_room::GalleryTarget {
+                position: Vec3::from_array(battle.brain.position()),
+                centre: shape.centre,
+                radius: 40.,
+            });
         }
         if battle.contacts.defeat_reward(battle.brain.hp()) {
             let low = rt.sora_hp * 2 <= rt.sora_target.max_hp;
@@ -329,7 +392,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         for v in &volumes {
             let (aid, _) = rt.instance_ids[&v.key];
             for (sphere, (centre, radius, height, prior)) in v.centres.iter().enumerate() {
-                let previous = if v.magic.is_some() {
+                let previous = if v.magic.is_some() || v.swept {
                     *prior
                 } else {
                     battle
@@ -344,7 +407,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 {
                     continue;
                 }
-                let swept = if v.magic.is_some() {
+                let swept = if v.magic.is_some() || v.swept {
                     combat::swept_volume(
                         centre.to_array(),
                         previous.map(|p| p.to_array()),
@@ -383,10 +446,10 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                         (index, rows[index].interval)
                     });
             let attack = params_of(&rows[row]);
-            let direction = (v.moving.unwrap_or(if v.magic.is_some() {
+            let direction = (v.moving.unwrap_or(if v.magic.is_some() || v.swept {
                 at - centre
             } else {
-                at - sora_at
+                at - v.origin.unwrap_or(sora_at)
             }) * Vec3::new(1., 0., 1.))
             .normalize_or(sora_facing);
             if counted
@@ -394,25 +457,33 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                     direction.to_array(),
                     target.high,
                     &attack,
-                    &rt.sora,
+                    v.stats.as_ref().unwrap_or(&rt.sora),
                     rt.difficulty,
                 )
             {
+                // A member's volume that landed (Goofy's Bash keeps his shield
+                // on the enemy through its hit callback).
+                if let Some(member) = v.member {
+                    party_struck.push((member, v.key));
+                }
+                // Sora's own hits feed his combo, Drive and Valor EXP.
                 if damage > 0 {
                     *enemy_outgoing_hits += 1;
                 }
-                player.connected = true;
-                player.drive.hit(
-                    rows[row].drive_drain,
-                    true,
-                    player.mp_charging,
-                    player.abilities.drive_boost,
-                );
-                if let Some(d) = drive.as_mut()
-                    && d.active
-                    && d.form == player::forms::VALOR
-                {
-                    d.pending_exp += 1;
+                if v.member.is_none() {
+                    player.connected = true;
+                    player.drive.hit(
+                        rows[row].drive_drain,
+                        true,
+                        player.mp_charging,
+                        player.abilities.drive_boost,
+                    );
+                    if let Some(d) = drive.as_mut()
+                        && d.active
+                        && d.form == player::forms::VALOR
+                    {
+                        d.pending_exp += 1;
+                    }
                 }
                 if rows[row].hit_sound >= 0 {
                     sound_queue.push((rows[row].hit_sound as u32, "hit"));
@@ -438,6 +509,18 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                                 rows[row].hit_effect,
                                 contact.to_array(),
                                 direction.to_array(),
+                            )
+                        })
+                    });
+                    // A member's spell starts the element of its own PAX.
+                    let spell_spark = spell_spark.or_else(|| {
+                        v.pax.as_ref().and_then(|p| {
+                            party_room::spell_spark(
+                                p,
+                                rows[row].hit_effect,
+                                contact.to_array(),
+                                direction.to_array(),
+                                1 << 62 | tick << 8 | (aid as u64),
                             )
                         })
                     });
@@ -476,7 +559,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 }
                 event(
                     log,
-                    serde_json::json!({"event":"gallery_hit","tick":tick,"actor":actor.id,"atkp":v.atkp,"sub":v.sub,"damage":damage,"hp":battle.brain.hp(),"step":row,"parts":target.parts}),
+                    serde_json::json!({"event":"gallery_hit","tick":tick,"actor":actor.id,"member":v.member,"atkp":v.atkp,"sub":v.sub,"damage":damage,"hp":battle.brain.hp(),"step":row,"parts":target.parts}),
                 );
             }
         }
@@ -550,6 +633,8 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 shapes: vec![(3, 0, body, 0., None)],
             });
         }
+        // The spheres of this actor's attacks, for the party members.
+        let mut member_samples: Vec<party_room::ClawSample> = Vec::new();
         for cand in &candidates {
             let (window, w_id) = (cand.window, cand.atkp);
             if battle.brain.serial() != battle.serial || battle.error.is_some() {
@@ -569,11 +654,42 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 .incoming_ids
                 .entry((battle.serial, window))
                 .or_insert_with(|| allocate(&mut rt.ids, &mut rt.next_group, rows[0].combo_group));
+            // The sweep's start is kept for every sphere, whoever it hits.
+            let mut priors: Vec<Option<Vec3>> = Vec::with_capacity(cand.shapes.len());
+            for &(shape_kind, ordinal, centre, radius, forced_prior) in &cand.shapes {
+                if shape_kind != 3 {
+                    priors.push(None);
+                    continue;
+                }
+                let prior = battle
+                    .contacts
+                    .previous
+                    .insert((battle.serial, window, ordinal), centre);
+                let prior = forced_prior.or(prior);
+                priors.push(prior);
+                // A Type 3 attack is a super guard: what a Type 1 shot
+                // clashes with (CLASH pair 1-3).
+                if rows[0].kind == 3 && !party.is_empty() {
+                    enemy_guards.push((centre, radius));
+                }
+                member_samples.push(party_room::ClawSample {
+                    instance: ids.0 as u64,
+                    atkp: w_id,
+                    aid: ids.0,
+                    group: ids.1,
+                    radius,
+                    centre,
+                    points: combat::swept(centre.to_array(), prior.map(|p| p.to_array()), radius),
+                    rows: rows.clone(),
+                    only: None,
+                });
+            }
             if rt.sora_record.has(ids.0) {
                 continue;
             }
             let mut blocked = false;
-            for &(shape_kind, ordinal, centre, radius, forced_prior) in &cand.shapes {
+            for (shape_index, &(shape_kind, _, centre, radius, _)) in cand.shapes.iter().enumerate()
+            {
                 if blocked {
                     break;
                 }
@@ -583,11 +699,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                     actor.error = Some(error);
                     continue;
                 }
-                let prior = battle
-                    .contacts
-                    .previous
-                    .insert((battle.serial, window, ordinal), centre);
-                let prior = forced_prior.or(prior);
+                let prior = priors[shape_index];
                 for c in combat::swept(centre.to_array(), prior.map(|p| p.to_array()), radius) {
                     let centre = Vec3::from_array(c);
                     let mut reflected = false;
@@ -682,6 +794,41 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                             cand.script_slot.filter(|_| !cand.direct),
                         ));
                     }
+                }
+            }
+        }
+        // Donald and Goofy take the same attacks (FUN_1401b0290).
+        if !member_samples.is_empty() && !party.is_empty() {
+            let src = party_room::Source {
+                samples: &member_samples,
+                attacker: &battle.assets.attacker,
+                difficulty: rt.difficulty,
+                from: at,
+                object: battle.assets.object_id,
+            };
+            let assets = &battle.assets;
+            for (i, m) in party.iter_mut().enumerate() {
+                let row = |id: u16| {
+                    assets
+                        .attack_steps(id, 0)
+                        .ok()
+                        .and_then(|v| v.first().copied())
+                };
+                if let Some(r) = party_room::receive(
+                    &src,
+                    &row,
+                    m,
+                    i,
+                    &*world,
+                    tick,
+                    sound_queue,
+                    effect_queue,
+                    log,
+                ) && !battle.brain.reflect(r.motion as usize, r.hit_back as f32)
+                {
+                    let error = "this source brain's reflect reaction is unqualified".to_string();
+                    battle.error = Some(error.clone());
+                    actor.error = Some(error);
                 }
             }
         }
@@ -856,6 +1003,9 @@ pub fn retire(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
     for id in expired {
         rt.enemy.record.clear_seen(id);
         rt.sora_record.clear_seen(id);
+        for m in &mut game.party {
+            m.record.clear_seen(id);
+        }
         for actor in actors.iter_mut() {
             if let Some(battle) = actor.battle.as_mut() {
                 battle.brain.record_mut().clear_seen(id)

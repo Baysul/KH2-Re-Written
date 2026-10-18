@@ -488,87 +488,344 @@ impl Gauge {
         }
         // A finished one-shot group switches to its queued group and
         // advances once, or the sprite hides.
-        for e in &mut self.elements {
-            let seq = sheets[e.sheet];
-            e.player.update(seq, 1.);
-            if seq.groups[e.player.group].play_count != 0 && e.player.finished() {
-                if let Some(next) = e.queued.take() {
-                    e.player = Player::new(seq, next);
-                    e.player.update(seq, 1.);
-                } else {
-                    e.hidden = true;
-                }
-            }
-        }
+        advance(&mut self.elements, sheets);
     }
 
     /// This frame's drawables in draw order, in canvas layout units (X origin
     /// applied). A child sits at its parent's child context + offset + base.
     pub fn draw(&mut self, sheets: &[&Sequence]) -> Vec<Draw> {
-        let mut out = Vec::new();
-        for node in &self.order {
-            match *node {
-                Node::Sprite(i) => {
-                    let base = self.elements[i].parent.map_or([0.; 2], |p| {
-                        let p = &self.elements[p];
-                        [
-                            p.context[0] + p.offset[0] + p.base[0],
-                            p.context[1] + p.offset[1] + p.base[1],
-                        ]
-                    });
-                    let e = &mut self.elements[i];
-                    let seq = sheets[e.sheet];
-                    e.base = base;
-                    e.context = seq
-                        .child_context(&e.player, &e.modifiers)
-                        .unwrap_or([0.; 2]);
-                    if e.hidden {
-                        continue;
-                    }
-                    let origin = [X_ORIGIN + e.offset[0] + base[0], e.offset[1] + base[1]];
-                    out.push(Draw::Quads {
-                        quads: seq.quads(&e.player, origin, &e.modifiers),
-                        z: e.z,
-                        sheet: e.sheet,
-                    });
-                }
-                Node::Mask(m) => {
-                    let mask = &self.masks[m];
-                    if mask.hidden {
-                        continue;
-                    }
-                    let a = &self.elements[mask.anchor];
-                    let pivot = [
-                        X_ORIGIN + a.context[0] + a.base[0] + mask.relative[0],
-                        a.context[1] + a.base[1] + mask.relative[1],
-                    ];
-                    let (s, c) = mask.angle.sin_cos();
-                    // Clockwise on a Y-down screen.
-                    let place =
-                        |x: f32, y: f32| [pivot[0] + x * c - y * s, pivot[1] + x * s + y * c];
-                    let quad = |[x0, y0, x1, y1]: [f32; 4]| {
-                        [place(x0, y0), place(x1, y0), place(x0, y1), place(x1, y1)]
-                    };
-                    let mut polygons = vec![match mask.kind {
-                        MaskKind::Clear => quad([-50., -50., 50., 50.]),
-                        MaskKind::Ring => quad([-64., -64., 0., 0.]),
-                        MaskKind::Sector => quad([-50., -120., 0., 0.]),
-                    }];
-                    if let Some([dx, dy, w, h]) = mask.rect
-                        && w > 0.
-                        && h > 0.
-                    {
-                        let (x0, y0) = (pivot[0] + dx, pivot[1] + dy);
-                        polygons.push([[x0, y0], [x0 + w, y0], [x0, y0 + h], [x0 + w, y0 + h]]);
-                    }
-                    out.push(Draw::Mask {
-                        polygons,
-                        z: mask.z,
-                    });
-                }
+        draw_nodes(&self.order, &mut self.elements, &self.masks, sheets)
+    }
+}
+
+/// A finished one-shot group switches to its queued group and advances once,
+/// or the sprite hides.
+fn advance(elements: &mut [Element], sheets: &[&Sequence]) {
+    for e in elements {
+        let seq = sheets[e.sheet];
+        e.player.update(seq, 1.);
+        if seq.groups[e.player.group].play_count != 0 && e.player.finished() {
+            if let Some(next) = e.queued.take() {
+                e.player = Player::new(seq, next);
+                e.player.update(seq, 1.);
+            } else {
+                e.hidden = true;
             }
         }
-        out
+    }
+}
+
+/// The drawables of a gauge's nodes in creation order.
+fn draw_nodes(
+    order: &[Node],
+    elements: &mut [Element],
+    masks: &[Mask],
+    sheets: &[&Sequence],
+) -> Vec<Draw> {
+    let mut out = Vec::new();
+    for node in order {
+        match *node {
+            Node::Sprite(i) => {
+                let base = elements[i].parent.map_or([0.; 2], |p| {
+                    let p = &elements[p];
+                    [
+                        p.context[0] + p.offset[0] + p.base[0],
+                        p.context[1] + p.offset[1] + p.base[1],
+                    ]
+                });
+                let e = &mut elements[i];
+                let seq = sheets[e.sheet];
+                e.base = base;
+                e.context = seq
+                    .child_context(&e.player, &e.modifiers)
+                    .unwrap_or([0.; 2]);
+                if e.hidden {
+                    continue;
+                }
+                let origin = [X_ORIGIN + e.offset[0] + base[0], e.offset[1] + base[1]];
+                out.push(Draw::Quads {
+                    quads: seq.quads(&e.player, origin, &e.modifiers),
+                    z: e.z,
+                    sheet: e.sheet,
+                });
+            }
+            Node::Mask(m) => {
+                let mask = &masks[m];
+                if mask.hidden {
+                    continue;
+                }
+                let a = &elements[mask.anchor];
+                // The anchor's own offset (FUN_14016b0c0) places the mask too.
+                let pivot = [
+                    X_ORIGIN + a.context[0] + a.base[0] + a.offset[0] + mask.relative[0],
+                    a.context[1] + a.base[1] + a.offset[1] + mask.relative[1],
+                ];
+                let (s, c) = mask.angle.sin_cos();
+                // Clockwise on a Y-down screen.
+                let place = |x: f32, y: f32| [pivot[0] + x * c - y * s, pivot[1] + x * s + y * c];
+                let quad = |[x0, y0, x1, y1]: [f32; 4]| {
+                    [place(x0, y0), place(x1, y0), place(x0, y1), place(x1, y1)]
+                };
+                let mut polygons = vec![match mask.kind {
+                    MaskKind::Clear => quad([-50., -50., 50., 50.]),
+                    MaskKind::Ring => quad([-64., -64., 0., 0.]),
+                    MaskKind::Sector => quad([-50., -120., 0., 0.]),
+                }];
+                if let Some([dx, dy, w, h]) = mask.rect
+                    && w > 0.
+                    && h > 0.
+                {
+                    let (x0, y0) = (pivot[0] + dx, pivot[1] + dy);
+                    polygons.push([[x0, y0], [x0 + w, y0], [x0, y0 + h], [x0 + w, y0 + h]]);
+                }
+                out.push(Draw::Mask {
+                    polygons,
+                    z: mask.z,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Donald's and Goofy's field gauge, the executable's GAUGE_FRIEND object
+/// (vtable 0x1405b2158): created by FUN_14016c3a0 / FUN_140181d20 from the
+/// same gauge sequence as Sora's, updated by FUN_140182730 and the event
+/// handlers FUN_140182530 / FUN_140182360 (events posted by FUN_1403d60c0
+/// for a hit and FUN_1403d2eb0 for a heal). A ring of two halves: the
+/// shadow (group 0x40) and HP (0x41) masked by the left half's wipe, the MP
+/// ring (0x42) by the right half's; the face sits in the middle.
+///
+/// The Goofy gauge's slide when Donald is absent (FUN_140182730, groups
+/// 0x49 / 0x4a) is not built: the room always has both members.
+const FRIEND_INTRO: usize = 0x47;
+/// Loop group by state (FUN_14017ec50): low HP 0x43, else 0x48.
+const FRIEND_LOOP: [usize; 3] = [0x48, 0x43, 0x48];
+/// The flash after a hit of event 1, 2 and 3 (FUN_1401823d0, 1401823c0,
+/// 1401823b0).
+const FRIEND_FLASH: [usize; 3] = [0x46, 0x45, 0x44];
+const FRIEND_SHADOW: usize = 0x40;
+const FRIEND_HP: usize = 0x41;
+const FRIEND_MP: usize = 0x42;
+/// The face while a hit reacts (FUN_14017ebe0 plays group 1).
+const FRIEND_FACE_HIT: usize = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FriendStats {
+    pub hp: i32,
+    pub max_hp: i32,
+    pub mp: i32,
+    pub max_mp: i32,
+    /// The HUD event of this tick: 0 none, 1 hit, 2 big hit, 3 blow or KO
+    /// hit, 4 heal.
+    pub event: u8,
+}
+
+pub struct FriendGauge {
+    elements: Vec<Element>,
+    masks: Vec<Mask>,
+    order: Vec<Node>,
+    /// Normal 0, low HP 1, KO 2 (obj+0x20).
+    state: usize,
+    /// The HP the last two events saw (obj+0x30 and +0x2c): the shadow ring
+    /// shows the older one.
+    current: i32,
+    shadow: i32,
+    face_sheet: Option<usize>,
+}
+
+impl FriendGauge {
+    /// `sheets[0]` is the gauge sequence; `face` is the sheet index of the
+    /// member's own face sequence; `slot` 0 is Donald's, 1 Goofy's.
+    pub fn new(
+        sheets: &[&Sequence],
+        face: Option<usize>,
+        slot: usize,
+        stats: &FriendStats,
+    ) -> Self {
+        let seq = sheets[0];
+        let mut g = FriendGauge {
+            elements: Vec::new(),
+            masks: Vec::new(),
+            order: Vec::new(),
+            state: Self::state_of(stats),
+            current: stats.hp,
+            shadow: stats.hp,
+            face_sheet: face,
+        };
+        // FUN_140181d20: the root plays the intro group and queues the loop;
+        // the second gauge sits one group pitch (+0x20 of the group) lower.
+        let root = g.sprite(
+            seq,
+            Id::Root,
+            FRIEND_INTRO,
+            Some(FRIEND_LOOP[g.state]),
+            None,
+            0,
+        );
+        let pitch = seq
+            .groups
+            .get(FRIEND_INTRO)
+            .map_or(0, |p| p.text_position_x);
+        g.elements[root].offset = [0., (pitch * slot as i32) as f32];
+        g.mask(MaskKind::Clear, root, 0);
+        g.mask(MaskKind::Ring, root, 200);
+        g.sprite(seq, Id::ShadowRing, FRIEND_SHADOW, None, Some(root), 100);
+        g.mask(MaskKind::Ring, root, 2000);
+        g.sprite(seq, Id::HpRing, FRIEND_HP, None, Some(root), 1000);
+        g.mask(MaskKind::Clear, root, 0);
+        g.mask(MaskKind::Ring, root, 20000);
+        g.sprite(seq, Id::MpFill, FRIEND_MP, None, Some(root), 10000);
+        if let Some(sheet) = face {
+            let i = g.sprite(sheets[sheet], Id::Face, FACE[g.state], None, Some(root), 0);
+            g.elements[i].sheet = sheet;
+        }
+        for m in &mut g.masks {
+            m.hidden = false;
+        }
+        g
+    }
+
+    fn sprite(
+        &mut self,
+        seq: &Sequence,
+        id: Id,
+        group: usize,
+        queued: Option<usize>,
+        parent: Option<usize>,
+        z: i32,
+    ) -> usize {
+        self.elements.push(Element {
+            id,
+            sheet: 0,
+            player: Player::new(seq, group),
+            queued,
+            parent,
+            offset: [0.; 2],
+            z,
+            hidden: false,
+            modifiers: Modifiers::default(),
+            context: [0.; 2],
+            base: [0.; 2],
+        });
+        self.order.push(Node::Sprite(self.elements.len() - 1));
+        self.elements.len() - 1
+    }
+
+    fn mask(&mut self, kind: MaskKind, anchor: usize, z: i32) {
+        self.masks.push(Mask {
+            kind,
+            anchor,
+            relative: [0.; 2],
+            angle: 0.,
+            rect: None,
+            z,
+            hidden: false,
+        });
+        self.order.push(Node::Mask(self.masks.len() - 1));
+    }
+
+    fn find(&self, id: Id) -> usize {
+        self.elements.iter().position(|e| e.id == id).unwrap()
+    }
+
+    /// FUN_14017ec50: dead 2, HP at most a quarter of the maximum 1.
+    fn state_of(stats: &FriendStats) -> usize {
+        if stats.hp <= 0 {
+            2
+        } else {
+            (stats.hp <= stats.max_hp / 4) as usize
+        }
+    }
+
+    /// FUN_140182180: the left half's wipe for the HP share `r` (mask 1 for
+    /// the shadow's share, mask 2 for the current one).
+    fn hp_wipe(&mut self, mask: usize, r: f32) {
+        let m = &mut self.masks[mask];
+        m.angle = wrap(r * std::f32::consts::PI - std::f32::consts::FRAC_PI_2);
+        m.rect = if r == 0. {
+            Some([-64., -62., 64., 68.])
+        } else if r >= 0.5 {
+            None
+        } else {
+            Some([-64., -64., 64., 64.])
+        };
+    }
+
+    /// The tail of FUN_140182730: the right half's wipe for the MP share.
+    fn mp_wipe(&mut self, mask: usize, r: f32) {
+        let m = &mut self.masks[mask];
+        m.angle = wrap((1. - r) * std::f32::consts::PI);
+        m.rect = if r == 0. {
+            Some([0., -62., 64., 68.])
+        } else if r >= 0.5 {
+            // The unset 1 x 1 rectangle (the executable's `uVar5 = 1`).
+            Some([-64., 0., 1., 1.])
+        } else {
+            Some([0., -64., 64., 64.])
+        };
+    }
+
+    fn set_root(&mut self, seq: &Sequence, group: usize, queued: Option<usize>) {
+        let i = self.find(Id::Root);
+        self.elements[i].player = Player::new(seq, group);
+        self.elements[i].queued = queued;
+        self.elements[i].hidden = false;
+    }
+
+    fn set_face(&mut self, sheets: &[&Sequence], group: usize, queued: Option<usize>) {
+        let Some(sheet) = self.face_sheet else { return };
+        let i = self.find(Id::Face);
+        self.elements[i].player = Player::new(sheets[sheet], group);
+        self.elements[i].queued = queued;
+        self.elements[i].hidden = false;
+    }
+
+    /// One 60 Hz frame (FUN_140182730): the state, the HUD event, the three
+    /// wipes, then every element's player.
+    pub fn update(&mut self, sheets: &[&Sequence], stats: &FriendStats) {
+        let seq = sheets[0];
+        // FUN_14017ee60: the state is read before the events.
+        self.state = Self::state_of(stats);
+        match stats.event {
+            // FUN_140182530: the shadow keeps the HP of the event before,
+            // the shadow ring restarts, the root flashes and queues its
+            // loop, the face reacts.
+            1..=3 => {
+                self.shadow = self.current;
+                self.current = stats.hp;
+                let i = self.find(Id::ShadowRing);
+                self.elements[i].player = Player::new(seq, FRIEND_SHADOW);
+                self.elements[i].queued = None;
+                self.elements[i].hidden = false;
+                self.set_root(
+                    seq,
+                    FRIEND_FLASH[stats.event as usize - 1],
+                    Some(FRIEND_LOOP[self.state]),
+                );
+                self.set_face(sheets, FRIEND_FACE_HIT, Some(FACE[self.state]));
+            }
+            // FUN_140182360: a heal makes the shadow the current HP.
+            4 => {
+                self.shadow = stats.hp;
+                self.current = stats.hp;
+                self.set_root(seq, FRIEND_LOOP[self.state], None);
+                self.set_face(sheets, FACE[self.state], None);
+            }
+            _ => {}
+        }
+        let share = |v: i32, max: i32| {
+            if max > 0 { v as f32 / max as f32 } else { 0. }
+        };
+        self.hp_wipe(1, share(self.shadow, stats.max_hp));
+        self.hp_wipe(2, share(stats.hp, stats.max_hp));
+        self.mp_wipe(4, share(stats.mp, stats.max_mp));
+        advance(&mut self.elements, sheets);
+    }
+
+    /// This frame's drawables in creation order.
+    pub fn draw(&mut self, sheets: &[&Sequence]) -> Vec<Draw> {
+        draw_nodes(&self.order, &mut self.elements, &self.masks, sheets)
     }
 }
 

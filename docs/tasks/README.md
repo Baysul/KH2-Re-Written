@@ -129,7 +129,7 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T120](T120-abilities-growth-combo-audit.md) | REA identity, fresh native ability/growth/combo audit and Rust corrections | PROGRESS. Next: qualify controlled installed/rewrite scenarios for each growth family, ground/air modifiers, miss/contact/finisher cases and equipment/form transitions; trace and implement the remaining ability consum... |
 | [T121](T121-equipable-growth-and-combos.md) | Equipable Sora inventory, growth tiers and combo integration | PROGRESS. Next: paired installed/rewrite scenarios for growth, modifier combinations and form transitions, plus remaining action/support consumers and campaign progression. |
 | [T121](T121-public-progress-tracker.md) | Evidence-based GitHub progress tracker | No verdict recorded; read the record. |
-| [T122](T122-enemy-summons-and-large-arena.md) | Source-bound enemy summons and expanded animation test arena | PARTIAL. |
+| [T122](T122-enemy-summons-and-large-arena.md) | Source-bound enemy summons and expanded animation test arena | PARTIAL: hits, KO, reflect, voices, air attacks, items, HUD gauges, Goofy's Bash; Limits not built. |
 | [T123](T123-enemy-motion-and-model-boundaries.md) | Remaining enemy motion and model boundaries | PARTIAL. |
 | [T124](T124-enemy-action-arguments-and-scheduler.md) | Enemy action arguments and scheduler research | PARTIAL. |
 | [T125](T125-enemy-ai-and-combat.md) | Executable enemy AI, combat, lock-on and Scan | PARTIAL. |
@@ -140,6 +140,7 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T130](T130-source-folder.md) | Group app folders under source and rename the validator | NOT RUN for the final merge; engineering checks above PASS on the branch. |
 | [T131](T131-source-group-data-effect-audio-extras.md) | Move data, effect, audio and extras under source | NOT RUN for the final merge; the build check above passes on the branch. |
 | [T136](T136-magic-effects-and-combos.md) | Magic: the spells' own effects, form variants and the combo check | PARTIAL: spells play their own effects in four forms and join the combo; Cure has a party menu; Donald casts his four spells, Goofy his Tornado and Turbo; Magic Lock-On works; no owner playtest or capture comparison. |
+| [T186](T186-party-hit-ko-interrupt-reflect.md) | Donald and Goofy being hit: reactions, KO and revive, interrupted casts, the Blizzard shot's reflect | PARTIAL. |
 | [T170](T170-lock-camera-and-scan-gauge.md) | Lock-on camera (mode 2) and the Scan target gauge | PARTIAL. |
 | [T171](T171-world-map-state.md) | World map: world unlock state and progress tables | PROGRESS. |
 | [T172](T172-world-map-screen.md) | World map: screen, cursor flight, symbols and camera | PROGRESS. |

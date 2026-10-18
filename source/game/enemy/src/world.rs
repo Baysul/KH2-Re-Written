@@ -626,6 +626,14 @@ impl World {
         script::EXTERN_SEGMENT + STATIC_BASE + at
     }
 
+    /// An AI object reference for the engine object `handle` (the word at
+    /// +4 names it), for arguments the host hands a script.
+    pub fn ai_reference(&mut self, handle: u32) -> u32 {
+        let at = self.alloc(8);
+        self.static_write(at + 4, handle);
+        at
+    }
+
     /// A fresh handle for an effect the host will create.
     pub fn next_effect_handle(&mut self) -> u32 {
         self.next_effect += 1;
