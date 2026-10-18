@@ -310,6 +310,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         let Some(battle) = actor.battle.as_mut() else {
             continue;
         };
+        battle.hp_events.clear();
         if battle.error.is_some() {
             continue;
         }
@@ -461,6 +462,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                     rt.difficulty,
                 )
             {
+                battle.hp_events.push(battle.brain.hp());
                 // A member's volume that landed (Goofy's Bash keeps his shield
                 // on the enemy through its hit callback).
                 if let Some(member) = v.member {

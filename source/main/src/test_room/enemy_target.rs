@@ -1,6 +1,7 @@
-//! Stable live actor/shape targeting and the Scan gauge feed. The Scan gauge
-//! is the native GAUGE_ENEMY object (visual::enemy_gauge); the lock-on
-//! reticle sprite is not drawn.
+//! Stable live actor/shape targeting, the Scan gauge feed and the lock-on
+//! reticle's inputs. The Scan gauge is the native GAUGE_ENEMY object
+//! (visual::enemy_gauge) and the reticle the native dk::LockOn
+//! (visual::lock_on).
 use super::*;
 use player::targeting::{self, Candidate, ManualCandidate, ManualInput, StableHolder, State};
 
@@ -292,6 +293,26 @@ pub fn camera_anchor(
     }
 }
 
+/// The dynamic camera-collision spheres of the gallery's live actors
+/// (FUN_140167c20 collects them from every actor each time the camera clips),
+/// capped at the executable's list size.
+pub fn camera_spheres(
+    gallery: &enemy_gallery::EnemyGallery,
+    to_world: impl Fn([f32; 3]) -> [f32; 3],
+) -> Vec<follow_camera::Sphere> {
+    gallery
+        .actors
+        .iter()
+        .filter_map(|actor| actor.battle.as_ref())
+        .flat_map(|battle| battle.pose.spheres.iter())
+        .take(follow_camera::MAX_SPHERES)
+        .map(|shape| follow_camera::Sphere {
+            centre: to_world(shape.centre.to_array()),
+            radius: shape.radius,
+        })
+        .collect()
+}
+
 /// The held target's actor still exists but can no longer be targeted: the
 /// lock manager's release through FUN_1403ba260 (which plays se000 #8). A
 /// vanished actor or a range release goes through FUN_1403dd280 silently.
@@ -336,6 +357,19 @@ fn hp_pool(game: &Game, gallery: &enemy_gallery::EnemyGallery, id: TargetId) -> 
     }
 }
 
+fn hp_events(gallery: &enemy_gallery::EnemyGallery, id: TargetId) -> Vec<i32> {
+    match id {
+        TargetId::Gallery(id, _) => gallery
+            .actors
+            .iter()
+            .find(|actor| actor.id == id)
+            .and_then(|actor| actor.battle.as_ref())
+            .map(|battle| battle.hp_events.clone())
+            .unwrap_or_default(),
+        TargetId::Legacy(_) => Vec::new(),
+    }
+}
+
 /// Whether the shape's HP pool is the primary one (TARGET record byte 1 is 0).
 fn primary_pool(gallery: &enemy_gallery::EnemyGallery, id: TargetId) -> bool {
     match id {
@@ -356,8 +390,13 @@ fn primary_pool(gallery: &enemy_gallery::EnemyGallery, id: TargetId) -> bool {
 /// (secondary pools of multi-part targets are not modelled and show nothing).
 pub struct ScanView {
     pub id: TargetId,
+    /// Manual lock (state 2) rather than the automatic target (state 1).
+    pub manual: bool,
     pub hp: i32,
     pub max_hp: i32,
+    /// The HP after each hit this tick (empty when the actor reports none);
+    /// every one is its own damage event, a zero-damage hit included.
+    pub events: Vec<i32>,
 }
 
 pub fn scan_view(
@@ -379,7 +418,13 @@ pub fn scan_view(
         return None;
     }
     let (hp, max_hp) = hp_pool(game, gallery, id)?;
-    Some(ScanView { id, hp, max_hp })
+    Some(ScanView {
+        id,
+        manual: state.holder.state == State::Locked,
+        hp,
+        max_hp,
+        events: hp_events(gallery, id),
+    })
 }
 
 /// The reticle's inputs (FUN_1403dd770): the held target's TARGET shape centre
@@ -421,18 +466,22 @@ pub fn reticle_view(
             key,
             manual: state.holder.state == State::Locked,
             primary_pool: primary_pool(gallery, id),
+            // No supported actor carries the side-panel counters or the
+            // manager's hide flag.
+            ..visual::lock_on::Held::default()
         },
         to_world(centre),
     ))
 }
 
-/// Drives the gauge like the lock manager: a new target (or the gauge being
-/// released) re-creates it from the pool (FUN_1403dd440); the same target's
+/// Drives the gauge like the lock manager: a new target, or the same target
+/// changing between the automatic and the manual lock (FUN_1403dcd70 releases
+/// and re-creates it), re-creates it from the pool (FUN_1403dd440); the same target's
 /// HP falling is a damage event (FUN_1403dcc10, with the trail) and rising a
 /// heal (FUN_1403dcbb0).
 #[derive(Default)]
 pub struct ScanTracker {
-    shown: Option<(TargetId, i32)>,
+    shown: Option<(TargetId, bool, i32)>,
 }
 
 impl ScanTracker {
@@ -449,18 +498,30 @@ impl ScanTracker {
                     gauge.hide();
                 }
             }
-            (Some((id, hp)), Some(view)) if id == view.id => {
-                match view.hp.cmp(&hp) {
+            (Some((id, manual, hp)), Some(view)) if id == view.id && manual == view.manual => {
+                // Each reported hit is an event of its own (FUN_1403dcc10 for
+                // delta < 1, FUN_1403dcbb0 above); any change they do not
+                // explain is applied as one more.
+                let mut known = hp;
+                for &after in &view.events {
+                    if after <= known {
+                        gauge.damage(seq, after);
+                    } else {
+                        gauge.set_hp(seq, after);
+                    }
+                    known = after;
+                }
+                match view.hp.cmp(&known) {
                     std::cmp::Ordering::Less => gauge.damage(seq, view.hp),
                     std::cmp::Ordering::Greater => gauge.set_hp(seq, view.hp),
                     std::cmp::Ordering::Equal => {}
                 }
-                self.shown = Some((id, view.hp));
+                self.shown = Some((id, manual, view.hp));
             }
             (_, Some(view)) => {
                 gauge.hide();
                 gauge.show(seq, view.hp, view.max_hp);
-                self.shown = Some((view.id, view.hp));
+                self.shown = Some((view.id, view.manual, view.hp));
             }
         }
         gauge.update(seq, slots);
@@ -545,8 +606,10 @@ mod tests {
     fn view(actor: u64, hp: i32) -> Option<ScanView> {
         Some(ScanView {
             id: TargetId::Gallery(actor, 0),
+            manual: false,
             hp,
             max_hp: 300,
+            events: Vec::new(),
         })
     }
 
@@ -601,5 +664,43 @@ mod tests {
         );
         assert!(!gauge.active());
         assert!(gauge.draw(&seq, 0).is_empty());
+    }
+    #[test]
+    fn switching_between_auto_and_manual_lock_recreates_the_gauge_without_a_trail() {
+        let seq = flat_sequence();
+        let slots = visual::hud_slots::HudSlots::default();
+        let mut gauge = EnemyGauge::new(&seq, &mut visual::hud_slots::HudSlots::default());
+        let mut tracker = ScanTracker::default();
+        tracker.step(&mut gauge, &seq, &slots, view(1, 300));
+        tracker.step(&mut gauge, &seq, &slots, view(1, 100));
+        let trailing = gauge.draw(&seq, 0).len();
+        let manual = |hp| view(1, hp).map(|v| ScanView { manual: true, ..v });
+        tracker.step(&mut gauge, &seq, &slots, manual(100));
+        assert_eq!(tracker.shown, Some((TargetId::Gallery(1, 0), true, 100)));
+        // A fresh gauge at 100 HP draws what the tracker now draws, which is
+        // fewer sprites than the damage trail's.
+        let mut fresh = EnemyGauge::new(&seq, &mut visual::hud_slots::HudSlots::default());
+        fresh.show(&seq, 100, 300);
+        fresh.update(&seq, &slots);
+        assert_eq!(gauge.draw(&seq, 0).len(), fresh.draw(&seq, 0).len());
+        assert!(gauge.draw(&seq, 0).len() < trailing);
+    }
+    #[test]
+    fn every_reported_hit_is_its_own_gauge_event_even_when_the_net_hp_is_unchanged() {
+        let seq = flat_sequence();
+        let slots = visual::hud_slots::HudSlots::default();
+        let mut gauge = EnemyGauge::new(&seq, &mut visual::hud_slots::HudSlots::default());
+        let mut tracker = ScanTracker::default();
+        tracker.step(&mut gauge, &seq, &slots, view(1, 300));
+        let with_events = |hp, events: Vec<i32>| view(1, hp).map(|v| ScanView { events, ..v });
+        // Two hits in one tick: 300 -> 250 -> 200.
+        tracker.step(&mut gauge, &seq, &slots, with_events(200, vec![250, 200]));
+        assert_eq!(tracker.shown, Some((TargetId::Gallery(1, 0), false, 200)));
+        // A zero-damage hit leaves the HP alone but still restarts the trail.
+        let before = gauge.draw(&seq, 0).len();
+        tracker.step(&mut gauge, &seq, &slots, with_events(200, vec![200]));
+        assert_eq!(tracker.shown, Some((TargetId::Gallery(1, 0), false, 200)));
+        // Restarting the trail changes what the gauge draws.
+        assert_ne!(gauge.draw(&seq, 0).len(), before);
     }
 }
