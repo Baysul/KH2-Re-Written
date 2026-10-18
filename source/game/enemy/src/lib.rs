@@ -11,6 +11,8 @@ pub mod damage;
 pub mod env;
 pub mod motion;
 pub mod object;
+pub mod route;
+pub mod rtn;
 pub mod script;
 pub mod sysobj;
 pub mod trap_table;

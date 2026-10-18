@@ -23,6 +23,8 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         5 => vector_sub,
         6 => vector_len,
         7 => vector_normalize,
+        82 => vector_outer_product,
+        91 => vector_inner_product,
         13 => vector_roty,
         16 => random_get,
         17 => random_getf,
@@ -167,6 +169,48 @@ fn vector_sub(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<
     return_vector(ctx, m, 5, [0, 1, 2, 3].map(|k| a[k] - b[k]), args)
 }
 
+/// 0:82 FUN_14041d570: the cross product a x b of two vectors (NaN lanes
+/// zeroed in place first); w is 0.
+fn vector_outer_product(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let a = read_sanitized(ctx, m, args[0].value)?;
+    let b = read_sanitized(ctx, m, args[1].value)?;
+    // FUN_140142120.
+    let v = [
+        b[2] * a[1] - b[1] * a[2],
+        b[0] * a[2] - a[0] * b[2],
+        a[0] * b[1] - b[0] * a[1],
+        0.0,
+    ];
+    return_vector(ctx, m, 82, v, args)
+}
+
+/// 0:91 FUN_14041d8b0: the dot product of the two vectors after each is
+/// normalised (a copy; the operands stay), i.e. the cosine of the angle.
+fn vector_inner_product(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let unit = |mut v: Vec4| {
+        let len = length3(&v);
+        if len != 0.0 {
+            let inv = 1.0 / len;
+            for lane in v.iter_mut().take(3) {
+                *lane *= inv;
+            }
+        }
+        v
+    };
+    let a = unit(read_sanitized(ctx, m, args[0].value)?);
+    let b = unit(read_sanitized(ctx, m, args[1].value)?);
+    args[0] = Slot::float(a[1] * b[1] + a[0] * b[0] + a[2] * b[2]);
+    Ok(())
+}
+
 /// FUN_140140f50: sqrtf(x*x + y*y + z*z), summed left to right in f32.
 pub fn length3(v: &Vec4) -> f32 {
     (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
@@ -219,6 +263,120 @@ fn reduce_angle(mut a: f32) -> f32 {
         }
     }
     a
+}
+
+/// FUN_1401a9000: arcsine with the argument clamped to [-1, 1].
+fn asin_clamped(x: f32) -> f32 {
+    use std::f32::consts::FRAC_PI_2;
+    if x > 1.0 {
+        FRAC_PI_2
+    } else if x >= -1.0 {
+        x.asin()
+    } else {
+        -FRAC_PI_2
+    }
+}
+
+/// FUN_1401ab290: the x, y, z Euler angles of a rotation matrix given by its
+/// first three rows, taken as the one of the two solutions nearer
+/// `reference`, added to it as a wrapped difference.
+pub fn euler_xyz(rows: &[[f32; 3]; 3], reference: [f32; 3]) -> [f32; 3] {
+    use std::f32::consts::PI;
+    let sy = rows[0][2].clamp(-1.0, 1.0);
+    let flat = (rows[0][0] * rows[0][0] + rows[0][1] * rows[0][1])
+        .abs()
+        .sqrt();
+    let mut e = [0.0f32; 3];
+    if flat <= 1.907_348_6e-6 {
+        // Looking straight up or down: the roll and the heading are one angle.
+        let a = if sy <= 0.0 {
+            rows[1][0].atan2(rows[1][1])
+        } else {
+            (-rows[1][0]).atan2(rows[1][1])
+        } * 0.5;
+        e[0] = a;
+        e[1] = asin_clamped(-sy);
+        e[2] = if sy < 0.0 { -a } else { a };
+    } else {
+        e[2] = rows[0][1].atan2(rows[0][0]);
+        e[1] = asin_clamped(-sy);
+        e[0] = rows[1][2].atan2(rows[2][2]);
+    }
+    let first = [0, 1, 2].map(|k| reduce_angle(e[k] - reference[k]));
+    e[2] += PI;
+    e[1] = PI - e[1];
+    e[0] += PI;
+    let second = [0, 1, 2].map(|k| reduce_angle(e[k] - reference[k]));
+    let dot = |v: &[f32; 3]| v[1] * v[1] + v[0] * v[0] + v[2] * v[2];
+    let chosen = if dot(&second) < dot(&first) {
+        second
+    } else {
+        first
+    };
+    [0, 1, 2].map(|k| chosen[k] + reference[k])
+}
+
+fn cross3(a: &Vec4, b: &Vec4) -> Vec4 {
+    // FUN_140142120.
+    [
+        b[2] * a[1] - b[1] * a[2],
+        b[0] * a[2] - a[0] * b[2],
+        a[0] * b[1] - b[0] * a[1],
+        0.0,
+    ]
+}
+
+fn normalized(mut v: Vec4) -> Vec4 {
+    // FUN_140142080: the xyz lanes only; a zero vector stays.
+    let len = length3(&v);
+    if len != 0.0 {
+        let inv = 1.0 / len;
+        for lane in v.iter_mut().take(3) {
+            *lane *= inv;
+        }
+    }
+    v
+}
+
+/// 6:68 FUN_14053ef90: from a forward vector (slot 0) and an up hint (slot 1,
+/// replaced by the vector it ends up using) build a rotation and return its
+/// x, y, z Euler angles in a static vector. The hint is normalised, and when
+/// it equals the forward vector it becomes (0, -1, 0) in the script's frame.
+pub(super) fn strike_raid_calc_xyzrot(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let forward = read_sanitized(ctx, m, args[0].value)?;
+    let hint_at = args[1].value;
+    let hint = read_sanitized(ctx, m, hint_at)?;
+    let mut forward = normalized(forward);
+    forward[3] = 0.0;
+    let mut hint = normalized(hint);
+    hint[3] = 0.0;
+    if hint[..3] == forward[..3] {
+        hint = [0.0, -1.0, 0.0, 0.0];
+    }
+    let mut row0 = normalized(cross3(&hint, &forward));
+    row0[3] = 0.0;
+    let row2 = [-forward[0], -forward[1], -forward[2], 0.0];
+    let up = cross3(&forward, &row0);
+    for (k, lane) in up.iter().enumerate() {
+        ctx.write_f32(m, hint_at + 4 * k as u32, *lane);
+    }
+    let row1 = normalized(cross3(&row2, &row0));
+    let rows = [
+        [row0[0], row0[1], row0[2]],
+        [row1[0], row1[1], row1[2]],
+        [row2[0], row2[1], row2[2]],
+    ];
+    let angles = euler_xyz(&rows, [0.0; 3]);
+    let cell = ctx.world.static_cell(6, 68, 0);
+    for (k, lane) in [angles[0], angles[1], angles[2], 0.0].iter().enumerate() {
+        ctx.write_f32(m, cell + 4 * k as u32, *lane);
+    }
+    args[0] = Slot::address(cell);
+    Ok(())
 }
 
 /// FUN_14013f900: a 4x4 matrix (sixteen floats) applied to a vector,

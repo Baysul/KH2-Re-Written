@@ -133,3 +133,58 @@ fn fix_rad_zeroes_non_finite_angles() {
     let (r, _) = call(fix_rad, &mut world, &[], &[Slot::float(f32::INFINITY)]);
     assert_eq!(r, Slot::float(0.0));
 }
+
+#[test]
+fn euler_angles_pick_the_solution_nearest_the_reference() {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let identity = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]];
+    let e = euler_xyz(&identity, [0.; 3]);
+    assert!(e.iter().all(|a| a.abs() < 1.0e-6));
+    // A quarter turn about z: the heading comes from row 0.
+    let yaw = [[0., 1., 0.], [-1., 0., 0.], [0., 0., 1.]];
+    let e = euler_xyz(&yaw, [0.; 3]);
+    assert!((e[2] - FRAC_PI_2).abs() < 1.0e-6 && e[0].abs() < 1.0e-6 && e[1].abs() < 1.0e-6);
+    // The same rotation seen from a reference near the other solution.
+    let e = euler_xyz(&identity, [PI, PI, PI]);
+    assert!(e.iter().all(|a| (a - PI).abs() < 1.0e-5));
+}
+
+#[test]
+fn strike_raid_rotation_for_forward_z_and_up_y() {
+    let mut world = World::default();
+    // forward (0,0,1) at word 0, up hint (0,1,0) at word 4.
+    let floats = [0., 0., 1., 0., 0., 1., 0., 0.];
+    let (r, out) = {
+        let mut obj = Object::bare(0);
+        let mut header = vec![0u8; 44];
+        header[..4].copy_from_slice(b"test");
+        for at in [16, 20, 24] {
+            header[at..at + 4].copy_from_slice(&64u32.to_le_bytes());
+        }
+        let mut inst = Instance::new(0, &header).unwrap();
+        let mut th = Thread::new(&inst, 0, 0, &[]);
+        let base = inst.work_base();
+        let mut memory = Memory::new(&mut inst, &mut th);
+        for (k, v) in floats.iter().enumerate() {
+            memory.write_f32(base + 4 * k as u32, *v);
+        }
+        let mut a = [Slot::default(); 16];
+        a[0] = Slot::address(base);
+        a[1] = Slot::address(base + 16);
+        let mut ctx = Ctx {
+            world: &mut world,
+            me: &mut obj,
+            env: &crate::env::NullEnv,
+        };
+        strike_raid_calc_xyzrot(&mut ctx, &mut memory, &mut a).unwrap();
+        let out: Vec<f32> = (0..8)
+            .map(|k| memory.read_f32(base + 4 * k as u32).unwrap())
+            .collect();
+        (a[0], out)
+    };
+    let angles = read_static(&world, r.value);
+    assert!((angles[0] - std::f32::consts::PI).abs() < 1.0e-5);
+    assert!(angles[1].abs() < 1.0e-5 && angles[2].abs() < 1.0e-5 && angles[3] == 0.0);
+    // The up hint was replaced by cross(forward, side) = (0, 1, 0).
+    assert_eq!(&out[4..7], &[0., 1., 0.]);
+}

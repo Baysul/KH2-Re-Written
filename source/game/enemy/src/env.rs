@@ -76,6 +76,124 @@ pub trait Env {
     }
     /// Position of a target actor (centre of its TARGET shape).
     fn target_position(&self, id: u32) -> Option<Vec3>;
+    /// The actor Sora has locked on to (`trap_obj_lockon_target`'s record).
+    fn lockon_target(&self) -> Option<u32> {
+        None
+    }
+    /// Where bone `bone` of an object is (`None`: the object's own origin),
+    /// for the objects carried by it (`obj_attach`).
+    fn attach_point(&self, _holder: u32, _bone: i32) -> Option<Vec3> {
+        None
+    }
+    /// The normal of a map polygon (`bg_get_normal`; -1: the polygon of the
+    /// last hit). `None`: straight up.
+    fn map_normal(&self, _polygon: i32) -> Option<Vec3> {
+        None
+    }
+    /// The movement Sora's controller asks for this frame (`player_get_movement`).
+    fn player_move_input(&self) -> Vec3 {
+        [0.; 3]
+    }
+    /// The pad buttons held and pressed this frame, one bit per button
+    /// (`pad_is_button`, `pad_is_trigger`).
+    fn pad_held(&self) -> u64 {
+        0
+    }
+    fn pad_pressed(&self) -> u64 {
+        0
+    }
+    /// The map's fog (near, far, min, max) a kind 1 light starts with.
+    fn default_fog(&self) -> [f32; 4] {
+        [0.; 4]
+    }
+    /// A number the host owns that scripts read: mission timer and score,
+    /// enemies left in the area's units, the area cost, prizes. 0 when the
+    /// host has none.
+    fn service_value(&self, _name: &'static str, _argument: i32) -> i32 {
+        0
+    }
+    /// The camera's answer to a point (its projection or inverse transform).
+    fn camera_vector(&self, _v: [f32; 4]) -> Option<[f32; 4]> {
+        None
+    }
+    /// The direction an effect handle faces.
+    fn effect_direction(&self, _handle: u32) -> Option<Vec3> {
+        None
+    }
+    /// The TARGET shapes of an object for the target searcher: (shape id,
+    /// centre). `None`: one shape, id 0, at the object's own position.
+    fn target_shapes(&self, _object: u32) -> Option<Vec<(u32, Vec3)>> {
+        None
+    }
+    /// The walk path of a spawn point (`unit`), or of any unit of the area
+    /// for `None`, by id or group (FUN_1403ff460 / FUN_1403ff4a0 and the
+    /// area-wide FUN_1403a5160 / FUN_1403a51c0). An id below zero is the
+    /// first path of the unit.
+    fn walk_path(
+        &self,
+        _unit: Option<u32>,
+        _key: crate::route::PathKey,
+    ) -> Option<crate::route::WalkPath> {
+        None
+    }
+    /// The spawn point with this id (FUN_1403fe2d0).
+    fn walk_unit(&self, _id: u32) -> Option<u32> {
+        None
+    }
+    /// How far across a zone (along its first axis, 0 to 1) a position is
+    /// (FUN_140421100).
+    fn zone_progress(&self, _zone: u32, _position: Vec3) -> f32 {
+        0.0
+    }
+    /// Sora is inside the object's reaction sphere (FUN_140417910).
+    fn player_in_reaction(&self, _object: u32) -> bool {
+        false
+    }
+    /// The object's head (its HEAD shape's place, else its target place;
+    /// FUN_1403b58c0). `None`: its own position.
+    fn head_position(&self, _object: u32) -> Option<Vec3> {
+        None
+    }
+    /// The object's LOOK shape: where it looks from and how far round it may
+    /// look, in radians (FUN_1403e4bc0). `None`: no shape.
+    fn look_cone(&self, _object: u32) -> Option<(Vec3, f32)> {
+        None
+    }
+    /// The event path points (DAT_142b59840's list): the two ints each point
+    /// holds.
+    fn event_path(&self) -> Vec<(i32, i32)> {
+        Vec::new()
+    }
+    /// The model has hook motions `hook` (FUN_1403c7c10 finds the table).
+    fn motion_hook(&self, _object: u32, _hook: i32) -> bool {
+        false
+    }
+    /// The camera's eye and what it looks at (`camera_eye`, `camera_at`).
+    fn camera_eye(&self) -> Option<Vec3> {
+        None
+    }
+    fn camera_at(&self) -> Option<Vec3> {
+        None
+    }
+    /// A point through the inverse of the camera's matrix
+    /// (`camera_apply_pos`).
+    fn camera_apply_pos(&self, _v: [f32; 4]) -> Option<[f32; 4]> {
+        None
+    }
+    /// The matrix of an object's bone, sixteen floats in the order
+    /// `out[k] = m[k]*x + m[4+k]*y + m[8+k]*z + m[12+k]*w`
+    /// (FUN_1403b50f0). `None`: no skeleton, the identity.
+    fn bone_matrix(&self, _object: u32, _bone: u32) -> Option<[f32; 16]> {
+        None
+    }
+    /// How full mission gauge `index` is, 0 to 1 (FUN_1403fb690).
+    fn mission_gauge_ratio(&self, _index: i32) -> f32 {
+        0.0
+    }
+    /// The light cycles' speed parameter (DAT_142af7bc8 + 4).
+    fn lightcycle_speed(&self) -> f32 {
+        0.0
+    }
     /// The battle target table's choice for an actor (`None`: no entry).
     fn pick_target(&self, _kind: i32, _from: Vec3) -> Option<u32> {
         None
