@@ -152,6 +152,21 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (2, 83) => vacuum_set_28,
         (2, 84) => vacuum_set_2c,
         (7, 32) => vacuum_set_effective_range,
+        // Requests and reads whose subsystem the host owns.
+        (1, 157) | (1, 219) => obj_camera_start,
+        (1, 165) => command_override,
+        (0, 32) => screen_whitein,
+        (1, 295) => camera_reset,
+        (1, 41) => signal_call,
+        (0, 14) => progress_set_flag,
+        (1, 32) => message_open,
+        (1, 33) => message_close,
+        (4, 4) => mission_information,
+        (4, 6) => mission_increment_count,
+        (4, 9) => mission_add_gauge,
+        (4, 48) => mission_set_count_figure,
+        (4, 29) => mission_get_count,
+        (4, 40) => mission_get_timer_second,
         // The object list and the map.
         (1, 331) => obj_each_all,
         (2, 4) => enemy_each,
@@ -162,7 +177,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
 
 // --- Decoding -----------------------------------------------------------
 
-fn object_of(ctx: &Ctx<'_>, m: &Memory<'_>, ai: u32) -> Option<ObjId> {
+pub(super) fn object_of(ctx: &Ctx<'_>, m: &Memory<'_>, ai: u32) -> Option<ObjId> {
     match ctx.sys_ref_ai(m, ai).ok()? {
         SysRef::Player => Some(PLAYER_OBJECT),
         SysRef::Object(id) => Some(id),
@@ -209,6 +224,18 @@ macro_rules! forward_traps {
 }
 
 forward_traps! {
+    obj_camera_start = "obj_camera_start", Some(0), Some(2), None;
+    command_override = "command_override", None, Some(2), None;
+    screen_whitein = "func_screen_whitein", None, None, None;
+    camera_reset = "camera_reset", None, None, None;
+    signal_call = "signal_call", None, None, None;
+    progress_set_flag = "progress_set_flag", None, None, None;
+    message_open = "message_open", None, None, None;
+    message_close = "message_close", None, None, None;
+    mission_information = "mission_information", None, None, None;
+    mission_increment_count = "mission_increment_count", None, None, None;
+    mission_add_gauge = "mission_add_gauge", None, None, None;
+    mission_set_count_figure = "mission_set_count_figure_num", None, None, None;
     screen_whiteout = "func_screen_whiteout", None, None, None;
     screen_fadein = "screen_fadein", None, None, None;
     sound_set_bgse_volume = "sound_set_bgse_volume", None, None, None;
@@ -656,6 +683,8 @@ host_value_traps! {
     prize_num_ca = "prize_num_ca", None;
     prize_vacuum_ca = "prize_vacuum_ca", Some(2);
     enemy_summon_entry = "enemy_summon_entry", Some(0);
+    mission_get_count = "mission_get_count", None;
+    mission_get_timer_second = "mission_get_timer_second", None;
 }
 
 /// A vector the camera or the effect system computes (the projection of a

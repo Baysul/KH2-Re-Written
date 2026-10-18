@@ -149,6 +149,16 @@ pub enum Event {
         id: i32,
         arguments: [i32; 4],
         handle: u32,
+        /// Started by `obj_hook`: bound to the object, which holds the
+        /// thread and stops it when it starts another or calls
+        /// `obj_hook_stop`. Then `other` is the second object it names.
+        hook: bool,
+        other: Option<ObjId>,
+    },
+    /// A magic thread the object held ended (`obj_hook_stop`, or a new hook
+    /// replaced it).
+    MagicStop {
+        handle: u32,
     },
     /// `attack_strike`: a script applied an attack to a target directly.
     AttackStrike {
@@ -169,6 +179,14 @@ pub enum Event {
         object: ObjId,
         id: i32,
         position: [f32; 3],
+    },
+    /// `obj_motion_capture`: `victim` plays motion `motion` of `captor`'s
+    /// model, blending in over `blend` ticks.
+    MotionCapture {
+        captor: ObjId,
+        victim: ObjId,
+        motion: i32,
+        blend: f32,
     },
     /// `obj_voice`: the object plays a voice line.
     Voice {
@@ -344,6 +362,8 @@ pub struct World {
     pub mission_timer_paused: bool,
     /// Enemy units (spawn groups) scripts disabled (`unit_disable`).
     pub units_disabled: std::collections::BTreeSet<u32>,
+    /// Captures made so far (`obj_motion_capture` hands out the count).
+    pub captures: i32,
     /// The C library's `rand()` state (the route start position and direction
     /// draw from it), seeded 1 as the C runtime does.
     pub crt_seed: u32,
@@ -415,6 +435,7 @@ impl Default for World {
             units_disabled: Default::default(),
             ring_counter: 0,
             crt_seed: 1,
+            captures: 0,
             eh22: Eh22::default(),
             battle_targets: Default::default(),
         }

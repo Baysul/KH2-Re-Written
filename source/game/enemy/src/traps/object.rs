@@ -734,18 +734,40 @@ fn motion_push(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result
     Ok(())
 }
 
-/// 1:29 FUN_14042d160 -> FUN_1403c6cc0: play a motion borrowed from another
-/// object (a grab). [U] Not translated; reports nothing captured.
-fn motion_capture(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    ctx.world.events.push(Event::Unsupported("motion_capture"));
-    int(args, 0);
+/// 1:29 FUN_14042d160 -> FUN_1403c6cc0: the second object plays a motion of
+/// the first one's model (a grab). The answer is a token the second object's
+/// `obj_motion_capture_id` returns until it starts a motion of its own. The
+/// host plays the motion. [U] The token is a count; the executable's value
+/// is whatever FUN_1403c64a0 leaves in +0x184.
+fn motion_capture(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let captor = ctx.sys_of_ai(m, args[0].value)?;
+    let victim = ctx.sys_of_ai(m, args[1].value)?;
+    let (motion, blend) = (args[2].as_int(), args[3].as_float());
+    ctx.world.captures += 1;
+    let token = ctx.world.captures;
+    let sys = &mut ctx.object(victim)?.sys;
+    sys.capture = Some(crate::sysobj::Capture {
+        captor,
+        motion,
+        token,
+    });
+    sys.motion.flags.word |= 1 << 14;
+    ctx.world.events.push(Event::MotionCapture {
+        captor,
+        victim,
+        motion,
+        blend,
+    });
+    int(args, token);
     Ok(())
 }
 
-/// 1:238 FUN_14042d3b0: the captured motion id (+0x184). [U] Always 0 until
-/// captures exist.
-fn motion_capture_id(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    int(args, 0);
+/// 1:238 FUN_14042d3b0: the token of the captured motion that plays (+0x184),
+/// 0 when none does.
+fn motion_capture_id(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let token = ctx.object(id)?.sys.capture.map_or(0, |c| c.token);
+    int(args, token);
     Ok(())
 }
 

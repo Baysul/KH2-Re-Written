@@ -17,7 +17,6 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 114) => search_by_entry,
         (1, 222) => get_entry_id,
         (0, 8) => vector_dump,
-        (0, 14) => progress_set_flag,
         (0, 78) => vector_inter,
         (1, 36) => bg_hide,
         (1, 37) => bg_show,
@@ -28,17 +27,9 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 153) => reset_pos,
         (1, 156) => obj_hop,
         (6, 42) => obj_hop_direct,
-        (1, 174) => look_start,
-        (1, 176) => look_end,
-        (4, 6) => mission_increment_count,
-        (4, 9) => mission_add_gauge,
-        (4, 48) => mission_set_count_figure,
         (0, 49) => effect_is_alive,
         (1, 0) => sysobj_appear,
         (1, 24) => area_area,
-        (1, 32) => message_open,
-        (1, 33) => message_close,
-        (1, 41) => signal_call,
         (1, 48) => message_is_end,
         (1, 76) => motion_unhook,
         (1, 93) => sysobj_party,
@@ -51,9 +42,6 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 221) => can_decide_command,
         (1, 227) => jump_direct,
         (1, 292) => search_by_unit_arg,
-        (1, 295) => camera_reset,
-        (1, 305) => camera_eye,
-        (1, 306) => camera_at,
         (2, 1) => exec_damage_blow,
         (2, 2) => exec_damage_small,
         (2, 3) => exec_damage_hitback,
@@ -64,8 +52,6 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (2, 87) => exec_damage_large,
         (2, 91) => damage_reaction_type,
         (2, 92) => damage_is_finish,
-        (4, 29) => mission_count,
-        (4, 40) => mission_timer,
         (6, 2) => player_get_form,
         (6, 53) => bghit_is_hit,
         (6, 55) => bghit_get_kind,
@@ -76,9 +62,6 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 88) => obj_target_pos,
         (1, 130) => obj_cmp,
         (1, 149) => effect_start_bind_other,
-        (1, 157) => obj_camera_start,
-        (1, 165) => command_override,
-        (0, 32) => screen_whitein,
         (1, 160) => target_set_obj,
         (1, 170) => unit_group,
         (1, 225) => is_star,
@@ -88,7 +71,6 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (6, 51) => bghit_check_line,
         (6, 54) => bghit_cross_pos,
         (1, 59) => is_fly,
-        (1, 83) => apply_bone_matrix,
         (1, 99) => float_height,
         (1, 100) => jump_height_to_uptime,
         (1, 107) => motion_speed,
@@ -108,11 +90,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 213) => obj_part,
         (1, 218) => set_unit_arg,
         (1, 250) => set_lockon_ratio,
-        (1, 252) => camera_apply_pos,
-        (1, 269) => lightcycle_movement,
         (1, 262) => voice,
-        (4, 4) => mission_information,
-        (4, 12) => mission_gauge_ratio,
         (5, 17) => check_rtn_flag,
         (5, 27) => set_rtn_flag,
         (5, 33) => set_rtn_time,
@@ -251,6 +229,8 @@ fn magic_start_thread(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) ->
             args[4].as_int(),
         ],
         handle,
+        hook: false,
+        other: None,
     });
     args[0] = Slot::address(handle);
     Ok(())
@@ -284,16 +264,29 @@ fn is_fly(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), 
     Ok(())
 }
 
-/// 1:75 FUN_14042f460 -> FUN_1403c7c10: look up the playing clip's hook. [U]
-/// Recorded; no clip has a hook here.
-fn motion_hook(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
-    ctx.world.events.push(Event::Unsupported("obj_motion_hook"));
+/// 1:75 FUN_14042f460 -> FUN_1403c7c10: switch to the hook table `n` of the
+/// motion set when the model has one.
+fn motion_hook(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let hook = args[1].as_int();
+    if ctx.env.motion_hook(id, hook) {
+        ctx.object(id)?.sys.motion_hook = Some(hook);
+    }
     Ok(())
 }
 
-/// 1:77 FUN_14042f4c0: a hook is set (+0x160). [U] Always 0.
-fn motion_is_hook(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    args[0] = Slot::int(0);
+/// 1:76 FUN_14042f490 -> FUN_1403c8f10: back to the plain motion set.
+fn motion_unhook(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    ctx.object(id)?.sys.motion_hook = None;
+    Ok(())
+}
+
+/// 1:77 FUN_14042f4c0: a hook table is in use (+0x160).
+fn motion_is_hook(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let hooked = ctx.object(id)?.sys.motion_hook.is_some();
+    args[0] = Slot::int(hooked as i32);
     Ok(())
 }
 
@@ -356,27 +349,6 @@ fn voice(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), F
         id: args[1].as_int(),
         arg: args[2].as_int(),
     });
-    Ok(())
-}
-
-/// 4:4 FUN_1404334b0: mission information on the HUD. [U] Recorded.
-fn mission_information(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
-    ctx.world
-        .events
-        .push(Event::Unsupported("mission_information"));
-    Ok(())
-}
-
-/// 4:12 FUN_140433770: the mission gauge ratio. [U] Reads 0.
-fn mission_gauge_ratio(
-    ctx: &mut Ctx<'_>,
-    _: &mut Memory<'_>,
-    args: &mut Args,
-) -> Result<(), Fault> {
-    ctx.world
-        .events
-        .push(Event::Unsupported("mission_get_gauge_ratio"));
-    args[0] = Slot::float(0.);
     Ok(())
 }
 
@@ -452,10 +424,34 @@ fn set_land_motion(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Re
     Ok(())
 }
 
-/// 1:112 FUN_14042ca20: start a magic thread bound to the object as a hook.
-/// [U] Recorded; the script gets nothing.
-fn obj_hook(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
-    ctx.world.events.push(Event::Unsupported("obj_hook"));
+/// 1:112 FUN_14042ca20: start magic thread `n` bound to the object (and to
+/// a second object when one is named) as its hook; the thread the object
+/// held before is stopped. The host runs the thread.
+fn obj_hook(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let other = super::service::object_of(ctx, m, args[2].value);
+    let handle = ctx.world.next_magic_handle();
+    let old = ctx.object(id)?.sys.hook.replace(handle);
+    if let Some(old) = old {
+        ctx.world.events.push(Event::MagicStop { handle: old });
+    }
+    ctx.world.events.push(Event::MagicStart {
+        object: id,
+        id: args[1].as_int(),
+        arguments: [0; 4],
+        handle,
+        hook: true,
+        other,
+    });
+    Ok(())
+}
+
+/// 1:214 FUN_14042cab0: stop the hook thread.
+fn obj_hook_stop(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    if let Some(old) = ctx.object(id)?.sys.hook.take() {
+        ctx.world.events.push(Event::MagicStop { handle: old });
+    }
     Ok(())
 }
 
@@ -516,11 +512,7 @@ macro_rules! unsupported_vector_traps {
     )*};
 }
 
-unsupported_vector_traps! {
-    apply_bone_matrix = (1, 83, "obj_apply_bone_matrix");
-    camera_apply_pos = (1, 252, "camera_apply_pos");
-    lightcycle_movement = (1, 269, "obj_get_lightcycle_movement");
-}
+unsupported_vector_traps! {}
 
 /// 1:0 FUN_14042b130 -> FUN_1403df930: `sysobj_appear`, make an object of the
 /// entry appear (at the routine's default position; scripts place it
@@ -735,26 +727,6 @@ fn bghit_cross_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Re
     Ok(())
 }
 
-macro_rules! presentation_traps {
-    ($($name:ident = $label:literal;)*) => {$(
-        /// A presentation request this build does not play. [U] Recorded with
-        /// the first operand words.
-        fn $name(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-            ctx.world.events.push(Event::Presentation {
-                name: $label,
-                words: [args[0].value, args[1].value, args[2].value],
-            });
-            Ok(())
-        }
-    )*};
-}
-
-presentation_traps! {
-    obj_camera_start = "obj_camera_start";
-    command_override = "command_override";
-    screen_whitein = "func_screen_whitein";
-}
-
 macro_rules! recorded_traps {
     ($($name:ident = $label:literal;)*) => {$(
         /// A service this build does not provide. [U] The call is recorded and
@@ -766,15 +738,7 @@ macro_rules! recorded_traps {
     )*};
 }
 
-recorded_traps! {
-    obj_hook_stop = "obj_hook_stop";
-    motion_unhook = "obj_motion_unhook";
-    camera_reset = "camera_reset";
-    signal_call = "signal_call";
-    progress_set_flag = "progress_set_flag";
-    message_open = "message_open";
-    message_close = "message_close";
-}
+recorded_traps! {}
 
 macro_rules! constant_int_traps {
     ($($name:ident = $value:literal, $label:literal;)*) => {$(
@@ -792,15 +756,11 @@ constant_int_traps! {
     message_is_end = 1, "method_message_is_end";
     bghit_is_hit = 0, "bghit_is_hit";
     bghit_get_kind = 0, "bghit_get_kind";
-    mission_count = 0, "mission_get_count";
-    mission_timer = 0, "mission_get_timer_second";
     can_decide_command = 0, "obj_can_decide_command";
     add_hp = 0, "obj_add_hp";
 }
 
 unsupported_vector_traps! {
-    camera_eye = (1, 305, "camera_eye");
-    camera_at = (1, 306, "camera_at");
     target_attack = (1, 166, "target_attack");
 }
 
@@ -1065,13 +1025,7 @@ fn vector_inter(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
     Ok(())
 }
 
-recorded_traps! {
-    look_start = "obj_look_start";
-    look_end = "obj_look_end";
-    mission_add_gauge = "mission_add_gauge";
-    mission_increment_count = "mission_increment_count";
-    mission_set_count_figure = "mission_set_count_figure_num";
-}
+recorded_traps! {}
 
 #[cfg(test)]
 mod tests;

@@ -363,9 +363,61 @@ pub struct Sysobj {
     /// The object's sound bank (`obj_play_se` ids 500000..500999 take its
     /// thousand); the host sets it from the object entry.
     pub sound_bank: Option<i32>,
+    /// +0x5d0: the head look.
+    pub head_look: HeadLook,
+    /// The captured motion playing, if any.
+    pub capture: Option<Capture>,
+    /// +0xd48: the magic thread `obj_hook` started.
+    pub hook: Option<u32>,
+    /// The hook table of the motion set in use (+0x160; `obj_motion_hook`).
+    pub motion_hook: Option<i32>,
     /// +0xa78: how far the map pushed the object out of itself
     /// (`obj_get_bg_press`), in the script frame.
     pub bg_press: [f32; 4],
+}
+
+/// A motion borrowed from another object's motion set (`obj_motion_capture`,
+/// FUN_1403c6cc0): the object plays `motion` of `captor`'s model until it
+/// starts a motion of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capture {
+    pub captor: crate::world::ObjId,
+    pub motion: i32,
+    /// What `obj_motion_capture` returned and `obj_motion_capture_id` reads
+    /// back (+0x184) for as long as the capture lasts.
+    pub token: i32,
+}
+
+/// +0x5d0: the head look (FUN_1403e5650 / FUN_1403e4f70) the head tracking
+/// reads: which object the head turns to and how far the turn has blended in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeadLook {
+    /// +0x10: the bone of the model's LOOK shape; `None` for a model without
+    /// one, which never looks. The host sets it.
+    pub bone: Option<u16>,
+    /// +8: 2 while a look is on.
+    pub state: i32,
+    /// +0xc.
+    pub kind: i32,
+    /// +0x14: the blend (value and rate per tick).
+    pub blend: Fade,
+    /// +0x30 and +0x38: the object looked at and its facing when the look
+    /// began.
+    pub target: Option<crate::world::ObjId>,
+    pub target_facing: [f32; 4],
+}
+
+impl Default for HeadLook {
+    fn default() -> Self {
+        Self {
+            bone: None,
+            state: 0,
+            kind: 0,
+            blend: Fade::default(),
+            target: None,
+            target_facing: [0.0; 4],
+        }
+    }
 }
 
 /// An object carried by another (FUN_1403d9fe0): it follows the holder's
@@ -550,6 +602,10 @@ impl Sysobj {
             unit: None,
             rtn: Default::default(),
             bg_press: [0.; 4],
+            head_look: HeadLook::default(),
+            capture: None,
+            hook: None,
+            motion_hook: None,
             sound_bank: None,
         }
     }
@@ -592,6 +648,9 @@ impl Sysobj {
         // pulse of the previous motion does not carry over to the new one.
         m.flags.word &= !motion::flag::ENDED;
         m.flags.pulses = 0;
+        // A motion of its own ends a captured one.
+        m.flags.word &= !(1 << 14);
+        self.capture = None;
         true
     }
 

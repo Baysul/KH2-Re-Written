@@ -164,6 +164,36 @@ pub trait Env {
     fn event_path(&self) -> Vec<(i32, i32)> {
         Vec::new()
     }
+    /// The model has hook motions `hook` (FUN_1403c7c10 finds the table).
+    fn motion_hook(&self, _object: u32, _hook: i32) -> bool {
+        false
+    }
+    /// The camera's eye and what it looks at (`camera_eye`, `camera_at`).
+    fn camera_eye(&self) -> Option<Vec3> {
+        None
+    }
+    fn camera_at(&self) -> Option<Vec3> {
+        None
+    }
+    /// A point through the inverse of the camera's matrix
+    /// (`camera_apply_pos`).
+    fn camera_apply_pos(&self, _v: [f32; 4]) -> Option<[f32; 4]> {
+        None
+    }
+    /// The matrix of an object's bone, sixteen floats in the order
+    /// `out[k] = m[k]*x + m[4+k]*y + m[8+k]*z + m[12+k]*w`
+    /// (FUN_1403b50f0). `None`: no skeleton, the identity.
+    fn bone_matrix(&self, _object: u32, _bone: u32) -> Option<[f32; 16]> {
+        None
+    }
+    /// How full mission gauge `index` is, 0 to 1 (FUN_1403fb690).
+    fn mission_gauge_ratio(&self, _index: i32) -> f32 {
+        0.0
+    }
+    /// The light cycles' speed parameter (DAT_142af7bc8 + 4).
+    fn lightcycle_speed(&self) -> f32 {
+        0.0
+    }
     /// The battle target table's choice for an actor (`None`: no entry).
     fn pick_target(&self, _kind: i32, _from: Vec3) -> Option<u32> {
         None
