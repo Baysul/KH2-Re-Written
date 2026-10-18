@@ -357,6 +357,19 @@ fn hp_pool(game: &Game, gallery: &enemy_gallery::EnemyGallery, id: TargetId) -> 
     }
 }
 
+fn hp_events(gallery: &enemy_gallery::EnemyGallery, id: TargetId) -> Vec<i32> {
+    match id {
+        TargetId::Gallery(id, _) => gallery
+            .actors
+            .iter()
+            .find(|actor| actor.id == id)
+            .and_then(|actor| actor.battle.as_ref())
+            .map(|battle| battle.hp_events.clone())
+            .unwrap_or_default(),
+        TargetId::Legacy(_) => Vec::new(),
+    }
+}
+
 /// Whether the shape's HP pool is the primary one (TARGET record byte 1 is 0).
 fn primary_pool(gallery: &enemy_gallery::EnemyGallery, id: TargetId) -> bool {
     match id {
@@ -381,6 +394,9 @@ pub struct ScanView {
     pub manual: bool,
     pub hp: i32,
     pub max_hp: i32,
+    /// The HP after each hit this tick (empty when the actor reports none);
+    /// every one is its own damage event, a zero-damage hit included.
+    pub events: Vec<i32>,
 }
 
 pub fn scan_view(
@@ -407,6 +423,7 @@ pub fn scan_view(
         manual: state.holder.state == State::Locked,
         hp,
         max_hp,
+        events: hp_events(gallery, id),
     })
 }
 
@@ -482,7 +499,19 @@ impl ScanTracker {
                 }
             }
             (Some((id, manual, hp)), Some(view)) if id == view.id && manual == view.manual => {
-                match view.hp.cmp(&hp) {
+                // Each reported hit is an event of its own (FUN_1403dcc10 for
+                // delta < 1, FUN_1403dcbb0 above); any change they do not
+                // explain is applied as one more.
+                let mut known = hp;
+                for &after in &view.events {
+                    if after <= known {
+                        gauge.damage(seq, after);
+                    } else {
+                        gauge.set_hp(seq, after);
+                    }
+                    known = after;
+                }
+                match view.hp.cmp(&known) {
                     std::cmp::Ordering::Less => gauge.damage(seq, view.hp),
                     std::cmp::Ordering::Greater => gauge.set_hp(seq, view.hp),
                     std::cmp::Ordering::Equal => {}
@@ -580,6 +609,7 @@ mod tests {
             manual: false,
             hp,
             max_hp: 300,
+            events: Vec::new(),
         })
     }
 
@@ -654,5 +684,23 @@ mod tests {
         fresh.update(&seq, &slots);
         assert_eq!(gauge.draw(&seq, 0).len(), fresh.draw(&seq, 0).len());
         assert!(gauge.draw(&seq, 0).len() < trailing);
+    }
+    #[test]
+    fn every_reported_hit_is_its_own_gauge_event_even_when_the_net_hp_is_unchanged() {
+        let seq = flat_sequence();
+        let slots = visual::hud_slots::HudSlots::default();
+        let mut gauge = EnemyGauge::new(&seq, &mut visual::hud_slots::HudSlots::default());
+        let mut tracker = ScanTracker::default();
+        tracker.step(&mut gauge, &seq, &slots, view(1, 300));
+        let with_events = |hp, events: Vec<i32>| view(1, hp).map(|v| ScanView { events, ..v });
+        // Two hits in one tick: 300 -> 250 -> 200.
+        tracker.step(&mut gauge, &seq, &slots, with_events(200, vec![250, 200]));
+        assert_eq!(tracker.shown, Some((TargetId::Gallery(1, 0), false, 200)));
+        // A zero-damage hit leaves the HP alone but still restarts the trail.
+        let before = gauge.draw(&seq, 0).len();
+        tracker.step(&mut gauge, &seq, &slots, with_events(200, vec![200]));
+        assert_eq!(tracker.shown, Some((TargetId::Gallery(1, 0), false, 200)));
+        // Restarting the trail changes what the gauge draws.
+        assert_ne!(gauge.draw(&seq, 0).len(), before);
     }
 }

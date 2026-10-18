@@ -291,7 +291,8 @@ pub struct CameraInput {
     /// follow reference's +0xc handle names). While set, manual zoom is
     /// ignored unless `zoom_override` is. No supported actor sets it.
     pub zoom_locked: bool,
-    /// Pad bit 32 (R2) held: zoom stays allowed through the lock.
+    /// Pad bit 32 (R2) held: zoom stays allowed through the lock, and the
+    /// field camera's automatic swing is paused.
     pub zoom_override: bool,
     /// The player's speed parameter (PRTY run speed in this test room).
     pub speed: f32,
@@ -449,7 +450,7 @@ impl FollowCamera {
         ];
     }
 
-    /// A world point on the 512x416 layout screen and its depth, from the
+    /// A world point on the 512x416 layout screen and its clip-space depth, from the
     /// camera as last applied (eye, look-at, field of view): the view and
     /// projection matrices (FUN_14019cfc0 / FUN_14019ce40) then FUN_140166a20,
     /// which divides X and Y by depth and re-centres them. The focal scales
@@ -469,7 +470,16 @@ impl FollowCamera {
         } else {
             (x, y)
         };
-        [x * focal * 0.8 + 256., y * focal * 0.866_666_7 + 208., z]
+        // The depth FUN_140166a20 returns is the clip-space Z, which it never
+        // divides by W: (f + n) / (f - n) * z - 2 f n / (f - n) with the
+        // projection's near 1 and far 4,000,000 (FUN_14019c820).
+        let (near, far) = (SCREEN_DEPTH[0], SCREEN_DEPTH[1]);
+        let depth = (far + near) / (far - near) * z - 2. * far * near / (far - near);
+        [
+            x * focal * 0.8 + 256.,
+            y * focal * 0.866_666_7 + 208.,
+            depth,
+        ]
     }
 
     /// FUN_140176710: which screen edges a world point is beyond.
@@ -581,6 +591,10 @@ impl FollowCamera {
             // the magnitude behind both turn and zoom), whether or not the
             // zoom lock discards the zoom.
             && input.right_stick == 0.
+            // cam+0x42 (FUN_140178ae0): pad bit 32 (R2) xor a config bit turns
+            // the swing off. The shipped setting must be the one that lets it
+            // run without R2 held, so holding R2 pauses it.
+            && !input.zoom_override
             && input.turn == 0.
             && input.zoom == 0.
             && input.stick[1] < FOLLOW_STICK_LIMIT
@@ -791,6 +805,18 @@ mod tests {
         );
         assert!((edge[0] - 512.).abs() < 0.1, "{edge:?}");
         assert!((edge[1] - 208.).abs() < 0.1, "{edge:?}");
+        // The depth is clip-space Z: view depth 3 maps to about 1, so the
+        // near flag trips below a view depth of about 3.
+        let at = |depth: f32| camera.project([0, 1, 2].map(|i| camera.eye[i] + forward[i] * depth));
+        assert!((at(3.)[2] - 1.).abs() < 1e-2);
+        assert_eq!(
+            camera.screen_flags([0, 1, 2].map(|i| camera.eye[i] + forward[i] * 2.5)) & OFF_NEAR,
+            OFF_NEAR
+        );
+        assert_eq!(
+            camera.screen_flags([0, 1, 2].map(|i| camera.eye[i] + forward[i] * 3.5)) & OFF_NEAR,
+            0
+        );
         assert_eq!(camera.screen_flags(camera.look_at), 0);
         assert_eq!(camera.screen_flags([5000., -170., 0.]), OFF_RIGHT);
         assert_eq!(camera.screen_flags([-5000., -170., 0.]), OFF_LEFT);
@@ -1089,6 +1115,9 @@ mod tests {
         let mut zooming = moving;
         zooming.zoom = 0.5;
         assert!(wrap(yaw_after(&zooming) - start).abs() < 1e-5);
+        let mut held = moving;
+        held.zoom_override = true;
+        assert!(wrap(yaw_after(&held) - start).abs() < 1e-5);
         // Recenter and turn together: the recenter wins, so the yaw target is
         // behind the player and the manual turn is not applied.
         let mut both = input([0., 0., 0.], [1., 0., 0.]);

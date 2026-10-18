@@ -88,13 +88,19 @@ T170 folder `lock-scan-01/`. The installed source stayed read-only.
    FUN_14017bb80); the Scan gauge is re-created when the same target moves
    between the automatic and the manual lock (FUN_1403dcd70 releases and
    re-creates it through FUN_1403dd440).
-   Left open from them: the gauge conditions are evaluated only on lock
-   transitions in the executable but every frame here (only visible when Scan
-   is toggled or the target stops being targetable mid-lock); two hits in one
-   frame make one damage event here and two there; zero-damage events; the
-   `cam+0x42` follow gate (pad bit 32 xor a config bit, FUN_140178ae0) whose
-   default setting is not established; whether the near/far screen test sees
-   linear or clip-space depth (about one unit at the near gate).
+   Second pass on the audits' open points: the screen test and the reticle
+   depth are clip-space Z, never divided by W (FUN_140166a20, FUN_14019c820:
+   (f + n) / (f - n) * z - 2 f n / (f - n), n 1, f 4,000,000), so the near
+   flag trips below a view depth of about 3 (`FollowCamera::project`); every
+   hit the gallery applies this tick is now its own gauge event with the HP
+   after it (`BattleActor::hp_events`), so two hits in a tick and a
+   zero-damage hit restart the trail as FUN_1403dcc10 does; holding R2 pauses
+   the field camera's automatic swing (cam+0x42, FUN_140178ae0 = pad bit 32 xor
+   config bit 4 of word +0x41a4; the shipped default is not read from the
+   image, it is taken as the one that lets the swing run without R2).
+   Left open: the gauge conditions are evaluated only on lock transitions in
+   the executable but every frame here (visible only when Scan is toggled or
+   the target stops being targetable mid-lock).
 
 ## Not done, and why
 

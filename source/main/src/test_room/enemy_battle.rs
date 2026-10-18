@@ -441,6 +441,9 @@ pub struct BattleActor {
     pub serial: u64,
     pub windows: Vec<AttackWindow>,
     pub contacts: ContactState,
+    /// The HP after each hit applied this tick, in order: the damage events
+    /// the lock manager hands the Scan gauge (FUN_1403d2eb0 / FUN_1403d2c50).
+    pub hp_events: Vec<i32>,
     clips: Arc<Clips>,
     pub paused: bool,
     pub error: Option<String>,
@@ -696,6 +699,7 @@ impl BattleActor {
             frame,
             serial: 0,
             contacts: ContactState::default(),
+            hp_events: Vec::new(),
             clips,
             paused: false,
             error: None,

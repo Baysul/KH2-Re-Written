@@ -255,6 +255,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         let Some(battle) = actor.battle.as_mut() else {
             continue;
         };
+        battle.hp_events.clear();
         if battle.error.is_some() {
             continue;
         }
@@ -393,6 +394,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                     rt.difficulty,
                 )
             {
+                battle.hp_events.push(battle.brain.hp());
                 if damage > 0 {
                     *enemy_outgoing_hits += 1;
                 }
