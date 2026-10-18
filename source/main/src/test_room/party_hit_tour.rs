@@ -64,6 +64,12 @@ enum Case {
     Reflect {
         member: usize,
     },
+    /// A member's (or Sora's) HP or MP is low with the Shadow in reach: the
+    /// AI uses an item from Sora's slots and it heals 30 ticks later.
+    Items {
+        member: usize,
+        what: Low,
+    },
     /// The Shadow hangs 200 above the floor 150 ahead of the member, so only
     /// an air attack (records 2/3, 6/7) is eligible: the member jumps,
     /// strikes and lands.
@@ -72,6 +78,17 @@ enum Case {
     },
     /// The Shadow fights on its own, the party's AI casts.
     Fight,
+}
+
+/// What the item case lowers.
+#[derive(Clone, Copy)]
+enum Low {
+    /// The member's HP to 40%.
+    MemberHp,
+    /// Sora's HP to 20%, a partner in need (the emergency pass).
+    SoraHp,
+    /// The member's MP to 30%.
+    MemberMp,
 }
 
 const CASES: &[Case] = &[
@@ -113,6 +130,21 @@ const CASES: &[Case] = &[
         delay: 36,
     },
     Case::Wait(120),
+    Case::Items {
+        member: DONALD,
+        what: Low::MemberHp,
+    },
+    Case::Wait(60),
+    Case::Items {
+        member: GOOFY,
+        what: Low::SoraHp,
+    },
+    Case::Wait(60),
+    Case::Items {
+        member: GOOFY,
+        what: Low::MemberMp,
+    },
+    Case::Wait(60),
     Case::Air { member: DONALD },
     Case::Wait(60),
     Case::Air { member: GOOFY },
@@ -395,6 +427,54 @@ pub fn drive(game: &mut Game, tick: u64) {
             }
             _ => {}
         },
+        Case::Items { member, what } => match state.stage {
+            0 if free(game, member) => {
+                stage(game, member, Some(true));
+                // Sora's slots start again as the room fills them.
+                if let Some(it) = game.items.as_mut() {
+                    it.slots = it.originals.clone();
+                }
+                if let Some(rt) = game.enemy.as_mut() {
+                    rt.enabled = true;
+                    if matches!(what, Low::SoraHp) {
+                        rt.sora_hp = rt.sora_target.max_hp / 5;
+                    }
+                }
+                if let Some(m) = game.party.get_mut(member) {
+                    match what {
+                        Low::MemberHp => m.hp = m.max_hp * 2 / 5,
+                        Low::MemberMp => m.mp.cur = m.mp.max * 3 / 10,
+                        Low::SoraHp => {}
+                    }
+                }
+                log(
+                    game,
+                    tick,
+                    index,
+                    "items_start",
+                    serde_json::json!({"member":member}),
+                );
+                capture(game, tick, &[20, 40, 60, 80, 100]);
+                state.stage = 1;
+                state.mark = tick;
+            }
+            1 => {
+                // The use queues an item; the heal lands 30 ticks later.
+                if !game.party_items.is_empty() {
+                    capture(game, tick, &[15, 30, 45]);
+                    state.stage = 2;
+                    state.mark = tick;
+                } else if tick > state.mark + PATIENCE {
+                    done = true;
+                }
+            }
+            2 => {
+                if game.party_items.is_empty() && tick > state.mark + 40 {
+                    done = true;
+                }
+            }
+            _ => {}
+        },
         Case::Air { member } => {
             // The target hangs 150 ahead of the member, 200 above its feet.
             let seen = game.party.get(member).map(|m| {
@@ -468,6 +548,17 @@ pub fn drive(game: &mut Game, tick: u64) {
             if tick >= state.mark + FIGHT {
                 done = true;
             }
+        }
+    }
+    if done && matches!(CASES[index], Case::Items { .. }) {
+        // Back to full HP and MP, the Shadow away again.
+        if let Some(rt) = game.enemy.as_mut() {
+            rt.enabled = false;
+            rt.sora_hp = rt.sora_target.max_hp;
+        }
+        for m in game.party.iter_mut() {
+            m.hp = m.max_hp;
+            m.mp.cur = m.mp.max;
         }
     }
     if done {

@@ -55,6 +55,8 @@ pub struct MotionData {
     pub actionable: Option<u32>,
     /// Frame trigger 14: (tick, voice n) (FUN_14040dd70 to FUN_1403d69b0).
     pub voices: Vec<(u32, i16)>,
+    /// Frame trigger 6: the item is used (FUN_14040dd70 to FUN_1403f6790).
+    pub item_use: Option<u32>,
 }
 
 impl MotionData {
@@ -143,6 +145,43 @@ pub struct MemberRt {
     /// last scanned at.
     pub voices: Option<drive_room::Voices>,
     pub voice_at: (u16, u32),
+    /// The item-use trigger of the running item motion has fired.
+    pub item_fired: bool,
+    /// The HUD event the gauge has not read yet (0 none, 1-3 hit, 4 heal;
+    /// FUN_1403d60c0 and FUN_1403d2eb0 post it).
+    pub event: u8,
+}
+
+/// `FUN_1403d60c0`'s gauge event of a hit: a dead member or a blow-class
+/// reaction (4, 7, 9, 0xb, 0xf, 0x11) is 3, a flinch class (3, 6, 8, 10,
+/// 0xd, 0x10, 0x12) 2, any other that reacts or hurts 1.
+fn gauge_event(dead: bool, reaction: u8, damage: i32) -> u8 {
+    if dead {
+        return 3;
+    }
+    match reaction {
+        3 | 6 | 8 | 10 | 0xd | 0x10 | 0x12 => 2,
+        4 | 7 | 9 | 0xb | 0xf | 0x11 => 3,
+        0 if damage < 1 => 0,
+        _ => 1,
+    }
+}
+
+/// An item the party used, waiting out `DAT_140623bcc` (30 ticks) before it
+/// heals (`FUN_1403f6790` queues it, `FUN_1403f6960` runs it).
+pub struct PendingItem {
+    pub delay: f32,
+    pub item: u16,
+    /// The party slot it is for (0 Sora, 1 Donald, 2 Goofy).
+    pub target: u8,
+}
+
+/// The wait between the use trigger and the heal (`DAT_140623bcc`).
+const ITEM_DELAY: f32 = 30.;
+
+/// The items that heal the whole party (`FUN_1403c4780`: 5, 6, 7, 0x83).
+fn heals_all(item: u16) -> bool {
+    matches!(item, 5..=7 | 0x83)
 }
 
 fn matrix(m: &[u32; 16], root: Vec3) -> Mat4 {
@@ -217,6 +256,13 @@ fn build_motion(
             .flat_map(|t| &t.records.ranges)
             .filter(|r| r.trigger == 2)
             .map(|r| r.start_frame.max(0) as u32)
+            .min(),
+        item_use: selected
+            .triggers
+            .iter()
+            .flat_map(|t| &t.records.frames)
+            .filter(|f| f.trigger == 6)
+            .map(|f| f.frame.max(0) as u32)
             .min(),
     };
     if let Some(own) = own {
@@ -874,6 +920,8 @@ impl BattleMode {
 
 /// A key family for the KO marker effects (00effect element 14).
 const KO_FX: u64 = FX_BASE | 1 << 39;
+/// Effect keys of a party item's two effects.
+const ITEM_FX: u64 = FX_BASE | 1 << 38;
 
 impl MemberRt {
     /// FUN_1403d69b0: a battle voice, picked from the vtbl rows of the
@@ -1065,6 +1113,7 @@ fn take_hit<W: player::World>(
     if ko {
         voices.push(2);
     }
+    m.event = gauge_event(m.hp == 0, attack.reaction, damage);
     let away = ((blow.body.0 - blow.from) * Vec3::new(1., 0., 1.)).normalize_or(Vec3::Z);
     let hit = player::Hit {
         reaction: attack.reaction,
@@ -1270,6 +1319,8 @@ pub fn heal_member(m: &mut MemberRt, amount: i32) -> bool {
         m.follower.revive(&m.kind.sstm);
     }
     m.hp = (m.hp + amount).min(m.max_hp);
+    // FUN_1403d2eb0: a heal posts the gauge's refresh event.
+    m.event = 4;
     was_down
 }
 
@@ -1360,6 +1411,8 @@ pub fn tick(game: &mut Game, tick: u64) {
         party_volumes,
         gallery_targets,
         party_fixed_target,
+        party_items,
+        items,
         ..
     } = game;
     party_volumes.clear();
@@ -1401,6 +1454,18 @@ pub fn tick(game: &mut Game, tick: u64) {
         }
         hp
     };
+    // The MP of Sora, Donald and Goofy, and Sora's item slots.
+    let mp_all: [Option<(i32, i32)>; 3] = {
+        let mut mp = [Some((player.mp.cur, player.mp.max)), None, None];
+        for (i, m) in party.iter().enumerate().take(2) {
+            mp[i + 1] = Some((m.mp.cur, m.mp.max));
+        }
+        mp
+    };
+    let counts: Vec<std::cell::Cell<u32>> = (0..8u16)
+        .map(|id| std::cell::Cell::new(items.as_ref().map_or(0, |rt| rt.count(id))))
+        .collect();
+    let stock = |id: u16| counts.get(id as usize).map_or(0, |c| c.get());
     // The tour orders its casts; the AI casts on its own elsewhere.
     let spells = *party_spells
         && (!*magic_tour || *party_hit_tour || super::magic_tour::free_party(tick, *magic_shift));
@@ -1450,6 +1515,8 @@ pub fn tick(game: &mut Game, tick: u64) {
             mp: Some((m.mp.cur, m.mp.max, m.mp.charging())),
             spells,
             hp,
+            mp_all,
+            items: &stock,
             actionable: &actionable,
             sstm: kind.sstm,
             rates: kind.rates,
@@ -1458,6 +1525,48 @@ pub fn tick(game: &mut Game, tick: u64) {
         let was = m.follower.attack.is_some();
         m.follower.tick(kind.records, &scene);
         m.motion_voices(sound_queue);
+        // FUN_1403f6790 at the item-use trigger: the item leaves Sora's slots
+        // and its heal is queued; a hit before the trigger uses nothing.
+        match m.follower.attack.and_then(|a| a.item.map(|i| (a, i))) {
+            Some((a, (item, target)))
+                if !m.item_fired
+                    && kind
+                        .motions
+                        .get(&a.motion)
+                        .and_then(|d| d.item_use)
+                        .is_some_and(|f| a.tick >= f) =>
+            {
+                m.item_fired = true;
+                if items.as_mut().is_some_and(|rt| rt.take(item)) {
+                    if let Some(c) = counts.get(item as usize) {
+                        c.set(c.get().saturating_sub(1));
+                    }
+                    party_items.push(PendingItem {
+                        delay: ITEM_DELAY,
+                        item,
+                        target,
+                    });
+                    // FUN_1403f6b30's first update: system element 0 at the
+                    // user.
+                    fx_calls.push(spell_fx::Call {
+                        pax: system_pax.clone(),
+                        fx: player::magic::Fx::Start {
+                            key: ITEM_FX | (index as u64) << 20 | tick,
+                            id: 0,
+                            bound: Some(player::magic::Anchor::Party(index + 1)),
+                            at: None,
+                        },
+                    });
+                    log_event(
+                        log,
+                        serde_json::json!({"event":"party_item_use","tick":tick,
+                        "member":kind.name,"item":item,"target":target}),
+                    );
+                }
+            }
+            None => m.item_fired = false,
+            _ => {}
+        }
         // FUN_1403c3660: the KO timer ran out; FUN_1403c3bd0 heals through
         // FUN_1403d2eb0, which revives the member.
         if m.follower.revive_due() {
@@ -1861,6 +1970,82 @@ pub fn tick(game: &mut Game, tick: u64) {
     // The guard spheres are read once, by the tick that follows their
     // making.
     enemy_guards.clear();
+    // FUN_1403f6960: the queued items count down and heal when due
+    // (FUN_1403c4ab0: the whole party for 5-7, else the one target).
+    let mut due = Vec::new();
+    party_items.retain_mut(|p| {
+        p.delay -= 1.;
+        if p.delay <= 0. {
+            due.push((p.item, p.target));
+        }
+        p.delay > 0.
+    });
+    for (item, target) in due {
+        let Some(info) = items
+            .as_ref()
+            .and_then(|rt| rt.src.items.get(&item).copied())
+        else {
+            continue;
+        };
+        let slots: Vec<usize> = if heals_all(item) {
+            (0..=party.len().min(2)).collect()
+        } else {
+            vec![target as usize]
+        };
+        for slot in slots {
+            // FUN_1403c4b80: a share of the maxima, 100% (Item Boost is
+            // Sora's own).
+            let share = |max: i32| (max * info.amount as i32 * 100 + 9999) / 10000;
+            let (hp_max, mp_max) = if slot == 0 {
+                (
+                    enemy.as_ref().map(|rt| rt.sora_target.max_hp),
+                    player.mp.max,
+                )
+            } else if let Some(m) = party.get(slot - 1) {
+                (Some(m.max_hp), m.mp.max)
+            } else {
+                continue;
+            };
+            let heal_hp = match item {
+                1 | 2 | 5 | 4 | 7 => hp_max.map_or(0, share),
+                _ => 0,
+            };
+            let heal_mp = match item {
+                3 | 6 | 4 | 7 => share(mp_max),
+                _ => 0,
+            };
+            let record = if slot == 0 {
+                if let Some(rt) = enemy.as_mut() {
+                    rt.sora_hp = (rt.sora_hp + heal_hp).min(rt.sora_target.max_hp);
+                }
+                player.mp.add(heal_mp);
+                serde_json::json!({"event":"party_item_heal","tick":tick,"item":item,
+                    "target":"Sora","hp":heal_hp,"mp":heal_mp,
+                    "sora_hp":enemy.as_ref().map(|rt| rt.sora_hp),"mp_now":player.mp.cur})
+            } else if let Some(m) = party.get_mut(slot - 1) {
+                let was_down = heal_member(m, heal_hp);
+                if heal_mp > 0 {
+                    m.mp.add(heal_mp);
+                }
+                serde_json::json!({"event":"party_item_heal","tick":tick,"item":item,
+                    "target":m.kind.name,"hp":heal_hp,"mp":heal_mp,"member_hp":m.hp,
+                    "mp_now":m.mp.cur,"was_down":was_down})
+            } else {
+                continue;
+            };
+            log_event(log, record);
+            // The item's own element on the target.
+            fx_calls.push(spell_fx::Call {
+                pax: system_pax.clone(),
+                fx: player::magic::Fx::Start {
+                    key: ITEM_FX | 1 << 30 | (slot as u64) << 20 | tick,
+                    id: info.effect,
+                    bound: Some(player::magic::Anchor::Party(slot)),
+                    at: None,
+                },
+            });
+        }
+    }
     // attack_strike on the chosen member: Cure's heal is an ATKP Type 6 row,
     // (Power x Magic + 99) / 100 with the healer's Magic, clamped to the
     // maximum HP.

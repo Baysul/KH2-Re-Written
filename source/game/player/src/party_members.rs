@@ -13,6 +13,12 @@
 //! `FUN_1401cc1a0`): they need the think loop's random MP-scaled permit
 //! (`FUN_1401b53b0`) and an MP bar that is not charging, and play the act of
 //! `party_spell`.
+//!
+//! The personality's table also holds the item entries (`FUN_1401cc970` for
+//! HP, `FUN_1401cce90` for MP): a member under 45% of its HP or MP uses the
+//! first item of a preference list that Sora's item slots hold, on itself,
+//! Sora or the other member, and a partner in need (`FUN_1401b3a30`, entry
+//! flags 0x10 and 0x20) is served before any attack is chosen.
 
 use crate::actor_physics::{Knock, Sstm};
 use crate::party_hit;
@@ -65,6 +71,28 @@ pub enum Spell {
     Turbo,
 }
 
+/// The consumables an item entry looks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemNeed {
+    Hp,
+    Mp,
+}
+
+/// Which emergency pass of `FUN_1401b3a30` an entry belongs to (entry flag
+/// 0x10 or 0x20): run first when a partner is in need.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Urgent {
+    No,
+    Hp,
+    Mp,
+}
+
+/// The share of the maximum below which a member uses an item
+/// (`DAT_1405b41c0`).
+const ITEM_BELOW: f32 = 0.45;
+/// The item-use motion (id 9, `FUN_1403d72d0`).
+pub const ITEM_MOTION: u16 = 9;
+
 /// One action parameter entry (record of 0x80 bytes): the attack's motion
 /// and its range window (FUN_1401b2880).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -86,6 +114,9 @@ pub struct Record {
     /// Cure: a member is healed while its HP is below this share of its
     /// maximum (+0x3c).
     pub heal_below: f32,
+    /// An item entry: the need it serves (it plays the item-use motion).
+    pub item: Option<ItemNeed>,
+    pub urgent: Urgent,
 }
 
 const fn ground(id: u8, motion: u16, far: f32) -> Record {
@@ -100,6 +131,21 @@ const fn ground(id: u8, motion: u16, far: f32) -> Record {
         cost: 0,
         spell: None,
         heal_below: 0.,
+        item: None,
+        urgent: Urgent::No,
+    }
+}
+
+/// The HP or MP item entry of a personality table (ids are this port's: the
+/// exe's entries have none).
+const fn item_entry(id: u8, need: ItemNeed) -> Record {
+    Record {
+        item: Some(need),
+        urgent: match need {
+            ItemNeed::Hp => Urgent::Hp,
+            ItemNeed::Mp => Urgent::Mp,
+        },
+        ..ground(id, ITEM_MOTION, 0.)
     }
 }
 
@@ -128,6 +174,8 @@ const fn spell(id: u8, spell: Spell, motion: u16, window: [f32; 4], cost: u8) ->
         cost,
         spell: Some(spell),
         heal_below: 0.,
+        item: None,
+        urgent: Urgent::No,
     }
 }
 
@@ -136,7 +184,7 @@ const fn spell(id: u8, spell: Spell, motion: u16, window: [f32; 4], cost: u8) ->
 /// (Fire 0-350, Blizzard 250-750, Thunder 0-500 with their height windows;
 /// Cure costs 255 and heals below 0.4 of the HP). The act motions are 192
 /// (Fire, Thunder, Cure) and 191 (Blizzard).
-pub const DONALD: [Record; 8] = [
+pub const DONALD: [Record; 10] = [
     ground(0, 151, 200.),
     ground(1, 152, 180.),
     air(2, 181, 150.),
@@ -146,21 +194,26 @@ pub const DONALD: [Record; 8] = [
     spell(59, Spell::Thunder, 192, [0., 500., -500., 1000.], 10),
     Record {
         heal_below: 0.4,
+        urgent: Urgent::Hp,
         ..spell(60, Spell::Cure, 192, [0., 0., 0., 0.], 255)
     },
+    item_entry(200, ItemNeed::Hp),
+    item_entry(201, ItemNeed::Mp),
 ];
 /// Goofy's records (personality 1): the two ground attacks, the two air
 /// attacks (ids 6, 7) and the specials Tornado (id 92, range 0-500,
 /// height window -100/500 after the negation) and Turbo (id 94, 0-500,
 /// -100/150), 10 MP each. Bash (id 93, 250-750) is the shield throw, a
 /// separate act (`party_bash`).
-pub const GOOFY: [Record; 6] = [
+pub const GOOFY: [Record; 8] = [
     ground(4, 151, 220.),
     ground(5, 152, 300.),
     air(6, 181, 100.),
     air(7, 182, 80.),
     spell(92, Spell::Tornado, 191, [0., 500., -100., 500.], 10),
     spell(94, Spell::Turbo, 194, [0., 500., -100., 150.], 10),
+    item_entry(200, ItemNeed::Hp),
+    item_entry(201, ItemNeed::Mp),
 ];
 
 /// The enemy a member fights: its centre and radius.
@@ -180,6 +233,8 @@ pub struct Attack {
     pub spell: Option<Spell>,
     /// Cure: the party slot healed (0 Sora, 1 Donald, 2 Goofy).
     pub heal: u8,
+    /// An item use: the item id and the party slot it is for.
+    pub item: Option<(u16, u8)>,
 }
 
 /// The movement loop of Goofy's Tornado and Turbo (`p_ex030` L1967 and
@@ -278,6 +333,10 @@ pub struct Scene<'a, W: World> {
     pub mp: Option<(i32, i32, bool)>,
     /// HP and maximum HP of Sora, Donald and Goofy (None: absent).
     pub hp: [Option<(i32, i32)>; 3],
+    /// MP and maximum MP of the same three.
+    pub mp_all: [Option<(i32, i32)>; 3],
+    /// How many slots of Sora's items hold an item (`FUN_1403c4380`).
+    pub items: &'a dyn Fn(u16) -> u32,
     /// The motion's range 2 start, the tick a reaction lets the member act
     /// again (`obj+0x18c` bits 2-4).
     pub actionable: &'a dyn Fn(u16) -> Option<u32>,
@@ -357,7 +416,7 @@ impl Follower {
         // Cure's record reads 0-0 as a range, which the original's check
         // would turn into "touching the enemy"; the cast waits on the
         // heal target instead [U: the record's flags were not decoded].
-        if r.spell == Some(Spell::Cure) {
+        if r.spell == Some(Spell::Cure) || r.item.is_some() {
             return true;
         }
         let dx = t.position[0] - self.position[0];
@@ -411,6 +470,79 @@ impl Follower {
         spell != Spell::Cure || self.heal_target(r.heal_below, &scene.hp).is_some()
     }
 
+    /// `FUN_1401cc970` / `FUN_1401cce90`: the item an item entry uses and the
+    /// party slot it is for. The target is the partner in need (HP only), else
+    /// the first of this member, Sora and the other member under 45%; two or
+    /// more under it prefer the Mega items. Items come from Sora's slots.
+    pub fn item_pick<W: World>(&self, need: ItemNeed, scene: &Scene<W>) -> Option<(u16, u8)> {
+        let own = self.slot as usize + 1;
+        let low = |i: usize| match need {
+            ItemNeed::Hp => {
+                scene.hp[i].is_some_and(|(cur, max)| cur < (max as f32 * ITEM_BELOW) as i32)
+            }
+            // A dead member is out of the MP check.
+            ItemNeed::Mp => {
+                scene.hp[i].is_some_and(|(cur, _)| cur > 0)
+                    && scene.mp_all[i]
+                        .is_some_and(|(cur, max)| cur < (max as f32 * ITEM_BELOW) as i32)
+            }
+        };
+        let mut target = match need {
+            ItemNeed::Hp => self.partner_in_need(&scene.hp),
+            ItemNeed::Mp => None,
+        };
+        let mut count = 0;
+        for i in [own, 0, 3 - own] {
+            if low(i) {
+                target.get_or_insert(i);
+                count += 1;
+            }
+        }
+        let list: &[u16] = match (need, count > 1) {
+            (ItemNeed::Hp, false) => &[1, 2, 5, 4, 7],
+            (ItemNeed::Hp, true) => &[5, 1, 2, 4, 7],
+            (ItemNeed::Mp, false) => &[3, 6, 4, 7],
+            (ItemNeed::Mp, true) => &[6, 3, 7, 4],
+        };
+        let item = list.iter().copied().find(|&id| (scene.items)(id) > 0)?;
+        Some((item, target? as u8))
+    }
+
+    /// Whether a record can be chosen: its motion exists, the target is in
+    /// its window, and a spell or an item has what it needs.
+    fn ready<W: World>(&self, r: &Record, t: &Target, scene: &Scene<W>) -> bool {
+        (scene.length)(r.motion).is_some()
+            && self.eligible(r, t)
+            && self.spell_ready(r, scene)
+            && r.item
+                .is_none_or(|need| self.item_pick(need, scene).is_some())
+    }
+
+    /// `FUN_1401b3a30`: with a partner in need the entries flagged for the
+    /// HP pass (Cure, the HP item) and then for the MP pass (the MP item) are
+    /// tried before any attack: one candidate is picked at random.
+    fn emergency<W: World>(
+        &mut self,
+        records: &[Record],
+        t: &Target,
+        scene: &Scene<W>,
+    ) -> Option<Record> {
+        self.partner_in_need(&scene.hp)?;
+        for pass in [Urgent::Hp, Urgent::Mp] {
+            let candidates: Vec<Record> = records
+                .iter()
+                .copied()
+                .filter(|r| r.urgent == pass && self.ready(r, t, scene))
+                .collect();
+            if !candidates.is_empty() {
+                let pick = candidates[self.rand(candidates.len() as u32) as usize];
+                self.history = [255; 3];
+                return Some(pick);
+            }
+        }
+        None
+    }
+
     /// FUN_1401b1d40 over the attack records: the random pick among the
     /// eligible ones, skipping a record chosen three times running.
     fn choose<W: World>(
@@ -422,11 +554,7 @@ impl Follower {
         let candidates: Vec<Record> = records
             .iter()
             .copied()
-            .filter(|r| {
-                (scene.length)(r.motion).is_some()
-                    && self.eligible(r, t)
-                    && self.spell_ready(r, scene)
-            })
+            .filter(|r| self.ready(r, t, scene))
             .collect();
         if candidates.is_empty() {
             return None;
@@ -457,6 +585,7 @@ impl Follower {
             tick: 0,
             spell: r.spell,
             heal,
+            item: None,
         });
         if r.air {
             // The jump reaches the target's height (1 + rise, at most 385)
@@ -468,6 +597,21 @@ impl Follower {
                 [self.yaw.sin() * AIR_SPEED, self.yaw.cos() * AIR_SPEED],
             ));
         }
+        self.gait = Gait::Stand;
+        self.tick = 0;
+        self.special = Special::new();
+    }
+
+    /// `FUN_1401b7d90`: the item-use motion; the member does not turn.
+    pub fn begin_item(&mut self, r: &Record, item: (u16, u8)) {
+        self.attack = Some(Attack {
+            record: r.id,
+            motion: r.motion,
+            tick: 0,
+            spell: None,
+            heal: 0,
+            item: Some(item),
+        });
         self.gait = Gait::Stand;
         self.tick = 0;
         self.special = Special::new();
@@ -806,9 +950,17 @@ impl Follower {
         }
         // Decide: an eligible attack starts at once (FUN_1401b1d40).
         if let Some(t) = scene.target
-            && let Some(r) = self.choose(records, &t, scene)
+            && let Some(r) = self
+                .emergency(records, &t, scene)
+                .or_else(|| self.choose(records, &t, scene))
             && (scene.length)(r.motion).is_some()
         {
+            if let Some(need) = r.item
+                && let Some(item) = self.item_pick(need, scene)
+            {
+                self.begin_item(&r, item);
+                return;
+            }
             let heal = if r.spell == Some(Spell::Cure) {
                 self.heal_target(r.heal_below, &scene.hp).unwrap_or(0) as u8
             } else {
@@ -892,6 +1044,9 @@ mod tests {
     fn no_actionable(_: u16) -> Option<u32> {
         None
     }
+    fn no_items(_: u16) -> u32 {
+        0
+    }
     pub(super) fn test_sstm() -> Sstm {
         let mut record = [0u8; 0x3c];
         for (at, v) in [
@@ -940,6 +1095,8 @@ mod tests {
             range: &no_range,
             mp: None,
             hp: [None; 3],
+            mp_all: [None; 3],
+            items: &no_items,
             actionable: &no_actionable,
             sstm: test_sstm(),
             rates: test_rates(),
@@ -1042,6 +1199,8 @@ mod tests {
             range: &no_range,
             mp: Some(mp),
             hp,
+            mp_all: [None; 3],
+            items: &no_items,
             actionable: &no_actionable,
             sstm: test_sstm(),
             rates: test_rates(),
@@ -1091,7 +1250,7 @@ mod tests {
         let scene = spell_scene(Some(t), &Flat, (100, 100, false), [Some((20, 20)); 3]);
         let ready: Vec<u8> = DONALD
             .iter()
-            .filter(|r| f.eligible(r, &t) && f.spell_ready(r, &scene))
+            .filter(|r| r.item.is_none() && f.eligible(r, &t) && f.spell_ready(r, &scene))
             .map(|r| r.id)
             .collect();
         assert_eq!(ready, vec![58]);
@@ -1181,6 +1340,8 @@ mod tests {
             range: &no_range,
             mp: None,
             hp: [None; 3],
+            mp_all: [None; 3],
+            items: &no_items,
             actionable: &ready_at_58,
             sstm: test_sstm(),
             rates: test_rates(),
@@ -1327,6 +1488,8 @@ mod tests {
             range: &no_range,
             mp: None,
             hp: [None; 3],
+            mp_all: [None; 3],
+            items: &no_items,
             actionable: &ready_at_58,
             sstm: test_sstm(),
             rates: test_rates(),
@@ -1384,5 +1547,126 @@ mod tests {
         assert!(f.position[1] > 0. && f.air.is_some());
         f.react(&claw_hit(), &test_sstm(), &Ground, &|m| m < 100);
         assert!(f.attack.is_none() && f.air.is_none());
+    }
+
+    fn item_scene<'a>(
+        hp: [Option<(i32, i32)>; 3],
+        mp: [Option<(i32, i32)>; 3],
+        items: &'a dyn Fn(u16) -> u32,
+        target: Option<Target>,
+    ) -> Scene<'a, Flat> {
+        Scene {
+            hp,
+            mp_all: mp,
+            items,
+            target,
+            spells: true,
+            mp: Some((100, 100, false)),
+            ..spell_scene(target, &Flat, (100, 100, false), hp)
+        }
+    }
+
+    fn stock(id: u16) -> u32 {
+        matches!(id, 1 | 2 | 3 | 5 | 6) as u32
+    }
+
+    #[test]
+    fn an_hp_item_goes_to_the_first_member_under_45_percent() {
+        let f = Follower::spawn([0.; 3], 0., 0);
+        let full = Some((100, 100));
+        // Donald (own slot 1) at 44: the Potion for himself.
+        let s = item_scene([full, Some((44, 100)), full], [None; 3], &stock, None);
+        assert_eq!(f.item_pick(ItemNeed::Hp, &s), Some((1, 1)));
+        // 45 is not under 45.
+        let s = item_scene([full, Some((45, 100)), full], [None; 3], &stock, None);
+        assert_eq!(f.item_pick(ItemNeed::Hp, &s), None);
+        // Sora under 45 and above a quarter: Sora, before Goofy.
+        let s = item_scene(
+            [Some((30, 100)), full, Some((40, 100))],
+            [None; 3],
+            &stock,
+            None,
+        );
+        assert_eq!(f.item_pick(ItemNeed::Hp, &s).map(|p| p.1), Some(0));
+        // Two members under it: the Mega-Potion first; without one, the
+        // Potion (the list order, FUN_1401cc970).
+        let s = item_scene(
+            [Some((30, 100)), full, Some((10, 100))],
+            [None; 3],
+            &stock,
+            None,
+        );
+        assert_eq!(f.item_pick(ItemNeed::Hp, &s).map(|p| p.0), Some(5));
+        let no_mega = |id: u16| (id == 1) as u32;
+        let s = item_scene(
+            [Some((30, 100)), full, Some((10, 100))],
+            [None; 3],
+            &no_mega,
+            None,
+        );
+        assert_eq!(f.item_pick(ItemNeed::Hp, &s).map(|p| p.0), Some(1));
+        // Nothing in the slots, nothing used.
+        let none = |_: u16| 0;
+        let s = item_scene([Some((30, 100)), full, full], [None; 3], &none, None);
+        assert_eq!(f.item_pick(ItemNeed::Hp, &s), None);
+    }
+
+    #[test]
+    fn a_partner_in_need_is_the_hp_items_target_first() {
+        let f = Follower::spawn([0.; 3], 0., 0);
+        let full = Some((100, 100));
+        // Sora at a quarter and Donald under 45: Sora is served.
+        let s = item_scene(
+            [Some((25, 100)), Some((40, 100)), full],
+            [None; 3],
+            &stock,
+            None,
+        );
+        assert_eq!(f.item_pick(ItemNeed::Hp, &s).map(|p| p.1), Some(0));
+    }
+
+    #[test]
+    fn an_mp_item_prefers_ether_and_the_mega_one_for_two() {
+        let f = Follower::spawn([0.; 3], 0., 1);
+        let hp = [Some((100, 100)); 3];
+        // Goofy (own slot 2) at 40% MP: the Ether for himself.
+        let mp = [Some((100, 100)), Some((100, 100)), Some((40, 100))];
+        let s = item_scene(hp, mp, &stock, None);
+        assert_eq!(f.item_pick(ItemNeed::Mp, &s), Some((3, 2)));
+        // Two under it: the Mega-Ether.
+        let mp = [Some((10, 100)), Some((100, 100)), Some((40, 100))];
+        let s = item_scene(hp, mp, &stock, None);
+        assert_eq!(f.item_pick(ItemNeed::Mp, &s), Some((6, 2)));
+        // A dead member needs no MP.
+        let dead = [Some((100, 100)), Some((0, 100)), Some((100, 100))];
+        let mp = [Some((100, 100)), Some((0, 100)), Some((100, 100))];
+        let s = item_scene(dead, mp, &stock, None);
+        assert_eq!(f.item_pick(ItemNeed::Mp, &s), None);
+    }
+
+    #[test]
+    fn a_partner_in_need_is_served_before_the_attacks() {
+        let t = Target {
+            position: [0., 0., 100.],
+            radius: 40.,
+        };
+        let mut f = Follower::spawn([0.; 3], 0., 0);
+        // Sora at a quarter, an enemy in reach and an item in the slots.
+        let full = Some((100, 100));
+        let s = Scene {
+            length: &all_motions,
+            ..item_scene([Some((25, 100)), full, full], [None; 3], &stock, Some(t))
+        };
+        let mut used = false;
+        for _ in 0..20 {
+            f.tick(&DONALD, &s);
+            if let Some(a) = f.attack {
+                // Cure or the item, never a weapon swing.
+                assert!(a.item.is_some() || a.spell == Some(Spell::Cure), "{a:?}");
+                used = true;
+                break;
+            }
+        }
+        assert!(used);
     }
 }

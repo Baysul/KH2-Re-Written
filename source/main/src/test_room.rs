@@ -47,7 +47,7 @@ use visual::controller::{self, Pad};
 use visual::enemy_gauge::EnemyGauge;
 use visual::fade::{self, Fade};
 use visual::field_command_menu::{self, CommandMenu, Decision, Item};
-use visual::gauge::{Canvas, Draw, Gauge, GaugeStats, Texture};
+use visual::gauge::{Canvas, Draw, FriendGauge, FriendStats, Gauge, GaugeStats, Texture};
 use visual::hud::{self, Sheet, SystemFont};
 use visual::input;
 use visual::menu_screen::{self, Menu2ld};
@@ -436,6 +436,8 @@ struct MenuSources {
 /// HUD sources loaded with the session.
 struct HudSource {
     sheets: Vec<Sheet>,
+    /// The sheet index of Donald's and Goofy's own face sequences.
+    friend_faces: [Option<usize>; 2],
     /// The field 2D archive's 'fiel' sheet: the lock-on reticle.
     field: Sheet,
     /// The field 2D archive's 'mapj' area-change iris (areas only).
@@ -932,6 +934,8 @@ struct Game {
     gallery_targets: Vec<party_room::GalleryTarget>,
     /// A target the party tour hangs in the air (an enemy that stays put).
     party_fixed_target: Option<party_room::GalleryTarget>,
+    /// Items the party used that have not healed yet.
+    party_items: Vec<party_room::PendingItem>,
     fx_live: HashMap<u64, magic::FxLive>,
     /// The party slot the Magic menu's Cure target list picked (0 Sora)
     /// and the Magic row Cure was chosen from, while that list is open.
@@ -1044,6 +1048,10 @@ struct Hud {
     iris: Option<Sheet>,
     menu: Option<MenuState>,
     gauge: Gauge,
+    /// Donald's and Goofy's gauges (GAUGE_FRIEND), made when the member
+    /// exists, and the sheets of their faces.
+    friends: [Option<FriendGauge>; 2],
+    friend_faces: [Option<usize>; 2],
     /// The Scan target gauge (GAUGE_ENEMY, layer 6) and what it shows.
     enemy_gauge: EnemyGauge,
     scan: enemy_target::ScanTracker,
@@ -2840,8 +2848,28 @@ fn load(
                 )?),
                 None => None,
             };
+            // Donald's and Goofy's faces: the 'face' sequence of their own
+            // archives (obj/<model>.a.<lang>), after Sora's.
+            let mut friend_faces = [None; 2];
+            if let Ok(library) = data::path_lookup::Library::open(source) {
+                for (i, name) in ["P_EX020", "P_EX030"].into_iter().enumerate() {
+                    if let Some(found) = library.find(&format!("obj/{name}.a.us"))
+                        && let Ok(sheet) = hud::load(
+                            source,
+                            &found.index.to_string(),
+                            found.ordinal,
+                            found.name_hash,
+                            b"face",
+                        )
+                    {
+                        friend_faces[i] = Some(sheets.len());
+                        sheets.push(sheet);
+                    }
+                }
+            }
             Some(HudSource {
                 field: hud::load(source, &l.index, l.ordinal, l.name_hash, b"fiel")?,
+                friend_faces,
                 sheets,
                 iris,
                 stats: hud::starting_stats(bar_entry(&battle, b"plrp")?)?,
@@ -4876,6 +4904,7 @@ fn setup(
     let enemy_model = startup.enemy_model.take();
     if let Some(HudSource {
         sheets,
+        friend_faces,
         field,
         iris,
         stats: (hp, mp),
@@ -4935,6 +4964,8 @@ fn setup(
                 &sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(),
                 &stats,
             ),
+            friends: [None, None],
+            friend_faces,
             enemy_gauge: EnemyGauge::new(&sheets[0].sequence, &mut slots),
             scan: Default::default(),
             slots,
@@ -7542,12 +7573,35 @@ fn hud_tick(
         enemy_gauge,
         scan,
         slots,
+        friends,
+        friend_faces,
         ..
     } = &mut *hud;
     if let Some(m) = menu {
         m.menu.update(&m.sheet.sequence);
     }
-    gauge.update(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(), &s);
+    let seqs: Vec<_> = sheets.iter().map(|s| &s.sequence).collect();
+    gauge.update(&seqs, &s);
+    // Donald's and Goofy's gauges follow their members (hidden while a Drive
+    // form holds them).
+    for (i, slot) in friends.iter_mut().enumerate() {
+        let stats = game
+            .party
+            .get_mut(i)
+            .filter(|m| !m.stored)
+            .map(|m| FriendStats {
+                hp: m.hp,
+                max_hp: m.max_hp,
+                mp: m.mp.cur,
+                max_mp: m.mp.max,
+                event: std::mem::take(&mut m.event),
+            });
+        match (stats, slot.as_mut()) {
+            (Some(st), Some(g)) => g.update(&seqs, &st),
+            (Some(st), None) => *slot = Some(FriendGauge::new(&seqs, friend_faces[i], i, &st)),
+            (None, _) => *slot = None,
+        }
+    }
     // The Scan gauge follows the lock manager's target (priority 7000, after
     // the player's gauge).
     scan.step(
@@ -7624,6 +7678,7 @@ fn hud_present(
     let Hud {
         sheets,
         gauge,
+        friends,
         enemy_gauge,
         field,
         reticle_draw,
@@ -7689,7 +7744,11 @@ fn hud_present(
         if let Some(reticle) = lock_on {
             draws.insert(0, reticle);
         }
-        draws.extend(gauge.draw(&sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>()));
+        let seqs: Vec<_> = sheets.iter().map(|s| &s.sequence).collect();
+        for friend in friends.iter_mut().flatten() {
+            draws.extend(friend.draw(&seqs));
+        }
+        draws.extend(gauge.draw(&seqs));
         draws.extend(enemy_gauge.draw(&sheets[0].sequence, 0));
         if let Some((font_sheet, widths)) = menu_font.as_ref() {
             draws.extend(panels.draw(
@@ -11153,6 +11212,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 forced: None,
                 voices: kind.voices.clone(),
                 voice_at: (u16::MAX, 0),
+                item_fired: false,
+                event: 0,
                 record: combat::HitRecord::new(true),
                 ko_fx: false,
                 cast_motion: 0,
@@ -11199,6 +11260,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         party_volumes: Vec::new(),
         gallery_targets: Vec::new(),
         party_fixed_target: None,
+        party_items: Vec::new(),
         fx_live: HashMap::new(),
         cure_target: 0,
         cure_pick: None,

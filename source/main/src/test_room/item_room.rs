@@ -79,6 +79,23 @@ impl ItemRt {
         }
     }
 
+    /// `FUN_1403c49c0`: the last slot holding `id` empties; false when none
+    /// does.
+    pub fn take(&mut self, id: u16) -> bool {
+        match self.slots.iter().rposition(|&s| s == id) {
+            Some(j) => {
+                self.slots[j] = 0;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// How many slots hold `id` (`FUN_1403c4380`).
+    pub fn count(&self, id: u16) -> u32 {
+        self.slots.iter().filter(|&&s| s == id).count() as u32
+    }
+
     /// The command id of the item in a slot.
     pub fn command_of(&self, slot: usize) -> Option<u16> {
         let id = *self.slots.get(slot)?;
