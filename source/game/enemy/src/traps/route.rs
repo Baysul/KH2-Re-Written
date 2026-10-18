@@ -579,7 +579,8 @@ fn can_look(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<()
 fn eh22_path_move_next(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
     let points = ctx.env.event_path();
     let e = &mut ctx.world.eh22;
-    if e.moving == 0 {
+    // Without an event path nothing can arrive, so nothing starts.
+    if e.moving == 0 && !points.is_empty() {
         let mut next = e.next;
         if (points.len() as i32) < next {
             next = 0;
@@ -600,7 +601,8 @@ fn eh22_path_move_next(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> R
 fn eh22_path_move_before(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
     let points = ctx.env.event_path();
     let e = &mut ctx.world.eh22;
-    if e.moving == 0 {
+    // Without an event path nothing can arrive, so nothing starts.
+    if e.moving == 0 && !points.is_empty() {
         let mut before = e.next - 1;
         if before < 0 {
             before = points.len() as i32 - 1;

@@ -86,6 +86,15 @@ pub struct ScriptEffect {
     pub at: Option<Vec3>,
 }
 
+/// See [`ScriptBrain::take_reports`].
+#[derive(Debug, Default)]
+pub struct ScriptReports {
+    pub sounds: Vec<(i32, Vec3)>,
+    pub voices: Vec<(i32, i32)>,
+    pub services: Vec<&'static str>,
+    pub unsupported: Vec<&'static str>,
+}
+
 pub struct ScriptBrain {
     world: EnemyWorld,
     object: Object,
@@ -101,8 +110,15 @@ pub struct ScriptBrain {
     pub effects: Vec<ScriptEffect>,
     /// Voice lines the script asked for (id, argument), for the host log.
     pub voices: Vec<(i32, i32)>,
+    /// Sound effects the script asked for (`obj_play_se`): id and place.
+    pub sounds: Vec<(i32, Vec3)>,
     /// Names of the engine services the script called that are not translated.
     pub unsupported: std::collections::BTreeSet<&'static str>,
+    /// Names of the requests the script made of subsystems this host does not
+    /// have (camera, screen, mission HUD, party, prizes).
+    pub services: std::collections::BTreeSet<&'static str>,
+    /// What the host has already reported, so each name is reported once.
+    reported: std::collections::BTreeSet<&'static str>,
     /// Attack slots the script applied to Sora directly (`attack_strike`),
     /// for the host's hit resolution to take.
     pub strikes: Vec<usize>,
@@ -148,7 +164,10 @@ impl ScriptBrain {
             fault: None,
             effects: Vec::new(),
             voices: Vec::new(),
+            sounds: Vec::new(),
             unsupported: Default::default(),
+            services: Default::default(),
+            reported: Default::default(),
             strikes: Vec::new(),
         };
         brain.build(position, yaw, stats, sstm, &mut ScriptRandom::default())?;
@@ -194,6 +213,7 @@ impl ScriptBrain {
         self.world.tick_attacks(&env);
         self.world.deliver_shouts(&env, Some(&mut self.object));
         self.world.follow_attachments(&env, Some(&mut self.object));
+        self.world.tick_captures(Some(&mut self.object));
         self.hit_the_map(room);
         self.drain_events();
         if self.object.sys.gone {
@@ -320,8 +340,15 @@ impl ScriptBrain {
                 Event::Unsupported(name) => {
                     self.unsupported.insert(name);
                 }
-                Event::Presentation { name, .. } | Event::Service { name, .. } => {
+                Event::Presentation { name, .. } => {
                     self.unsupported.insert(name);
+                }
+                Event::Service { name, .. } => {
+                    self.services.insert(name);
+                }
+                Event::Sound { id, position, .. } => self.sounds.push((id, position)),
+                Event::MotionCapture { .. } => {
+                    self.unsupported.insert("obj_motion_capture");
                 }
                 Event::AttackStrike {
                     slot,
@@ -333,6 +360,25 @@ impl ScriptBrain {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// What the script asked of the host since the last call: the sound
+    /// effects to play, the voice lines, and the names of the requests that
+    /// nothing here plays (each reported once).
+    pub fn take_reports(&mut self) -> ScriptReports {
+        let new = |set: &std::collections::BTreeSet<&'static str>,
+                   reported: &mut std::collections::BTreeSet<&'static str>| {
+            set.iter()
+                .copied()
+                .filter(|name| reported.insert(name))
+                .collect::<Vec<_>>()
+        };
+        ScriptReports {
+            sounds: std::mem::take(&mut self.sounds),
+            voices: std::mem::take(&mut self.voices),
+            services: new(&self.services, &mut self.reported),
+            unsupported: new(&self.unsupported, &mut self.reported),
         }
     }
 

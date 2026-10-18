@@ -745,12 +745,18 @@ fn motion_capture(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Res
     let (motion, blend) = (args[2].as_int(), args[3].as_float());
     ctx.world.captures += 1;
     let token = ctx.world.captures;
+    let model = ctx.object(captor)?.sys.model;
+    let remaining = usize::try_from(motion)
+        .map(|slot| ctx.env.clips(model).length(slot))
+        .unwrap_or(0);
     let sys = &mut ctx.object(victim)?.sys;
     sys.capture = Some(crate::sysobj::Capture {
         captor,
         motion,
         token,
+        remaining,
     });
+    sys.motion.flags.word &= !crate::motion::flag::ENDED;
     sys.motion.flags.word |= 1 << 14;
     ctx.world.events.push(Event::MotionCapture {
         captor,

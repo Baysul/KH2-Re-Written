@@ -493,6 +493,37 @@ impl World {
         Some(id)
     }
 
+    /// Run the captured motions down: when the borrowed clip has played its
+    /// length the object's motion ends (the end pulse) and the capture is
+    /// over, so a script waiting on `obj_motion_capture_id` goes on. `me` is
+    /// the object the host runs itself, outside the list; Sora's stand-in is
+    /// stepped too.
+    pub fn tick_captures(&mut self, me: Option<&mut Object>) {
+        fn step(object: &mut Object) {
+            let sys = &mut object.sys;
+            let Some(capture) = sys.capture.as_mut() else {
+                return;
+            };
+            if capture.remaining > 0 {
+                capture.remaining -= 1;
+            }
+            if capture.remaining == 0 {
+                sys.capture = None;
+                sys.motion.flags.word &= !(1 << 14);
+                sys.motion.flags.word |= crate::motion::flag::ENDED;
+            }
+        }
+        for object in self.objects.iter_mut().flatten() {
+            step(object);
+        }
+        if let Some(object) = me {
+            step(object);
+        }
+        if let Some(proxy) = self.player_proxy.as_deref_mut() {
+            step(proxy);
+        }
+    }
+
     /// Put every carried object on its holder (physics mode 3): at the
     /// holder's bone when the host knows it, else the holder's origin. `me` is
     /// the object the host runs itself, outside the list.
@@ -748,7 +779,7 @@ pub fn object_handle(id: ObjId) -> u32 {
     if id == PLAYER_OBJECT {
         return PLAYER_HANDLE;
     }
-    OBJECT_HANDLES + id * 0x1000
+    OBJECT_HANDLES.wrapping_add(id.wrapping_mul(0x1000))
 }
 
 /// A word inside an object's handle range: the object and its field offset.
@@ -764,11 +795,14 @@ pub fn object_from_handle(handle: u32) -> Option<ObjId> {
 
 /// A word of a target record (sys+0xbf8): +0 and +8 hold the target's engine
 /// handle (0 = nobody), +4 is zero and +0xc the search kind.
-fn target_record_word(t: crate::sysobj::Target, offset: u32) -> u32 {
+pub(crate) fn target_record_word(t: crate::sysobj::Target, offset: u32) -> u32 {
     match offset {
         0 | 8 => match t.id {
             0 => 0,
             crate::traps::target::PLAYER_TARGET => PLAYER_HANDLE,
+            id if id & crate::traps::target::OBJECT_TARGET != 0 => {
+                object_handle(id & !crate::traps::target::OBJECT_TARGET)
+            }
             id => object_handle(id),
         },
         4 => t.group as u32,

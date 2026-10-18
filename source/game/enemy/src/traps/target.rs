@@ -1,14 +1,15 @@
 //! Traps on the actor an object is aiming at (the record at sysobj+0xbf8), and
 //! the small battle-record traps of table 2.
 //!
-//! [U] The battle target table's own selection (`FUN_14040c870` over
-//! `DAT_142a16370`, with its separate random generator), the last-attacker
-//! rules and kinds 3 to 6 of `trap_target_search` are the host's
-//! [`Env::pick_target`](crate::env::Env::pick_target); kinds without a source
-//! translation fall back to Sora.
+//! The battle target table's selection (FUN_14040c870 over DAT_142a16370, with
+//! the engine's generator) and search kinds 0, 1, 3 and 5 are translated;
+//! kinds 4 and 6 (the same with the object's own range and angle parameters)
+//! are not and answer Sora, and the host's
+//! [`Env::pick_target`](crate::env::Env::pick_target) fills in for objects
+//! this crate does not hold.
 
 use crate::script::{Fault, Memory, Slot};
-use crate::sysobj::{Target, Vec3};
+use crate::sysobj::{Target, Vec3, class_flag, state_flag};
 use crate::world::{
     Ctx, OBJECT_HANDLES, ObjId, PLAYER_HANDLE, TARGET_DUP_HANDLES, TARGET_RECORD_OFFSET, TrapFn,
     object_handle,
@@ -240,9 +241,55 @@ pub(super) fn pick_battle_target(ctx: &mut Ctx<'_>) -> Option<ObjId> {
     Some(chosen[(draw / (1u64 << 32).div_ceil(n)) as usize])
 }
 
-/// The record `kind` search writes (FUN_1403be2b0): Sora, or the battle
-/// target table's pick. [U] Kinds 3 to 6 (nearest of the object list's
-/// targets) are not translated and answer Sora.
+/// FUN_1403be7f0: the nearest TARGET shape of the object list's enemy-class
+/// objects that are alive, measured from the searching object (less `bias`
+/// for the objects that are preferred targets).
+fn nearest_target(
+    ctx: &mut Ctx<'_>,
+    from: ObjId,
+    bias: f32,
+) -> Result<Option<(ObjId, u32)>, Fault> {
+    let own = ctx.object(from)?.sys.position;
+    let mut ids: Vec<ObjId> = ctx.world.objects.iter().flatten().map(|o| o.id).collect();
+    ids.push(ctx.me.id);
+    ids.sort_unstable();
+    ids.dedup();
+    let mut best: Option<(ObjId, u32, f32)> = None;
+    for id in ids {
+        let o = ctx.object(id)?;
+        let alive = !o.sys.gone
+            && o.sys.hp > 0
+            && o.sys.state_flags & state_flag::DEAD_MARKED == 0
+            && o.sys.flags & crate::world::SEARCH_SKIP_FLAGS == 0;
+        let class = o.sys.class_flags;
+        if class & class_flag::ENEMY == 0 || !alive {
+            continue;
+        }
+        for (shape, at) in super::searcher::shapes(ctx, id) {
+            let mut distance = len3(sub3(at, own));
+            if class & class_flag::PRIORITY_TARGET != 0 {
+                distance -= bias;
+            }
+            if best.is_none_or(|(_, _, d)| distance < d) {
+                best = Some((id, shape, distance));
+            }
+        }
+    }
+    Ok(best.map(|(id, shape, _)| (id, shape)))
+}
+
+fn sub3(a: Vec3, b: Vec3) -> Vec3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn len3(v: Vec3) -> f32 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+
+/// The record `kind` search writes (FUN_1403be2b0): Sora, the battle
+/// target table's pick, or (kinds 3 and 5) the nearest enemy-class target.
+/// [U] Kinds 4 and 6 (the same with ranges and angles of the object's own
+/// parameters) are not translated and answer Sora.
 fn search(ctx: &mut Ctx<'_>, kind: i32, from: u32) -> Result<Target, Fault> {
     let obj = ctx.object(from)?;
     let (flags, position) = (obj.sys.flags, obj.sys.position);
@@ -273,6 +320,17 @@ fn search(ctx: &mut Ctx<'_>, kind: i32, from: u32) -> Result<Target, Fault> {
                     None => PLAYER_TARGET,
                 }
             })
+        }
+        3 | 5 => {
+            let bias = if kind == 5 { 10_000.0 } else { 0.0 };
+            if let Some((found, shape)) = nearest_target(ctx, from, bias)? {
+                return Ok(Target {
+                    id: target_id_of(found),
+                    kind,
+                    group: shape as i32,
+                });
+            }
+            0
         }
         _ => PLAYER_TARGET,
     };

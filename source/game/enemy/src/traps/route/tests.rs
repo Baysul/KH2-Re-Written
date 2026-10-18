@@ -376,3 +376,27 @@ fn the_event_path_walks_the_list_and_wraps() {
     );
     assert_eq!(point.as_int(), 1);
 }
+
+#[test]
+fn without_an_event_path_nothing_starts_moving() {
+    let mut world = world_with(&[0.]);
+    let mut me = Object::bare(0);
+    let mut f = frame();
+    run(
+        &NullEnv,
+        &mut world,
+        &mut me,
+        &mut f,
+        eh22_path_move_next,
+        &[],
+    );
+    run(
+        &NullEnv,
+        &mut world,
+        &mut me,
+        &mut f,
+        eh22_path_move_before,
+        &[],
+    );
+    assert_eq!(world.eh22.moving, 0);
+}

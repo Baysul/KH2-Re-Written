@@ -214,6 +214,7 @@ fn run(
         world.tick_objects(&env, Some(0));
         world.deliver_shouts(&env, Some(&mut object));
         world.follow_attachments(&env, Some(&mut object));
+        world.tick_captures(Some(&mut object));
         for event in std::mem::take(&mut world.events) {
             match event {
                 Event::Unsupported(name) => {

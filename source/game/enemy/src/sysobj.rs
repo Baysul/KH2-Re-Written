@@ -386,6 +386,8 @@ pub struct Capture {
     /// What `obj_motion_capture` returned and `obj_motion_capture_id` reads
     /// back (+0x184) for as long as the capture lasts.
     pub token: i32,
+    /// Ticks the borrowed motion has left (the length of the captor's clip).
+    pub remaining: u32,
 }
 
 /// +0x5d0: the head look (FUN_1403e5650 / FUN_1403e4f70) the head tracking
@@ -465,6 +467,9 @@ pub mod class_flag {
     pub const SUMMON: u32 = 1 << 22;
     /// `sysobj_is_sora` reads +0x6cb bit 0.
     pub const SORA: u32 = 1 << 24;
+    /// +0x6c8 bit 10: preferred by target search kind 5 (its distance counts
+    /// 10000 shorter).
+    pub const PRIORITY_TARGET: u32 = 1 << 10;
     /// +0x6c8 bit 3: the object follows routes (a townsperson); read by
     /// FUN_14054e130 when it builds a route.
     pub const ROUTINE: u32 = 1 << 3;

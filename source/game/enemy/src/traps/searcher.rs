@@ -96,7 +96,7 @@ fn target_clear(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Resul
 }
 
 /// The TARGET shapes of an object: (shape id, centre).
-fn shapes(ctx: &mut Ctx<'_>, id: ObjId) -> Vec<(u32, Vec3)> {
+pub(super) fn shapes(ctx: &mut Ctx<'_>, id: ObjId) -> Vec<(u32, Vec3)> {
     if let Some(list) = ctx.env.target_shapes(id) {
         return list;
     }

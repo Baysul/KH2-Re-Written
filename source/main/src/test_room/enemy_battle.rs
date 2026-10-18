@@ -231,6 +231,14 @@ impl Brain {
             _ => Vec::new(),
         }
     }
+    /// What a script brain asked of the host this frame (none for other
+    /// brains).
+    pub fn take_script_reports(&mut self) -> super::enemy_script::ScriptReports {
+        match self {
+            Self::Script(a) => a.take_reports(),
+            _ => Default::default(),
+        }
+    }
     pub fn follow_capture(&mut self, volumes: &[player::magic::Volume]) {
         if let Self::Shadow(a) = self
             && let Some(h) = a.held
@@ -815,6 +823,21 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
                 }
                 super::enemy_motion_fx::scan(&mut game, actor);
                 if let Some(battle) = actor.battle.as_mut() {
+                    let reports = battle.brain.take_script_reports();
+                    for &(id, _) in &reports.sounds {
+                        if let Ok(id) = u32::try_from(id) {
+                            game.sound_queue.push((id, "enemy_script_se"));
+                        }
+                    }
+                    for (id, arg) in reports.voices {
+                        game.event(serde_json::json!({"event":"enemy_script_voice","tick":tick,"actor":actor.id,"id":id,"arg":arg}));
+                    }
+                    for name in reports.services {
+                        game.event(serde_json::json!({"event":"enemy_script_service","tick":tick,"actor":actor.id,"service":name}));
+                    }
+                    for name in reports.unsupported {
+                        game.event(serde_json::json!({"event":"enemy_script_unsupported","tick":tick,"actor":actor.id,"service":name}));
+                    }
                     let object = battle.assets.object_id;
                     for e in battle.brain.take_script_effects() {
                         game.effect_queue.push(match e.at {

@@ -216,3 +216,95 @@ fn a_captured_motion_hands_out_a_token_until_the_object_moves_on() {
         }
     )));
 }
+
+/// A model whose motion 7 is three ticks long.
+struct ShortClip;
+struct ThreeTicks;
+impl Clips for ThreeTicks {
+    fn length(&self, slot: usize) -> u32 {
+        if slot == 7 { 3 } else { 0 }
+    }
+    fn loop_start(&self, _: usize) -> u32 {
+        0
+    }
+    fn root_delta(&self, _: usize, _: u32) -> Vec3 {
+        [0.; 3]
+    }
+    fn events(&self, _: usize) -> Option<&crate::motion::MotionEvents> {
+        None
+    }
+}
+impl Env for ShortClip {
+    fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
+        NullEnv.floor(x, z, top)
+    }
+    fn clips(&self, _: u32) -> &dyn Clips {
+        &ThreeTicks
+    }
+    fn player_position(&self) -> Vec3 {
+        [0.; 3]
+    }
+    fn target_position(&self, _: u32) -> Option<Vec3> {
+        None
+    }
+}
+
+#[test]
+fn a_captured_motion_ends_when_the_borrowed_clip_has_played() {
+    let mut world = world_with(&[0., 50.]);
+    let mut f = frame();
+    let captor = ai_object(&mut f, 0, 1);
+    let victim = ai_object(&mut f, 16, 2);
+    let capture = crate::traps::lookup(1, 29).unwrap();
+    let capture_id = crate::traps::lookup(1, 238).unwrap();
+    let token = run_with(
+        &ShortClip,
+        &mut world,
+        &mut f,
+        capture,
+        &[
+            Slot::address(captor),
+            Slot::address(victim),
+            Slot::int(7),
+            Slot::float(0.0),
+        ],
+    );
+    assert_eq!(token.as_int(), 1);
+    for _ in 0..2 {
+        world.tick_captures(None);
+        let id = run_with(
+            &ShortClip,
+            &mut world,
+            &mut f,
+            capture_id,
+            &[Slot::address(victim)],
+        );
+        assert_eq!(id.as_int(), 1, "still captured");
+    }
+    world.tick_captures(None);
+    let id = run_with(
+        &ShortClip,
+        &mut world,
+        &mut f,
+        capture_id,
+        &[Slot::address(victim)],
+    );
+    assert_eq!(id.as_int(), 0);
+    let sys = &world.objects[2].as_ref().unwrap().sys;
+    assert!(sys.motion_ended());
+    assert_eq!(sys.motion.flags.word >> 14 & 1, 0);
+    // Sora's stand-in is stepped as well.
+    let proxy_token = {
+        let proxy = world.player_proxy.as_mut().unwrap();
+        proxy.sys.capture = Some(crate::sysobj::Capture {
+            captor: 1,
+            motion: 7,
+            token: 9,
+            remaining: 1,
+        });
+        proxy.sys.capture.map(|c| c.token)
+    };
+    assert_eq!(proxy_token, Some(9));
+    world.tick_captures(None);
+    assert!(world.player_proxy.as_ref().unwrap().sys.capture.is_none());
+}
