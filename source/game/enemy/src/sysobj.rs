@@ -352,6 +352,20 @@ pub struct Sysobj {
     pub texture_animation: bool,
     /// +0xaa4: the texture fade (`obj_tex_fade_start`).
     pub tex_fade: Fade,
+    /// +0x630: the route the object follows (`obj_set_path`,
+    /// `create_active_path`).
+    pub route: Option<Box<crate::route::Route>>,
+    /// +0x9e8: the spawn point (unit) the object came from, which owns the
+    /// walk paths its routes are made of.
+    pub unit: Option<u32>,
+    /// +0xc28..: the routine action state.
+    pub rtn: crate::rtn::Rtn,
+    /// The object's sound bank (`obj_play_se` ids 500000..500999 take its
+    /// thousand); the host sets it from the object entry.
+    pub sound_bank: Option<i32>,
+    /// +0xa78: how far the map pushed the object out of itself
+    /// (`obj_get_bg_press`), in the script frame.
+    pub bg_press: [f32; 4],
 }
 
 /// An object carried by another (FUN_1403d9fe0): it follows the holder's
@@ -380,6 +394,11 @@ pub mod state_flag {
     pub const GLANCE_LOST: u32 = 1 << 13;
     /// `obj_is_limit` reads +0x126 bit 0.
     pub const LIMIT: u32 = 1 << 16;
+    /// +0x9b8 bit 2 is the dead mark (`obj_dead_mark`); kept in the state
+    /// word here.
+    pub const DEAD_MARKED: u32 = 1 << 20;
+    /// +0x9b8 bit 12: the position was set by `obj_set_pos_trans`.
+    pub const TRANSFERRED: u32 = 1 << 21;
 }
 
 /// Bits of [`Sysobj::class_flags`] (+0x6c8).
@@ -394,6 +413,12 @@ pub mod class_flag {
     pub const SUMMON: u32 = 1 << 22;
     /// `sysobj_is_sora` reads +0x6cb bit 0.
     pub const SORA: u32 = 1 << 24;
+    /// +0x6c8 bit 3: the object follows routes (a townsperson); read by
+    /// FUN_14054e130 when it builds a route.
+    pub const ROUTINE: u32 = 1 << 3;
+    /// +0x6c8 bit 7: a missing path is looked for among all the area's
+    /// units (FUN_1403b9de0).
+    pub const AREA_PATHS: u32 = 1 << 7;
 }
 
 impl Sysobj {
@@ -521,6 +546,11 @@ impl Sysobj {
             model_hidden: false,
             texture_animation: false,
             tex_fade: Fade::default(),
+            route: None,
+            unit: None,
+            rtn: Default::default(),
+            bg_press: [0.; 4],
+            sound_bank: None,
         }
     }
 

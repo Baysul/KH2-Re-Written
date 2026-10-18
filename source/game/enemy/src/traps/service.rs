@@ -138,7 +138,6 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (6, 58) => act_child_push,
         (2, 57) => limit_effect_start,
         (1, 169) => effect_unbind,
-        (5, 8) => create_active_path,
         (10, 58) => friend_link_magic,
         (10, 35) => friend_get_action_param,
         (1, 242) => player_capture_form,
@@ -285,7 +284,6 @@ forward_traps! {
     player_capture_form_end = "player_capture_form_end", None, None, None;
     act_child_push = "obj_act_child_push", Some(0), Some(1), None;
     effect_unbind = "obj_effect_unbind", Some(0), None, None;
-    create_active_path = "create_active_path", Some(0), Some(1), None;
 }
 
 /// A request that returns an AI object the host made: forward it and hand the

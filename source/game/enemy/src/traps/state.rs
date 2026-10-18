@@ -15,7 +15,6 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 54) => reset_collision,
         (1, 97) => spec,
         (1, 114) => search_by_entry,
-        (1, 177) => set_path,
         (1, 222) => get_entry_id,
         (0, 8) => vector_dump,
         (0, 14) => progress_set_flag,
@@ -29,10 +28,8 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 153) => reset_pos,
         (1, 156) => obj_hop,
         (6, 42) => obj_hop_direct,
-        (1, 172) => can_look,
         (1, 174) => look_start,
         (1, 176) => look_end,
-        (1, 318) => play_se,
         (4, 6) => mission_increment_count,
         (4, 9) => mission_add_gauge,
         (4, 48) => mission_set_count_figure,
@@ -51,14 +48,12 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 167) => act_start_pri,
         (1, 191) => lockon_target,
         (1, 214) => obj_hook_stop,
-        (1, 217) => set_pos_trans,
         (1, 221) => can_decide_command,
         (1, 227) => jump_direct,
         (1, 292) => search_by_unit_arg,
         (1, 295) => camera_reset,
         (1, 305) => camera_eye,
         (1, 306) => camera_at,
-        (1, 328) => dead_mark,
         (2, 1) => exec_damage_blow,
         (2, 2) => exec_damage_small,
         (2, 3) => exec_damage_hitback,
@@ -71,7 +66,6 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (2, 92) => damage_is_finish,
         (4, 29) => mission_count,
         (4, 40) => mission_timer,
-        (5, 3) => path_dir,
         (6, 2) => player_get_form,
         (6, 53) => bghit_is_hit,
         (6, 55) => bghit_get_kind,
@@ -111,16 +105,11 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 210) => search_by_part,
         (1, 145) => touch_zone,
         (1, 148) => set_pos,
-        (1, 162) => target_set_before_player,
         (1, 213) => obj_part,
         (1, 218) => set_unit_arg,
-        (1, 247) => bg_random_pos,
-        (1, 248) => bg_random_pos_air,
         (1, 250) => set_lockon_ratio,
         (1, 252) => camera_apply_pos,
         (1, 269) => lightcycle_movement,
-        (5, 14) => path_point_pos,
-        (6, 24) => bg_press,
         (1, 262) => voice,
         (4, 4) => mission_information,
         (4, 12) => mission_gauge_ratio,
@@ -232,14 +221,6 @@ fn search_by_unit_arg(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) ->
     finish_search(ctx, m, args[0].value, "unit_arg", value, index, found)
 }
 
-/// 1:177 FUN_14042d8e0 -> FUN_1403b9de0: bind a path to the object. [U]
-/// Recorded; reports that nothing was bound.
-fn set_path(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    ctx.world.events.push(Event::Unsupported("obj_set_path"));
-    args[0] = Slot::int(0);
-    Ok(())
-}
-
 /// 1:222 FUN_14042bb10 -> FUN_1403b5770: the first word of the object entry.
 fn get_entry_id(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
@@ -340,18 +321,6 @@ fn set_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(),
     Ok(())
 }
 
-/// 1:162 FUN_1404304b0 -> FUN_1403bd410. [U] Recorded.
-fn target_set_before_player(
-    ctx: &mut Ctx<'_>,
-    _: &mut Memory<'_>,
-    _: &mut Args,
-) -> Result<(), Fault> {
-    ctx.world
-        .events
-        .push(Event::Unsupported("target_set_before_player"));
-    Ok(())
-}
-
 /// 1:213 FUN_14042bae0 -> FUN_1403b5b20: the entry's part id (+0x4c).
 fn obj_part(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
@@ -370,17 +339,6 @@ fn set_unit_arg(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
     {
         *slot = value;
     }
-    Ok(())
-}
-
-/// 1:247 FUN_14042ead0 -> FUN_1403f3fa0: a random point in the map. [U] The
-/// map is not available to the engine; the shared vector reads zero.
-fn bg_random_pos(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    ctx.world
-        .events
-        .push(Event::Unsupported("bg_get_random_pos"));
-    let cell = ctx.world.static_cell(1, 247, 0);
-    args[0] = Slot::address(cell);
     Ok(())
 }
 
@@ -560,11 +518,8 @@ macro_rules! unsupported_vector_traps {
 
 unsupported_vector_traps! {
     apply_bone_matrix = (1, 83, "obj_apply_bone_matrix");
-    bg_random_pos_air = (1, 248, "bg_get_random_pos_air");
     camera_apply_pos = (1, 252, "camera_apply_pos");
     lightcycle_movement = (1, 269, "obj_get_lightcycle_movement");
-    path_point_pos = (5, 14, "get_path_point_pos");
-    bg_press = (6, 24, "obj_get_bg_press");
 }
 
 /// 1:0 FUN_14042b130 -> FUN_1403df930: `sysobj_appear`, make an object of the
@@ -814,8 +769,6 @@ macro_rules! recorded_traps {
 recorded_traps! {
     obj_hook_stop = "obj_hook_stop";
     motion_unhook = "obj_motion_unhook";
-    dead_mark = "obj_dead_mark";
-    set_pos_trans = "obj_set_pos_trans";
     camera_reset = "camera_reset";
     signal_call = "signal_call";
     progress_set_flag = "progress_set_flag";
@@ -848,7 +801,6 @@ constant_int_traps! {
 unsupported_vector_traps! {
     camera_eye = (1, 305, "camera_eye");
     camera_at = (1, 306, "camera_at");
-    path_dir = (5, 3, "get_path_dir");
     target_attack = (1, 166, "target_attack");
 }
 
@@ -1044,22 +996,6 @@ fn bg_ground_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resu
         ctx.write_f32(m, out + 4 * k as u32, *lane);
     }
     args[0] = Slot::int(hit.is_some() as i32);
-    Ok(())
-}
-
-/// 1:318 FUN_14042c060: play a sound effect at the object. [U] Recorded.
-fn play_se(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let id = ctx.sys_of_ai(m, args[0].value)?;
-    ctx.world.events.push(Event::Presentation {
-        name: "obj_play_se",
-        words: [id, args[1].value, 0],
-    });
-    Ok(())
-}
-
-/// 1:172 FUN_14042d6c0: can the object look at another. [U] Never.
-fn can_look(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    args[0] = Slot::int(0);
     Ok(())
 }
 

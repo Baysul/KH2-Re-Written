@@ -125,6 +125,45 @@ pub trait Env {
     fn target_shapes(&self, _object: u32) -> Option<Vec<(u32, Vec3)>> {
         None
     }
+    /// The walk path of a spawn point (`unit`), or of any unit of the area
+    /// for `None`, by id or group (FUN_1403ff460 / FUN_1403ff4a0 and the
+    /// area-wide FUN_1403a5160 / FUN_1403a51c0). An id below zero is the
+    /// first path of the unit.
+    fn walk_path(
+        &self,
+        _unit: Option<u32>,
+        _key: crate::route::PathKey,
+    ) -> Option<crate::route::WalkPath> {
+        None
+    }
+    /// The spawn point with this id (FUN_1403fe2d0).
+    fn walk_unit(&self, _id: u32) -> Option<u32> {
+        None
+    }
+    /// How far across a zone (along its first axis, 0 to 1) a position is
+    /// (FUN_140421100).
+    fn zone_progress(&self, _zone: u32, _position: Vec3) -> f32 {
+        0.0
+    }
+    /// Sora is inside the object's reaction sphere (FUN_140417910).
+    fn player_in_reaction(&self, _object: u32) -> bool {
+        false
+    }
+    /// The object's head (its HEAD shape's place, else its target place;
+    /// FUN_1403b58c0). `None`: its own position.
+    fn head_position(&self, _object: u32) -> Option<Vec3> {
+        None
+    }
+    /// The object's LOOK shape: where it looks from and how far round it may
+    /// look, in radians (FUN_1403e4bc0). `None`: no shape.
+    fn look_cone(&self, _object: u32) -> Option<(Vec3, f32)> {
+        None
+    }
+    /// The event path points (DAT_142b59840's list): the two ints each point
+    /// holds.
+    fn event_path(&self) -> Vec<(i32, i32)> {
+        Vec::new()
+    }
     /// The battle target table's choice for an actor (`None`: no entry).
     fn pick_target(&self, _kind: i32, _from: Vec3) -> Option<u32> {
         None

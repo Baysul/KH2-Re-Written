@@ -10,7 +10,7 @@
 use crate::script::{Fault, Memory, Slot};
 use crate::sysobj::{Target, Vec3};
 use crate::world::{
-    Ctx, OBJECT_HANDLES, PLAYER_HANDLE, TARGET_DUP_HANDLES, TARGET_RECORD_OFFSET, TrapFn,
+    Ctx, OBJECT_HANDLES, ObjId, PLAYER_HANDLE, TARGET_DUP_HANDLES, TARGET_RECORD_OFFSET, TrapFn,
     object_handle,
 };
 
@@ -26,6 +26,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 120) => target_pos,
         (1, 121) => target_search,
         (1, 131) => target_dup,
+        (1, 162) => target_set_before_player,
         (1, 132) => target_free,
         (2, 5) => enemy_is_no_control,
         (2, 8) => damage_is_reaction,
@@ -147,19 +148,132 @@ fn target_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<
     Ok(())
 }
 
-/// The record `kind` search writes: Sora, or the battle target table's pick.
+/// One entry of the battle target table (DAT_142a16370): who the enemies
+/// pick among, and how soon (0 is first, otherwise the lower number wins).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BattleTarget {
+    pub priority: i32,
+    pub object: Option<ObjId>,
+}
+
+/// How many objects the battle target table holds.
+pub const BATTLE_TARGET_SLOTS: usize = 8;
+
+/// FUN_1403ba720: the object exists and none of the hidden/removed flags
+/// (`flags & 0x10080000`) is set.
+fn usable(ctx: &mut Ctx<'_>, id: ObjId) -> bool {
+    ctx.object(id)
+        .is_ok_and(|o| !o.sys.gone && o.sys.flags & crate::world::SEARCH_SKIP_FLAGS == 0)
+}
+
+/// 1:162 FUN_1404304b0 -> FUN_1403bd410 -> FUN_14040c9d0: put the object in the
+/// battle target table with a priority. Entries whose object has become
+/// unusable are cleared first; the object keeps its slot if it has one, else
+/// takes the last free (or unusable) slot.
+fn target_set_before_player(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let priority = args[1].as_int();
+    for k in 0..BATTLE_TARGET_SLOTS {
+        if let Some(o) = ctx.world.battle_targets[k].object
+            && !usable(ctx, o)
+        {
+            ctx.world.battle_targets[k].object = None;
+        }
+    }
+    if !usable(ctx, id) {
+        return Ok(());
+    }
+    let mut slot = None;
+    for k in 0..BATTLE_TARGET_SLOTS {
+        let held = ctx.world.battle_targets[k].object;
+        match held {
+            Some(o) if o == id => {
+                slot = Some(k);
+                break;
+            }
+            Some(o) if usable(ctx, o) => {}
+            _ => slot = Some(k),
+        }
+    }
+    if let Some(k) = slot {
+        ctx.world.battle_targets[k] = BattleTarget {
+            priority,
+            object: Some(id),
+        };
+    }
+    Ok(())
+}
+
+/// FUN_14040c870: the battle target table's choice. A usable entry of
+/// priority 0 wins at once; else the lowest priority, and among equals one
+/// drawn with the engine's generator.
+pub(super) fn pick_battle_target(ctx: &mut Ctx<'_>) -> Option<ObjId> {
+    let mut best: Option<i32> = None;
+    let mut chosen: Vec<ObjId> = Vec::new();
+    for k in 0..BATTLE_TARGET_SLOTS {
+        let BattleTarget { priority, object } = ctx.world.battle_targets[k];
+        let Some(o) = object else { continue };
+        if !usable(ctx, o) {
+            continue;
+        }
+        if priority == 0 {
+            return Some(o);
+        }
+        match best {
+            Some(b) if priority == b => chosen.push(o),
+            Some(b) if priority > b => {}
+            _ => {
+                best = Some(priority);
+                chosen = vec![o];
+            }
+        }
+    }
+    let n = chosen.len() as u64;
+    if n == 0 {
+        return None;
+    }
+    let draw = u64::from(ctx.world.engine_rng.step());
+    Some(chosen[(draw / (1u64 << 32).div_ceil(n)) as usize])
+}
+
+/// The record `kind` search writes (FUN_1403be2b0): Sora, or the battle
+/// target table's pick. [U] Kinds 3 to 6 (nearest of the object list's
+/// targets) are not translated and answer Sora.
 fn search(ctx: &mut Ctx<'_>, kind: i32, from: u32) -> Result<Target, Fault> {
     let obj = ctx.object(from)?;
     let (flags, position) = (obj.sys.flags, obj.sys.position);
     let id = match kind {
         0 => {
-            if flags >> 11 & 1 != 0 {
-                PLAYER_TARGET
+            let picked = if flags >> 11 & 1 != 0 {
+                None
             } else {
-                ctx.env.pick_target(0, position).unwrap_or(PLAYER_TARGET)
-            }
+                pick_battle_target(ctx)
+                    .map(target_id_of)
+                    .or_else(|| ctx.env.pick_target(0, position))
+            };
+            picked.unwrap_or(PLAYER_TARGET)
         }
-        1 => ctx.object(from)?.sys.last_attacker.unwrap_or(PLAYER_TARGET),
+        1 => {
+            let picked = if flags & 0x1800 != 0 {
+                None
+            } else {
+                pick_battle_target(ctx).map(target_id_of)
+            };
+            picked.unwrap_or_else(|| {
+                let last = ctx.object(from).ok().and_then(|o| o.sys.last_attacker);
+                match last {
+                    Some(t) if t & OBJECT_TARGET != 0 && !usable(ctx, t & !OBJECT_TARGET) => {
+                        PLAYER_TARGET
+                    }
+                    Some(t) => t,
+                    None => PLAYER_TARGET,
+                }
+            })
+        }
         _ => PLAYER_TARGET,
     };
     Ok(Target { id, kind, group: 0 })
@@ -256,3 +370,6 @@ fn get_attacker(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
     args[0] = Slot::address(handle);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -5,7 +5,7 @@
 use super::math::read_native;
 use crate::script::{Fault, Memory, Slot};
 use crate::sysobj::{JumpMotions, Target, class_flag, state_flag};
-use crate::world::{Ctx, ObjId, PLAYER_OBJECT, TrapFn};
+use crate::world::{Ctx, Event, ObjId, PLAYER_OBJECT, TrapFn};
 use player::actor_physics;
 
 type Args = [Slot; 16];
@@ -14,6 +14,11 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
     Some(match (table, index) {
         (0, 0) | (1, 122) | (2, 36) => nothing,
         (1, 2) => sysobj_moveto,
+        (6, 68) => super::math::strike_raid_calc_xyzrot,
+        (1, 217) => set_pos_trans,
+        (1, 318) => play_se,
+        (1, 328) => dead_mark,
+        (6, 24) => bg_press,
         (1, 17) => leave_force,
         (1, 18) => obj_attach,
         (1, 85) => texanm_start,
@@ -728,5 +733,73 @@ fn is_summon(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let v = ctx.object(id)?.sys.class_flags & class_flag::SUMMON != 0;
     flag(args, v);
+    Ok(())
+}
+
+/// 1:217 FUN_14042b900 -> FUN_1403b6510: place the object like `obj_set_pos`
+/// and mark the position as moved by a transfer (state bit 12).
+fn set_pos_trans(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let v = read_native(ctx, m, args[1].value)?;
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let sys = &mut ctx.object(id)?.sys;
+    sys.position = [v[0], v[1], v[2]];
+    sys.state_flags |= state_flag::TRANSFERRED;
+    Ok(())
+}
+
+/// 1:318 FUN_14042c060 -> FUN_1403dadf0: play sound effect `id` at the object
+/// (0x60708 is no sound). Ids 500000 to 500999 take the thousand of the
+/// object's sound bank. The host plays it.
+fn play_se(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let mut sound = args[1].as_int();
+    if sound == 0x60708 {
+        return Ok(());
+    }
+    let sys = &ctx.object(id)?.sys;
+    if (500_000..501_000).contains(&sound)
+        && let Some(bank) = sys.sound_bank
+    {
+        sound += (bank - sound / 1000) * 1000;
+    }
+    let position = sys.position;
+    ctx.world.events.push(Event::Sound {
+        object: id,
+        id: sound,
+        position,
+    });
+    Ok(())
+}
+
+/// 1:328 FUN_14042dd50 -> FUN_1403d4a40: the object counts as dead for its
+/// spawn group and for the targeting rules, without being removed (state bit
+/// 2, once).
+fn dead_mark(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let sys = &mut ctx.object(id)?.sys;
+    if sys.state_flags & state_flag::DEAD_MARKED == 0 {
+        sys.state_flags |= state_flag::DEAD_MARKED;
+        let unit = sys.unit;
+        ctx.world.events.push(Event::Service {
+            name: "obj_dead_mark",
+            object: Some(id),
+            other: None,
+            words: [unit.unwrap_or(u32::MAX), 0, 0, 0, 0, 0, 0, 0],
+            vector: None,
+        });
+    }
+    Ok(())
+}
+
+/// 6:24 FUN_14053e080: the push the map gave the object (+0xa78), in the
+/// shared result vector.
+fn bg_press(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let press = ctx.object(id)?.sys.bg_press;
+    let cell = ctx.world.static_cell(6, 68, 0);
+    for (k, lane) in press.iter().enumerate() {
+        ctx.write_f32(m, cell + 4 * k as u32, *lane);
+    }
+    args[0] = Slot::address(cell);
     Ok(())
 }

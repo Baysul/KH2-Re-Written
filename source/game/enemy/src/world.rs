@@ -164,6 +164,12 @@ pub enum Event {
     ObjectDead {
         object: ObjId,
     },
+    /// `obj_play_se`: the object plays a sound effect where it is.
+    Sound {
+        object: ObjId,
+        id: i32,
+        position: [f32; 3],
+    },
     /// `obj_voice`: the object plays a voice line.
     Voice {
         object: ObjId,
@@ -338,6 +344,34 @@ pub struct World {
     pub mission_timer_paused: bool,
     /// Enemy units (spawn groups) scripts disabled (`unit_disable`).
     pub units_disabled: std::collections::BTreeSet<u32>,
+    /// The C library's `rand()` state (the route start position and direction
+    /// draw from it), seeded 1 as the C runtime does.
+    pub crt_seed: u32,
+    /// The event path walker (DAT_142b59840), see [`Eh22`].
+    pub eh22: Eh22,
+    /// The lap counter of the random map position search (DAT_142ae5d78).
+    pub ring_counter: u32,
+    /// The battle target table (DAT_142a16370).
+    pub battle_targets:
+        [crate::traps::target::BattleTarget; crate::traps::target::BATTLE_TARGET_SLOTS],
+}
+
+/// The event path walker the `eh22_path_*` traps drive (DAT_142b59840):
+/// where it is on the event's list of points, where it goes next, and
+/// whether a move is running (1 forward, 2 backward). The host ends a move
+/// by clearing `moving` once the camera or actor has arrived.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Eh22 {
+    /// +0x110 and +0x118: the current point and the next one.
+    pub current: i32,
+    pub next: i32,
+    /// +0x120: 0 idle, 1 moving forward, 2 moving backward.
+    pub moving: i32,
+    /// +0x114: the value of the point moved to.
+    pub value: f32,
+    /// +0x124 and +0x128: what `eh22_path_play` last set.
+    pub play_value: u32,
+    pub play: bool,
 }
 
 /// How many `sysobj_appear` calls may be inside each other's OBJ_INIT.
@@ -379,11 +413,21 @@ impl Default for World {
             status: 0,
             mission_timer_paused: false,
             units_disabled: Default::default(),
+            ring_counter: 0,
+            crt_seed: 1,
+            eh22: Eh22::default(),
+            battle_targets: Default::default(),
         }
     }
 }
 
 impl World {
+    /// The C library's `rand()` (Microsoft's generator): 15 bits.
+    pub fn crt_rand(&mut self) -> i32 {
+        self.crt_seed = self.crt_seed.wrapping_mul(214_013).wrapping_add(2_531_011);
+        (self.crt_seed >> 16 & 0x7fff) as i32
+    }
+
     /// FUN_1403df930 as the host sees it: build the object the spawner
     /// describes, run its OBJ_INIT and put it in the object list. Returns its
     /// id; `me` is the object whose script asked (never reused).

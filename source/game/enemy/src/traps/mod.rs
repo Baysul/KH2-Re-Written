@@ -10,6 +10,8 @@ pub mod homing;
 pub mod math;
 pub mod object;
 pub mod query;
+pub mod random_position;
+pub mod route;
 pub mod searcher;
 pub mod service;
 pub mod sheet;
@@ -29,6 +31,8 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         .or_else(|| sheet::lookup(table, index))
         .or_else(|| query::lookup(table, index))
         .or_else(|| searcher::lookup(table, index))
+        .or_else(|| random_position::lookup(table, index))
+        .or_else(|| route::lookup(table, index))
         .or_else(|| service::lookup(table, index))
         .or_else(|| state::lookup(table, index))
 }
