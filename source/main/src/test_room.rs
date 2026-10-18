@@ -97,6 +97,7 @@ mod party_limit;
 mod party_room;
 mod prize_room;
 mod second_deck;
+mod sephiroth;
 mod settings_room;
 mod spell_fx;
 mod summon;
@@ -830,7 +831,7 @@ pub(crate) struct RoomPart;
 
 /// A scrolling chunk's UV animation (UVSC record, draw-01 §7).
 #[derive(Component)]
-struct UvScroll {
+pub(crate) struct UvScroll {
     material: Handle<FogMaterial>,
     speed: [f32; 2],
     ratio: [f32; 2],
@@ -840,7 +841,7 @@ struct UvScroll {
 /// TEXA workers of the current area (draw-02 section 1): frame scripts
 /// that swap sprites into an environment's texture.
 #[derive(Resource)]
-struct TexaWorkers {
+pub(crate) struct TexaWorkers {
     list: Vec<TexaWorker>,
     last_tick: u64,
 }
@@ -860,12 +861,18 @@ fn texa_tick(
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut workers) = workers else { return };
+    texa_advance(&mut workers, game.tick, &mut images);
+}
+
+/// Runs every TEXA worker up to `tick` (at most four 60 Hz ticks per call)
+/// and uploads the sprites that changed.
+pub(crate) fn texa_advance(workers: &mut TexaWorkers, tick: u64, images: &mut Assets<Image>) {
     let ticks = if workers.last_tick == u64::MAX {
         1
     } else {
-        game.tick.saturating_sub(workers.last_tick).min(4)
+        tick.saturating_sub(workers.last_tick).min(4)
     };
-    workers.last_tick = game.tick;
+    workers.last_tick = tick;
     for w in &mut workers.list {
         let mut sprite = None;
         for _ in 0..ticks {
@@ -898,8 +905,16 @@ fn uv_scroll_tick(
     scrolls: Query<&UvScroll>,
     mut materials: ResMut<Assets<FogMaterial>>,
 ) {
-    let tick = game.tick as i64;
-    for s in &scrolls {
+    uv_scroll_apply(game.tick as i64, scrolls.iter(), &mut materials);
+}
+
+/// Sets every scrolling chunk's UV offset for `tick`.
+pub(crate) fn uv_scroll_apply<'a>(
+    tick: i64,
+    scrolls: impl Iterator<Item = &'a UvScroll>,
+    materials: &mut Assets<FogMaterial>,
+) {
+    for s in scrolls {
         let off = |speed: f32, ratio: f32| -> f32 {
             let acc = tick * (speed as i32 as i64);
             ((((ratio * acc as f32) as i64) >> 16) & 0xfff) as f32 / 4096.
@@ -937,6 +952,9 @@ struct Game {
     ability_tour: Option<ability_inventory::Tour>,
     enemy_tour: bool,
     enemy_battle_tour: bool,
+    /// The Sephiroth fight (`--sephiroth`): the room's own Shadow is off and
+    /// the boss is summoned from the area's placement.
+    sephiroth: bool,
     /// `--magic-tour`: the scripted spell and combo run (magic_tour.rs).
     magic_tour: bool,
     /// The Drive form the tour casts in (`--magic-form`, 0 = none) and the
@@ -11778,6 +11796,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut gear_tour_quick = false;
     let mut enemy_tour = false;
     let mut enemy_battle_tour = false;
+    let mut sephiroth = false;
     let mut magic_tour = false;
     let mut party_hit_tour = false;
     let mut magic_form = 0u8;
@@ -11834,6 +11853,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .ok_or("enemy tour capture directory absent")?,
                 );
             }
+            Some("--sephiroth") => sephiroth = true,
             Some("--enemy-combat-tour") if autoplay.is_none() => {
                 enemy_battle_tour = true;
                 autoplay = Some(
@@ -12221,6 +12241,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         ability_tour: tour,
         enemy_tour,
         enemy_battle_tour,
+        sephiroth,
         magic_tour,
         magic_form,
         magic_shift,
@@ -12579,6 +12600,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             None,
         ),
     };
+    if let Some(a) = &area_res {
+        let setup = &a.current.state.setup;
+        game.event(serde_json::json!({"event":"area_start","world":a.current.world,
+            "area":a.current.area,"programs":a.current.programs,
+            "bg_mask":format!("{:#x}", setup.bg_mask),"battle_level":setup.battle_level,
+            "bgm":setup.bgm,"camera_mode":setup.camera_mode,
+            "events":setup.events.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>(),
+            "spawns":setup.spawns.iter().map(|r| format!("{:x}{}", r.name, if r.deferred {" (deferred)"} else {""})).collect::<Vec<_>>()}));
+    }
     let mut enemy_model = None;
     if let Some(e) = loaded.enemy {
         let spawn = loaded.spawn + e.offset;
@@ -12598,7 +12628,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         enemy_model = Some(e.model);
         game.enemy = Some(EnemyRuntime {
             sora_target_radius: e.sora_target_radius,
-            enabled: !game.enemy_battle_tour,
+            enabled: !game.enemy_battle_tour && !game.sephiroth,
             battle_level: e.battle_level,
             clips: e.clips,
             body: e.body,
@@ -12807,6 +12837,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .init_resource::<crate::skate::Skate>()
         .init_resource::<debug_menu::DebugMenu>()
         .init_resource::<enemy_battle_tour::Checks>()
+        .init_resource::<sephiroth::Fight>()
         .add_plugins(SkatePlugins)
         .add_systems(
             Startup,
@@ -12830,6 +12861,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                     enemy_battle::tick,
                     enemy_gallery::tick,
                     enemy_battle_tour::tick,
+                    sephiroth::tick,
                     enemy_tour::tick,
                     field_npc_tick,
                     talk_tick,
