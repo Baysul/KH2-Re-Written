@@ -24,6 +24,8 @@ const MOTIONS: [u16; 5] = [0, 1, 2, 151, 152];
 /// The reaction motions, loaded when the set holds them: the flinches and
 /// air flinches, the blows and their land motions, the guard bounce, the
 /// DEAD motion and the get-up.
+/// Goofy's Bash: the throw, the return and the shield's spin.
+const BASH_MOTIONS: [u16; 3] = [192, 193, 201];
 const REACTIONS: [u16; 15] = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 41, 54, 55, 43, 5];
 
 /// One motion, sampled per tick (60 Hz).
@@ -57,6 +59,12 @@ pub struct MotionData {
     pub voices: Vec<(u32, i16)>,
     /// Frame trigger 6: the item is used (FUN_14040dd70 to FUN_1403f6790).
     pub item_use: Option<u32>,
+    /// The clip's trigger tables as the object-script engine reads them.
+    pub events: enemy::motion::MotionEvents,
+    /// The hand bone in model space (root removed) and the weapon's vertices
+    /// in its own space, per tick (a thrown shield flies with the latter).
+    pub hand: Vec<Mat4>,
+    pub weapon_local: Vec<Vec<Vec3>>,
 }
 
 impl MotionData {
@@ -109,6 +117,10 @@ pub struct PartyKind {
     /// The member character id (2 Donald, 3 Goofy) and its battle voices.
     pub character: u8,
     pub voices: Option<drive_room::Voices>,
+    /// The member's object script (`p_ex030`, when the Bash is built) and the
+    /// motions it plays.
+    pub script: Option<Vec<u8>>,
+    pub blade_clips: Arc<party_blade::BladeClips>,
 }
 
 /// A member in the room.
@@ -150,6 +162,12 @@ pub struct MemberRt {
     /// The HUD event the gauge has not read yet (0 none, 1-3 hit, 4 heal;
     /// FUN_1403d60c0 and FUN_1403d2eb0 post it).
     pub event: u8,
+    /// The Bash the object-script engine runs (Goofy's `blade` act), the
+    /// shield while it is out of the hand and the attack volumes of the last
+    /// tick by key (a volume that struck feeds its hit callback).
+    pub blade: Option<party_blade::Blade>,
+    pub shield: Option<party_blade::Shield>,
+    pub bash_keys: Vec<(u64, usize)>,
 }
 
 /// `FUN_1403d60c0`'s gauge event of a hit: a dead member or a blow-class
@@ -264,6 +282,31 @@ fn build_motion(
             .filter(|f| f.trigger == 6)
             .map(|f| f.frame.max(0) as u32)
             .min(),
+        events: enemy::motion::MotionEvents {
+            ranges: selected
+                .triggers
+                .iter()
+                .flat_map(|t| &t.records.ranges)
+                .map(|r| enemy::motion::RangeEvent {
+                    start: r.start_frame as u16,
+                    end: r.end_frame as u16,
+                    kind: r.trigger,
+                    params: r.parameters.iter().map(|&v| v as u16).collect(),
+                })
+                .collect(),
+            frames: selected
+                .triggers
+                .iter()
+                .flat_map(|t| &t.records.frames)
+                .map(|f| enemy::motion::FrameEvent {
+                    frame: f.frame as u16,
+                    kind: f.trigger,
+                    params: f.parameters.iter().map(|&v| v as u16).collect(),
+                })
+                .collect(),
+        },
+        hand: Vec::new(),
+        weapon_local: Vec::new(),
     };
     if let Some(own) = own {
         data.hits = own
@@ -310,8 +353,15 @@ fn build_motion(
             .matrix_bits
             .get(hand_bone)
             .map_or(Mat4::IDENTITY, |m| matrix(m, r));
+        data.hand.push(hand);
         if let (Some(w), Some(own)) = (weapon, own) {
             let (wp, _) = w.skinning.sample_evaluated(&own.motion, key)?;
+            data.weapon_local.push(
+                wp.position_bits
+                    .iter()
+                    .map(|p| Vec3::from_array(p.map(f32::from_bits)))
+                    .collect(),
+            );
             data.weapon.push(
                 wp.position_bits
                     .iter()
@@ -383,6 +433,17 @@ pub fn load(
     for r in records {
         if !wanted.contains(&r.motion) {
             wanted.push(r.motion);
+        }
+    }
+    // The Bash plays 192, 193 and the thrown shield's spin 201.
+    if records
+        .iter()
+        .any(|r| r.spell == Some(party_members::Spell::Bash))
+    {
+        for m in BASH_MOTIONS {
+            if !wanted.contains(&m) {
+                wanted.push(m);
+            }
         }
     }
     wanted.extend(REACTIONS);
@@ -545,6 +606,32 @@ pub fn load(
         .ok_or("SSTM record")?;
     let sstm = actor_physics::Sstm::read(record).ok_or("SSTM record truncated")?;
     let rates = party_hit::Rates::read(record).ok_or("SSTM rates truncated")?;
+    // Goofy's own object script runs the Bash on the object-script engine.
+    let script = if records
+        .iter()
+        .any(|r| r.spell == Some(party_members::Spell::Bash))
+    {
+        super::enemy_script::script_payload(source, name).ok()
+    } else {
+        None
+    };
+    let blade_clips = Arc::new(party_blade::BladeClips(
+        std::iter::once(0u16)
+            .chain(BASH_MOTIONS)
+            .filter_map(|slot| {
+                let d = motions.get(&slot)?;
+                Some((
+                    slot as usize,
+                    party_blade::BladeClip {
+                        length: d.end(),
+                        loop_start: d.loop_start,
+                        roots: d.root.iter().map(|r| r.to_array()).collect(),
+                        events: d.events.clone(),
+                    },
+                ))
+            })
+            .collect(),
+    ));
     Ok(PartyKind {
         name,
         model,
@@ -572,6 +659,8 @@ pub fn load(
         rates,
         character: character as u8,
         voices: None,
+        script,
+        blade_clips,
     })
 }
 
@@ -743,7 +832,7 @@ fn land_volume(
             hit = Some((Vec3::from_array(c), high));
         }
     }
-    let Some((at, high)) = hit else { return None };
+    let (at, high) = hit?;
     let rows = rt.steps[&(v.atkp, v.sub)].clone();
     let cure = matches!(rows[0].kind, 5 | 6);
     let (counted, row) = rt.enemy.record.hit(aid, grp, cure, |count| {
@@ -1412,9 +1501,11 @@ pub fn tick(game: &mut Game, tick: u64) {
         gallery_targets,
         party_fixed_target,
         party_items,
+        party_struck,
         items,
         ..
     } = game;
+    let struck_last = std::mem::take(party_struck);
     party_volumes.clear();
     let fixed: Vec<GalleryTarget> = party_fixed_target.iter().copied().collect();
     // The battle flag follows an enemy near Sora or a live member attack
@@ -1467,7 +1558,7 @@ pub fn tick(game: &mut Game, tick: u64) {
         .collect();
     let stock = |id: u16| counts.get(id as usize).map_or(0, |c| c.get());
     // The tour orders its casts; the AI casts on its own elsewhere.
-    let spells = *party_spells
+    let spells = (*party_spells || std::env::var_os("KH2RW_PARTY_COMBAT").is_some())
         && (!*magic_tour || *party_hit_tour || super::magic_tour::free_party(tick, *magic_shift));
     // Heals the acts land this tick: party slot, ATKP id, healer index.
     let mut heals: Vec<(usize, u16, usize)> = Vec::new();
@@ -1491,6 +1582,94 @@ pub fn tick(game: &mut Game, tick: u64) {
             &[gallery_targets.as_slice(), fixed.as_slice()].concat(),
             m.follower.position,
         );
+        // The Bash: the engine runs the `blade` act of Goofy's own script, and
+        // the member follows what it says.
+        let bashing = m
+            .follower
+            .attack
+            .is_some_and(|a| a.spell == Some(party_members::Spell::Bash));
+        if !bashing {
+            m.blade = None;
+            m.shield = None;
+            m.bash_keys.clear();
+        }
+        let mut scripted = None;
+        let mut bash_attacks = Vec::new();
+        if bashing {
+            if m.blade.is_none()
+                && let Some(payload) = kind.script.as_ref()
+            {
+                m.started = tick;
+                m.blade = party_blade::Blade::start(
+                    payload,
+                    kind.blade_clips.clone(),
+                    &*world,
+                    party_blade::Start {
+                        position: m.follower.position,
+                        yaw: m.follower.yaw,
+                        stats: kind.target,
+                        sstm: kind.sstm,
+                        target: centre,
+                    },
+                )
+                .map_err(|e| eprintln!("{}: the Bash could not start: {e}", kind.name))
+                .ok();
+            }
+            // Volumes that struck last tick run their hit callbacks.
+            if let Some(b) = m.blade.as_mut() {
+                for (member, key) in &struck_last {
+                    if *member == index
+                        && let Some(&(_, slot)) = m.bash_keys.iter().find(|(k, _)| k == key)
+                    {
+                        b.struck(&*world, slot, centre);
+                    }
+                }
+            }
+            if let (Some(b), Some(a)) = (m.blade.as_mut(), m.follower.attack) {
+                let hand = kind
+                    .motions
+                    .get(&a.motion)
+                    .and_then(|d| d.hand.get(a.tick as usize).copied())
+                    .unwrap_or(Mat4::IDENTITY);
+                let f = b.tick(&*world, player.position, centre, hand);
+                if f.spent_mp {
+                    m.mp.change(-10, CHARGE);
+                }
+                for id in &f.effects {
+                    fx_calls.push(spell_fx::Call {
+                        pax: kind.pax.clone(),
+                        fx: player::magic::Fx::Start {
+                            key: FX_BASE
+                                | (index as u64) << 40
+                                | 1 << 36
+                                | (tick << 4)
+                                | *id as u64 & 15,
+                            id: *id,
+                            bound: Some(player::magic::Anchor::Party(index + 1)),
+                            at: None,
+                        },
+                    });
+                }
+                if tick.is_multiple_of(30) || f.done {
+                    log_event(
+                        log,
+                        serde_json::json!({"event":"party_bash","tick":tick,"member":kind.name,
+                        "motion":f.motion,"motion_tick":f.tick,"position":f.position,
+                        "shield":f.shield.map(|s| s.position),"attacks":f.attacks.len(),
+                        "done":f.done}),
+                    );
+                }
+                m.shield = f.shield;
+                scripted = Some(party_members::Scripted {
+                    motion: f.motion,
+                    tick: f.tick,
+                    position: f.position,
+                    yaw: f.yaw,
+                    done: f.done,
+                });
+                bash_attacks = f.attacks;
+            }
+        }
         let length = |id: u16| kind.motions.get(&id).map(|d| d.end() + 1);
         let root = |id: u16, t: u32| {
             kind.motions
@@ -1521,6 +1700,8 @@ pub fn tick(game: &mut Game, tick: u64) {
             sstm: kind.sstm,
             rates: kind.rates,
             battle,
+            scripted,
+            can_bash: kind.script.is_some(),
         };
         let was = m.follower.attack.is_some();
         m.follower.tick(kind.records, &scene);
@@ -1617,7 +1798,8 @@ pub fn tick(game: &mut Game, tick: u64) {
             };
             m.follower.begin(&record, &target.unwrap_or(ahead), heal);
             m.started = tick;
-            m.armed = true;
+            // The Bash has no cast of its own: the engine runs the act.
+            m.armed = record.spell != Some(party_members::Spell::Bash);
         }
         let now = m.follower.attack;
         if !was
@@ -1625,7 +1807,8 @@ pub fn tick(game: &mut Game, tick: u64) {
             && let Some(a) = now
         {
             m.started = tick;
-            m.armed = a.spell.is_some();
+            // The Bash has no cast: the engine runs its own act.
+            m.armed = a.spell.is_some_and(|s| s != party_members::Spell::Bash);
         }
         // The act manager starts the spell's act (FUN_1403caa90).
         if m.armed
@@ -1679,6 +1862,72 @@ pub fn tick(game: &mut Game, tick: u64) {
                 "motion_tick":a.tick,"position":m.follower.position,"yaw":m.follower.yaw,
                 "enemy":target.map(|t| t.position)}),
             );
+        }
+        // The shield's attack objects (ATKP 1161): offered to the gallery and
+        // landed on the Shadow; a landed hit runs the script's hit callback
+        // next tick.
+        m.bash_keys.clear();
+        for a in &bash_attacks {
+            let key = KEY_BASE | 1 << 46 | (index as u64) << 40 | a.serial;
+            m.bash_keys.push((key, a.slot));
+            let v = player::magic::Volume {
+                key,
+                atkp: a.id as u16,
+                sub: a.extra as u8,
+                centre: a.position,
+                radius: a.radius,
+                height: a.radius,
+                previous: a.previous,
+                moving: None,
+                role: player::magic::Role::Damage,
+            };
+            party_volumes.push(OutVolume {
+                member: index,
+                key,
+                atkp: v.atkp,
+                sub: v.sub,
+                spheres: vec![(
+                    Vec3::from_array(v.centre),
+                    v.radius,
+                    v.height,
+                    v.previous.map(Vec3::from_array),
+                )],
+                moving: None,
+                stats: attacker(&kind),
+                origin: Vec3::from_array(m.follower.position),
+                spell: true,
+                pax: kind.pax.clone(),
+            });
+            if let Some(rt) = enemy.as_mut() {
+                let stats = attacker(&kind);
+                if let Some((at, dir, effect)) = land_volume(
+                    rt,
+                    index,
+                    kind.name,
+                    &stats,
+                    &v,
+                    key,
+                    Vec3::new(m.follower.yaw.sin(), 0., m.follower.yaw.cos()),
+                    tick,
+                    sound_queue,
+                    log,
+                ) {
+                    // The next tick's callback keeps the shield on it.
+                    party_struck.push((index, key));
+                    if effect != 0
+                        && let Some(pax) = &kind.pax
+                        && let Some(calls) = spell_spark(
+                            pax,
+                            effect,
+                            at.to_array(),
+                            dir.to_array(),
+                            1 << 62 | tick << 8 | (index as u64) << 4 | 8,
+                        )
+                    {
+                        fx_calls.extend(calls);
+                    }
+                }
+            }
         }
         let over = m.follower.attack.is_none();
         // The waits of the acts end when the member's motion changes, and
@@ -2099,6 +2348,31 @@ pub fn present(
             continue;
         };
         let f = data.frame_of(m.follower.tick);
+        // A thrown shield flies as an object of its own: its vertices in its
+        // own space, placed in the world by the script and brought back into
+        // the member's space for the mesh.
+        if part.weapon
+            && let Some(s) = m.shield
+            && let Some(weapon) = &m.kind.weapon
+            && let Some(motion) = m.kind.motions.get(&s.motion)
+            && let Some(local) = motion.weapon_local.get(motion.frame_of(s.tick))
+        {
+            let turn = Quat::from_rotation_y(s.yaw);
+            let member = Vec3::from_array(m.follower.position);
+            let back = Quat::from_rotation_y(-m.follower.yaw);
+            let positions: Vec<[f32; 3]> = weapon.parts[part.ordinal]
+                .indices
+                .iter()
+                .map(|&i| {
+                    let world = Vec3::from_array(s.position) + turn * local[i as usize];
+                    (back * (world - member)).to_array()
+                })
+                .collect();
+            if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+            }
+            continue;
+        }
         let (frame, model) = if part.weapon {
             // A motion without its own weapon pose keeps the idle one.
             let (source, at) = if data.weapon.is_empty() {

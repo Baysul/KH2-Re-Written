@@ -80,6 +80,32 @@ pub struct ScriptEffect {
     pub at: Option<Vec3>,
 }
 
+/// The attack objects a world's scripts have placed.
+pub fn script_attacks(world: &EnemyWorld) -> Vec<ScriptAttack> {
+    use enemy::attack::flag;
+    world
+        .attacks
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, a)| {
+            let a = a.as_ref()?;
+            if a.flags & flag::HAS_POSITION == 0 && a.flags & flag::LINE == 0 {
+                return None;
+            }
+            let v = |p: [f32; 4]| [p[0], p[1], p[2]];
+            Some(ScriptAttack {
+                slot,
+                serial: a.serial,
+                id: a.param_id,
+                extra: a.param_extra,
+                position: v(a.position),
+                previous: Some(v(a.previous)),
+                radius: a.current_radius(),
+            })
+        })
+        .collect()
+}
+
 pub struct ScriptBrain {
     world: EnemyWorld,
     object: Object,
@@ -99,7 +125,7 @@ pub struct ScriptBrain {
     pub unsupported: std::collections::BTreeSet<&'static str>,
 }
 
-fn script_payload(source: &ProbeSource, model: &str) -> Result<Vec<u8>, String> {
+pub(super) fn script_payload(source: &ProbeSource, model: &str) -> Result<Vec<u8>, String> {
     let mut library = Library::open(source).map_err(|e| e.to_string())?;
     let bytes = library
         .read(&format!("obj/{model}.mdlx"))
@@ -192,28 +218,7 @@ impl ScriptBrain {
 
     /// The attack objects the script has placed, for the host's hit tests.
     pub fn attacks(&self) -> Vec<ScriptAttack> {
-        use enemy::attack::flag;
-        self.world
-            .attacks
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, a)| {
-                let a = a.as_ref()?;
-                if a.flags & flag::HAS_POSITION == 0 && a.flags & flag::LINE == 0 {
-                    return None;
-                }
-                let v = |p: [f32; 4]| [p[0], p[1], p[2]];
-                Some(ScriptAttack {
-                    slot,
-                    serial: a.serial,
-                    id: a.param_id,
-                    extra: a.param_extra,
-                    position: v(a.position),
-                    previous: Some(v(a.previous)),
-                    radius: a.current_radius(),
-                })
-            })
-            .collect()
+        script_attacks(&self.world)
     }
 
     /// An attack of the script struck something.

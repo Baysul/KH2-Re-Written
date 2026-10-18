@@ -13,9 +13,11 @@ pub mod sheet;
 pub mod state;
 pub mod system;
 pub mod target;
+pub mod weapon;
 
 pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
     math::lookup(table, index)
+        .or_else(|| weapon::lookup(table, index))
         .or_else(|| attack::lookup(table, index))
         .or_else(|| homing::lookup(table, index))
         .or_else(|| object::lookup(table, index))

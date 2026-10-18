@@ -98,6 +98,31 @@ impl Object {
         run_thread(world, env, self, &mut t);
     }
 
+    /// An attack's hit callback (`attack_set_hit_callback`): `entry` runs on a
+    /// throw-away thread, until its first yield, with the script's own
+    /// argument, the object the attack struck and one more word.
+    pub fn run_hit_callback(
+        &mut self,
+        world: &mut World,
+        env: &dyn Env,
+        callback: (i32, u32),
+        struck: u32,
+    ) {
+        let (entry, ai) = callback;
+        if entry <= 0 {
+            return;
+        }
+        let struck = world.ai_reference(struck);
+        let mut t = Thread::with_sizes(
+            self.script.stack_bytes,
+            self.script.temp_bytes,
+            EVENT_SLOT,
+            entry,
+            &[Slot::address(ai), Slot::address(struck), Slot::int(0)],
+        );
+        run_thread(world, env, self, &mut t);
+    }
+
     /// Turn the act manager's requests into thread changes. Inside the
     /// interpreter callbacks are queued (it runs them after the trap); outside
     /// they run now.

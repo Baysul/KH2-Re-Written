@@ -167,6 +167,12 @@ pub struct Sysobj {
     /// +0x10/+0x1c: the movement the script requested (direction, speed).
     pub move_direction: Vec3,
     pub move_speed: f32,
+    /// The weapon objects of this object (`obj+0xd60 + 8 * slot`), the object a
+    /// weapon is attached to (`obj+0x6a0`) and whether a weapon's motion
+    /// follows its owner's (`trap_obj_motion_sync`).
+    pub weapons: Vec<crate::world::ObjId>,
+    pub attached: Option<crate::world::ObjId>,
+    pub synced: bool,
     /// +0xa28 / +0xa38: wished and actual displacement of the last tick.
     pub wished: Vec3,
     pub moved: Vec3,
@@ -310,6 +316,9 @@ impl Sysobj {
             motion: Motion::default(),
             airborne: false,
             reaction: Reaction::None,
+            weapons: Vec::new(),
+            attached: None,
+            synced: false,
             move_direction: [0.; 3],
             move_speed: 0.,
             wished: [0.; 3],
@@ -477,10 +486,21 @@ impl Sysobj {
             stepped = true;
         }
         if stepped {
-            if clips.ended(m.slot, m.tick) {
+            let ended = clips.ended(m.slot, m.tick);
+            if ended {
                 m.flags.word |= motion::flag::ENDED;
             }
             self.dispatch_frame_events(clips);
+            // FUN_1403c6740: a clock that reached the end with a motion queued
+            // behind it (`trap_sysobj_motion_push`) starts that motion now.
+            if ended
+                && !self.motion_queue.is_empty()
+                && let (slot, blend) = self.motion_queue.remove(0)
+                && self.motion_start(slot, blend, clips)
+            {
+                self.dispatch_ranges(clips);
+                return;
+            }
         }
         self.dispatch_ranges(clips);
     }

@@ -60,7 +60,8 @@ pub enum Gait {
 
 /// The acts of the party's BDX scripts: Donald's `p_ex020` spells (`fire`,
 /// `blizzard`, `thunder`, `cure`) and Goofy's `p_ex030` specials
-/// (`tornado`, `turbo`; `blade`, his Bash, is not built).
+/// (`tornado`, `turbo`, and `blade`, his Bash, which the room runs on the
+/// object-script engine).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spell {
     Fire,
@@ -69,6 +70,7 @@ pub enum Spell {
     Cure,
     Tornado,
     Turbo,
+    Bash,
 }
 
 /// The consumables an item entry looks for.
@@ -202,15 +204,16 @@ pub const DONALD: [Record; 10] = [
 ];
 /// Goofy's records (personality 1): the two ground attacks, the two air
 /// attacks (ids 6, 7) and the specials Tornado (id 92, range 0-500,
-/// height window -100/500 after the negation) and Turbo (id 94, 0-500,
-/// -100/150), 10 MP each. Bash (id 93, 250-750) is the shield throw, a
-/// separate act (`party_bash`).
-pub const GOOFY: [Record; 8] = [
+/// height window -100/500 after the negation), Bash (id 93, 250-750, the
+/// raw window -500/1000 negated to -1000/500) and Turbo (id 94, 0-500,
+/// -100/150), 10 MP each.
+pub const GOOFY: [Record; 9] = [
     ground(4, 151, 220.),
     ground(5, 152, 300.),
     air(6, 181, 100.),
     air(7, 182, 80.),
     spell(92, Spell::Tornado, 191, [0., 500., -100., 500.], 10),
+    spell(93, Spell::Bash, 192, [250., 750., -1000., 500.], 10),
     spell(94, Spell::Turbo, 194, [0., 500., -100., 150.], 10),
     item_entry(200, ItemNeed::Hp),
     item_entry(201, ItemNeed::Mp),
@@ -221,6 +224,18 @@ pub const GOOFY: [Record; 8] = [
 pub struct Target {
     pub position: Vec3,
     pub radius: f32,
+}
+
+/// What the object-script engine says about a scripted act this tick (the
+/// Bash): the member's motion and its tick, its place, and whether the act
+/// has ended.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Scripted {
+    pub motion: u16,
+    pub tick: u32,
+    pub position: Vec3,
+    pub yaw: f32,
+    pub done: bool,
 }
 
 /// An attack in progress.
@@ -346,6 +361,11 @@ pub struct Scene<'a, W: World> {
     /// The battle flag (`DAT_142a11404`): the KO timer runs at 1.0 a tick
     /// instead of SSTM+0x5c.
     pub battle: bool,
+    /// The running Bash, as the engine ran it this tick (None while the room
+    /// has not started it).
+    pub scripted: Option<Scripted>,
+    /// The member's own script is loaded, so the Bash can run.
+    pub can_bash: bool,
 }
 
 impl Follower {
@@ -889,6 +909,23 @@ impl Follower {
         // An attack plays out its motion with root motion, then ends.
         if let Some(mut a) = self.attack {
             a.tick += 1;
+            if let Some(Spell::Bash) = a.spell {
+                // The act's script plays the motions and carries the member.
+                if let Some(s) = scene.scripted {
+                    self.position = s.position;
+                    self.yaw = s.yaw;
+                    a.motion = s.motion;
+                    a.tick = s.tick;
+                    self.tick = s.tick;
+                    self.attack = (!s.done).then_some(a);
+                    if s.done {
+                        self.tick = 0;
+                    }
+                } else {
+                    self.attack = Some(Attack { tick: 0, ..a });
+                }
+                return;
+            }
             if self.air.is_some() {
                 // The jump carries the member; the motion's root does not.
             } else if let Some(spell @ (Spell::Tornado | Spell::Turbo)) = a.spell {
@@ -1101,6 +1138,8 @@ mod tests {
             sstm: test_sstm(),
             rates: test_rates(),
             battle: true,
+            scripted: None,
+            can_bash: true,
         }
     }
 
@@ -1205,6 +1244,8 @@ mod tests {
             sstm: test_sstm(),
             rates: test_rates(),
             battle: true,
+            scripted: None,
+            can_bash: true,
         }
     }
 
@@ -1294,7 +1335,7 @@ mod tests {
             position: [0., 0., 6000.],
             radius: 40.,
         };
-        f.begin(&GOOFY[5], &t, 0);
+        f.begin(&GOOFY[6], &t, 0);
         let scene = |t: Target| Scene {
             centre: Some(t.position),
             length: &|m| matches!(m, 194).then_some(400),
@@ -1346,6 +1387,8 @@ mod tests {
             sstm: test_sstm(),
             rates: test_rates(),
             battle,
+            scripted: None,
+            can_bash: true,
         }
     }
     fn claw_hit() -> Hit {
@@ -1494,6 +1537,8 @@ mod tests {
             sstm: test_sstm(),
             rates: test_rates(),
             battle: true,
+            scripted: None,
+            can_bash: true,
         }
     }
 
@@ -1668,5 +1713,78 @@ mod tests {
             }
         }
         assert!(used);
+    }
+
+    #[test]
+    fn a_scripted_bash_follows_the_engine_and_ends_when_it_says() {
+        let mut f = Follower::spawn([0., 0., 0.], 0., 1);
+        let t = Target {
+            position: [0., 0., 500.],
+            radius: 40.,
+        };
+        let bash = GOOFY
+            .iter()
+            .find(|r| r.spell == Some(Spell::Bash))
+            .expect("Goofy has the Bash");
+        f.begin(bash, &t, 0);
+        // Before the room has started the engine's act the member waits.
+        let waiting = Scene {
+            ..spell_scene(Some(t), &Flat, (100, 100, false), [None; 3])
+        };
+        f.tick(&GOOFY, &waiting);
+        assert_eq!(f.motion(), 192);
+        let running = Scene {
+            scripted: Some(Scripted {
+                motion: 192,
+                tick: 12,
+                position: [5., 0., 7.],
+                yaw: 0.5,
+                done: false,
+            }),
+            ..spell_scene(Some(t), &Flat, (100, 100, false), [None; 3])
+        };
+        f.tick(&GOOFY, &running);
+        assert_eq!(
+            (f.position, f.yaw, f.motion(), f.tick),
+            ([5., 0., 7.], 0.5, 192, 12)
+        );
+        let over = Scene {
+            scripted: Some(Scripted {
+                motion: 0,
+                tick: 0,
+                position: [5., 0., 9.],
+                yaw: 0.5,
+                done: true,
+            }),
+            ..spell_scene(Some(t), &Flat, (100, 100, false), [None; 3])
+        };
+        f.tick(&GOOFY, &over);
+        assert!(f.attack.is_none());
+        assert_eq!(f.position, [5., 0., 9.]);
+    }
+
+    #[test]
+    fn the_bash_needs_the_script_and_a_target_250_to_750_away() {
+        let f = Follower::spawn([0.; 3], 0., 1);
+        let bash = GOOFY.iter().find(|r| r.spell == Some(Spell::Bash)).unwrap();
+        let near = Target {
+            position: [0., 0., 100.],
+            radius: 40.,
+        };
+        let far = Target {
+            position: [0., 0., 500.],
+            radius: 40.,
+        };
+        assert!(!f.eligible(bash, &near));
+        assert!(f.eligible(bash, &far));
+        // Without the member's script no Bash is chosen.
+        let mut s = spell_scene(Some(far), &Flat, (100, 100, false), [None; 3]);
+        s.length = &spell_length_with_bash;
+        s.can_bash = false;
+        assert!(!f.ready(bash, &far, &s) || !s.spells);
+    }
+
+    fn spell_length_with_bash(m: u16) -> Option<u32> {
+        matches!(m, 151 | 152 | 191 | 192 | 193 | 194).then_some(60)
     }
 }

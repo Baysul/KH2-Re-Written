@@ -118,6 +118,100 @@ from the installation at run time.
   member's own stats; Sora's combo and Drive are not fed). `--enemy-combat-tour` keeps the party out
   (it is Sora's exercise) and still passes.
 
+## Third pass (same task, PR 109)
+
+What was added after the second pass, with the evidence for each. Every static
+reading is of the Steam build named above; nothing from the game is in Git.
+
+- **Record windows corrected.** The records' height windows are Y-down in the
+  executable (`obj+0xe40` is target minus self in Y-down, `FUN_1401b7ad0`), so the Y-up window is the
+  negated pair: ground -100/150, Fire -100/200, Blizzard -100/150, Thunder -500/1000,
+  Tornado -100/500, Turbo -100/150 (the second pass had the pairs swapped).
+- **Air attacks (item 5).** Donald records 2 and 3 (motions 181, 182, far 150/130) and Goofy
+  6 and 7 (181, 182, far 100/80) need the target 100-385 above the member (raw window -385/-100).
+  `FUN_1401b0420` makes the jump call `vt+0x18` with height `1 + rise` (at most 385) and 8.0
+  horizontal toward the target; the member plays motion 4 while falling and motion 5 on landing,
+  and a hit cancels it. Rewrite: `player::party_hit::Airborne`, `Follower::air`.
+  PASS `--party-hit-tour` (`run12`, `run18`): Donald's record 3 rose to 200.9 and landed on motion 5,
+  Goofy's record 6 the same, with captures of both flips.
+- **Friend air-hit physics (item 7).** Traced rather than assumed: a friend's mover is the shared
+  `FUN_1403b89a0` driven by the mode table `FUN_140409d20`, the same code Sora's air flinch uses,
+  so reusing Sora's air-flinch data (`Arc::launch(50)`, `strength x HitBackToJump`) is the same
+  call, not an approximation. The earlier "separate physics not traced" note is withdrawn.
+- **Party items (item 2).** The personality table's entries 2 and 3 are `FUN_1401cc970` (HP) and
+  `FUN_1401cce90` (MP), flags 0x18 and 0x28, in the same random candidate pool as the attacks and
+  in the emergency passes of `FUN_1401b3a30` (flag 0x10: HP item and Cure; 0x20: MP item) that run
+  first when a partner is in need (`obj+0xf78`). A member whose own HP, Sora's or the other
+  member's is under 45% (`DAT_1405b41c0`; MP the same and alive) uses the first item of the
+  preference list that Sora's item slots hold (`FUN_1403c4380`): HP `[1,2,5,4,7]`, or
+  `[5,1,2,4,7]` with two in need; MP `[3,6,4,7]` or `[6,3,7,4]`. The target is the partner in need
+  (HP), else the first of itself, Sora, the other member. The use needs an enemy target
+  (`FUN_1401b2ce0` checks `obj+0xc`) and plays motion 9; trigger 6 takes the item from the
+  last matching slot (`FUN_1403d7e50`, `FUN_1403c49c0`) and queues a heal 30 ticks
+  (`DAT_140623bcc`) later (`FUN_1403f6790`, `FUN_1403f6960`, `FUN_1403c4ab0`): the whole party for
+  items 5, 6, 7, one target otherwise, a share of the target's maxima like Sora's
+  (`FUN_1403c4b80`), the item's own effect element on each target. Rewrite:
+  `party_members::{ItemNeed, Urgent, item_pick, emergency}`, `party_room::PendingItem`.
+  PASS `--party-hit-tour` (`run14`): Donald's Potion on himself at 40% (8 HP), on Sora at 20%
+  (`target` 0, the emergency pass), Goofy's Ether at 30% MP; `party_item_use` and
+  `party_item_heal` events with the slots emptied. [U] The per-item "frequency"
+  byte of the character record (`+0xf5 + item index`: 0 often, 1 seldom, 2 never unless a partner is
+  in need) is taken as 0: the menu that sets it is not built. [U] Item Boost for a friend user
+  (`FUN_1403ba720`) is taken as 100%.
+- **HUD gauges (item 1).** `FUN_14016c3a0` makes two `dk::GAUGE_FRIEND` objects from the same
+  gauge sequence as Sora's: root intro group 0x47 queued to 0x48 (0x43 at low HP), ring sprites
+  0x40 (shadow), 0x41 (HP), 0x42 (MP) behind five circle masks (`FUN_140181d20`), the member's
+  own face sequence (`obj/<model>.a.<lang>`, `FUN_1403b57b0`) with groups 3/0/2 by state
+  (`FUN_14017eba0`), the second gauge one group pitch (`+0x20` of group 0x47) lower. Per frame
+  `FUN_140182730` wipes the HP half by `r x pi - pi/2` (with the half-plane rectangle for r < 0.5)
+  and the MP half by `(1 - r) x pi`; the HUD events of a hit (`FUN_1403d60c0`: dead or blow class
+  = group 0x44, flinch class = 0x45, other = 0x46) and of a heal (`FUN_1403d2eb0`) restart the root,
+  the shadow ring and the face. **Face placement:** `FUN_14017e980` only sets the face texture's
+  VRAM addresses (the sums of `DAT_14071ae10`/`ae20` per slot plus 0x3500/0x2800); the on-screen
+  place is the sequence's own, so nothing was unresolved. Rewrite: `visual::gauge::FriendGauge`.
+  PASS release tour captures (`run15`): both gauges beside Sora's, Donald's KO face and HP ring.
+  Not built: Goofy's slide up when Donald is absent (groups 0x49/0x4a, `FUN_140182730`) and the
+  per-frame chase of the shadow ring's value (the shadow keeps the HP of the event before).
+- **Goofy's Bash (item 4).** The `blade` act of `p_ex030` (L3406): motion 192 (blend 8),
+  `trap_obj_thread_start` (1,82) of the projectile thread (L3506), which waits for frame trigger 9,
+  takes the shield from weapon slot 0 (`FUN_140431310`), detaches it (1,102) and the motion list
+  (1,236), starts motion 201 on it, places it at the hand (`FUN_14042f6f0`) with ATKP 1161 (radius
+  60) bound to it, and flies it with the shared homing library (turn 0.5236, speed 20, 180-tick
+  limit); the hit callback L4373 stops the flight and keeps the shield on the target while hits
+  keep coming within 16 ticks; then motion 193, the shield re-attached (1,126) (1,18), and idle.
+  Instead of a hand port the act runs on the object-script engine (`enemy` crate, the interpreter
+  the opt-in `ScriptBrain` uses): new traps `obj_thread_start`, `obj_weapon`, `obj_detach`,
+  `obj_attach`, `is_attach`, `motion_sync`/`unsync`/`is_motion_sync`, `party_hand_to_bone`,
+  `obj_apply_bone_matrix` (through `Env::bone_point`), `obj_use_mp`, `is_summon`; the
+  motion queue is now consumed when a clip ends (`FUN_1403c6740`; it was only recorded); an
+  attack's hit callback can be run by the host (`Object::run_hit_callback`). Host:
+  `test_room::party_blade` (clips, floor, enemy centre, hand), `Follower` follows the engine's
+  motion and position (`Scripted`), the shield is drawn from the weapon's own vertices, its ATKP 1161
+  volume lands on the Shadow and on gallery enemies and a landed hit runs the callback next tick.
+  PASS `--party-hit-tour` from the Bash case (`run18`, before the last clippy refactor): the act
+  started at tick 1, the shield left the hand at tick 80, ATKP 1161 hit the Shadow every 16 ticks
+  (12 hits), motion 193 at tick 280, idle at 351. 4 new unit tests in the engine (weapon traps, the
+  queue) and 2 in `party_members`. [U] The bone number 3 of the hand lookup is not mapped: the
+  member's SKLT hand bone stands in; the shield's spin uses Goofy's motion 201, not the weapon
+  set's; `trap_obj_use_mp` is recorded and 10 MP is taken at the start (the executable's consumer was
+  not found); the shield's second movement request (`+0xa58/+0xa64`) is applied by the host as a
+  displacement of `direction x speed` a tick (the executable's consumer is not translated).
+- **Spell sparks on gallery enemies (item 6).** A member's spell volume starts the element of its own
+  PAX chosen by the hit-effect category of the ATKP row (`attack_set_pax`, `FUN_1402c6730`, mask
+  `1 << (32 + effect - 1) | 1`) at the contact point. Coded for both the Shadow and the gallery
+  bridge; **NOT RUN** against a gallery enemy (the one-off switch `KH2RW_PARTY_COMBAT` that lets
+  the party into `--enemy-combat-tour` was added and not run).
+- **Limits (item 3): NOT BUILT.** Traced as far as the structure: `limit/us/goofy.bar` holds the BDX
+  program `limit_goofy` (triggers 23 and 22), two PAX containers (types 20 and 18), and the `comb`
+  and `gage` sprite sheets; `trinity.bar` the same plus `wave` and `se40` and a 19 KB program. The
+  scripts call about 50 distinct traps, including the untranslated limit group (2,47 limit_motion_start,
+  2,48/49 limit_player/friend, 2,50 limit_camera_start, 2,54 limit_start_thread, 2,55 limit_light,
+  2,58/59 limit_effect_start, 2,60 limit_time, 2,63 limit_reference), the camera and light traps and,
+  for Trinity, the shot traps (7,28-7,36). Running them also needs the limit controller (`FUN_1403d7fa0`,
+  0x128 bytes), Sora as a script-driven object, the limit gauge and combo sheets, and the limit
+  motion sets. Selection and cost (`FUN_1403e7950`, `FUN_1403d8b40`, `limt` rows) are in
+  `goofy-spec.md` 7.2. None of it was started in code.
+
 ## Checks
 
 - PASS `cargo fmt --all --check`, PASS `cargo clippy --workspace --all-targets --locked -- -D warnings`,
@@ -156,17 +250,19 @@ from the installation at run time.
 
 ## Not reproduced / uncertain
 
+- Third pass, checks that were NOT RUN: the full `--party-hit-tour` after the last edits (the
+  clippy refactor of `party_blade::Start`, `is_multiple_of`, the tour's skip switch
+  `KH2RW_PARTY_TOUR_FROM`); `--enemy-combat-tour` after the third pass; a gallery enemy hit by a
+  member's spell spark or by the Bash; the item cases against gallery enemies; any owner playtest.
+  PASS this pass: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D
+  warnings`, `cargo test --workspace --locked`, `cargo build --workspace --locked` and the
+  `--frames 180` smoke run on the final tree.
 - A voice's priority (row byte 2) is not used, as for Sora's: two voices on one tick both play.
-- No HUD gauge for Donald and Goofy: their HP is in the log and the Cure menu's
-  colour only. The original's `dk::GAUGE_FRIEND` (face, ring masks, state groups 0x40-0x4a,
-  `FUN_140182730` per frame) is a separate port.
 - The `patn` override (`FUN_14040a8e0`, `FUN_1403ee9b0`) is taken as absent for
   the party; reaction class 5 (Magnet's capture, `FUN_14040fbf0`) and 14 are not
   built for members.
-- Air hits on a member (Goofy's Tornado and Turbo hover) use Sora's air-flinch data: the hop
-  and the horizontal speed are `Arc::launch(50)` and `strength × HitBackToJump` (the same
-  `FUN_1403d4800` call), landing on motion 5; the friend object's own mode-1 physics was not traced
-  separately.
+- Air hits on a member use Sora's air-flinch data because the mover is the same
+  (`FUN_1403b89a0`, `FUN_140409d20`; third pass).
 - Mode 4 (blow) is assumed for the friend's blow (`FUN_140409d30` can choose
   mode 8 or 0x21 for other flag states).
 - `FUN_140410100`'s counters (`DAT_142aea190`) belong to a mini-game manager and
@@ -177,7 +273,6 @@ from the installation at run time.
 - ATKP 139 (Goofy's shield) has ReflectRange 45, not 0 as `goofy-spec.md` §5.4 says: the
   shield only clashes with attackers within 45 degrees of his facing. The claws' own cone
   (0 for the Shadow's) is taken as met for other attackers.
-- A member's hit on a gallery enemy shows the default spark, not the member's own spell effect.
 - The reflect needs an enemy Type 3 attack sphere in reach; the three supported gallery enemies
   were not found to make one in the runs, so the reflect in the room was checked with a synthetic
   guard sphere in the path of the real shot.

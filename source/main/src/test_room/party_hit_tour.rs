@@ -70,6 +70,9 @@ enum Case {
         member: usize,
         what: Low,
     },
+    /// Goofy throws his shield at the Shadow 300 ahead (the Bash, run by his
+    /// own object script) and the case ends when he is free again.
+    Bash,
     /// The Shadow hangs 200 above the floor 150 ahead of the member, so only
     /// an air attack (records 2/3, 6/7) is eligible: the member jumps,
     /// strikes and lands.
@@ -144,6 +147,8 @@ const CASES: &[Case] = &[
         member: GOOFY,
         what: Low::MemberMp,
     },
+    Case::Wait(60),
+    Case::Bash,
     Case::Wait(60),
     Case::Air { member: DONALD },
     Case::Wait(60),
@@ -246,6 +251,22 @@ pub fn drive(game: &mut Game, tick: u64) {
         );
     }
     let mut state = std::mem::take(&mut game.party_hit_state);
+    // `KH2RW_PARTY_TOUR_FROM=bash|air|items` starts a one-off run at that case.
+    if tick == 1
+        && let Ok(from) = std::env::var("KH2RW_PARTY_TOUR_FROM")
+        && let Some(at) = CASES.iter().position(|c| match from.as_str() {
+            "bash" => matches!(c, Case::Bash),
+            "air" => matches!(c, Case::Air { .. }),
+            "items" => matches!(c, Case::Items { .. }),
+            _ => false,
+        })
+    {
+        state.case = at;
+        // The Shadow stays out until a case brings it.
+        if let Some(rt) = game.enemy.as_mut() {
+            rt.enabled = false;
+        }
+    }
     let Some(&case) = CASES.get(state.case) else {
         game.party_hit_state = state;
         return;
@@ -468,10 +489,40 @@ pub fn drive(game: &mut Game, tick: u64) {
                     done = true;
                 }
             }
-            2 => {
-                if game.party_items.is_empty() && tick > state.mark + 40 {
+            2 if game.party_items.is_empty() && tick > state.mark + 40 => done = true,
+            _ => {}
+        },
+        Case::Bash => match state.stage {
+            0 if free(game, GOOFY) => {
+                stage(game, GOOFY, Some(true));
+                if let Some(rt) = game.enemy.as_mut() {
+                    rt.enabled = true;
+                }
+                let ordered = party_room::order_cast(game, GOOFY, Spell::Bash, 0);
+                log(
+                    game,
+                    tick,
+                    index,
+                    "bash",
+                    serde_json::json!({"ordered":ordered}),
+                );
+                capture(game, tick, &[30, 60, 75, 90, 110, 140, 180]);
+                state.stage = 1;
+                state.mark = tick;
+            }
+            1 => {
+                if tick > state.mark + 30 && free(game, GOOFY) {
+                    state.stage = 2;
+                    state.mark = tick;
+                } else if tick > state.mark + PATIENCE {
                     done = true;
                 }
+            }
+            2 if tick > state.mark + 20 => {
+                if let Some(rt) = game.enemy.as_mut() {
+                    rt.enabled = false;
+                }
+                done = true;
             }
             _ => {}
         },
@@ -509,7 +560,7 @@ pub fn drive(game: &mut Game, tick: u64) {
                     state.mark = tick;
                 }
                 1 | 2 => {
-                    if tick % 6 == 0
+                    if tick.is_multiple_of(6)
                         && let Some((record, y, motion)) = seen
                     {
                         let e = serde_json::json!({

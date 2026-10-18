@@ -87,6 +87,7 @@ mod journal_tour;
 mod level_growth;
 mod magic_room;
 mod magic_tour;
+mod party_blade;
 mod party_hit_tour;
 mod party_room;
 mod prize_room;
@@ -936,6 +937,9 @@ struct Game {
     party_fixed_target: Option<party_room::GalleryTarget>,
     /// Items the party used that have not healed yet.
     party_items: Vec<party_room::PendingItem>,
+    /// Volumes of a member's Bash that landed on a gallery enemy this tick:
+    /// the member and the volume's key.
+    party_struck: Vec<(usize, u64)>,
     fx_live: HashMap<u64, magic::FxLive>,
     /// The party slot the Magic menu's Cure target list picked (0 Sora)
     /// and the Magic row Cure was chosen from, while that list is open.
@@ -2854,13 +2858,8 @@ fn load(
             if let Ok(library) = data::path_lookup::Library::open(source) {
                 for (i, name) in ["P_EX020", "P_EX030"].into_iter().enumerate() {
                     if let Some(found) = library.find(&format!("obj/{name}.a.us"))
-                        && let Ok(sheet) = hud::load(
-                            source,
-                            &found.index.to_string(),
-                            found.ordinal,
-                            found.name_hash,
-                            b"face",
-                        )
+                        && let Ok(sheet) =
+                            hud::load(source, found.index, found.ordinal, found.name_hash, b"face")
                     {
                         friend_faces[i] = Some(sheets.len());
                         sheets.push(sheet);
@@ -11214,6 +11213,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 voice_at: (u16::MAX, 0),
                 item_fired: false,
                 event: 0,
+                blade: None,
+                shield: None,
+                bash_keys: Vec::new(),
                 record: combat::HitRecord::new(true),
                 ko_fx: false,
                 cast_motion: 0,
@@ -11261,6 +11263,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         gallery_targets: Vec::new(),
         party_fixed_target: None,
         party_items: Vec::new(),
+        party_struck: Vec::new(),
         fx_live: HashMap::new(),
         cure_target: 0,
         cure_pick: None,

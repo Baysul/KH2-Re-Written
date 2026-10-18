@@ -104,6 +104,20 @@ pub trait Env {
     fn progress_flag(&self, _flag: u32) -> bool {
         false
     }
+    /// Where `local` (a point in bone `bone` of the model of `object`, which
+    /// stands at `position` facing `yaw`) is in the world
+    /// (`trap_obj_apply_bone_matrix`); `None` when the host has no bone data
+    /// for the object.
+    fn bone_point(
+        &self,
+        _object: u32,
+        _bone: i32,
+        _local: Vec3,
+        _position: Vec3,
+        _yaw: f32,
+    ) -> Option<Vec3> {
+        None
+    }
     /// An effect handle `trap_obj_effect_start_bind` returned is still alive.
     fn effect_active(&self, _handle: u32) -> bool {
         false

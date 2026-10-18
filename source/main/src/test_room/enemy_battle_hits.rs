@@ -117,6 +117,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         party,
         enemy_guards,
         party_volumes,
+        party_struck,
         gallery_targets,
         enemy_battle_tour,
         ..
@@ -238,7 +239,9 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
     }
     // The party's attacks (party_room::tick, one tick old).
     // The combat tour is Sora's exercise of three actors: the party stays out.
-    for pv in party_volumes.iter().filter(|_| !*enemy_battle_tour) {
+    // `KH2RW_PARTY_COMBAT` lets the party fight in it for a one-off check.
+    let party_out = *enemy_battle_tour && std::env::var_os("KH2RW_PARTY_COMBAT").is_none();
+    for pv in party_volumes.iter().filter(|_| !party_out) {
         if !ensure_attack_rows(rt, pv.atkp, pv.sub) {
             continue;
         }
@@ -308,7 +311,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
             continue;
         }
         // Where the party's AI may aim: the actor's TARGET point.
-        if !*enemy_battle_tour
+        if !(*enemy_battle_tour && std::env::var_os("KH2RW_PARTY_COMBAT").is_none())
             && battle.brain.targetable()
             && let Some(shape) = battle.pose.targets.first()
         {
@@ -453,6 +456,11 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                     rt.difficulty,
                 )
             {
+                // A member's volume that landed (Goofy's Bash keeps his shield
+                // on the enemy through its hit callback).
+                if let Some(member) = v.member {
+                    party_struck.push((member, v.key));
+                }
                 // Sora's own hits feed his combo, Drive and Valor EXP.
                 if damage > 0 {
                     *enemy_outgoing_hits += 1;

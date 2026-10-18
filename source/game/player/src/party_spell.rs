@@ -229,7 +229,7 @@ impl Cast {
             Spell::Fire => Some(r + FIRE_RING_WAIT),
             Spell::Thunder => Some(r + THUNDER_WAIT),
             Spell::Blizzard | Spell::Cure => Some(r),
-            Spell::Tornado | Spell::Turbo => None,
+            Spell::Tornado | Spell::Turbo | Spell::Bash => None,
         };
         if !ctx.same
             && let Some(last) = waits
@@ -483,6 +483,9 @@ impl Cast {
                     self.done = true;
                 }
             }
+            // The Bash runs on the object-script engine (the room never builds
+            // a cast for it).
+            Spell::Bash => self.done = true,
         }
         self.age += 1;
         self.held.clone_from(&out.volumes);

@@ -107,7 +107,7 @@ Unfinished (verdict PARTIAL):
 
 ### Donald and Goofy in the party — PARTIAL (T136, T186)
 
-Donald and Goofy follow Sora and fight in the test room (ground attacks, Donald's four spells, Goofy's Tornado and Turbo, the Cure target menu). The enemy's claws now hit them: flinch and blow reactions, Goofy's shield, KO with the revive timer, a revive by Cure, and a hit during a cast ends or pauses it as in the executable (T186). Not built: their voices, a HUD gauge, items, Limits, Goofy's Bash, air attacks.
+Donald and Goofy follow Sora and fight in the test room (ground attacks, Donald's four spells, Goofy's Tornado and Turbo, the Cure target menu). The enemy's claws now hit them: flinch and blow reactions, Goofy's shield, KO with the revive timer, a revive by Cure, and a hit during a cast ends or pauses it as in the executable (T186). They also have battle voices, air attacks (Donald records 2 and 3, Goofy 6 and 7), potions and ethers from Sora's item slots, field HUD gauges (HP and MP half rings around their own faces), and Goofy's Bash, which runs the `blade` act of his own object script on the object-script engine. Not built: Limits (Whirli-Goof, Knocksmash, Trinity), the Goofy gauge's slide when Donald is absent, the party's item-use settings.
 
 ### Drive forms — not started
 

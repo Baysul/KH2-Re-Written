@@ -129,7 +129,7 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T120](T120-abilities-growth-combo-audit.md) | REA identity, fresh native ability/growth/combo audit and Rust corrections | PROGRESS. Next: qualify controlled installed/rewrite scenarios for each growth family, ground/air modifiers, miss/contact/finisher cases and equipment/form transitions; trace and implement the remaining ability consum... |
 | [T121](T121-equipable-growth-and-combos.md) | Equipable Sora inventory, growth tiers and combo integration | PROGRESS. Next: paired installed/rewrite scenarios for growth, modifier combinations and form transitions, plus remaining action/support consumers and campaign progression. |
 | [T121](T121-public-progress-tracker.md) | Evidence-based GitHub progress tracker | No verdict recorded; read the record. |
-| [T122](T122-enemy-summons-and-large-arena.md) | Source-bound enemy summons and expanded animation test arena | PARTIAL. |
+| [T122](T122-enemy-summons-and-large-arena.md) | Source-bound enemy summons and expanded animation test arena | PARTIAL: hits, KO, reflect, voices, air attacks, items, HUD gauges, Goofy's Bash; Limits not built. |
 | [T123](T123-enemy-motion-and-model-boundaries.md) | Remaining enemy motion and model boundaries | PARTIAL. |
 | [T124](T124-enemy-action-arguments-and-scheduler.md) | Enemy action arguments and scheduler research | PARTIAL. |
 | [T125](T125-enemy-ai-and-combat.md) | Executable enemy AI, combat, lock-on and Scan | PARTIAL. |

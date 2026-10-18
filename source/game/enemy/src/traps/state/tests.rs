@@ -135,6 +135,40 @@ fn starting_a_motion_clears_the_end_pulse_of_the_previous_one() {
     assert!(!s.motion_ended(), "a new motion has not ended yet");
 }
 
+struct Clock30;
+impl crate::env::Env for Clock30 {
+    fn floor(&self, _: f32, _: f32, _: f32) -> Option<f32> {
+        Some(0.)
+    }
+    fn clips(&self, _: u32) -> &dyn crate::env::Clips {
+        &ThirtyTicks
+    }
+    fn player_position(&self) -> crate::sysobj::Vec3 {
+        [0.; 3]
+    }
+    fn target_position(&self, _: u32) -> Option<crate::sysobj::Vec3> {
+        None
+    }
+}
+
+#[test]
+fn a_motion_queued_behind_the_playing_one_starts_when_its_clock_ends() {
+    let mut s = Sysobj::bare();
+    assert!(s.motion_start(192, 0., &ThirtyTicks));
+    s.motion_queue.push((193, 0.));
+    // The clip is 30 ticks long: the queued motion starts on the step that
+    // reaches the end, not before, and its own clock begins at 0.
+    for _ in 0..29 {
+        s.begin_tick(&Clock30);
+        assert_eq!(s.motion.slot, 192);
+    }
+    s.begin_tick(&Clock30);
+    assert_eq!(s.motion.slot, 193);
+    assert_eq!(s.motion.tick, 0);
+    assert!(s.motion_queue.is_empty());
+    assert!(!s.motion_ended());
+}
+
 /// Run a trap on object 0 (a bare object) whose AI struct is at work word 0
 /// and whose first argument vector lives at word 8.
 fn run(
