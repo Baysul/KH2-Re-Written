@@ -26,6 +26,7 @@ pub mod ptya;
 pub mod shadow;
 pub mod soldier;
 pub mod targeting;
+pub mod vibration;
 pub mod wisdom_form;
 
 pub type Vec3 = [f32; 3];
@@ -116,6 +117,12 @@ pub struct Clip {
     pub turn_to_target: Vec<(u32, u32, f32)>,
     /// Frame trigger 21: turn toward the target by up to `deg` at a tick.
     pub face_target: Vec<(u32, f32)>,
+    /// Frame trigger 16: at a tick the command lockout (`obj+0xb94`) is set to
+    /// this many ticks (FUN_14040dd70 case 0x10).
+    pub command_lockout: Vec<(u32, f32)>,
+    /// Frame trigger 31: at a tick the vibration wave `id` starts
+    /// (FUN_14040dd70 case 0x1f → FUN_1403eefc0).
+    pub vibrations: Vec<(u32, u8)>,
     /// Frame trigger 0: the pending physics mode starts (jump take-off,
     /// FUN_14040dd70).
     pub takeoff: Option<u32>,
@@ -547,6 +554,10 @@ pub struct Player {
     /// Sora's jump height as FUN_1403b5a40 reads it (High Jump's row height
     /// or the PRTY one), kept from the last tick for the hop cap.
     jump_reach_height: f32,
+    /// The command lockout `obj+0xb94`: while above zero commands are refused
+    /// even inside an ANB range 0 to 2 (FUN_1403ba070); it counts down only
+    /// inside such a range and is cleared outside one (FUN_1403b4980).
+    command_lock: f32,
     /// Quick Run's mode 0x10 state.
     quick_run: Option<growth::QuickRun>,
     /// The speed effect Quick Run started this tick: element 0x6c + the
@@ -698,6 +709,7 @@ impl Player {
             invulnerable: 0.,
             was_floating: false,
             jump_reach_height: 0.,
+            command_lock: 0.,
             quick_run: None,
             quick_run_effect: None,
             glide: None,
@@ -1262,6 +1274,30 @@ impl Player {
         Clip::within(&self.clip(clips).actionable, self.motion_frame(clips))
     }
 
+    /// FUN_1403ba070's main path: a range 0 to 2 is active and the command
+    /// lockout (frame trigger 16) has run out.
+    fn command_window(&self, clips: &Clips) -> bool {
+        self.command_lock <= 0. && self.actionable(clips)
+    }
+
+    /// FUN_1403b4980 then the frame trigger: the lockout counts down while a
+    /// range 0 to 2 holds and is cleared when none does; trigger 16 at this
+    /// frame sets it anew. [I] The order within the frame is not traced.
+    fn command_lockout(&mut self, clips: &Clips) {
+        if self.command_lock > 0. {
+            self.command_lock = if self.actionable(clips) {
+                self.command_lock - 1.
+            } else {
+                0.
+            };
+        }
+        let frame = self.motion_frame(clips);
+        let clip = self.clip(clips);
+        if let Some(&(_, ticks)) = clip.command_lockout.iter().find(|&&(f, _)| f == frame) {
+            self.command_lock = ticks;
+        }
+    }
+
     /// Motion frame to sample for the current action.
     pub fn motion_frame(&self, clips: &Clips) -> u32 {
         let clip = self.clip(clips);
@@ -1414,7 +1450,7 @@ impl Player {
         guard: bool,
         step: &mut Step,
     ) -> bool {
-        let actionable = self.actionable(clips);
+        let actionable = self.command_window(clips);
         let air = self.in_air();
         if air
             && actionable
@@ -1533,6 +1569,7 @@ impl Player {
         let mut step = Step::default();
         self.jump_reach_height = self.jump_height(p).0;
         self.frame = self.frame.saturating_add(1);
+        self.command_lockout(clips);
         if self.action == Action::Item
             && clips.item.as_ref().and_then(|c| c.item_use) == Some(self.frame)
         {
@@ -1593,7 +1630,7 @@ impl Player {
                 // Commands need an active ANB range 0, 1 or 2 (obj+0x18c &
                 // 0x1c, FUN_1401b15f0): always during locomotion, from
                 // LAND's range-2 start (tick 12 installed) after a landing.
-                let ready = self.actionable(clips);
+                let ready = self.command_window(clips);
                 if (input.guard
                     && !input.attack
                     && self.square(input, clips, height, moving, direction, ready, &mut step))
@@ -1690,7 +1727,7 @@ impl Player {
                     disp[2] += -dx * s + dz * c;
                 }
                 let recovery = self.frame >= clip.blend_to_idle.unwrap_or(clip.end);
-                let ready = self.actionable(clips);
+                let ready = self.command_window(clips);
                 // FUN_1403d6fc0 takes Square (FUN_1403a81f0) before the
                 // attack command.
                 if (input.guard
@@ -1713,7 +1750,7 @@ impl Player {
                 self.release_if_due(clips, i);
                 // A spell is a combo hit: the next press may chain from the
                 // cast's combo window (range 11 / 35, finisher range 50).
-                let ready = self.actionable(clips);
+                let ready = self.command_window(clips);
                 if (input.guard
                     && self.square(input, clips, height, moving, direction, false, &mut step))
                     || (input.attack
@@ -1762,7 +1799,7 @@ impl Player {
                     disp[0] += dx * c + dz * s;
                     disp[2] += -dx * s + dz * c;
                 }
-                let ready = self.actionable(clips);
+                let ready = self.command_window(clips);
                 let end = clip.end;
                 if self.frame == growth::ROLL_CHAIN_TICK && input.guard_held {
                     // Frame trigger 34: Square still held → Quick Run.
@@ -2095,7 +2132,7 @@ impl Player {
             mp_charging: self.mp_charging,
             combo_window: Clip::within(&clip.combo_windows, frame),
             finisher_window: Clip::within(&clip.finisher_windows, frame),
-            actionable: self.actionable(clips),
+            actionable: self.command_window(clips),
         };
         // FUN_1403a9950 passes only the connected flag; Combo Master
         // applies to the main attack command, not these Square abilities.
@@ -2145,7 +2182,7 @@ impl Player {
                 let clip = self.clip(clips);
                 self.frame >= clip.blend_to_idle.unwrap_or(clip.end)
             }
-            _ => self.actionable(clips),
+            _ => self.command_window(clips),
         }
     }
 
@@ -2425,7 +2462,7 @@ impl Player {
         // The dispatcher hands a Jump press to the airborne mode's jump
         // slot while actionable (FUN_1403d6fc0 → FUN_1403cb9f0).
         if input.jump
-            && self.actionable(clips)
+            && self.command_window(clips)
             && !matches!(self.action, Action::Hurt(_))
             && self.aerial_dodge(moving, direction, step)
         {
@@ -2445,7 +2482,7 @@ impl Player {
         } else if let Action::Hurt(_) = self.action {
             // The air flinch and Aerial Recovery play out, then fall;
             // Aerial Recovery takes commands from its range-1 tick.
-            let ready = self.actionable(clips);
+            let ready = self.command_window(clips);
             if input.attack
                 && ready
                 && self.try_attack(input, p, clips, true, moving, direction, step)
@@ -2457,7 +2494,7 @@ impl Player {
             let clip = &clips.spells[i].clip;
             self.face_target(clip, input);
             self.release_if_due(clips, i);
-            let ready = self.actionable(clips);
+            let ready = self.command_window(clips);
             if (input.guard && self.square(input, clips, height, moving, direction, false, step))
                 || (input.attack
                     && self.try_attack(input, p, clips, ready, moving, direction, step))
@@ -2469,7 +2506,7 @@ impl Player {
         } else if let Action::AirAttack(i) = self.action {
             let clip = &clips.attacks[i].clip;
             self.face_target(clip, input);
-            let ready = self.actionable(clips);
+            let ready = self.command_window(clips);
             if (input.guard && self.square(input, clips, height, moving, direction, false, step))
                 || (input.attack
                     && self.try_attack(input, p, clips, ready, moving, direction, step))
@@ -2479,7 +2516,7 @@ impl Player {
                 self.blend = clips.attacks[i].blend;
             }
         } else if input.attack
-            && self.actionable(clips)
+            && self.command_window(clips)
             && self.try_attack(input, p, clips, true, moving, direction, step)
         {
             // Air attacks need an active ANB range 0–2 too: JUMP from its
@@ -3245,6 +3282,37 @@ mod tests {
             player.tick(&Input::default(), &p, &c, &w);
         }
         assert_eq!(player.action, Action::Idle);
+    }
+
+    #[test]
+    fn frame_trigger_16_refuses_commands_for_its_ticks_inside_a_range() {
+        let (p, mut c, w) = (params(), clips(), room());
+        for clip in [&mut c.idle, &mut c.field_idle] {
+            clip.actionable = vec![(0, 1000)];
+            clip.command_lockout = vec![(3, 5.)];
+        }
+        let mut player = Player::new([0., 0., 0.], 0.);
+        let mut open = Vec::new();
+        for _ in 0..12 {
+            player.tick(&Input::default(), &p, &c, &w);
+            open.push(player.can_command(&c));
+        }
+        // Frames 1 and 2 are open, the trigger at frame 3 closes five ticks
+        // (the frame itself counts one down at the next), then it reopens.
+        assert_eq!(
+            open,
+            [
+                true, true, false, false, false, false, false, true, true, true, true, true
+            ]
+        );
+        // Outside a range the lockout is cleared at once.
+        c.idle.actionable = vec![(0, 3)];
+        c.field_idle.actionable = vec![(0, 3)];
+        let mut player = Player::new([0., 0., 0.], 0.);
+        for _ in 0..6 {
+            player.tick(&Input::default(), &p, &c, &w);
+        }
+        assert_eq!(player.command_lock, 0.);
     }
 
     #[test]
