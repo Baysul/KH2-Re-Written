@@ -132,7 +132,9 @@ pub fn load(
             .map(std::sync::Arc::new);
         let sheet = |name: &[u8; 4]| {
             let found = library.find(&path)?;
-            visual::hud::load(source, found.index, found.ordinal, found.name_hash, name).ok()
+            visual::hud::load(source, found.index, found.ordinal, found.name_hash, name)
+                .map_err(|e| eprintln!("{path} {}: {e}", String::from_utf8_lossy(name)))
+                .ok()
         };
         let (gauge_sheet, counter_sheet) = (sheet(b"gage"), sheet(b"comb"));
         out.limits.push(LoadedLimit {
