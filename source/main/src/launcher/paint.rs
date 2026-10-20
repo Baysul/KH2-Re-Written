@@ -1,6 +1,7 @@
 //! The launcher's drawing, made without game files: shapes generated here,
-//! text from Windows' own fonts, all as `Ui2dFrame` quads. Coordinates are
-//! a 1280x720 design space mapped onto the 16:9 layout space.
+//! text from Windows' own fonts (elsewhere the bundled Liberation Sans), all
+//! as `Ui2dFrame` quads. Coordinates are a 1280x720 design space mapped onto
+//! the 16:9 layout space.
 use bevy::prelude::*;
 use data::sprite_sequence::Quad;
 use std::collections::HashMap;
@@ -40,12 +41,15 @@ pub fn to_layout(x: f32, y: f32) -> [f32; 2] {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Face {
-    /// Headings: Trebuchet MS Bold Italic (close to KH2's menu lettering).
+    /// Headings: Trebuchet MS Bold Italic (close to KH2's menu lettering);
+    /// Liberation Sans Bold Italic off Windows.
     Heading,
-    /// Menu rows and body text: Segoe UI Semibold.
+    /// Menu rows and body text: Segoe UI Semibold; Liberation Sans Bold off
+    /// Windows.
     Body,
 }
 
+#[cfg(windows)]
 const FACES: [(Face, &[&str]); 2] = [
     (
         Face::Heading,
@@ -100,6 +104,12 @@ fn shape(size: u32, alpha: impl Fn(f32, f32) -> f32) -> Vec<u8> {
     out
 }
 
+#[cfg(windows)]
+const NO_FONT: &str = "no usable Windows font found";
+#[cfg(not(windows))]
+const NO_FONT: &str = "the bundled launcher font did not load";
+
+#[cfg(windows)]
 fn load_font(face: Face) -> Option<fontdue::Font> {
     let windir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
     let fonts = std::path::Path::new(&windir).join("Fonts");
@@ -108,6 +118,17 @@ fn load_font(face: Face) -> Option<fontdue::Font> {
         let bytes = std::fs::read(fonts.join(name)).ok()?;
         fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).ok()
     })
+}
+
+/// Unmodified Liberation Sans 2.1.5 (SIL OFL 1.1); provenance in
+/// `assets/fonts/README.md`.
+#[cfg(not(windows))]
+fn load_font(face: Face) -> Option<fontdue::Font> {
+    let bytes: &[u8] = match face {
+        Face::Heading => include_bytes!("../../assets/fonts/LiberationSans-BoldItalic.ttf"),
+        Face::Body => include_bytes!("../../assets/fonts/LiberationSans-Bold.ttf"),
+    };
+    fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).ok()
 }
 
 impl Paint {
@@ -129,8 +150,8 @@ impl Paint {
         let pixels = vec![0; (ATLAS * ATLAS * 4) as usize];
         let atlas = sheet_from(images, frame, pixels.clone(), ATLAS);
         let mut fonts = HashMap::new();
-        for (face, _) in FACES {
-            let font = load_font(face).ok_or("no usable Windows font found")?;
+        for face in [Face::Heading, Face::Body] {
+            let font = load_font(face).ok_or(NO_FONT)?;
             fonts.insert(face, font);
         }
         Ok(Self {

@@ -248,6 +248,7 @@ fn run() -> Result<AppExit, Box<dyn std::error::Error>> {
             }),
             ..default()
         }))
+        .add_plugins(visual::window_clear::WindowClearPlugin)
         .add_systems(Startup, setup)
         .add_systems(Update, (controls, refresh, finish).chain());
     Ok(app.run())

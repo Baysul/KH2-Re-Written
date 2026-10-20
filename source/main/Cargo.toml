@@ -73,5 +73,9 @@ bench = false
 [features]
 skate3 = ["dep:skate-disc", "dep:skate-sim"]
 
+# Keep the existing Windows backend; Linux starts with native Wayland only.
+[target.'cfg(target_os = "linux")'.dependencies]
+bevy = { version = "=0.19.1", default-features = false, features = ["wayland"] }
+
 [lints]
 workspace = true

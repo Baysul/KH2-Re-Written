@@ -24,6 +24,7 @@ const CONFIG_LIMIT: u64 = 1 << 20;
 /// The private folder for launch files, configs, manifests and the
 /// launcher's settings: `.local/test-room` beside the checkout the
 /// executable was built in, else `%LOCALAPPDATA%\KH2FinalRewrite`.
+#[cfg(not(target_os = "linux"))]
 pub fn data_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         for up in exe.ancestors().skip(1).take(4) {
@@ -36,6 +37,70 @@ pub fn data_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(|local| PathBuf::from(local).join("KH2FinalRewrite"))
         .unwrap_or_else(|| PathBuf::from(".local/test-room"))
+}
+
+/// The private folder for launch files, configs, manifests and saved start
+/// rooms: `$XDG_DATA_HOME/KH2FinalRewrite` (default `~/.local/share`). No
+/// checkout or working-directory folder is chosen implicitly (T178).
+#[cfg(target_os = "linux")]
+pub fn data_dir() -> PathBuf {
+    xdg_dir("XDG_DATA_HOME", ".local/share")
+}
+
+/// The launcher's settings: the data folder.
+#[cfg(not(target_os = "linux"))]
+pub fn settings_dir() -> PathBuf {
+    data_dir()
+}
+
+/// The launcher's settings: `$XDG_CONFIG_HOME/KH2FinalRewrite` (default
+/// `~/.config`).
+#[cfg(target_os = "linux")]
+pub fn settings_dir() -> PathBuf {
+    xdg_dir("XDG_CONFIG_HOME", ".config")
+}
+
+/// `KH2FinalRewrite` under an XDG base directory. Relative values are
+/// ignored, as the specification requires; without an absolute `$HOME`
+/// either there is no safe place for private files.
+#[cfg(target_os = "linux")]
+fn xdg_dir(var: &str, home_default: &str) -> PathBuf {
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|home| home.join(home_default))
+        })
+        .expect("an absolute HOME is required for the rewrite's private files")
+        .join("KH2FinalRewrite")
+}
+
+/// Where `kh2fm title|room|talk` look for a launch file when started without
+/// arguments: `.local/test-room/<name>.json` beside the checkout, then
+/// `%LOCALAPPDATA%\KH2FinalRewrite\test-room-<name>.json`.
+#[cfg(not(target_os = "linux"))]
+pub fn launch_file_candidates(name: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        for up in exe.ancestors().skip(1).take(4) {
+            candidates.push(up.join(format!(".local/test-room/{name}.json")));
+        }
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates
+            .push(PathBuf::from(local).join(format!("KH2FinalRewrite/test-room-{name}.json")));
+    }
+    candidates
+}
+
+/// Where `kh2fm title|room|talk` look for a launch file when started without
+/// arguments: the data folder's `<name>.json`, where the launcher keeps them.
+#[cfg(target_os = "linux")]
+pub fn launch_file_candidates(name: &str) -> Vec<PathBuf> {
+    vec![data_dir().join(format!("{name}.json"))]
 }
 
 fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
@@ -124,12 +189,32 @@ fn vdf_values(text: &str, key: &str) -> Vec<String> {
 /// they list in `steamapps/libraryfolders.vdf`.
 fn steam_libraries() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    for var in ["ProgramFiles(x86)", "ProgramFiles"] {
-        if let Some(p) = std::env::var_os(var) {
-            roots.push(PathBuf::from(p).join("Steam"));
+    #[cfg(not(target_os = "linux"))]
+    {
+        for var in ["ProgramFiles(x86)", "ProgramFiles"] {
+            if let Some(p) = std::env::var_os(var) {
+                roots.push(PathBuf::from(p).join("Steam"));
+            }
         }
+        roots.push(PathBuf::from(r"C:\Program Files (x86)\Steam"));
     }
-    roots.push(PathBuf::from(r"C:\Program Files (x86)\Steam"));
+    // Native, legacy-symlink and Flatpak Steam roots (duplicates collapse
+    // once the install folders are canonicalized).
+    #[cfg(target_os = "linux")]
+    if let Some(home) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".local/share"));
+        roots.extend([
+            data.join("Steam"),
+            home.join(".steam/steam"),
+            home.join(".var/app/com.valvesoftware.Steam/data/Steam"),
+        ]);
+    }
     let mut libraries = Vec::new();
     for root in roots {
         if !root.is_dir() {
@@ -218,7 +303,7 @@ fn bound(folder: PathBuf, manifest_path: PathBuf, m: SourceManifest) -> Bound {
 fn quick_match(folder: &Path, manifest_path: &Path) -> Option<Bound> {
     let bytes = read_limited(manifest_path, MANIFEST_LIMIT).ok()?;
     let m: SourceManifest = serde_json::from_slice(&bytes).ok()?;
-    let required = validation::required_files();
+    let required = validation::required_files_in(validation::package_folder_of(&m.files)?);
     if m.canonical_source_path != folder
         || m.qualification != "quarantined_unqualified"
         || validation::content_identity(&m.files) != m.content_identity
@@ -261,7 +346,7 @@ pub fn quick_check(dir: &Path, folder: &Path, hint: Option<&Path>) -> Result<Bou
         .map_err(|e| CheckError::Rejected(format!("This folder can't be opened ({e}).")))?;
     if !has_executable(&folder) {
         return Err(CheckError::Rejected(format!(
-            "There is no \"{KH2_EXECUTABLE}\" in this folder. Choose the \"KINGDOM HEARTS -HD 1.5+2.5 ReMIX-\" folder Steam installed. To find it, right-click the game in Steam and choose Manage > Browse local files."
+            "There is no \"{KH2_EXECUTABLE}\" in this folder. Choose the \"KINGDOM HEARTS -HD 1.5+2.5 ReMIX-\" folder Steam installed (in Steam, right-click the game and choose Manage > Browse local files), or the folder your Epic copy was installed to."
         )));
     }
     hint.map(Path::to_path_buf)
@@ -647,10 +732,16 @@ pub fn viewers(dir: &Path) -> Vec<Viewer> {
 }
 
 /// A new private log path for a viewer: outside any checkout, under
-/// `%LOCALAPPDATA%\KH2FinalRewrite\logs`.
+/// `%LOCALAPPDATA%\KH2FinalRewrite\logs` on Windows and
+/// `$XDG_STATE_HOME/KH2FinalRewrite/logs` (default `~/.local/state`) on Linux.
 pub fn viewer_log(program: &str) -> Result<PathBuf, String> {
-    let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
-    let logs = PathBuf::from(local).join("KH2FinalRewrite").join("logs");
+    #[cfg(target_os = "linux")]
+    let logs = xdg_dir("XDG_STATE_HOME", ".local/state").join("logs");
+    #[cfg(not(target_os = "linux"))]
+    let logs = {
+        let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
+        PathBuf::from(local).join("KH2FinalRewrite").join("logs")
+    };
     fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
     let stamp = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)

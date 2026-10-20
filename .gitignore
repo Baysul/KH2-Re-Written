@@ -60,6 +60,10 @@
 !/source/main/assets/development-checker.bmp
 !/source/visual/assets/final-rewrite-text.png
 !/source/visual/assets/kingdom-hearts-final-rewrite-logo.png
+# Unmodified Liberation Sans 2.1.5 launcher fonts (SIL OFL 1.1) and their provenance.
+!/source/main/assets/fonts/LiberationSans-Bold.ttf
+!/source/main/assets/fonts/LiberationSans-BoldItalic.ttf
+!/source/main/assets/fonts/README.md
 !/docs/**/*.md
 !/docs/research/*.csv
 !/docs/release/dependency-inventory.csv
@@ -79,6 +83,10 @@
 !/docs/progress/coverage.json
 !/docs/progress/summary.json
 /target/
+/GLOSSARY.md
+/.scratch/
+# Local Fabric metadata and isolated research worktrees are never public inputs.
+/.pi/fabric/
 /.local/
 /private/
 /research/

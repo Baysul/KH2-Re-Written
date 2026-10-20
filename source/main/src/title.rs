@@ -734,15 +734,7 @@ fn launch_file_args() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
         #[serde(default)]
         options: Vec<String>,
     }
-    let mut candidates = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        for up in exe.ancestors().skip(1).take(4) {
-            candidates.push(up.join(".local/test-room/launch-title.json"));
-        }
-    }
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        candidates.push(PathBuf::from(local).join("KH2FinalRewrite/test-room-launch-title.json"));
-    }
+    let candidates = crate::launcher::launch_file_candidates("launch-title");
     let path = candidates
         .iter()
         .find(|p| p.is_file())
@@ -842,14 +834,25 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         m.name_hash,
         &new_game::message_ids(),
     )?);
-    let backend = if autoplay.is_some() {
-        match std::env::var_os("KH2RW_TEST_SAVE") {
+    let (backend, saving_off) = if autoplay.is_some() {
+        let backend = match std::env::var_os("KH2RW_TEST_SAVE") {
             Some(path) => save_files::FileBackend::from_test_file(Path::new(&path))?,
             None => save_files::FileBackend::in_memory(save_files::synthetic_container()),
-        }
+        };
+        (backend, None)
     } else {
-        save_files::FileBackend::open(&crate::launcher::data_dir(), Path::new(&args[0]))?
+        save_files::FileBackend::open_or_off(
+            &crate::launcher::data_dir(),
+            Path::new(&args[0]),
+            source.package_folder(),
+        )?
     };
+    if let Some(reason) = &saving_off {
+        eprintln!(
+            "WARNING: saving is off for this copy ({reason}). No save file is read or written; \
+             progress made in this session is lost when it closes."
+        );
+    }
     let files = match save_files::Files::load(
         &source,
         (&m.index, m.ordinal, m.name_hash),
@@ -954,7 +957,11 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Kingdom Hearts II Re:Written (title; quarantined source)".into(),
+                title: if saving_off.is_some() {
+                    "Kingdom Hearts II Re:Written (title; quarantined source; SAVING OFF)".into()
+                } else {
+                    "Kingdom Hearts II Re:Written (title; quarantined source)".into()
+                },
                 resolution: (1280, 720).into(),
                 ..default()
             }),
@@ -962,6 +969,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             close_when_requested: false,
             ..default()
         }))
+        .add_plugins(visual::window_clear::WindowClearPlugin)
         .add_plugins(Ui2dPlugin {
             order: 0,
             overlay: false,

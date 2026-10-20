@@ -16,6 +16,8 @@ const MANIFEST_LIMIT: u64 = 8 * 1024 * 1024;
 pub struct ProbeSource {
     root: PathBuf,
     manifest: SourceManifest,
+    /// The manifest's candidate package folder (`validation::PACKAGE_FOLDERS`).
+    package_folder: &'static str,
     // Set only by `bind_session`: one admission (full scan, or the session
     // check with per-chunk verification of every read) serves the session.
     session: Option<std::sync::OnceLock<()>>,
@@ -152,7 +154,11 @@ impl ProbeSource {
             return Err("source manifest exceeds inspection limit".into());
         }
         let manifest: SourceManifest = serde_json::from_slice(&bytes)?;
-        let required = validation::required_files();
+        let Some(package_folder) = validation::package_folder_of(&manifest.files) else {
+            return Err(
+                "source manifest identity/path/schema/candidate layout is inconsistent".into(),
+            );
+        };
         let chunks_ok = manifest.schema_version == 1
             || (manifest.schema_version == validation::SCHEMA
                 && validation::chunk_identity(&manifest.files) == manifest.chunk_identity
@@ -164,15 +170,6 @@ impl ProbeSource {
             || manifest.canonical_source_path != root
             || manifest.qualification != "quarantined_unqualified"
             || validation::content_identity(&manifest.files) != manifest.content_identity
-            || manifest.files.len() != required.len()
-            || required.iter().any(|(path, _)| {
-                manifest
-                    .files
-                    .iter()
-                    .filter(|f| f.relative_path == *path)
-                    .count()
-                    != 1
-            })
         {
             return Err(
                 "source manifest identity/path/schema/candidate layout is inconsistent".into(),
@@ -181,8 +178,24 @@ impl ProbeSource {
         Ok(Self {
             root,
             manifest,
+            package_folder,
             session: None,
         })
+    }
+
+    /// The bound candidate package folder.
+    pub fn package_folder(&self) -> &'static str {
+        self.package_folder
+    }
+
+    /// The six package indexes of the bound folder, in package order.
+    pub fn indexes(&self) -> &'static [&'static str; 6] {
+        validation::index_files(self.package_folder).expect("bound folder is a candidate folder")
+    }
+
+    /// The bound candidate files: the executable and the folder's packages.
+    pub fn candidate_files(&self) -> Vec<(String, &'static str)> {
+        validation::required_files_in(self.package_folder)
     }
 
     /// Binds one interactive session. The first `verify_full_source` still
@@ -240,7 +253,8 @@ impl ProbeSource {
         if self.manifest.schema_version < validation::SCHEMA {
             return self.verify_full_source();
         }
-        let whole: Vec<(String, &str)> = validation::required_files()
+        let whole: Vec<(String, &str)> = self
+            .candidate_files()
             .into_iter()
             .filter(|(p, _)| !p.ends_with(".pkg"))
             .collect();
@@ -258,7 +272,7 @@ impl ProbeSource {
                 .into());
             }
         }
-        for (relative, _) in validation::required_files() {
+        for (relative, _) in self.candidate_files() {
             if !relative.ends_with(".pkg") {
                 continue;
             }
@@ -296,10 +310,7 @@ impl ProbeSource {
         if self.session.as_ref().is_some_and(|s| s.get().is_none()) {
             return Err("session source not admitted yet (verify_session)".into());
         }
-        if !validation::required_files()
-            .iter()
-            .any(|(name, _)| name == relative && name.ends_with(".hed"))
-        {
+        if !self.indexes().contains(&relative) {
             return Err("index is outside the inspected KH2 candidate set".into());
         }
         let expected = self

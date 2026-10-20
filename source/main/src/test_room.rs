@@ -2758,7 +2758,7 @@ fn load_camp_source(
             .unwrap_or_default(),
         notice_callouts: {
             let texts = msg(&[0x561e, 0x561f, 0x5620])?;
-            let file = read_named(source, "Image/dt/kh2_first.hed", "THelpText.bin")?;
+            let file = read_named(source, source.indexes()[0], "THelpText.bin")?;
             file.map_or_else(Vec::new, |b| {
                 pause_menu::notice::parse_callouts(&b, |id| {
                     texts
@@ -5781,6 +5781,7 @@ fn resize_scene(
     compose: Option<ResMut<Compose>>,
     windows: Query<&Window>,
     mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<visual::overlay::LayoutMaterial>>,
     mut frame: ResMut<Ui2dFrame>,
     settings: Res<settings_room::SettingsRes>,
 ) {
@@ -5804,6 +5805,20 @@ fn resize_scene(
         });
     }
     frame.sheets[c.scene_sheet].size = size;
+    // The resized image is a new GPU texture, but Bevy rebuilds a material's
+    // bind group only when the material itself changes: mark every material
+    // sampling the scene (the 2D pass, the afterimage) changed, or they keep
+    // showing the last picture drawn at the old size.
+    let stale: Vec<_> = materials
+        .iter()
+        .filter(|(_, m)| m.texture == c.scene)
+        .map(|(id, _)| id)
+        .collect();
+    for id in stale {
+        if let Some(material) = materials.get_mut(id) {
+            material.into_inner();
+        }
+    }
 }
 
 /// The scene, then the dissolve snapshot fading out over it, then the HUD
@@ -5965,12 +5980,17 @@ const AUTOPLAY_BLOWS: [u64; 2] = [1500, 1700];
 /// blow struck at 1700.
 const AUTOPLAY_GUARDS: [u64; 3] = [1170, 1340, 1720];
 /// The last stretch leaves Sora standing so an enemy can attack him.
-/// The index that holds the item pictures.
-const PICTURE_INDEX: &str = "Image/dt/kh2_fifth.hed";
 const AUTOPLAY_END: u64 = 9400;
 /// A shown-pose change above this many units in one frame is logged.
 const POSE_JUMP_LOG: f32 = 6.;
 const AUTOPLAY_WARMUP_FRAMES: u64 = 30;
+
+/// The index that holds the item pictures: the fifth package (observed in
+/// the Steam candidate; another layout's fifth package must hold them too, or
+/// the read fails).
+fn picture_index(source: &ProbeSource) -> &'static str {
+    source.indexes()[4]
+}
 
 #[allow(clippy::too_many_arguments)]
 fn simulate(
@@ -9323,11 +9343,8 @@ fn read_board_model(
     idle: Option<&motion::SelectedMotion>,
 ) -> Result<BoardModel, Box<dyn std::error::Error>> {
     let hash = data::name_hash::of_path(&format!("obj/{name}.mdlx"));
-    for (index, _) in validation::required_files()
-        .into_iter()
-        .filter(|(n, _)| n.ends_with(".hed"))
-    {
-        let checked = source.open_index(&index)?;
+    for &index in source.indexes() {
+        let checked = source.open_index(index)?;
         let Some(ordinal) = checked
             .inventory
             .entries
@@ -9337,7 +9354,7 @@ fn read_board_model(
             continue;
         };
         drop(checked);
-        let mut models = model_inspection::read_model_at(source, &index, ordinal, hash)?;
+        let mut models = model_inspection::read_model_at(source, index, ordinal, hash)?;
         if models.is_empty() {
             break;
         }
@@ -10827,7 +10844,7 @@ fn load_wanted_picture(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asse
         return;
     }
     let path = format!("itempic/item-{id:03}.imd");
-    let sheet = match menu_screen::load_imgd(source, PICTURE_INDEX, &path) {
+    let sheet = match menu_screen::load_imgd(source, picture_index(source), &path) {
         Ok(Some(t)) => Some(frame.add_sheet(images, t.rgba, t.size, t.texel_scale)),
         Ok(None) => None,
         Err(e) => {
@@ -10868,7 +10885,7 @@ fn load_wanted_journal(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asse
         if let std::collections::hash_map::Entry::Vacant(slot) = c.journal_sheets.faces.entry(key) {
             let faces = code_of(key).and_then(|code| {
                 let path = format!("menu/jmface_{code}.2ld");
-                match menu_screen::load_images_named(source, PICTURE_INDEX, &path) {
+                match menu_screen::load_images_named(source, picture_index(source), &path) {
                     Ok(f) => f,
                     Err(e) => {
                         eprintln!("Journal faces {path} rejected: {e}");
@@ -10900,13 +10917,13 @@ fn load_wanted_journal(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asse
         let mut path = format!("menu/{}/jm_photo/{code}{}.bin", c.lang, a.suffix);
         if c.lang != "us"
             && !matches!(
-                menu_screen::load_imgd(source, PICTURE_INDEX, &path),
+                menu_screen::load_imgd(source, picture_index(source), &path),
                 Ok(Some(_))
             )
         {
             path = format!("menu/us/jm_photo/{code}{}.bin", a.suffix);
         }
-        match menu_screen::load_imgd(source, PICTURE_INDEX, &path) {
+        match menu_screen::load_imgd(source, picture_index(source), &path) {
             Ok(Some(t)) => {
                 let slot = frame.add_sheet(images, t.rgba, t.size, t.texel_scale);
                 c.journal_sheets.photos.insert(row, slot);
@@ -10933,13 +10950,13 @@ fn load_wanted_notice(c: &mut CampRes, frame: &mut Ui2dFrame, images: &mut Asset
     let mut path = format!("menu/{}/{file}", c.lang);
     if c.lang != "us"
         && !matches!(
-            menu_screen::load_imgd(source, PICTURE_INDEX, &path),
+            menu_screen::load_imgd(source, picture_index(source), &path),
             Ok(Some(_))
         )
     {
         path = format!("menu/us/{file}");
     }
-    match menu_screen::load_imgd(source, PICTURE_INDEX, &path) {
+    match menu_screen::load_imgd(source, picture_index(source), &path) {
         Ok(Some(t)) => {
             let slot = frame.add_sheet(images, t.rgba, t.size, t.texel_scale);
             c.notice_sheets.insert(file.clone(), slot);
@@ -11140,18 +11157,9 @@ fn launch_file_args(name: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Erro
         #[serde(default)]
         options: Vec<String>,
     }
-    // Search next to the checkout first (`.local/test-room/launch.json`, found
-    // from the executable in `target/<profile>/`), then LOCALAPPDATA.
-    let mut candidates = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        for up in exe.ancestors().skip(1).take(4) {
-            candidates.push(up.join(format!(".local/test-room/{name}.json")));
-        }
-    }
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        candidates
-            .push(PathBuf::from(local).join(format!("KH2FinalRewrite/test-room-{name}.json")));
-    }
+    // Windows searches next to the checkout first, then LOCALAPPDATA; Linux
+    // uses the launcher's data folder.
+    let candidates = crate::launcher::launch_file_candidates(name);
     let path = candidates.iter().find(|p| p.is_file()).ok_or_else(|| {
         format!(
             "no arguments and no launch file; looked in: {}",
@@ -12136,6 +12144,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             close_when_requested: false,
             ..default()
         }))
+        .add_plugins(visual::window_clear::WindowClearPlugin)
         .add_plugins(FogPlugin)
         .add_plugins(Ui2dPlugin {
             order: 0,

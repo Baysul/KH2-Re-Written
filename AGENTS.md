@@ -12,6 +12,10 @@ Read `docs/fidelity-contract.md`, `docs/milestones.md`, `docs/unknowns.md`, and 
 - Resolve public technical claims against pinned primary sources and installed-build observations. A tool's README is not compatibility evidence. No claim of whole-game equivalence from finite opening tests.
 - Preserve user files and saves. Do not switch Steam editions, repair/update the installation, spend money, share data or publish releases without the corresponding user instruction. Local inspection/builds are authorized.
 
+## Compatibility scope
+
+The requested extension is current-feature parity across native Windows/Linux and qualified Steam/Epic sources. Accepted decisions are recorded in [source qualification](docs/tasks/T174_source_qualification.md), [native Linux](docs/tasks/T175_native_linux_platform.md), and [first-port acceptance](docs/tasks/T176_port_acceptance.md). Portable saves remain deferred, not removed from scope. Planning and research do not qualify E01 or advance a gate. Private evidence stays outside Git; do not publish it.
+
 ## File placement and naming
 
 - Read `docs/folder-guide.md` for the current layout and historical-name map.

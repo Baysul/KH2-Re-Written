@@ -5,16 +5,6 @@ use super::*;
 use bevy::window::{MonitorSelection, PresentMode, VideoModeSelection, WindowMode};
 use visual::settings::{LANGUAGES, Settings};
 
-/// The KH2 package indexes a language's files may sit in.
-const INDEXES: [&str; 6] = [
-    "Image/dt/kh2_first.hed",
-    "Image/dt/kh2_second.hed",
-    "Image/dt/kh2_third.hed",
-    "Image/dt/kh2_fourth.hed",
-    "Image/dt/kh2_fifth.hed",
-    "Image/dt/kh2_sixth.hed",
-];
-
 /// Language-bearing paths (`{l}` = the language code); a configured file
 /// that matches one is swapped for the same path in the new language.
 const TEMPLATES: [&str; 10] = [
@@ -78,7 +68,8 @@ impl SettingsRes {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut names = HashMap::new();
         if sources.is_some() {
-            for index in INDEXES {
+            // The bound source's package indexes a language's files may sit in.
+            for &index in source.indexes() {
                 let Ok(checked) = source.open_index(index) else {
                     continue;
                 };

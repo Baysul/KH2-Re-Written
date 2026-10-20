@@ -6,16 +6,6 @@ use crate::{original_payload, probe_source::CheckedIndex, probe_source::ProbeSou
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// The six KH2 indexes, in package order.
-pub const INDEXES: [&str; 6] = [
-    "Image/dt/kh2_first.hed",
-    "Image/dt/kh2_second.hed",
-    "Image/dt/kh2_third.hed",
-    "Image/dt/kh2_fourth.hed",
-    "Image/dt/kh2_fifth.hed",
-    "Image/dt/kh2_sixth.hed",
-];
-
 /// MD5 (RFC 1321) of `data`.
 pub fn md5(data: &[u8]) -> [u8; 16] {
     const S: [u32; 64] = [
@@ -76,7 +66,8 @@ pub struct Found {
 
 impl Library {
     pub fn open(source: &ProbeSource) -> Result<Self> {
-        let indexes = INDEXES
+        let indexes = source
+            .indexes()
             .iter()
             .map(|&name| Ok((name, source.open_index(name)?)))
             .collect::<Result<_>>()?;

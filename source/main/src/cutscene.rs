@@ -996,6 +996,7 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         close_when_requested: false,
         ..default()
     }))
+    .add_plugins(visual::window_clear::WindowClearPlugin)
     .add_plugins(Ui2dPlugin {
         order: 0,
         overlay: false,

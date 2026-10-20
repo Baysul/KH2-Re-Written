@@ -30,7 +30,8 @@ use std::time::Duration;
 use visual::overlay::{Ui2dFrame, Ui2dPlugin};
 
 pub use install::{
-    data_dir, field_args, field_start, landing_room_config, play_args, save_start, saved_start,
+    data_dir, field_args, field_start, landing_room_config, launch_file_candidates, play_args,
+    save_start, saved_start,
 };
 
 // Palette.
@@ -246,6 +247,29 @@ impl Launcher {
     }
 }
 
+/// Where folder browsing starts: the drive letters on Windows; the home
+/// folder and the file system root elsewhere. Only existing ones are shown.
+fn browse_roots() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    let roots: Vec<PathBuf> = ('A'..='Z')
+        .map(|d| PathBuf::from(format!("{d}:\\")))
+        .collect();
+    #[cfg(not(windows))]
+    let roots: Vec<PathBuf> = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .into_iter()
+        .chain([PathBuf::from("/")])
+        .collect();
+    roots.into_iter().filter(|p| p.is_dir()).collect()
+}
+
+/// The heading over [`browse_roots`].
+#[cfg(windows)]
+const BROWSE_ROOTS_TITLE: &str = "Choose a drive";
+#[cfg(not(windows))]
+const BROWSE_ROOTS_TITLE: &str = "Choose where to look";
+
 /// A path as people type it (no `\\?\` prefix).
 fn plain(p: &Path) -> String {
     let s = p.display().to_string();
@@ -255,9 +279,8 @@ fn plain(p: &Path) -> String {
 /// Drives, folders, `.iso` files and `default.xex` for the Skate 3 disc.
 fn browse_iso_items(path: Option<&Path>, tests: &Bound) -> Vec<Item> {
     let Some(path) = path else {
-        let mut items: Vec<Item> = ('A'..='Z')
-            .map(|d| PathBuf::from(format!("{d}:\\")))
-            .filter(|p| p.is_dir())
+        let mut items: Vec<Item> = browse_roots()
+            .into_iter()
             .map(|p| Item::new(plain(&p), Action::BrowseIso(Some(p))))
             .collect();
         items.push(Item::new("Back", Action::UseFolder(tests.folder.clone())));
@@ -300,9 +323,8 @@ fn browse_iso_items(path: Option<&Path>, tests: &Bound) -> Vec<Item> {
 
 fn browse_items(path: Option<&Path>) -> Vec<Item> {
     let Some(path) = path else {
-        let mut items: Vec<Item> = ('A'..='Z')
-            .map(|d| PathBuf::from(format!("{d}:\\")))
-            .filter(|p| p.is_dir())
+        let mut items: Vec<Item> = browse_roots()
+            .into_iter()
             .map(|p| Item::new(plain(&p), Action::Browse(Some(p))))
             .collect();
         items.push(Item::new("Back", Action::Pick));
@@ -406,28 +428,37 @@ fn start_test(index: usize, dir: &Path, b: &Bound) -> Result<Running, String> {
     spawn(test.name.into(), exe, args)
 }
 
+/// The launcher's own executable names, for messages.
+#[cfg(windows)]
+const LAUNCHER_NAMES: &str = "KH2RW Launcher.exe or KH2RW.exe";
+#[cfg(not(windows))]
+const LAUNCHER_NAMES: &str = "KH2RW";
+
 /// A viewer is a sibling executable: folder, manifest, selection, new log.
 fn start_viewer(v: &install::Viewer, b: &Bound) -> Result<Running, String> {
+    let file = format!("{}{}", v.program, std::env::consts::EXE_SUFFIX);
     let exe = std::env::current_exe()
         .map_err(|e| e.to_string())?
-        .with_file_name(format!("{}.exe", v.program));
+        .with_file_name(&file);
     if !exe.is_file() {
         return Err(format!(
-            "{}.exe is not next to KH2RW Launcher.exe or KH2RW.exe. Build all of main (cargo build -p main).",
-            v.program
+            "{file} is not next to {LAUNCHER_NAMES}. Build all of main (cargo build -p main)."
         ));
     }
     let log = install::viewer_log(v.program)?;
-    let args = [&b.folder, &b.manifest, &v.selection, &log]
-        .map(|p| p.to_string_lossy().into_owned())
-        .to_vec();
+    // Paths go to the viewer as they are, without a lossy text conversion.
+    let args = [&b.folder, &b.manifest, &v.selection, &log].map(|p| p.as_os_str().to_owned());
     spawn(v.label.clone(), exe, args)
 }
 
-fn spawn(name: String, exe: PathBuf, args: Vec<String>) -> Result<Running, String> {
+fn spawn(
+    name: String,
+    exe: PathBuf,
+    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+) -> Result<Running, String> {
     let mut command = Command::new(exe);
     command
-        .args(&args)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -668,7 +699,7 @@ fn act(l: &mut Launcher, action: Action, exit: &mut MessageWriter<AppExit>) {
             match skate_source::admit(Some(&path)) {
                 Ok(_) => {
                     l.settings.skate3_iso = Some(path);
-                    if let Err(e) = install::save_settings(&l.dir, &l.settings) {
+                    if let Err(e) = install::save_settings(&install::settings_dir(), &l.settings) {
                         eprintln!("Launcher settings not saved: {e}");
                     }
                     l.go(Screen::Tests(b));
@@ -760,7 +791,7 @@ fn checked(l: &mut Launcher, result: Result<Bound, String>, folder: &Path) {
             lines: vec![
                 plain(&b.folder),
                 format!(
-                    "The tests only run on the supported Steam version ({}…). This folder has {}….",
+                    "The tests only run on the game version the launch configs here were made for ({}…). This folder has {}….",
                     &want[..12.min(want.len())],
                     &b.identity[..12.min(b.identity.len())]
                 ),
@@ -770,7 +801,7 @@ fn checked(l: &mut Launcher, result: Result<Bound, String>, folder: &Path) {
     }
     l.settings.game_folder = Some(b.folder.clone());
     l.settings.manifest = Some(b.manifest.clone());
-    if let Err(e) = install::save_settings(&l.dir, &l.settings) {
+    if let Err(e) = install::save_settings(&install::settings_dir(), &l.settings) {
         eprintln!("Launcher settings not saved: {e}");
     }
     l.go(Screen::Tests(b));
@@ -801,7 +832,7 @@ fn update(
         l.viewers = install::viewers(&l.dir);
         if !l.settings.guide_seen {
             l.settings.guide_seen = true;
-            if let Err(e) = install::save_settings(&l.dir, &l.settings) {
+            if let Err(e) = install::save_settings(&install::settings_dir(), &l.settings) {
                 eprintln!("Launcher settings not saved: {e}");
             }
             l.go(Screen::Guide(None));
@@ -1025,7 +1056,7 @@ fn draw(
         Screen::Pick => "Select the game folder".into(),
         Screen::Browse(path) => path
             .as_deref()
-            .map_or_else(|| "Choose a drive".into(), plain),
+            .map_or_else(|| BROWSE_ROOTS_TITLE.into(), plain),
         Screen::BrowseIso(path, _) => path
             .as_deref()
             .map_or_else(|| "Find your Skate 3 ISO".into(), plain),
@@ -1249,8 +1280,8 @@ fn footer(l: &Launcher, p: &mut Paint, f: &mut Ui2dFrame) {
 
 /// The quick start steps [launcher text, not the original's].
 const GUIDE_STEPS: [&str; 4] = [
-    "You need your own Steam copy of KINGDOM HEARTS -HD 1.5+2.5 ReMIX-, installed. Only Kingdom Hearts II Final Mix is used.",
-    "Choose the game folder. A Steam install is found for you. If it is not, browse to it or drop the folder on this window.",
+    "You need your own Steam or Epic copy of KINGDOM HEARTS -HD 1.5+2.5 ReMIX-, installed. Only Kingdom Hearts II Final Mix is used.",
+    "Choose the game folder. A Steam install is found for you. If it is not, or your copy is from Epic, browse to it or drop the folder on this window.",
     "Optional: on the test list, set your Skate 3 disc (an Xbox 360 ISO) to ride a skateboard with J.",
     "Choose Title screen and pick New Game, or Test room to start playing straight away.",
 ];
@@ -1378,7 +1409,7 @@ fn check_screen(job: &Job, p: &mut Paint, f: &mut Ui2dFrame) {
 /// The Skate 3 disc the launcher remembers (an ISO, or an extracted
 /// folder's `default.xex`), for the test room's J key.
 pub fn skate3_iso() -> Option<std::path::PathBuf> {
-    install::load_settings(&install::data_dir()).skate3_iso
+    install::load_settings(&install::settings_dir()).skate3_iso
 }
 
 /// Where the riding data prepared from the Skate 3 disc is kept.
@@ -1389,7 +1420,7 @@ pub fn skate3_cache() -> std::path::PathBuf {
 
 pub fn main() -> std::process::ExitCode {
     let dir = install::data_dir();
-    let settings = install::load_settings(&dir);
+    let settings = install::load_settings(&install::settings_dir());
     App::new()
         .insert_resource(Launcher {
             dir,
@@ -1420,6 +1451,7 @@ pub fn main() -> std::process::ExitCode {
             }),
             ..default()
         }))
+        .add_plugins(visual::window_clear::WindowClearPlugin)
         .add_plugins(Ui2dPlugin {
             order: 0,
             overlay: false,

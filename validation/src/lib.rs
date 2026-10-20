@@ -12,6 +12,28 @@ use std::{
 
 pub const KH2_EXECUTABLE: &str = "KINGDOM HEARTS II FINAL MIX.exe";
 const PACKAGES: [&str; 6] = ["first", "second", "third", "fourth", "fifth", "sixth"];
+/// Package folders seen in candidate installations: the Steam collection's
+/// `Image/dt` and the selected Epic candidate's `Image/en` (T172). A folder
+/// is a layout only; it establishes no edition, language or storefront.
+pub const PACKAGE_FOLDERS: [&str; 2] = ["Image/dt", "Image/en"];
+const INDEX_FILES: [[&str; 6]; 2] = [
+    [
+        "Image/dt/kh2_first.hed",
+        "Image/dt/kh2_second.hed",
+        "Image/dt/kh2_third.hed",
+        "Image/dt/kh2_fourth.hed",
+        "Image/dt/kh2_fifth.hed",
+        "Image/dt/kh2_sixth.hed",
+    ],
+    [
+        "Image/en/kh2_first.hed",
+        "Image/en/kh2_second.hed",
+        "Image/en/kh2_third.hed",
+        "Image/en/kh2_fourth.hed",
+        "Image/en/kh2_fifth.hed",
+        "Image/en/kh2_sixth.hed",
+    ],
+];
 /// Schema 2 also records the SHA-256 of every CHUNK_SIZE-byte chunk, so a
 /// session can verify exactly the bytes it reads against the full scan.
 pub const SCHEMA: u32 = 2;
@@ -205,7 +227,7 @@ fn inspect_files_counted(
             r.into_inner()
                 .unwrap()
                 .unwrap_or_else(|| Err(invalid("scan worker stopped")))
-                .map_err(|e| invalid(format!("cannot inspect {relative}: {e}; select the collection install root and finish/verify the installation in Steam")))
+                .map_err(|e| invalid(format!("cannot inspect {relative}: {e}; select the game install root and finish/verify the installation in its store launcher")))
         })
         .collect()
 }
@@ -225,17 +247,64 @@ pub fn content_identity(files: &[SourceFile]) -> String {
     format!("{:x}", hash.finalize())
 }
 
+/// The executable and the packages of the Steam candidate layout.
 pub fn required_files() -> Vec<(String, &'static str)> {
+    required_files_in(PACKAGE_FOLDERS[0])
+}
+
+/// The executable and the twelve package files in `folder`.
+pub fn required_files_in(folder: &str) -> Vec<(String, &'static str)> {
     let mut files = vec![(KH2_EXECUTABLE.into(), "kh2_executable_candidate")];
     for package in PACKAGES {
         for extension in ["hed", "pkg"] {
             files.push((
-                format!("Image/dt/kh2_{package}.{extension}"),
+                format!("{folder}/kh2_{package}.{extension}"),
                 "kh2_package_candidate",
             ));
         }
     }
     files
+}
+
+/// The six package indexes in a candidate `folder`, in package order.
+pub fn index_files(folder: &str) -> Option<&'static [&'static str; 6]> {
+    let i = PACKAGE_FOLDERS.iter().position(|f| *f == folder)?;
+    Some(&INDEX_FILES[i])
+}
+
+/// The package folder of a manifest's files, when they are exactly the
+/// executable and one candidate folder's packages, each listed once.
+pub fn package_folder_of(files: &[SourceFile]) -> Option<&'static str> {
+    PACKAGE_FOLDERS.into_iter().find(|folder| {
+        let required = required_files_in(folder);
+        files.len() == required.len()
+            && required
+                .iter()
+                .all(|(path, _)| files.iter().filter(|f| f.relative_path == *path).count() == 1)
+    })
+}
+
+/// The package folder a scan reads: the one candidate folder holding any
+/// package file. Package files in two folders make the layout ambiguous, so
+/// nothing is mixed or chosen. With none, the first folder is used so its
+/// missing files are reported.
+pub fn detect_package_folder(root: &Path) -> io::Result<&'static str> {
+    let present: Vec<_> = PACKAGE_FOLDERS
+        .into_iter()
+        .filter(|folder| {
+            required_files_in(folder)
+                .iter()
+                .skip(1)
+                .any(|(path, _)| root.join(path).exists())
+        })
+        .collect();
+    match present[..] {
+        [] => Ok(PACKAGE_FOLDERS[0]),
+        [folder] => Ok(folder),
+        _ => Err(invalid(
+            "package files are in both Image/dt and Image/en; the layout is ambiguous, so the folder is not used",
+        )),
+    }
 }
 
 /// Scan the observed local layout, fail on missing files, and leave unsupported sources quarantined.
@@ -251,7 +320,10 @@ pub fn scan_with(root: &Path, with_chunks: bool) -> io::Result<SourceManifest> {
 /// Total size of the required files, for `scan_with_progress` (missing
 /// files count as 0; the scan itself reports them).
 pub fn required_bytes(root: &Path) -> u64 {
-    required_files()
+    let Ok(folder) = detect_package_folder(root) else {
+        return 0;
+    };
+    required_files_in(folder)
         .iter()
         .filter_map(|(relative, _)| fs::metadata(root.join(relative)).ok())
         .map(|m| m.len())
@@ -279,10 +351,11 @@ fn scan_counted(
             "select the installed game folder, not a file or cache",
         ));
     }
-    let files = inspect_files_counted(&root, &required_files(), with_chunks, progress)?;
+    let folder = detect_package_folder(&root)?;
+    let files = inspect_files_counted(&root, &required_files_in(folder), with_chunks, progress)?;
     if let Some(empty) = files.iter().find(|f| f.size == 0) {
         return Err(invalid(format!(
-            "empty required candidate file: {}; finish/verify the Steam installation",
+            "empty required candidate file: {}; finish/verify the installation in its store launcher",
             empty.relative_path
         )));
     }
@@ -299,11 +372,27 @@ fn scan_counted(
             root.file_name()
                 .is_some_and(|name| name == std::ffi::OsStr::new(&dir))
         });
+    let steam_layout = folder == PACKAGE_FOLDERS[0];
+    let mut unknowns = vec![
+        "No independently qualified supported-build profile yet".into(),
+        "Clean/modded status not established by hashes alone".into(),
+        "Shared launcher, language, font, movie and audio dependency coverage incomplete".into(),
+        "English/Japanese content and edition equivalence unverified".into(),
+    ];
+    if !steam_layout {
+        unknowns.push(format!(
+            "{folder} layout: internal language routes, package precedence and executable-derived tables unqualified"
+        ));
+    }
     Ok(SourceManifest {
         schema_version: SCHEMA,
         chunk_identity: chunk_identity(&files),
         canonical_source_path: root,
-        product: "KINGDOM HEARTS II FINAL MIX (Steam collection candidate)".into(),
+        product: if steam_layout {
+            "KINGDOM HEARTS II FINAL MIX (Steam collection candidate)".into()
+        } else {
+            format!("KINGDOM HEARTS II FINAL MIX ({folder} layout candidate)")
+        },
         observed_app_id: steam_matches
             .then(|| vdf_value(&metadata, "appid"))
             .flatten(),
@@ -314,17 +403,14 @@ fn scan_counted(
             .then(|| vdf_value(&metadata, "language"))
             .flatten(),
         qualification: "quarantined_unqualified".into(),
-        edition_confidence:
-            "Steam language and package names are clues; edition not independently verified".into(),
+        edition_confidence: if steam_layout {
+            "Steam language and package names are clues; edition not independently verified".into()
+        } else {
+            "The package folder name is a clue; edition, storefront and language coverage not independently verified".into()
+        },
         content_identity: content_identity(&files),
         files,
-        unknowns: vec![
-            "No independently qualified supported-build profile yet".into(),
-            "Clean/modded status not established by hashes alone".into(),
-            "Shared launcher, language, font, movie and audio dependency coverage incomplete"
-                .into(),
-            "English/Japanese content and edition equivalence unverified".into(),
-        ],
+        unknowns,
     })
 }
 
@@ -346,7 +432,7 @@ pub fn safe_output(root: &Path, output: &Path) -> io::Result<PathBuf> {
     let parent = fs::canonicalize(parent)?;
     if parent.starts_with(&root) {
         return Err(invalid(
-            "manifest output must be outside the Steam installation",
+            "manifest output must be outside the game installation",
         ));
     }
     if parent.ancestors().any(|dir| dir.join(".git").exists()) {

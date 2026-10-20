@@ -16,14 +16,32 @@ struct SmokeRun {
     gamepad_control: bool,
 }
 
+#[cfg(target_os = "linux")]
+fn default_log_path() -> PathBuf {
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|home| home.join(".local/state"))
+        })
+        .expect("an absolute XDG_STATE_HOME or HOME is required for the smoke log; or use --log");
+    state.join("KH2FinalRewrite/logs/smoke.log")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn default_log_path() -> PathBuf {
+    PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA is required on Windows"))
+        .join("KH2FinalRewrite/logs/smoke.log")
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut exit_after = None;
     let mut gamepad_control = false;
-    let mut log_path = PathBuf::from(
-        std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA is required on Windows"),
-    )
-    .join("KH2FinalRewrite/logs/smoke.log");
+    let mut log_path = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--gamepad" => gamepad_control = true,
@@ -35,10 +53,11 @@ fn main() {
                         .expect("invalid frame count"),
                 )
             }
-            "--log" => log_path = PathBuf::from(args.next().expect("--log needs a path")),
+            "--log" => log_path = Some(PathBuf::from(args.next().expect("--log needs a path"))),
             _ => panic!("unknown argument: {arg}"),
         }
     }
+    let log_path = log_path.unwrap_or_else(default_log_path);
     if let Some(parent) = log_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).expect("create smoke log directory");
     }
@@ -67,6 +86,7 @@ fn main() {
                     ..default()
                 }),
         )
+        .add_plugins(visual::window_clear::WindowClearPlugin)
         .add_systems(Startup, setup)
         .add_systems(Update, (move_object, finish_smoke))
         .run();

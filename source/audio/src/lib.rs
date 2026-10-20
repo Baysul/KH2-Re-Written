@@ -1,8 +1,11 @@
 //! Sound output for the test room: a software mixer (safe) feeding the
-//! Windows waveOut device (the only FFI, in `winmm`). Clips arrive already
-//! decoded; voices are resampled linearly to the device rate.
+//! Windows waveOut device (the only FFI, in `winmm`) or, on Linux, CPAL's
+//! ALSA output (`linux_device`). Clips arrive already decoded; voices are
+//! resampled linearly to the device rate.
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "linux")]
+mod linux_device;
 #[cfg(windows)]
 mod winmm;
 
@@ -249,6 +252,8 @@ pub struct Output {
     pub mixer: Arc<Mutex<Mixer>>,
     #[cfg(windows)]
     _device: winmm::Device,
+    #[cfg(target_os = "linux")]
+    _device: linux_device::Device,
 }
 
 impl Output {
@@ -269,7 +274,22 @@ impl Output {
                 _device: device,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let feed = mixer.clone();
+            let device = linux_device::Device::open(RATE, move |buffer| {
+                if let Ok(mut m) = feed.lock() {
+                    m.mix(buffer);
+                } else {
+                    buffer.fill(0);
+                }
+            })?;
+            Ok(Self {
+                mixer,
+                _device: device,
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = mixer;
             Err(std::io::Error::other("no audio output on this platform"))

@@ -15,11 +15,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         data::probe_source::ProbeSource::bind(&PathBuf::from(&args[0]), &PathBuf::from(&args[1]))?;
     let output = source.output_path(&PathBuf::from(&args[2]))?;
     let mut samples = Vec::new();
-    for (relative, _) in validation::required_files()
-        .into_iter()
-        .filter(|(name, _)| name.ends_with(".hed"))
-    {
-        let mut checked = source.open_index(&relative)?;
+    for &relative in source.indexes() {
+        let mut checked = source.open_index(relative)?;
         for (ordinal, entry) in checked.inventory.entries.iter().enumerate() {
             use std::io::{Seek, SeekFrom};
             checked.reader.seek(SeekFrom::Start(entry.package_offset))?;

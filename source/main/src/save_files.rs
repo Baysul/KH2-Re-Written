@@ -21,6 +21,8 @@ use visual::{
 pub struct FileBackend {
     container: Container,
     store: Option<Store>,
+    /// False when saving is off: every save or delete then fails.
+    writable: bool,
 }
 
 impl FileBackend {
@@ -29,6 +31,18 @@ impl FileBackend {
         Self {
             container,
             store: None,
+            writable: true,
+        }
+    }
+
+    /// Saving is off: no file is read or written, the slots are empty, and
+    /// saving or deleting fails, so the menu shows its write-failure notice
+    /// instead of reporting progress it did not keep.
+    fn off() -> Self {
+        Self {
+            container: Container::empty(&save::cipher::key_from_steam_id(0)),
+            store: None,
+            writable: false,
         }
     }
 
@@ -43,9 +57,36 @@ impl FileBackend {
     /// The rewrite's own container under `data_dir/saves`. When it does not
     /// exist yet, the original game's file for the same Steam account is
     /// read (never written) as the starting point.
-    pub fn open(data_dir: &Path, root: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    ///
+    /// Saving is turned off instead (with the reason), and no save file is
+    /// touched, when the selected copy is not in the Steam package layout
+    /// (its save format and account rules are unqualified, whatever its
+    /// executable's table reads as) or its executable gives no usable save
+    /// table. Other errors still fail (T180).
+    pub fn open_or_off(
+        data_dir: &Path,
+        root: &Path,
+        package_folder: &str,
+    ) -> Result<(Self, Option<String>), Box<dyn std::error::Error>> {
+        if package_folder != validation::PACKAGE_FOLDERS[0] {
+            return Ok((
+                Self::off(),
+                Some(format!(
+                    "the save format of a copy with an {package_folder} folder is not qualified"
+                )),
+            ));
+        }
         let exe = std::fs::read(root.join("KINGDOM HEARTS II FINAL MIX.exe"))?;
-        let sbox = save::cipher::Sbox::from_executable(&exe)?;
+        match save::cipher::Sbox::from_executable(&exe) {
+            Ok(sbox) => Ok((Self::with_table(data_dir, sbox)?, None)),
+            Err(e) => Ok((Self::off(), Some(e.to_string()))),
+        }
+    }
+
+    fn with_table(
+        data_dir: &Path,
+        sbox: save::cipher::Sbox,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let original = store::original_folder();
         let id = original
             .as_deref()
@@ -66,6 +107,7 @@ impl FileBackend {
         Ok(Self {
             container,
             store: Some(own),
+            writable: true,
         })
     }
 
@@ -92,10 +134,15 @@ impl Backend for FileBackend {
     }
 
     fn save(&mut self, slot: usize, data: &SaveData) -> bool {
-        slots::store(&mut self.container, slot, data, now()).is_ok() && self.persist()
+        self.writable
+            && slots::store(&mut self.container, slot, data, now()).is_ok()
+            && self.persist()
     }
 
     fn delete(&mut self, slot: usize) -> bool {
+        if !self.writable {
+            return false;
+        }
         slots::delete(&mut self.container, slot);
         self.persist()
     }

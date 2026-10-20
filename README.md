@@ -102,18 +102,60 @@ cargo test --workspace --locked
 cargo run -p main --locked -- --frames 180
 ```
 
+### Native Linux development
+
+The first native Linux build and **source-free development window** work on the
+current x86_64 Wayland host. Run `cargo run -p main --locked -- --frames 180`
+from a Wayland session. This shows a generated sample, not the game, and needs no
+installation or saves. The pinned dependencies are unchanged; Linux now selects
+the Wayland backend explicitly. See [the build/startup record](docs/tasks/T177_linux_build_startup.md)
+for checks and remaining limits.
+
+The launcher (`cargo run -p main --bin KH2RW --locked`) also opens natively on
+Wayland, with bundled fonts, Linux folders, native folder browsing and Linux
+Steam library detection ([T178](docs/tasks/T178_linux_launcher_boundary.md)).
+Sound plays through the existing mixer to the Linux sound system (ALSA,
+usually PipeWire's bridge) at the mixer's own 48 kHz stereo
+([T179](docs/tasks/T179_linux_sound_output.md)).
+
+The launcher also accepts the current Epic copy, whose packages sit in
+`Image/en` rather than Steam's `Image/dt`: browse to its folder
+([T180](docs/tasks/T180_epic_source_binding.md)). From it the title, test rooms
+and cutscene start on Linux. **Saving is off for an Epic copy**: its save format
+is not qualified, so no save file is read or written, the title warns, and its
+window title says SAVING OFF. Installed-source gameplay is not yet qualified on
+Linux. Epic and Steam source candidates remain quarantined; a successful build,
+launcher window or Epic run does not admit either one. Windows runtime regression checks also remain
+outstanding. This is not a release or a claim of distro, controller or
+whole-game support.
+
 The full list of checks, and the rules for contributing, are in [CONTRIBUTING.md](CONTRIBUTING.md). Developer tools for reading the installed game are in [docs/developer-tools.md](docs/developer-tools.md).
 
 ## Private data
 
-Source manifests, package records, captures and saves stay outside this repository, in `%LOCALAPPDATA%\KH2FinalRewrite\`. See [ARCHITECTURE.md](ARCHITECTURE.md) for the layout.
+Source manifests, package records, captures and saves stay outside this repository.
+The Windows layout uses `%LOCALAPPDATA%\KH2FinalRewrite\`; see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+On Linux each kind of file has its own `KH2FinalRewrite` folder, following the
+XDG base-directory rules (absolute `$XDG_*` values, else the `$HOME` defaults;
+relative values are ignored):
+
+| What | Folder |
+|---|---|
+| Launcher settings | `$XDG_CONFIG_HOME` (`~/.config`) |
+| Source manifests, generated test configs, launch files, saved start rooms | `$XDG_DATA_HOME` (`~/.local/share`) |
+| Logs (viewers, smoke) | `$XDG_STATE_HOME/…/logs` (`~/.local/state`) |
+
+There is no checkout or working-directory fallback on Linux, and nothing is
+migrated from Windows. The smoke's `--log '<private-file>'` overrides its log
+location without requiring either variable.
 
 ## Credits
 
 - **Project owner:** TheGlurbus ([@BurBaGlurbus](https://github.com/BurBaGlurbus)), who maintains the project.
 - **Code:** written with [Claude](https://claude.com/claude-code), an AI coding assistant, under the owner's direction.
 - **Format research:** [OpenKH](https://git.openkh.dev/) (Apache-2.0) documents the game's file formats, and the project's reader follows it. The attribution list is in [NOTICE](NOTICE).
-- **Other third-party code:** [Bevy](https://bevy.org), the `image` and `png` crates, zlib-rs, Microsoft DirectXTex (MIT), the .NET runtime (MIT), and `bevy_mikktspace` (Morten Mikkelsen). Release licences are in [docs/release/](docs/release/).
+- **Other third-party code:** [Bevy](https://bevy.org), the `image` and `png` crates, zlib-rs, Microsoft DirectXTex (MIT), the .NET runtime (MIT), and `bevy_mikktspace` (Morten Mikkelsen). Off Windows the launcher's text uses the bundled Liberation Sans fonts (SIL OFL 1.1; see [their notes](source/main/assets/fonts/README.md)). Release licences are in [docs/release/](docs/release/).
 - **Skate 3 crates** (`source/extras/skateboard/engine/`, GPL-3.0): adapted from [SK8-ENGINE/skate-3-rust-engine](https://github.com/SK8-ENGINE/skate-3-rust-engine). See [its README](source/extras/skateboard/engine/README.md).
 - **Games:** *Kingdom Hearts* is by Square Enix and Disney. This project is not affiliated with or endorsed by either company.
 

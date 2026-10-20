@@ -64,11 +64,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("selection schema/source identity/count is invalid".into());
     }
-    let indexes: Vec<_> = validation::required_files()
-        .into_iter()
-        .filter(|(p, _)| p.ends_with(".hed"))
-        .map(|(p, _)| p)
-        .collect();
+    let indexes: Vec<String> = source.indexes().iter().map(|p| p.to_string()).collect();
     let mut seen = HashSet::new();
     for item in &selection.selections {
         if !indexes.contains(&item.index)

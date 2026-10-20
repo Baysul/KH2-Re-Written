@@ -255,9 +255,7 @@ fn read_selection_models(
     }
     let mut seen = HashSet::new();
     for item in &selection.selections {
-        if !validation::required_files()
-            .iter()
-            .any(|(name, _)| name == &item.index && name.ends_with(".hed"))
+        if !source.indexes().contains(&item.index.as_str())
             || !seen.insert((&item.index, item.ordinal))
         {
             return Err("invalid/duplicate model source identity".into());
@@ -325,15 +323,12 @@ fn read_models_profile(
     let mut texture_rgba = 0usize;
     let mut texture_images = 0usize;
     let mut uv_corners = 0usize;
-    for (relative, _) in validation::required_files()
-        .into_iter()
-        .filter(|(name, _)| name.ends_with(".hed"))
-    {
+    for &relative in source.indexes() {
         let selected: Vec<_> = items.iter().filter(|item| item.index == relative).collect();
         if selected.is_empty() {
             continue;
         }
-        let mut checked = source.open_index(&relative)?;
+        let mut checked = source.open_index(relative)?;
         for item in selected {
             let entry = checked
                 .inventory
@@ -465,7 +460,7 @@ fn read_models_profile(
                     return Err("cumulative inspection mesh budget exceeded".into());
                 }
                 models.push(InspectionModel {
-                    index: relative.clone(),
+                    index: relative.to_owned(),
                     ordinal: item.ordinal,
                     bar_ordinal,
                     excluded_linked_groups: geometry.excluded_linked_groups,

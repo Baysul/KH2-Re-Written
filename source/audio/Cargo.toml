@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+# Linux device output (T179); Windows keeps its own waveOut module.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "=0.16.0", default-features = false }
+
 # The workspace forbids unsafe code. This crate only denies it: the one
 # module that calls the Windows waveOut API allows it, and nothing else may.
 [lints.rust]

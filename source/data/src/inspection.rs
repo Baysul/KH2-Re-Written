@@ -59,9 +59,7 @@ pub fn read_selected_images(
     }
     let mut seen = HashSet::new();
     for item in &selection.selections {
-        if !validation::required_files()
-            .iter()
-            .any(|(name, _)| name == &item.index && name.ends_with(".hed"))
+        if !source.indexes().contains(&item.index.as_str())
             || !seen.insert((&item.index, item.ordinal))
         {
             return Err("image selection contains invalid/duplicate source identities".into());
@@ -71,10 +69,7 @@ pub fn read_selected_images(
     let mut images = Vec::new();
     let mut storage_bytes = 0usize;
     let mut rgba_bytes = 0usize;
-    for (relative, _) in validation::required_files()
-        .into_iter()
-        .filter(|(name, _)| name.ends_with(".hed"))
-    {
+    for &relative in source.indexes() {
         let selected: Vec<_> = selection
             .selections
             .iter()
@@ -83,7 +78,7 @@ pub fn read_selected_images(
         if selected.is_empty() {
             continue;
         }
-        let mut checked = source.open_index(&relative)?;
+        let mut checked = source.open_index(relative)?;
         for item in selected {
             let entry = checked
                 .inventory
@@ -108,7 +103,7 @@ pub fn read_selected_images(
                     return Err("image inspection exceeds RGBA budget".into());
                 }
                 images.push(InspectionImage {
-                    index: relative.clone(),
+                    index: relative.to_owned(),
                     ordinal: item.ordinal,
                     replacement_ordinal: replacement.metadata.ordinal,
                     decoded,

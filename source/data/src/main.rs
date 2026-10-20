@@ -14,7 +14,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let root = fs::canonicalize(PathBuf::from(&args[0]))?;
     let output = validation::safe_output(&root, &PathBuf::from(&args[1]))?;
     let mut inventories = serde_json::Map::new();
-    for (relative, _) in validation::required_files()
+    for (relative, _) in validation::required_files_in(validation::detect_package_folder(&root)?)
         .into_iter()
         .filter(|(name, _)| name.ends_with(".hed"))
     {
