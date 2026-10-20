@@ -170,4 +170,5 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T192](T192-first-person-flags-and-commands.md) | First person: FUN_1403ba300's flag bits and what first person blocks | PARTIAL. |
 | [T202](T202-second-command-deck-and-world-layouts.md) | The second command deck (Summon, Party, Limit) and the world command layouts | PARTIAL. |
 | [T203](T203-party-limit-scenes.md) | Party limits run from the second deck | PARTIAL. |
+| [T204](T204-summons.md) | Summons come, last their time and leave from the second deck | PARTIAL. |
 | [T141](T141-ik-and-animation-parity.md) | IK aim chains, pole vectors and joint-space motion blends | PROGRESS. Master Form matches the PS2 routine; 87% of installed motions within 0.1. |

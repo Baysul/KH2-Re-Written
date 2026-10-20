@@ -35,11 +35,16 @@ const MEMBER_COMMANDS: [u16; 16] = [
 const ABILITY_KIND: u8 = 0x13;
 
 /// 00battle `sumn` (0x40-byte rows after an 8-byte header): the summon's
-/// command and the charm item that offers it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// command, the charm item that offers it, its object entry (+4, the one
+/// FUN_1403de610 spawns), a second object (+8: Tinker Bell) and its
+/// finisher's command (+0xc).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SummonRow {
     pub command: u16,
     pub charm: u16,
+    pub object: u16,
+    pub extra: u16,
+    pub limit: u16,
 }
 
 /// 00battle `limt` (0x40-byte rows after an 8-byte header): id, the three
@@ -82,6 +87,9 @@ pub fn read_summons(sumn: &[u8]) -> Vec<SummonRow> {
         .map(|r| SummonRow {
             command: u16::from_le_bytes([r[0], r[1]]),
             charm: u16::from_le_bytes([r[2], r[3]]),
+            object: u16::from_le_bytes([r[4], r[5]]),
+            extra: u16::from_le_bytes([r[8], r[9]]),
+            limit: u16::from_le_bytes([r[0xc], r[0xd]]),
         })
         .collect()
 }
@@ -123,6 +131,9 @@ pub struct Room {
     pub sora_bits: Vec<u16>,
     /// Commands the current form disables (FUN_1403b6cb0).
     pub masked: Vec<u16>,
+    /// The summon state (DAT_142a24edc: 0 none, 1 appearing, 2 out, 3
+    /// leaving).
+    pub summon_state: u8,
 }
 
 pub struct SecondDeck {
@@ -312,16 +323,20 @@ impl SecondDeck {
         }
     }
 
-    /// Menu 6 (FUN_1403f3860): Attack as on the top deck; Summon when the
-    /// list has an entry (else the empty row); Party; Limit. Summons never
-    /// run here, so Dismiss and Genie's Drive row (0x25d) do not come up.
+    /// Menu 6 (FUN_1403f3860): Attack as on the top deck; Dismiss while a
+    /// summon is out, else Summon when the list has an entry (else the
+    /// empty row); Party; Limit. [Open] Genie's Drive row (0x25d, summon
+    /// state 2 with Genie out) is not built.
     pub fn deck(&self, room: &Room, attack: &Item) -> (Vec<Item>, Vec<Option<usize>>) {
         let summons = self.summon_list(room);
         let party = self.party_list(room);
         let limits = self.limit_list(room);
         let mut items = vec![attack.clone()];
         let mut opens = vec![None];
-        if summons.is_empty() {
+        if room.summon_state != 0 {
+            items.push(self.item(DISMISS, self.with_mask(room, DISMISS, 0)));
+            opens.push(None);
+        } else if summons.is_empty() {
             items.push(self.item(BLANK, 5));
             opens.push(None);
         } else {
@@ -383,7 +398,7 @@ pub fn room(game: &Game, world: Option<u8>) -> Room {
         .into_iter()
         .filter(|&b| game.player.abilities.has(b))
         .collect();
-    let mut commands = vec![SUMMON, PARTY, LIMIT];
+    let mut commands = vec![SUMMON, PARTY, LIMIT, DISMISS];
     commands.extend(sd.summons.iter().map(|s| s.command));
     commands.extend(sd.limits.iter().map(|l| l.command));
     commands.extend(MEMBER_COMMANDS.iter().filter(|&&c| c != 0));
@@ -404,6 +419,7 @@ pub fn room(game: &Game, world: Option<u8>) -> Room {
         charms,
         sora_bits,
         masked,
+        summon_state: super::summon::state_of(game),
     }
 }
 
@@ -468,14 +484,27 @@ pub fn decide(
         Decision::ExecuteSub { row, index } => {
             let command = sd.list.get(index).copied();
             let limit = sd.list_kind == LIMIT_LIST;
+            let summon = sd.list_kind == SUMMON_LIST;
             game.event(
                 serde_json::json!({"event":"second_deck_command","tick":tick,
                 "row":row,"command":command,"built":limit}),
             );
-            // A party limit starts with the tick's Sora update (party_limit).
+            // A party limit starts with the tick's Sora update (party_limit);
+            // a summon with the summon tick (summon.rs).
             if limit {
                 game.limit_request = command;
+            } else if summon {
+                game.summon_request = command;
             }
+            Decision::None
+        }
+        // Row 1 is Dismiss while a summon is out (execute 316).
+        Decision::Execute(1) if super::summon::state_of(game) != 0 => {
+            game.event(
+                serde_json::json!({"event":"second_deck_command","tick":tick,
+                "row":1,"command":DISMISS,"built":true}),
+            );
+            game.summon_dismiss = true;
             Decision::None
         }
         Decision::Execute(row) if row > 0 => {
@@ -519,10 +548,12 @@ mod tests {
                 SummonRow {
                     command: 0x1bf,
                     charm: 0x17f,
+                    ..SummonRow::default()
                 },
                 SummonRow {
                     command: 0x59,
                     charm: 0x9f,
+                    ..SummonRow::default()
                 },
             ],
             limits: vec![
@@ -613,13 +644,16 @@ mod tests {
     fn reads_summon_and_limit_rows() {
         let mut sumn = vec![2, 0, 0, 0, 1, 0, 0, 0];
         let mut r = [0u8; 0x40];
-        r[..4].copy_from_slice(&[0xbf, 1, 0x7f, 1]);
+        r[..0xe].copy_from_slice(&[0xbf, 1, 0x7f, 1, 0xc8, 6, 0, 0, 0xf4, 4, 0, 0, 0x11, 2]);
         sumn.extend(r);
         assert_eq!(
             read_summons(&sumn),
             vec![SummonRow {
                 command: 0x1bf,
-                charm: 0x17f
+                charm: 0x17f,
+                object: 0x6c8,
+                extra: 0x4f4,
+                limit: 0x211,
             }]
         );
         let mut limt = vec![2, 0, 0, 0, 1, 0, 0, 0];

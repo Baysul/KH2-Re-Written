@@ -769,8 +769,8 @@ fn load_motion(gallery: &mut EnemyGallery, id: u64, choice: usize) -> Result<(),
 }
 
 /// One evaluated pose: the model's vertices and where each bone's joint is.
-struct Sampled {
-    points: Vec<Vec3>,
+pub(super) struct Sampled {
+    pub(super) points: Vec<Vec3>,
     joints: Vec<Vec3>,
 }
 
@@ -818,7 +818,7 @@ fn skeleton_mesh(links: &[(usize, usize)], joints: &[Vec3]) -> Mesh {
     visual::room::line_mesh(positions, colors)
 }
 
-fn sample(
+pub(super) fn sample(
     kind: &Kind,
     motion: &motion::SelectedMotion,
     frame: f32,

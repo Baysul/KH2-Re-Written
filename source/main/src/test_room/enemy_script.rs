@@ -16,7 +16,7 @@ type Vec3 = [f32; 3];
 
 /// Sora's team number (`sysobj+0x4dc`): attacks with her team in their mask
 /// can hit her.
-const SORA_TEAM: u8 = 1;
+pub(super) const SORA_TEAM: u8 = 1;
 
 /// The host view the engine reads each tick.
 struct BrainEnv<'a> {
@@ -400,6 +400,33 @@ impl ScriptBrain {
     pub fn position(&self) -> Vec3 {
         self.object.sys.position
     }
+    /// The object's fade (+0xa08): its alpha and whether it is falling.
+    pub fn fade(&self) -> (f32, bool) {
+        let f = &self.object.sys.fade;
+        (f.value, f.rate < 0.)
+    }
+
+    /// Record every trap the script calls (a development aid).
+    pub fn trace(&mut self) {
+        self.world.trace.get_or_insert_with(Vec::new);
+    }
+
+    /// The traps called since the last call, in order.
+    pub fn take_trace(&mut self) -> Vec<(u16, u16)> {
+        self.world
+            .trace
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// The traps the script called that have no translation, once each.
+    pub fn missing_traps(&self) -> Vec<(u16, u16)> {
+        let mut m = self.world.missing.clone();
+        m.sort_unstable();
+        m.dedup();
+        m
+    }
     pub fn yaw(&self) -> f32 {
         self.object.sys.yaw
     }
@@ -476,6 +503,31 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
         };
         self.object.reflect(&mut self.world, &env, motion, back);
+        self.record_faults();
+    }
+
+    /// FUN_1403de610's summon: +0x6c8 |= 0x400000 (`sysobj_is_summon`),
+    /// not of the enemy class, on Sora's team [I: the team follows the
+    /// object type in the constructor FUN_1401b06e0, not traced].
+    pub fn make_summon(&mut self) {
+        use enemy::sysobj::class_flag;
+        let s = &mut self.object.sys;
+        s.class_flags = s.class_flags & !class_flag::ENEMY | class_flag::SUMMON;
+        s.team = SORA_TEAM as i32;
+    }
+
+    /// Start the named act (FUN_1403cac50 / FUN_1403cae60): the running act
+    /// and the queue end first.
+    pub fn start_act(&mut self, name: &[u8]) {
+        let env = BrainEnv {
+            room: None,
+            clips: &self.clips,
+            player: self.player,
+            player_yaw: self.player_yaw,
+        };
+        let actions = self.object.acts.start(name);
+        self.object
+            .apply_actions(Some((&mut self.world, &env)), actions);
         self.record_faults();
     }
 

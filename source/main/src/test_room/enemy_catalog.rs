@@ -316,91 +316,102 @@ impl Catalog {
             .entries
             .get(index)
             .ok_or("enemy index outside catalog")?;
-        let mut library = Library::open(source)?;
-        let found = library
-            .find(&model_path(&entry.model_name))
-            .ok_or("enemy model unavailable")?;
-        let archive = library.read_found(&found)?;
-        let source_bar = bar::read_bar(&archive)?;
-        let textures: Vec<_> = source_bar
-            .entries
-            .iter()
-            .filter(|e| e.entry_type == 7)
-            .collect();
-        let material_issue = if textures.is_empty() {
-            Some("Source has no type-7 tim_ material; geometry-only preview".into())
-        } else if textures.len() == 1
-            && textures[0].name_bytes == *b"tim_"
-            && textures[0].size >= 36
-            && payload(&archive, textures[0])?[..4] == (-1i32).to_le_bytes()
-        {
-            Some("Source tim_ uses the disabled/custom -1 profile; its texture decoding is unsupported; geometry-only preview".into())
-        } else {
-            None
-        };
-        let source_layout = serde_json::json!({
-            "original_bytes":archive.len(),
-            "entries":source_bar.entries.iter().map(|e| serde_json::json!({"type":e.entry_type,"name":e.name_bytes,"size":e.size})).collect::<Vec<_>>(),
-            "texture_profile":"original-only; HD replacement payloads not requested"
-        });
-        let mut models = model_inspection::read_original_model_at(
-            source,
-            found.index,
-            found.ordinal,
-            found.name_hash,
-            material_issue.is_none(),
-        )?;
-        if models.is_empty() {
-            return Err("enemy model has no supported mesh".into());
-        }
-        let model = models.remove(0);
-        let mut scripts = Vec::new();
-        for entry in bar::read_bar(&archive)?.entries {
-            if entry.entry_type == 3 && entry.offset >= 0 && entry.size != 0 {
-                scripts.push(payload(&archive, &entry)?.to_vec());
-            }
-        }
-        // A missing set still permits inspecting the installed static model.
-        let set = library.find(&set_path(&entry.animation_name));
-        let bytes = match set {
-            Some(set) => library.read_found(&set)?,
-            None => Vec::new(),
-        };
-        let motions = if bytes.is_empty() {
-            Vec::new()
-        } else {
-            motion_choices(&bytes)?
-        };
-        let variants = !bytes.is_empty() && enemy_actions::uses_motion_variants(&bytes)?;
-        let mut actions = Vec::new();
-        let mut action_issues = Vec::new();
-        for (index, script) in scripts.iter().enumerate() {
-            match enemy_actions::inspect(script) {
-                Ok(inspection) => {
-                    if inspection.unresolved_registrations != 0 {
-                        action_issues.push(format!(
-                            "Script {index}: {} unresolved action registrations",
-                            inspection.unresolved_registrations
-                        ));
-                    }
-                    actions.extend(inspection.actions);
-                }
-                Err(error) => action_issues.push(format!("Script {index}: {error}")),
-            }
-        }
-        Ok(Kind {
-            model,
-            extra_models: models,
-            motions,
-            scripts,
-            bytes,
-            actions,
-            action_issues,
-            variants,
-            material_issue,
-            source_layout,
-        })
+        load_entry_kind(source, entry)
     }
+}
+
+/// An objentry record outside the catalog (a summon), unclassified.
+pub fn plain_entry(source: &ProbeSource, object: &ObjectEntry) -> Result<Entry> {
+    let library = Library::open(source)?;
+    entry(object, &HashMap::new(), &HashMap::new(), &library)
+}
+
+/// The model, motion set, scripts and acts of an objentry record.
+pub fn load_entry_kind(source: &ProbeSource, entry: &Entry) -> Result<Kind> {
+    let mut library = Library::open(source)?;
+    let found = library
+        .find(&model_path(&entry.model_name))
+        .ok_or("enemy model unavailable")?;
+    let archive = library.read_found(&found)?;
+    let source_bar = bar::read_bar(&archive)?;
+    let textures: Vec<_> = source_bar
+        .entries
+        .iter()
+        .filter(|e| e.entry_type == 7)
+        .collect();
+    let material_issue = if textures.is_empty() {
+        Some("Source has no type-7 tim_ material; geometry-only preview".into())
+    } else if textures.len() == 1
+        && textures[0].name_bytes == *b"tim_"
+        && textures[0].size >= 36
+        && payload(&archive, textures[0])?[..4] == (-1i32).to_le_bytes()
+    {
+        Some("Source tim_ uses the disabled/custom -1 profile; its texture decoding is unsupported; geometry-only preview".into())
+    } else {
+        None
+    };
+    let source_layout = serde_json::json!({
+        "original_bytes":archive.len(),
+        "entries":source_bar.entries.iter().map(|e| serde_json::json!({"type":e.entry_type,"name":e.name_bytes,"size":e.size})).collect::<Vec<_>>(),
+        "texture_profile":"original-only; HD replacement payloads not requested"
+    });
+    let mut models = model_inspection::read_original_model_at(
+        source,
+        found.index,
+        found.ordinal,
+        found.name_hash,
+        material_issue.is_none(),
+    )?;
+    if models.is_empty() {
+        return Err("enemy model has no supported mesh".into());
+    }
+    let model = models.remove(0);
+    let mut scripts = Vec::new();
+    for entry in bar::read_bar(&archive)?.entries {
+        if entry.entry_type == 3 && entry.offset >= 0 && entry.size != 0 {
+            scripts.push(payload(&archive, &entry)?.to_vec());
+        }
+    }
+    // A missing set still permits inspecting the installed static model.
+    let set = library.find(&set_path(&entry.animation_name));
+    let bytes = match set {
+        Some(set) => library.read_found(&set)?,
+        None => Vec::new(),
+    };
+    let motions = if bytes.is_empty() {
+        Vec::new()
+    } else {
+        motion_choices(&bytes)?
+    };
+    let variants = !bytes.is_empty() && enemy_actions::uses_motion_variants(&bytes)?;
+    let mut actions = Vec::new();
+    let mut action_issues = Vec::new();
+    for (index, script) in scripts.iter().enumerate() {
+        match enemy_actions::inspect(script) {
+            Ok(inspection) => {
+                if inspection.unresolved_registrations != 0 {
+                    action_issues.push(format!(
+                        "Script {index}: {} unresolved action registrations",
+                        inspection.unresolved_registrations
+                    ));
+                }
+                actions.extend(inspection.actions);
+            }
+            Err(error) => action_issues.push(format!("Script {index}: {error}")),
+        }
+    }
+    Ok(Kind {
+        model,
+        extra_models: models,
+        motions,
+        scripts,
+        bytes,
+        actions,
+        action_issues,
+        variants,
+        material_issue,
+        source_layout,
+    })
 }
 
 fn entry(

@@ -907,7 +907,9 @@ impl Sysobj {
             let step = self.turn_rate.max(0.) * 2.;
             self.yaw = wrap(self.yaw + delta.clamp(-step, step));
         }
-        // The texture fade runs with the frame.
+        // FUN_1403cc730: the alpha fade (+0xa08), then the texture fade
+        // (+0xaa4), run with the frame.
+        self.fade.step(1.0);
         self.tex_fade.step(1.0);
         // A carried object does not move by itself (physics mode 3); the
         // world places it on its holder.

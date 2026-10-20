@@ -99,6 +99,8 @@ mod prize_room;
 mod second_deck;
 mod settings_room;
 mod spell_fx;
+mod summon;
+mod summon_tour;
 mod victim_hit;
 mod wall_hit;
 mod weapon_trail;
@@ -1009,6 +1011,14 @@ struct Game {
     party_limits: Arc<party_limit::LimitSource>,
     party_limit: Option<party_limit::Running>,
     limit_request: Option<u16>,
+    /// The summons' tables, the summon out, and what the menu asked for.
+    summons: Option<summon::Source>,
+    summon: Option<summon::Summoned>,
+    summon_request: Option<u16>,
+    summon_dismiss: bool,
+    summon_serial: u64,
+    /// FUN_1403f3fa0's direction counter (DAT_142ae5d78).
+    summon_octant: u32,
     /// The top deck's rows while a limit has the menu.
     deck_saved: Option<(Vec<Item>, Vec<Option<usize>>)>,
     /// Decide on a row a limit's command took this tick: its override
@@ -1018,6 +1028,8 @@ struct Game {
     deck_tour: bool,
     /// The unattended `--party-limit-tour` (limit_tour.rs).
     limit_tour: bool,
+    /// The unattended `--summon-tour` (summon_tour.rs).
+    summon_tour: bool,
     /// The deck swap (left, logical 0x10000) and open (right, 0x10000000)
     /// pressed since the last tick.
     deck_queued: bool,
@@ -1871,6 +1883,7 @@ struct Loaded {
     magic: Option<magic_room::MagicSource>,
     /// The second command deck's tables and labels.
     second_deck: Option<second_deck::SecondDeck>,
+    summons: Option<summon::Source>,
     /// The party limits' files.
     party_limits: party_limit::LimitSource,
     items: Option<item_room::ItemSource>,
@@ -3179,7 +3192,11 @@ fn load(
             basic_fk,
             params,
             pax: base_pax,
-            scripted: vec![player::WALL_RECOIL_AIR],
+            scripted: vec![
+                player::WALL_RECOIL_AIR,
+                summon::CALL_MOTION,
+                summon::APPEAR_MOTION,
+            ],
             external: limit_source.motions(1),
         },
     )?;
@@ -3604,6 +3621,13 @@ fn load(
         },
         None => None,
     };
+    // The summons: the `sumn` rows and the SSTM record (03system pref).
+    let summons = second_deck.as_ref().and_then(|d| {
+        let pref = bar_entry(&system, b"pref").ok()?;
+        let sstm = bar_entry(pref, b"sstm").ok()?;
+        let at = u32::from_le_bytes(sstm.get(4..8)?.try_into().ok()?) as usize;
+        summon::Source::new(d.summons.clone(), sstm.get(at..)?)
+    });
     let enemy = match &config.enemy {
         Some(e) => Some(load_enemy(
             source,
@@ -3734,6 +3758,7 @@ fn load(
         abilities: ability_source,
         magic: magic_src,
         second_deck,
+        summons,
         party_limits: std::mem::take(&mut limit_source),
         items: item_room::load(&system).ok(),
         party: match config.enemy {
@@ -6094,6 +6119,8 @@ fn simulate(
     let tick = game.tick;
     let deck_buttons = if game.deck_tour {
         deck_tour::press(tick)
+    } else if game.summon_tour {
+        summon_tour::press(tick)
     } else if game.limit_tour {
         // While a limit offers a row and no reaction command, the tour walks
         // the cursor onto it.
@@ -6117,7 +6144,7 @@ fn simulate(
     } else {
         field_command_menu::Buttons::default()
     };
-    let scripted_menu = game.deck_tour || game.limit_tour;
+    let scripted_menu = game.deck_tour || game.limit_tour || game.summon_tour;
     let (up, down) = if scripted_menu {
         (deck_buttons.up, deck_buttons.down)
     } else if game.ability_tour.is_some()
@@ -6177,8 +6204,12 @@ fn simulate(
     // Field talk locks control (player+0xdc8 → +0x40 bit 0); an area
     // change zeroes the pad while DAT_142a10500 is set (FUN_1403b2340).
     // Riding the skateboard hands the pad to the Skate 3 skater.
-    let talking =
-        game.talking || area.as_deref().is_some_and(|a| a.transition.is_some()) || skate.riding();
+    // FUN_1403de460 holds Sora (player +0x120 |= 0x104) until the summon is
+    // out (FUN_1403de610 clears it).
+    let talking = game.talking
+        || area.as_deref().is_some_and(|a| a.transition.is_some())
+        || skate.riding()
+        || game.summon.as_ref().is_some_and(|s| s.holds_sora);
     let (stick, jump, decide) = if talking {
         (Vec2::ZERO, false, false)
     } else {
@@ -6250,8 +6281,8 @@ fn simulate(
             game.player.abilities.set(bit);
         }
     }
-    // The deck tour owns the summon charms.
-    if game.deck_tour
+    // The deck and summon tours own the summon charms.
+    if (game.deck_tour || game.summon_tour)
         && tick == 1
         && let Some(it) = game.items.as_mut()
     {
@@ -11635,6 +11666,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut badge_tour = false;
     let mut journal_tour = false;
     let mut deck_tour = false;
+    let mut summon_tour = false;
     let mut limit_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
@@ -11758,6 +11790,17 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("command deck tour capture directory absent")?,
+                );
+            }
+            // So does the summon tour.
+            Some("--summon-tour") if autoplay.is_none() => {
+                magic_tour = true;
+                summon_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("summon tour capture directory absent")?,
                 );
             }
             // The limit tour too runs in the magic tour's setup.
@@ -11952,7 +11995,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         None
     };
     // A form's change takes about 260 ticks before the first cast.
-    let magic_shift = if party_hit_tour || deck_tour || limit_tour {
+    let magic_shift = if party_hit_tour || deck_tour || limit_tour || summon_tour {
         // The magic tour's schedule never comes up.
         1 << 40
     } else if magic_form != 0 {
@@ -11965,6 +12008,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         Vec::new()
     } else if deck_tour {
         deck_tour::captures()
+    } else if summon_tour {
+        summon_tour::captures()
     } else if limit_tour {
         limit_tour::captures()
     } else if journal_tour {
@@ -12000,6 +12045,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         party_hit_tour::END
     } else if deck_tour {
         deck_tour::end()
+    } else if summon_tour {
+        summon_tour::end()
     } else if limit_tour {
         limit_tour::end()
     } else if journal_tour {
@@ -12189,6 +12236,12 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         party_spells: !party_hit_tour,
         party_battle: party_room::BattleMode::default(),
         second_deck: loaded.second_deck.take(),
+        summons: loaded.summons.take(),
+        summon: None,
+        summon_request: None,
+        summon_dismiss: false,
+        summon_serial: 0,
+        summon_octant: 0,
         limit_tour,
         party_limits: Arc::new(std::mem::take(&mut loaded.party_limits)),
         party_limit: None,
@@ -12196,6 +12249,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         limit_decide: None,
         deck_saved: None,
         deck_tour,
+        summon_tour,
         deck_queued: false,
         open_queued: false,
         party_hit_tour,
@@ -12645,6 +12699,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 command_layout::follow,
                 (
                     simulate,
+                    summon::tick,
                     skate_tick,
                     area_tick,
                     enemy_battle::tick,
@@ -12692,7 +12747,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 drive_room::thrown_keyblade,
                 skate_present,
                 present_enemy,
-                (enemy_gallery::present, present_spells).chain(),
+                (enemy_gallery::present, present_spells, summon::present).chain(),
                 party_room::present,
                 drive_room::party_visibility,
                 present_npc,

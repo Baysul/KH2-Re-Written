@@ -214,6 +214,15 @@ impl Gauge {
         self.max_time = self.time;
     }
 
+    /// FUN_1403c2740 with mode 3: a summon at `level` gives level + 3 bars of
+    /// SSTM +0x68 time each.
+    pub fn enter_summon(&mut self, level: u8) {
+        self.mode = mode::SUMMON;
+        self.bars = level + 3;
+        self.time = self.bars as f32 * FORM_BAR_TIME;
+        self.max_time = self.time;
+    }
+
     /// The YS::SORA constructor after a revert (FUN_140405030): the gauge
     /// is in Drive mode again; the bars and time keep their values.
     pub fn leave_form(&mut self) {
@@ -356,5 +365,16 @@ mod tests {
         // At the maximum the bar count is one less (4 bars, 2400).
         assert_eq!(g.add_time(-1.), 0);
         assert_eq!(g.add_time(-600.), 1);
+    }
+
+    #[test]
+    fn a_summon_drains_at_its_boost_and_takes_gains() {
+        let mut g = Gauge::new(9);
+        g.enter_summon(0);
+        assert_eq!((g.mode, g.bars, g.max_time), (mode::SUMMON, 3, 1800.));
+        g.drain_frame(true, 2., 0.5);
+        assert_eq!(g.time, 1799.5);
+        g.gain(1., false, 1., 1.);
+        assert_eq!(g.time, 1800.);
     }
 }

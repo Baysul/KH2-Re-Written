@@ -112,6 +112,54 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .filter_map(|s| s.parse().ok())
         .collect();
     let ticks: u32 = args[5].to_string_lossy().parse()?;
+    // LIMIT_PROBE_TRAPS=t:i,t:i,...: those the engine has no routine for.
+    if let Ok(list) = std::env::var("LIMIT_PROBE_TRAPS") {
+        let missing: Vec<&str> = list
+            .split(',')
+            .filter(|t| {
+                let mut p = t.split(':').filter_map(|v| v.trim().parse::<u16>().ok());
+                match (p.next(), p.next()) {
+                    (Some(a), Some(b)) => enemy::traps::lookup(a, b).is_none(),
+                    _ => false,
+                }
+            })
+            .collect();
+        println!("traps missing {} {}", missing.len(), missing.join(","));
+    }
+    // LIMIT_PROBE_SUMMONS=1: 00battle `sumn` rows, the `limt` rows whose
+    // second member is a summon (200..204), and the summon commands.
+    if std::env::var_os("LIMIT_PROBE_SUMMONS").is_some() {
+        let entry = |file: &[u8], name: &[u8; 4]| -> Option<Vec<u8>> {
+            let bar = data::bar::read_bar(file).ok()?;
+            let e = bar.entries.iter().find(|e| &e.name_bytes == name)?;
+            file.get(e.offset as usize..e.offset as usize + e.size as usize)
+                .map(<[u8]>::to_vec)
+        };
+        let battle = library.read("00battle.bin")?;
+        let system = library.read("03system.bin")?;
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let mut ids = vec![0x48u16, 0x13c];
+        if let Some(sumn) = entry(&battle, b"sumn") {
+            for row in sumn.get(8..).unwrap_or(&[]).chunks(0x40) {
+                println!("sumn {}", hex(row));
+                ids.push(u16::from_le_bytes([row[0], row[1]]));
+            }
+        }
+        if let Some(limt) = entry(&battle, b"limt") {
+            for row in limt.get(8..).unwrap_or(&[]).chunks(0x40) {
+                if (200..=204).contains(&row[2]) {
+                    println!("limt {}", hex(row));
+                    ids.push(u16::from_le_bytes([row[0x28], row[0x29]]));
+                }
+            }
+        }
+        if let Some(cmd) = entry(&system, b"cmd\0") {
+            let commands = data::command_table::read(&cmd)?;
+            for c in commands.iter().filter(|c| ids.contains(&c.id)) {
+                println!("{c:?}");
+            }
+        }
+    }
     // LIMIT_PROBE_OBJ=<hex objentry id>: that object's model and motion names.
     if let Ok(id) = std::env::var("LIMIT_PROBE_OBJ")
         && let Ok(id) = u32::from_str_radix(id.trim_start_matches("0x"), 16)
