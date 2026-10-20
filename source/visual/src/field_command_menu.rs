@@ -1,9 +1,12 @@
-//! The field command menu (top level, normal style), translated from the
-//! executable's dk::COMMAND_DRAW: update FUN_14015e800, level builder
-//! FUN_14015b6d0, cursor FUN_14015ba00, cursor decoration FUN_14015bc30,
-//! slot fetch FUN_14015d140, slot draw FUN_14015b4a0 and its text
-//! FUN_14016ae30. Input follows FUN_1403b11e0 (wrapping up/down). Layout
-//! units are the PS2 512x416 space; the menu's X origin is -85 at 16:9.
+//! The field command menu, translated from the executable's
+//! dk::COMMAND_DRAW: update FUN_14015e800, level builder FUN_14015b6d0,
+//! cursor FUN_14015ba00, cursor decoration FUN_14015bc30, slot fetch
+//! FUN_14015d140, slot draw FUN_14015b4a0 and its text FUN_14016ae30. Input
+//! follows FUN_1403b11e0 (wrapping up/down, right opens) and the manager's
+//! FUN_1403f2470 (left swaps the top deck, menu 0, with the second deck,
+//! menu 6). The art set follows the battle style; the art itself comes
+//! from the loaded world layout. Layout units are the PS2 512x416 space;
+//! the menu's X origin is -85 at 16:9.
 use crate::gauge::Draw;
 use data::sprite_sequence::{Modifiers, Player, Quad, Sequence, color};
 
@@ -24,25 +27,40 @@ const FONT_REFERENCE: f32 = 18.;
 const CELL: [f32; 2] = [18., 24.];
 const CELL_COLUMNS: usize = 28;
 
-/// Groups for kind 0, style 0 (normal) from the tables at 0x140717ef0,
-/// 0x140718290/0x1407182a0, 0x1407182c0 and 0x140718388.
+/// Root deck kinds (mgr+0xbd4): the top menu and the second deck
+/// (Attack, Summon, Party, Limit; FUN_1403f3860), swapped by FUN_1403f2470.
+pub const FIRST_DECK: usize = 0;
+pub const SECOND_DECK: usize = 6;
+/// Groups of kinds 0 and 6 by battle style (0 normal, 1 battle, 2 forced)
+/// from the tables at 0x140717ef0 (cursor, row, last row), 0x140718280
+/// (panel on a deck swap), 0x140718290 (panel intro), 0x1407182a0 (panel
+/// loop), 0x1407182b0 (cursor refresh) and 0x1407182c0 (icon frame); the
+/// root's loop is 0x140718388.
 const ROOT_LOOP: usize = 6;
-const PANEL_INTRO: usize = 17;
-const PANEL_LOOP: usize = 18;
-const CURSOR: usize = 9;
-const ROW: usize = 16;
-const LAST_ROW: usize = 11;
-const ICON_FRAME: usize = 45;
+const PANEL_SWAP: [usize; 3] = [19, 88, 32];
+const PANEL_INTRO: [usize; 3] = [17, 86, 30];
+const PANEL_LOOP: [usize; 3] = [18, 87, 31];
+const CURSOR: [usize; 3] = [9, 78, 22];
+const CURSOR_REFRESH: [usize; 3] = [10, 79, 23];
+const ROW: [usize; 3] = [16, 85, 29];
+const LAST_ROW: [usize; 3] = [11, 80, 24];
+const ICON_FRAME: [usize; 3] = [45, 47, 46];
+/// The bouncing pointer: 20 beside the top deck, 21 beside any other kind
+/// (FUN_14015bc30).
 const POINTER: usize = 20;
-/// Submenu art groups by menu kind, style 0 (T_EF0[kind]: panel, cursor,
-/// row, last row; command-01 section 8): Magic 1, Items 2, Drive 3, the
-/// party list 4.
+const POINTER_OTHER: usize = 21;
+/// Submenu art groups by menu kind (T_EF0[kind]: panel, cursor, row, last
+/// row; equal in every style): Magic 1, Items 2, Drive 3, the party pick
+/// 4, Summon 7, Party 8, Limit 9.
 fn sub_groups(kind: usize) -> Option<[usize; 4]> {
     match kind {
         1 => Some([60, 57, 59, 58]),
         2 => Some([51, 48, 50, 49]),
         3 => Some([77, 74, 76, 75]),
         4 | 11 => Some([64, 61, 63, 62]),
+        7 => Some([73, 70, 72, 71]),
+        8 => Some([36, 33, 35, 34]),
+        9 => Some([56, 53, 55, 54]),
         // The Limit Form's limits (T_EF0[12]).
         12 => Some([52, 53, 55, 54]),
         _ => None,
@@ -121,6 +139,7 @@ pub struct CommandMenu {
     root: Player,
     slots: Vec<Slot>,
     counter: usize,
+    /// The top deck's rows (menu 0).
     pub items: Vec<Item>,
     pub reaction: Option<Reaction>,
     pub cursor: usize,
@@ -128,6 +147,20 @@ pub struct CommandMenu {
     last_count: usize,
     /// The submenu kind each top row opens on decide (None executes).
     pub opens: Vec<Option<usize>>,
+    /// The second deck's rows (menu 6) and the submenu kinds they open.
+    pub second: Vec<Item>,
+    pub second_opens: Vec<Option<usize>>,
+    /// The deck shown: `FIRST_DECK` or `SECOND_DECK` (mgr+0xbd4).
+    pub kind: usize,
+    /// The deck drawn last frame (COMMAND_DRAW+0x184).
+    last_kind: usize,
+    /// The battle style picking the art set (DAT_142a11404: 0 normal,
+    /// 1 battle, 2 forced) and the style drawn last frame (+0x190).
+    pub style: usize,
+    last_style: usize,
+    /// FUN_1403b2780: the deck swap is refused and the pointer hidden (a
+    /// scripted deck or a restricted mode).
+    pub locked: bool,
     /// The open submenu, if any.
     pub sub: Option<Sub>,
 }
@@ -136,7 +169,7 @@ pub struct CommandMenu {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
     None,
-    /// Execute the command at this row.
+    /// Execute the command at this row of the shown deck.
     Execute(usize),
     /// The row cannot be selected (error sound in the original).
     Invalid,
@@ -150,6 +183,21 @@ pub enum Decision {
     },
     /// The submenu was closed with back.
     Closed,
+    /// The other deck is shown now (FUN_1403f2470, sound 0x14).
+    Toggled,
+}
+
+/// The command-menu buttons pressed this frame, as logical pad bits
+/// (FUN_1403b11e0, FUN_1403f2470): decide 0x200000004, back 8, up 0x4000,
+/// down 0x8000, left 0x10000 (deck swap / close), right 0x10000000 (open).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Buttons {
+    pub up: bool,
+    pub down: bool,
+    pub decide: bool,
+    pub back: bool,
+    pub left: bool,
+    pub right: bool,
 }
 
 impl CommandMenu {
@@ -166,8 +214,50 @@ impl CommandMenu {
             last_cursor: None,
             last_count: 0,
             opens: Vec::new(),
+            second: Vec::new(),
+            second_opens: Vec::new(),
+            kind: FIRST_DECK,
+            last_kind: FIRST_DECK,
+            style: 0,
+            last_style: 0,
+            locked: false,
             sub: None,
         }
+    }
+
+    /// The same menu on a newly loaded layout (a world's own command file):
+    /// the field reload keeps the deck, rows and cursor and rebuilds every
+    /// slot without the intro (FUN_14015db50, FUN_14015cbe0).
+    pub fn reload(&mut self, seq: &Sequence) {
+        self.root = Player::new(seq, ROOT_LOOP);
+        self.slots.clear();
+        self.last_cursor = None;
+        self.last_count = 0;
+        self.last_kind = self.kind;
+        if let Some(sub) = self.sub.as_mut() {
+            sub.slots.clear();
+            sub.last_cursor = None;
+            sub.last_count = 0;
+        }
+    }
+
+    /// The shown deck's rows.
+    pub fn rows(&self) -> &[Item] {
+        if self.kind == SECOND_DECK {
+            &self.second
+        } else {
+            &self.items
+        }
+    }
+
+    /// The submenu kind row `row` of the shown deck opens.
+    pub fn opens_of(&self, row: usize) -> Option<usize> {
+        let opens = if self.kind == SECOND_DECK {
+            &self.second_opens
+        } else {
+            &self.opens
+        };
+        opens.get(row).copied().flatten()
     }
 
     /// Opens the submenu of `kind` on top of the top level.
@@ -195,13 +285,29 @@ impl CommandMenu {
 
     /// `input` with the back button: it closes an open submenu.
     pub fn input_with_back(&mut self, up: bool, down: bool, decide: bool, back: bool) -> Decision {
+        self.press(Buttons {
+            up,
+            down,
+            decide,
+            back,
+            ..Buttons::default()
+        })
+    }
+
+    /// One frame of menu input. FUN_1403b11e0 takes decide, then back, then
+    /// up, down and right (open the row's submenu); FUN_1403f2470 then
+    /// takes left: with only the top level up it swaps the decks, keeping
+    /// the cursor row when the other deck has one (FUN_1403b1b80), else it
+    /// closes the submenu. A left pressed in the same frame as decide or
+    /// right is not taken.
+    pub fn press(&mut self, b: Buttons) -> Decision {
         if let Some(sub) = self.sub.as_mut() {
             let n = sub.items.len();
-            if back || n == 0 {
+            if b.back || b.left || n == 0 {
                 self.sub = None;
                 return Decision::Closed;
             }
-            if decide {
+            if b.decide {
                 return if sub.items[sub.cursor].colour < 4 {
                     let index = sub.cursor;
                     let row = self.cursor;
@@ -212,13 +318,13 @@ impl CommandMenu {
                     Decision::Invalid
                 };
             }
-            if up {
+            if b.up {
                 sub.cursor = if sub.cursor > 0 {
                     sub.cursor - 1
                 } else {
                     n - 1
                 };
-            } else if down {
+            } else if b.down {
                 sub.cursor = if sub.cursor < n - 1 {
                     sub.cursor + 1
                 } else {
@@ -227,14 +333,15 @@ impl CommandMenu {
             }
             return Decision::None;
         }
-        let n = self.items.len();
+        let n = self.rows().len();
         if n == 0 {
             return Decision::None;
         }
-        if decide {
-            return if self.items[self.cursor].colour < 4 {
+        self.cursor = self.cursor.min(n - 1);
+        if b.decide {
+            return if self.rows()[self.cursor].colour < 4 {
                 let row = self.cursor;
-                if self.opens.get(row).copied().flatten().is_some() {
+                if self.opens_of(row).is_some() {
                     return Decision::Open(row);
                 }
                 self.cursor = 0;
@@ -243,18 +350,37 @@ impl CommandMenu {
                 Decision::Invalid
             };
         }
-        if up {
+        if b.back {
+            return Decision::None;
+        }
+        if b.up {
             self.cursor = if self.cursor > 0 {
                 self.cursor - 1
             } else {
                 n - 1
             };
-        } else if down {
+        } else if b.down {
             self.cursor = if self.cursor < n - 1 {
                 self.cursor + 1
             } else {
                 0
             };
+        } else if b.right {
+            let row = self.cursor;
+            if self.rows()[row].colour < 4 && self.opens_of(row).is_some() {
+                return Decision::Open(row);
+            }
+        }
+        if b.left && !self.locked {
+            self.kind = if self.kind == FIRST_DECK {
+                SECOND_DECK
+            } else {
+                FIRST_DECK
+            };
+            if self.cursor >= self.rows().len() {
+                self.cursor = 0;
+            }
+            return Decision::Toggled;
         }
         Decision::None
     }
@@ -302,8 +428,8 @@ impl CommandMenu {
 
     /// The submenu level's build (FUN_14015b6d0 with L = 1): the kind's
     /// panel, its rows bottom-anchored like the top level, and the cursor
-    /// row moved 8 right.
-    fn update_sub(sub: &mut Sub, seq: &Sequence) {
+    /// row moved 8 right. A style change restarts the panel and cursor.
+    fn update_sub(sub: &mut Sub, seq: &Sequence, changed: bool) {
         let Some([panel, cursor_group, row_group, last_group]) = sub_groups(sub.kind) else {
             return;
         };
@@ -349,7 +475,7 @@ impl CommandMenu {
         place(
             sub,
             panel,
-            false,
+            changed,
             [x, PANEL_ANCHOR - PITCH * n as f32],
             None,
             0x80b4b4b4,
@@ -368,7 +494,7 @@ impl CommandMenu {
             y += PITCH;
         }
         if n > 0 {
-            let force = sub.last_cursor != Some(cur) || sub.last_count != n;
+            let force = sub.last_cursor != Some(cur) || sub.last_count != n || changed;
             let item = &sub.items[cur];
             let (label, colour) = (item.label.clone(), CURSOR_TEXT[item.colour.min(8)]);
             place(
@@ -388,38 +514,49 @@ impl CommandMenu {
         }
     }
 
-    /// One frame: root update, the level-0 build (FUN_14015b6d0), then the
-    /// slots' players in creation order.
+    /// One frame: root update, the level-0 build (FUN_14015b6d0) for the
+    /// shown deck, then the slots' players in creation order. A deck swap
+    /// plays the panel's swap group (T_280) before its loop and restarts
+    /// the cursor; a battle-style change replays the panel intro and
+    /// flashes the cursor (T_2B0).
     pub fn update(&mut self, seq: &Sequence) {
         self.root.update(seq, 1.);
         self.counter = 0;
-        let n = self.items.len();
+        let style = self.style.min(2);
+        let changed = style != self.last_style;
+        let kind = self.kind;
+        let swap = (kind == FIRST_DECK && self.last_kind == SECOND_DECK)
+            || (kind == SECOND_DECK && self.last_kind == FIRST_DECK);
+        let rows: Vec<Item> = self.rows().to_vec();
+        let n = rows.len();
         let cur = self.cursor.min(n.saturating_sub(1));
         if self.last_count != n {
             self.slots.clear();
         }
         let x = ROOT_BASE[0];
-        let first = self.slots.is_empty();
+        let (group, force) = if swap {
+            (PANEL_SWAP[style], true)
+        } else {
+            (PANEL_INTRO[style], changed)
+        };
         let panel = self.slot(
             seq,
-            PANEL_INTRO,
-            false,
+            group,
+            force,
             [x, PANEL_ANCHOR - PITCH * n as f32],
             None,
             0x80b4b4b4,
         );
-        if first
-            || self.slots[panel].queued.is_some()
-            || self.slots[panel].player.group != PANEL_LOOP
-        {
-            self.slots[panel].queued = Some(PANEL_LOOP);
-        }
+        self.slots[panel].queued = Some(PANEL_LOOP[style]);
         let mut y = ROW_ANCHOR - PITCH * n as f32;
         let mut cursor_y = y;
-        for i in 0..n {
+        for (i, item) in rows.iter().enumerate() {
             if i != cur {
-                let group = if i == n - 1 { LAST_ROW } else { ROW };
-                let item = &self.items[i];
+                let group = if i == n - 1 {
+                    LAST_ROW[style]
+                } else {
+                    ROW[style]
+                };
                 let (label, colour) = (item.label.clone(), ROW_TEXT[item.colour.min(8)]);
                 self.slot(seq, group, true, [x, y], Some(label), colour);
             } else {
@@ -428,8 +565,13 @@ impl CommandMenu {
             y += PITCH;
         }
         if n > 0 {
-            let force = self.last_cursor != Some(cur) || self.last_count != n;
-            let item = &self.items[cur];
+            let mut force = self.last_cursor != Some(cur) || self.last_count != n || swap;
+            let mut group = CURSOR[style];
+            if changed {
+                force = true;
+                group = CURSOR_REFRESH[style];
+            }
+            let item = &rows[cur];
             let (label, colour, icon) = (
                 item.label.clone(),
                 CURSOR_TEXT[item.colour.min(8)],
@@ -437,14 +579,15 @@ impl CommandMenu {
             );
             let c = self.slot(
                 seq,
-                CURSOR,
+                group,
                 force,
                 [x + CURSOR_SHIFT, cursor_y],
                 Some(label),
                 colour,
             );
             // Decoration (FUN_14015bc30): icon frame, category icon and the
-            // bouncing pointer, all parented to the cursor row.
+            // bouncing pointer, all parented to the cursor row. The pointer
+            // shows only while no submenu was drawn and the menu is free.
             let icon_group = match icon {
                 1 => Some(37),
                 2 => Some(41),
@@ -455,21 +598,31 @@ impl CommandMenu {
                 7 => Some(40),
                 _ => None,
             };
-            let frame = self.slot(seq, ICON_FRAME, force, [0., 0.], None, colour);
+            let frame = self.slot(seq, ICON_FRAME[style], force, [0., 0.], None, colour);
+            let sub_drawn = self.sub.as_ref().is_some_and(|s| s.last_cursor.is_some());
+            let pointer_group = if kind != FIRST_DECK {
+                POINTER_OTHER
+            } else {
+                POINTER
+            };
             match icon_group {
                 Some(g) => {
                     self.slots[frame].parent = Some(c);
                     let ic = self.slot(seq, g, force, [0., 0.], None, colour);
                     self.slots[ic].parent = Some(c);
+                    let pointer = self.slot(seq, pointer_group, force, [0., 0.], None, colour);
+                    self.slots[pointer].parent = Some(c);
+                    self.slots[pointer].disabled = sub_drawn || self.locked;
                 }
                 None => {
                     self.slots[frame].disabled = true;
                     let placeholder = self.slot(seq, 2, force, [0., 0.], None, 0x80e6e6e6);
                     self.slots[placeholder].disabled = true;
+                    let pointer = self.slot(seq, pointer_group, force, [0., 0.], None, colour);
+                    self.slots[pointer].parent = Some(c);
+                    self.slots[pointer].disabled = self.locked;
                 }
             }
-            let pointer = self.slot(seq, POINTER, force, [0., 0.], None, colour);
-            self.slots[pointer].parent = Some(c);
         }
         if let Some(r) = self.reaction.clone() {
             let i = self.slot(
@@ -485,8 +638,10 @@ impl CommandMenu {
         self.last_cursor = Some(cur);
         self.last_count = n;
         if let Some(sub) = self.sub.as_mut() {
-            Self::update_sub(sub, seq);
+            Self::update_sub(sub, seq, changed);
         }
+        self.last_kind = kind;
+        self.last_style = style;
         self.slots.truncate(self.counter);
         for s in &mut self.slots {
             s.player.update(seq, 1.);
@@ -650,6 +805,98 @@ pub fn text_quads_sized(
 mod tests {
     use super::*;
 
+    /// A menu with no sequence behind it (input only).
+    fn bare(items: Vec<Item>, opens: Vec<Option<usize>>) -> CommandMenu {
+        CommandMenu {
+            root: Player {
+                group: 0,
+                time: 0.,
+                state: 1,
+                plays_left: 0,
+            },
+            slots: Vec::new(),
+            counter: 0,
+            items,
+            reaction: None,
+            cursor: 0,
+            last_cursor: None,
+            last_count: 0,
+            opens,
+            second: Vec::new(),
+            second_opens: Vec::new(),
+            kind: FIRST_DECK,
+            last_kind: FIRST_DECK,
+            style: 0,
+            last_style: 0,
+            locked: false,
+            sub: None,
+        }
+    }
+
+    fn row(icon: u8, colour: usize) -> Item {
+        Item {
+            label: vec![0x2e],
+            icon,
+            colour,
+        }
+    }
+
+    #[test]
+    fn left_swaps_the_decks_and_keeps_the_cursor_row() {
+        let mut menu = bare(
+            vec![row(1, 0), row(2, 0), row(3, 0), row(4, 0)],
+            vec![None, Some(1), Some(2), Some(3)],
+        );
+        // Attack, Summon (blank: colour 5), Party, Limit.
+        menu.second = vec![row(1, 0), row(0, 5), row(6, 0), row(7, 0)];
+        menu.second_opens = vec![None, None, Some(8), Some(9)];
+        menu.input(false, true, false);
+        menu.input(false, true, false);
+        let left = Buttons {
+            left: true,
+            ..Buttons::default()
+        };
+        assert_eq!(menu.press(left), Decision::Toggled);
+        assert_eq!((menu.kind, menu.cursor), (SECOND_DECK, 2));
+        // Party opens the party list; right opens it too.
+        assert_eq!(menu.input(false, false, true), Decision::Open(2));
+        let right = Buttons {
+            right: true,
+            ..Buttons::default()
+        };
+        assert_eq!(menu.press(right), Decision::Open(2));
+        // A blank row neither opens nor executes.
+        menu.input(true, false, false);
+        assert_eq!(menu.press(right), Decision::None);
+        assert_eq!(menu.input(false, false, true), Decision::Invalid);
+        // With a submenu up, left closes it instead of swapping.
+        menu.open_sub(8, vec![row(6, 0)]);
+        assert_eq!(menu.press(left), Decision::Closed);
+        assert_eq!(menu.kind, SECOND_DECK);
+        // Back on the top level swaps back; a cursor past the other deck's
+        // end returns to its first row (FUN_1403b1b80).
+        menu.second.push(row(1, 0));
+        menu.cursor = 4;
+        assert_eq!(menu.press(left), Decision::Toggled);
+        assert_eq!((menu.kind, menu.cursor), (FIRST_DECK, 0));
+        // A locked menu does not swap.
+        menu.locked = true;
+        assert_eq!(menu.press(left), Decision::None);
+        assert_eq!(menu.kind, FIRST_DECK);
+    }
+
+    #[test]
+    fn execution_on_the_second_deck_reports_its_row() {
+        let mut menu = bare(vec![row(1, 0)], vec![None]);
+        menu.second = vec![row(1, 0), row(5, 0)];
+        menu.second_opens = vec![None, None];
+        menu.kind = SECOND_DECK;
+        menu.input(false, true, false);
+        assert_eq!(menu.rows()[menu.cursor].icon, 5);
+        assert_eq!(menu.input(false, false, true), Decision::Execute(1));
+        assert_eq!((menu.kind, menu.cursor), (SECOND_DECK, 0));
+    }
+
     #[test]
     fn text_advances_by_scaled_width() {
         let widths = [11u8; 100];
@@ -674,23 +921,7 @@ mod tests {
                 colour: if i == 1 { 5 } else { 0 },
             })
             .collect();
-        let mut menu = CommandMenu {
-            root: Player {
-                group: 0,
-                time: 0.,
-                state: 1,
-                plays_left: 0,
-            },
-            slots: Vec::new(),
-            counter: 0,
-            items,
-            reaction: None,
-            cursor: 0,
-            last_cursor: None,
-            last_count: 0,
-            opens: Vec::new(),
-            sub: None,
-        };
+        let mut menu = bare(items, Vec::new());
         menu.input(true, false, false);
         assert_eq!(menu.cursor, 3);
         assert_eq!(menu.input(false, false, true), Decision::Execute(3));
@@ -708,23 +939,7 @@ mod tests {
                 colour: 0,
             })
             .collect();
-        let mut menu = CommandMenu {
-            root: Player {
-                group: 0,
-                time: 0.,
-                state: 1,
-                plays_left: 0,
-            },
-            slots: Vec::new(),
-            counter: 0,
-            items,
-            reaction: None,
-            cursor: 0,
-            last_cursor: None,
-            last_count: 0,
-            opens: vec![None, Some(1), None],
-            sub: None,
-        };
+        let mut menu = bare(items, vec![None, Some(1), None]);
         // Row 1 opens the submenu and the cursor stays on it.
         menu.input(false, true, false);
         assert_eq!(menu.input(false, false, true), Decision::Open(1));

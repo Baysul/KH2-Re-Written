@@ -66,7 +66,9 @@ struct Locator {
 }
 mod ability_inventory;
 mod character_kit;
+mod command_layout;
 mod debug_menu;
+mod deck_tour;
 mod drive_fx;
 mod drive_room;
 mod enemy_battle;
@@ -92,6 +94,7 @@ mod party_blade;
 mod party_hit_tour;
 mod party_room;
 mod prize_room;
+mod second_deck;
 mod settings_room;
 mod spell_fx;
 mod victim_hit;
@@ -662,6 +665,8 @@ const AMBIENT_KEY: u32 = 0x4000_0000;
 const SE_CURSOR: u32 = 1;
 const SE_OPEN: u32 = 3;
 const SE_CLOSE: u32 = 4;
+/// The command deck swap (FUN_1403f2470).
+const SE_DECK: u32 = 0x14;
 const SE_LOW_HP: u32 = 9;
 /// Manual lock engaged, and released by the toggle (FUN_1401dd170(7) / (8) in
 /// the lock manager, FUN_1403dd650 / FUN_1403dcd70).
@@ -991,6 +996,14 @@ struct Game {
     party_spells: bool,
     /// The battle flag (`DAT_142a11404`) with its switching delay.
     party_battle: party_room::BattleMode,
+    /// The second command deck (Summon, Party, Limit) and its lists.
+    second_deck: Option<second_deck::SecondDeck>,
+    /// The unattended `--command-deck-tour` (deck_tour.rs).
+    deck_tour: bool,
+    /// The deck swap (left, logical 0x10000) and open (right, 0x10000000)
+    /// pressed since the last tick.
+    deck_queued: bool,
+    open_queued: bool,
     /// The party-hit tour (`--party-hit-tour`).
     party_hit_tour: bool,
     party_hit_state: party_hit_tour::State,
@@ -1122,6 +1135,10 @@ struct MenuState {
     menu: CommandMenu,
     sheet: Sheet,
     font: SystemFont,
+    /// The layout file loaded for the current world (None: the configured
+    /// one) and the language its world layouts are read in.
+    layout: Option<String>,
+    language: String,
 }
 
 /// Sora's field gauge: the translated GAUGE_PLAYER logic, drawn into a
@@ -1825,6 +1842,8 @@ struct Loaded {
     vibration: Option<player::vibration::Library>,
     abilities: AbilitySource,
     magic: Option<magic_room::MagicSource>,
+    /// The second command deck's tables and labels.
+    second_deck: Option<second_deck::SecondDeck>,
     items: Option<item_room::ItemSource>,
     /// Base Sora's kit, and what builds the Drive forms' kits.
     kit: character_kit::Kit,
@@ -3515,6 +3534,34 @@ fn load(
         }
         (m, _) => m,
     };
+    // The second deck's tables (00battle sumn / limt, 03system cmd and
+    // item) and its labels.
+    let second_deck = match &config.menu {
+        Some(menu) => match second_deck::load(&battle, &system) {
+            Ok(mut d) => {
+                let wanted = d.wanted_names();
+                let ids: Vec<u32> = wanted.iter().map(|w| w.1).collect();
+                let texts = hud::load_messages_optional(
+                    source,
+                    &menu.messages.index,
+                    menu.messages.ordinal,
+                    menu.messages.name_hash,
+                    &ids,
+                )?;
+                for ((cmd, _), text) in wanted.into_iter().zip(texts) {
+                    if let Some(t) = text {
+                        d.names.insert(cmd, t);
+                    }
+                }
+                Some(d)
+            }
+            Err(e) => {
+                eprintln!("second command deck tables: {e}");
+                None
+            }
+        },
+        None => None,
+    };
     let enemy = match &config.enemy {
         Some(e) => Some(load_enemy(
             source,
@@ -3644,6 +3691,7 @@ fn load(
         sstm,
         abilities: ability_source,
         magic: magic_src,
+        second_deck,
         items: item_room::load(&system).ok(),
         party: match config.enemy {
             // The party stands in rooms with a fight to join.
@@ -5194,7 +5242,13 @@ fn setup(
                 let mut menu = CommandMenu::new(&sheet.sequence, items);
                 // The Magic row opens submenu 1 (command-01 section 0.6).
                 menu.opens = vec![None, Some(1), Some(2), None];
-                MenuState { menu, sheet, font }
+                MenuState {
+                    menu,
+                    sheet,
+                    font,
+                    layout: None,
+                    language: "us".into(),
+                }
             }),
             stats,
             canvas,
@@ -5922,6 +5976,11 @@ fn read_pad(
     game.advance_queued |= p & 0x40c != 0;
     game.menu_up_queued |= p & 0x4000 != 0;
     game.menu_down_queued |= p & 0x8000 != 0;
+    // Left swaps the command decks, right opens the row's submenu
+    // (FUN_1403f2470, FUN_1403b11e0; MODE_FIELD: the D-pad, or the right
+    // stick in its menu role).
+    game.deck_queued |= p & 0x1_0000 != 0;
+    game.open_queued |= p & 0x1000_0000 != 0;
     game.lock_queued |= p & 0x800 != 0;
     game.cycle_queued |= p & 0x30_0000_0000 != 0;
     targeting.queue_cycle(p);
@@ -5984,7 +6043,14 @@ fn simulate(
     mut targeting: ResMut<enemy_target::Targeting>,
 ) {
     let tick = game.tick;
-    let (up, down) = if game.ability_tour.is_some()
+    let deck_buttons = if game.deck_tour {
+        deck_tour::press(tick)
+    } else {
+        field_command_menu::Buttons::default()
+    };
+    let (up, down) = if game.deck_tour {
+        (deck_buttons.up, deck_buttons.down)
+    } else if game.ability_tour.is_some()
         || game.enemy_tour
         || game.enemy_battle_tour
         || game.magic_tour
@@ -5999,7 +6065,9 @@ fn simulate(
         game.menu_down_queued = false;
         queued
     };
-    let (stick, jump, decide) = if game.enemy_battle_tour {
+    let (stick, jump, decide) = if game.deck_tour {
+        (Vec2::ZERO, false, deck_buttons.decide)
+    } else if game.enemy_battle_tour {
         (
             Vec2::ZERO,
             false,
@@ -6080,7 +6148,19 @@ fn simulate(
     // The decide button executes the command under the cursor; Attack
     // (icon 1) is the only command this room implements.
     let mut cursor_moved = false;
-    let back = std::mem::take(&mut game.back_queued) && !talking;
+    let back = (std::mem::take(&mut game.back_queued) || deck_buttons.back) && !talking;
+    let left = (std::mem::take(&mut game.deck_queued) || deck_buttons.left) && !talking;
+    let right = (std::mem::take(&mut game.open_queued) || deck_buttons.right) && !talking;
+    // The deck tour owns the summon charms.
+    if game.deck_tour
+        && tick == 1
+        && let Some(it) = game.items.as_mut()
+    {
+        for c in deck_tour::CHARMS {
+            it.stock.insert(c, 1);
+        }
+    }
+    let world_index = area.as_deref().map(|a| a.current.world);
     let mut attack = decide;
     let mut sub_was_open = false;
     let mut menu_cast = None;
@@ -6170,12 +6250,32 @@ fn simulate(
                 }
             }
         }
+        // The second deck's rows and open list, and the art set: battle
+        // style 1 while the battle flag is on (DAT_142a11404).
+        let deck_room = second_deck::room(&game, world_index);
+        second_deck::refresh(&game, &mut m.menu, &deck_room);
+        m.menu.style = usize::from(second_deck::battle(&game));
         sub_was_open = m.menu.sub.is_some();
-        let before = (m.menu.cursor, m.menu.sub.as_ref().map(|s| s.cursor));
-        let decision = m.menu.input_with_back(up, down, decide, back);
-        cursor_moved = (m.menu.cursor, m.menu.sub.as_ref().map(|s| s.cursor)) != before;
+        let before = (
+            m.menu.kind,
+            m.menu.cursor,
+            m.menu.sub.as_ref().map(|s| s.cursor),
+        );
+        let decision = m.menu.press(field_command_menu::Buttons {
+            up,
+            down,
+            decide,
+            back,
+            left,
+            right,
+        });
+        cursor_moved = (
+            m.menu.kind,
+            m.menu.cursor,
+            m.menu.sub.as_ref().map(|s| s.cursor),
+        ) != before;
         attack =
-            decision == Decision::Execute(0) && m.menu.items.first().is_some_and(|i| i.icon == 1);
+            decision == Decision::Execute(0) && m.menu.rows().first().is_some_and(|i| i.icon == 1);
         // The command menu's own sounds (magicsfx-01 §5): a sub-menu push
         // plays se000 #3 (FUN_1403b2800 with its play flag), and backing out
         // of a sub-menu plays #4 (FUN_1403b20f0 with its play flag). Running
@@ -6191,8 +6291,23 @@ fn simulate(
                 cursor_moved = false;
                 game.sound_queue.push((SE_CLOSE, "menu_close"));
             }
+            // The deck swap plays se000 #20 (FUN_1401dd170(0x14)); a cursor
+            // move in the same frame plays its own sound.
+            Decision::Toggled => {
+                cursor_moved = m.menu.cursor != before.1;
+                game.sound_queue.push((SE_DECK, "menu_deck"));
+                game.event(serde_json::json!({"event":"command_deck","tick":tick,
+                    "kind":m.menu.kind,"cursor":m.menu.cursor}));
+            }
             _ => {}
         }
+        // The second deck opens its own lists; what is left (Attack, an
+        // unusable row) goes on like the top deck's.
+        let decision = if m.menu.kind == field_command_menu::SECOND_DECK {
+            second_deck::decide(&mut game, &mut m.menu, decision, &deck_room)
+        } else {
+            decision
+        };
         match decision {
             // Limit Form: the Magic slot is "Limit" (0x2c3, submenu 12).
             Decision::Open(1) if game.drive.as_ref().is_some_and(|d| d.limit_form()) => {
@@ -11197,6 +11312,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut npc_tour = false;
     let mut badge_tour = false;
     let mut journal_tour = false;
+    let mut deck_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
     // Capture ticks replacing the unattended run's own list (research).
@@ -11307,6 +11423,18 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("npc tour capture directory absent")?,
+                );
+            }
+            // The deck tour runs in the magic tour's setup (Sora still, the
+            // Shadow frozen nearby) with the magic schedule pushed away.
+            Some("--command-deck-tour") if autoplay.is_none() => {
+                magic_tour = true;
+                deck_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("command deck tour capture directory absent")?,
                 );
             }
             Some("--journal-tour") if autoplay.is_none() => {
@@ -11490,7 +11618,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         None
     };
     // A form's change takes about 260 ticks before the first cast.
-    let magic_shift = if party_hit_tour {
+    let magic_shift = if party_hit_tour || deck_tour {
         // The magic tour's schedule never comes up.
         1 << 40
     } else if magic_form != 0 {
@@ -11501,6 +11629,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let captures = if party_hit_tour {
         // The tour asks for its captures as its cases happen.
         Vec::new()
+    } else if deck_tour {
+        deck_tour::captures()
     } else if journal_tour {
         journal_tour::CAPTURES.to_vec()
     } else if npc_tour {
@@ -11532,6 +11662,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     };
     let autoplay_end = if party_hit_tour {
         party_hit_tour::END
+    } else if deck_tour {
+        deck_tour::end()
     } else if journal_tour {
         journal_tour::END
     } else if npc_tour {
@@ -11715,6 +11847,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         fx_calls: Vec::new(),
         party_spells: !party_hit_tour,
         party_battle: party_room::BattleMode::default(),
+        second_deck: loaded.second_deck.take(),
+        deck_tour,
+        deck_queued: false,
+        open_queued: false,
         party_hit_tour,
         party_hit_state: party_hit_tour::State::default(),
         enemy_guards: Vec::new(),
@@ -12158,6 +12294,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 read_pad,
                 camp_tick,
                 game_over::tick,
+                command_layout::follow,
                 (
                     simulate,
                     skate_tick,

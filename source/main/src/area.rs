@@ -429,6 +429,32 @@ impl AreaSource {
         ))
     }
 
+    /// FUN_1403a5920: the room's command-layout digit, arif row byte +0x34
+    /// (0 outside the table).
+    pub fn command_variant(&self, world: u8, area: u8) -> u8 {
+        command_variant(&self.arif, world, area)
+    }
+
+    /// FUN_140153ee0's file for a room: `<world><n>command.2dd`, or the
+    /// world-independent `zz0command.2dd` when the Config's command menu
+    /// is the default one (FUN_1402e5380: save config bit 6).
+    pub fn command_layout(&self, world: u8, area: u8, language: &str, default: bool) -> String {
+        command_layout(
+            progress::WORLDS
+                .get(world as usize)
+                .copied()
+                .unwrap_or("zz"),
+            self.command_variant(world, area),
+            language,
+            default,
+        )
+    }
+
+    /// The installed copy of `name`, and the source to read it from.
+    pub fn find(&self, name: &str) -> Option<(data::path_lookup::Found, &ProbeSource)> {
+        Some((self.library.find(name)?, &self.source))
+    }
+
     /// The BGM pair of a room: the ARD override, else the arif row's pair
     /// for the world's set index (FUN_1403a5960; bgm-input §A4).
     fn bgm_pair(&self, world: u8, area: u8, ard: Option<[u16; 2]>) -> [u16; 2] {
@@ -894,4 +920,62 @@ pub fn exit_target(area: &Area, avoid: Option<u8>, from: [f32; 2]) -> Option<[f3
         }
     }
     best.map(|(_, d)| d)
+}
+
+/// FUN_1403a5920 over 03system `arif`: world count at +4, per world a u16
+/// area count and a u16 offset at 8 + 4 * world, 0x40-byte area rows.
+pub fn command_variant(arif: &[u8], world: u8, area: u8) -> u8 {
+    let word = |o: usize| arif.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let worlds = arif
+        .get(4..8)
+        .map_or(0, |w| u32::from_le_bytes(w.try_into().unwrap()));
+    let w = world as usize;
+    if world as u32 >= worlds {
+        return 0;
+    }
+    match (word(8 + w * 4), word(10 + w * 4)) {
+        (Some(count), Some(off)) if (area as u16) < count => arif
+            .get(off as usize + area as usize * 0x40 + 0x34)
+            .copied()
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// `field2d/<language>/<world><n>command.2dd`, or `zz0command.2dd` for the
+/// default menu (FUN_140153ee0 / FUN_140154070).
+pub fn command_layout(world: &str, variant: u8, language: &str, default: bool) -> String {
+    if default {
+        format!("field2d/{language}/zz0command.2dd")
+    } else {
+        format!("field2d/{language}/{world}{variant}command.2dd")
+    }
+}
+
+#[cfg(test)]
+mod command_layout_tests {
+    use super::*;
+
+    #[test]
+    fn the_layout_follows_the_arif_digit() {
+        // Two worlds: world 0 with one area, world 1 with two (the second
+        // area's digit 5).
+        let mut arif = vec![1, 0, 0, 0, 2, 0, 0, 0];
+        arif.extend([1, 0, 16, 0, 2, 0, 80, 0]);
+        arif.resize(16 + 3 * 0x40, 0);
+        arif[80 + 0x40 + 0x34] = 5;
+        assert_eq!(command_variant(&arif, 1, 1), 5);
+        assert_eq!(command_variant(&arif, 1, 0), 0);
+        // Outside the table: 0.
+        assert_eq!(command_variant(&arif, 1, 2), 0);
+        assert_eq!(command_variant(&arif, 7, 0), 0);
+        assert_eq!(
+            command_layout("tt", 5, "us", false),
+            "field2d/us/tt5command.2dd"
+        );
+        assert_eq!(
+            command_layout("tt", 5, "fr", true),
+            "field2d/fr/zz0command.2dd"
+        );
+    }
 }
