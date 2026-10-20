@@ -1187,6 +1187,8 @@ struct Hud {
     updated: bool,
     /// The form level-up panels (sprite priority 9000, after the gauge).
     panels: visual::level_up::Panels,
+    /// A party limit's gauge and combo counter while it runs.
+    limit_hud: Option<party_limit::LimitHud>,
 }
 
 /// The original's default follow camera, ticked with the simulation in the
@@ -2474,6 +2476,9 @@ struct EnemyRuntime {
     /// The last player-side attacker of the Shadow (obj+0xd40,
     /// FUN_140411300): the revenge target.
     last_attacker: party_room::Attacker,
+    /// Hits that landed on it (Sora's, the members', a limit scene's): a
+    /// party limit's combo counter counts them.
+    hits_landed: u32,
 }
 
 /// A placeholder for a spell's hit volume: the spell effects (the `.mag`
@@ -3143,7 +3148,7 @@ fn load(
     // The party limits' files: Sora's motions join his kit, the friends'
     // their motion tables.
     let mut limit_source = match (&config.enemy, data::path_lookup::Library::open(source)) {
-        (Some(_), Ok(mut library)) => party_limit::load(&mut library, &battle, "us"),
+        (Some(_), Ok(mut library)) => party_limit::load(source, &mut library, &battle, "us"),
         _ => party_limit::LimitSource::default(),
     };
     let kit = character_kit::load_kit(
@@ -5249,6 +5254,7 @@ fn setup(
         let mut slots = visual::hud_slots::HudSlots::default();
         commands.insert_resource(Hud {
             panels: Default::default(),
+            limit_hud: None,
             gauge: Gauge::new(
                 &sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(),
                 &stats,
@@ -8393,6 +8399,25 @@ fn hud_tick(
     }
     let Hud { sheets, panels, .. } = &mut *hud;
     panels.update(&sheets[0].sequence);
+    // A party limit's gauge and combo counter (FUN_1403d96d0 shows them,
+    // FUN_1403d8f40 hides them).
+    let values = game.party_limit.as_ref().map(|r| r.hud_values());
+    let Hud {
+        limit_hud, slots, ..
+    } = &mut *hud;
+    match values {
+        Some((limit, command, time, hits)) => {
+            let h = limit_hud.get_or_insert_with(|| {
+                party_limit::LimitHud::start(game.party_limits.clone(), limit, command, time, slots)
+            });
+            h.update(time, hits, slots);
+        }
+        None => {
+            if let Some(h) = limit_hud.take() {
+                h.end(slots);
+            }
+        }
+    }
     hud.updated = true;
 }
 
@@ -8421,8 +8446,12 @@ fn hud_present(
         image,
         menu,
         panels,
+        limit_hud,
         ..
     } = &mut *hud;
+    // The limit file whose sheets the texture list borrows while a limit's
+    // HUD is up.
+    let limit_sheets = limit_hud.as_ref().map(|h| h.sheets());
     let mut textures: Vec<Texture> = sheets
         .iter()
         .map(|s| Texture {
@@ -8485,6 +8514,22 @@ fn hud_present(
         }
         draws.extend(gauge.draw(&seqs));
         draws.extend(enemy_gauge.draw(&sheets[0].sequence, 0));
+        // A party limit's gauge and combo counter (MISSION_GAUGE, COUNTER).
+        if let (Some(h), Some((src, limit))) = (limit_hud.as_mut(), limit_sheets.as_ref()) {
+            let l = &src.limits[*limit];
+            let mut at = [usize::MAX; 2];
+            for (k, sheet) in [&l.gauge_sheet, &l.counter_sheet].into_iter().enumerate() {
+                if let Some(s) = sheet {
+                    at[k] = textures.len();
+                    textures.push(Texture {
+                        rgba: &s.texture_rgba,
+                        size: s.texture_size.map(|v| v as usize),
+                        texel_scale: s.texel_scale as f32,
+                    });
+                }
+            }
+            draws.extend(h.draw(at[0], at[1]));
+        }
         if let Some((font_sheet, widths)) = menu_font.as_ref() {
             draws.extend(panels.draw(
                 &sheets[0].sequence,
@@ -8979,6 +9024,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
                     );
                 }
             }
+            rt.hits_landed += 1;
             let record = serde_json::json!({"event":"hit","tick":tick,"atkp":atkp,"sub":sub,"damage":damage,
                 "step":row,"combo":player.combo.step,"enemy_hp":rt.enemy.hp,"reaction":format!("{:?}", rt.enemy.reaction),
                 "act":format!("{:?}", rt.enemy.current_act()),"high":high});
@@ -12336,6 +12382,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             target_reach: e.target_reach,
             claws_now: Vec::new(),
             last_attacker: party_room::Attacker::Sora,
+            hits_landed: 0,
             sora_record: combat::HitRecord::new(true),
             ids: combat::AttackIds::default(),
             instance_ids: HashMap::new(),

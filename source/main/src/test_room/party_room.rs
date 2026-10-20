@@ -873,6 +873,7 @@ pub(super) fn land_volume(
             .hit_by(dir.to_array(), high, &attack, stats, rt.difficulty, false)
     {
         rt.last_attacker = Attacker::Member(index);
+        rt.hits_landed += 1;
         if let Some(&id) = rt.hit_sounds.get(&v.atkp)
             && id >= 0
         {
@@ -2225,6 +2226,7 @@ pub fn tick(game: &mut Game, tick: u64) {
                     .hit_by(dir.to_array(), high, &attack, &stats, rt.difficulty, false)
             {
                 rt.last_attacker = Attacker::Member(index);
+                rt.hits_landed += 1;
                 if let Some(&id) = rt.hit_sounds.get(&atkp)
                     && id >= 0
                 {

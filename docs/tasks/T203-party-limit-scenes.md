@@ -105,8 +105,17 @@ Fixed in round 2 (all from the executable):
 - The tour presses Triangle while reaction commands come and a row's command once none
   has come for 240 ticks; the top deck's rows come back after a limit.
 
-Still open: the shot sprites, the `comd` sheets and the limit gauge / combo counter are not
-drawn; summons are not done.
+Round 3, the limit HUD: the gauge (YS::MISSION_GAUGE → dk::MISSION_GAUGE, FUN_14017b750 /
+FUN_14018c990 / FUN_14018cf00 / FUN_14018d040: frame 3, fill 0xc scaled by time / start time,
+rest 0xd, marker 0xe, cap 9; right side, slot 0xc) and the combo counter (YS::COMBOCOUNTER →
+dk::COUNTER two-row mode, FUN_1403fa730 / FUN_14018be20 / FUN_14018c560: "%09d", digits 0xc..
+and 0x18.., leading zeros 0x16 / 0x22; left side, slot 0xc, range 0–999) draw from the limit
+file's own `gage` / `comb` sheets with their HD art (`visual::limit_hud`). Trinity Limit and
+0x26c show no counter. Every hit on the Shadow during a limit counts. [I] A child sprite sits
+at its parent's child context once (the executable also sets each child's offset to that
+context; FUN_14016abf0's composition was not traced to the end).
+
+Still open: the shot sprites and the `comd` sheets are not drawn; summons are not done.
 
 ## Uncertainty
 
@@ -122,5 +131,4 @@ hits, as far as checked against the executable; the presentation listed above is
 
 ## Next task
 
-The limit gauge and combo counter HUD (MISSION_GAUGE / the `gage` and `comb` sheets), the
-`comd` sheets and the shot sprites, then summons.
+The `comd` sheets and the shot sprites, then summons.

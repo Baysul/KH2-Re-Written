@@ -33,6 +33,10 @@ pub struct LoadedLimit {
     pub events: Vec<(ClipKey, MotionEvents)>,
     /// The file's effect container.
     pub pax: Option<std::sync::Arc<data::object_effect::Pax>>,
+    /// The gauge and combo counter sheets (`gage`, `comb`; FUN_1403d94d0)
+    /// with their HD art.
+    pub gauge_sheet: Option<visual::hud::Sheet>,
+    pub counter_sheet: Option<visual::hud::Sheet>,
 }
 
 #[derive(Default)]
@@ -76,7 +80,12 @@ pub fn events_of(m: &motion::SelectedMotion) -> MotionEvents {
 /// The party limits of the `limt` table this room can run: Sora with
 /// Donald and Goofy, any world, not a summon's [test-room choice: the
 /// Timeless River and world guests' files are left out].
-pub fn load(library: &mut Library, battle: &[u8], language: &str) -> LimitSource {
+pub fn load(
+    source: &data::probe_source::ProbeSource,
+    library: &mut Library,
+    battle: &[u8],
+    language: &str,
+) -> LimitSource {
     let Ok(limt) = super::bar_entry(battle, b"limt") else {
         return LimitSource::default();
     };
@@ -121,12 +130,19 @@ pub fn load(library: &mut Library, battle: &[u8], language: &str) -> LimitSource
             .as_ref()
             .and_then(|b| data::object_effect::read_pax(b).ok())
             .map(std::sync::Arc::new);
+        let sheet = |name: &[u8; 4]| {
+            let found = library.find(&path)?;
+            visual::hud::load(source, found.index, found.ordinal, found.name_hash, name).ok()
+        };
+        let (gauge_sheet, counter_sheet) = (sheet(b"gage"), sheet(b"comb"));
         out.limits.push(LoadedLimit {
             row,
             file,
             index,
             events,
             pax,
+            gauge_sheet,
+            counter_sheet,
         });
     }
     out
@@ -383,6 +399,8 @@ pub struct Running {
     seen: Vec<u16>,
     /// The last tick a reaction command was offered.
     pub last_reaction: u64,
+    /// The Shadow's landed-hit tally as last counted.
+    hits_seen: u32,
 }
 
 /// The character's clip view for a limit: its idle and the limit's motions.
@@ -630,6 +648,7 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
         pushers,
         seen: Vec::new(),
         last_reaction: tick,
+        hits_seen: game.enemy.as_ref().map_or(0, |rt| rt.hits_landed),
     });
     Ok(())
 }
@@ -833,6 +852,13 @@ pub fn tick(
         });
     }
     land_attacks(game, &mut run, &strikes, tick);
+    // The combo counter counts every hit on the Shadow while the limit runs.
+    if let Some(rt) = game.enemy.as_ref() {
+        let landed = rt.hits_landed;
+        run.scene
+            .count_hits(landed.wrapping_sub(run.hits_seen) as i32);
+        run.hits_seen = landed;
+    }
     if tick.is_multiple_of(10) {
         let live: Vec<_> = super::enemy_script::script_attacks(run.scene.world())
             .iter()
@@ -972,4 +998,110 @@ fn end(game: &mut Game, run: Running, tick: u64) {
         "missing":run.scene.missing(),"faults":run.scene.faults().len(),
         "first_faults":run.scene.faults().iter().take(4).map(|f| format!("{f:?}")).collect::<Vec<_>>(),
         "traps":run.scene.trace_counts()}));
+}
+
+// --- The limit's HUD -----------------------------------------------------
+
+use visual::limit_hud::{self, ComboCounter, LimitGauge};
+
+/// The limit's gauge (YS::MISSION_GAUGE at +0xe0: right side, kind 0xc) and
+/// combo counter (YS::COMBOCOUNTER at +0x88: left side, kind 0xc, range 0 to
+/// 999), shown while the limit runs (FUN_1403d96d0). Trinity Limit (0x1e4)
+/// and 0x26c show no counter. Each draws from its limit file's sheet.
+pub struct LimitHud {
+    source: std::sync::Arc<LimitSource>,
+    limit: usize,
+    gauge: Option<LimitGauge>,
+    counter: Option<ComboCounter>,
+}
+
+impl LimitHud {
+    pub fn start(
+        source: std::sync::Arc<LimitSource>,
+        limit: usize,
+        command: u16,
+        time: f32,
+        slots: &mut visual::hud_slots::HudSlots,
+    ) -> Self {
+        let l = &source.limits[limit];
+        let gauge = l.gauge_sheet.as_ref().and_then(|s| {
+            LimitGauge::new(
+                &s.sequence,
+                limit_hud::Side::Right,
+                limit_hud::LIMIT_KIND,
+                time,
+                time,
+                slots,
+            )
+        });
+        let counter = (command != 0x1e4 && command != 0x26c)
+            .then_some(l.counter_sheet.as_ref())
+            .flatten()
+            .and_then(|s| {
+                ComboCounter::new(
+                    &s.sequence,
+                    limit_hud::Side::Left,
+                    limit_hud::LIMIT_KIND,
+                    limit_hud::digits_of(999),
+                    slots,
+                )
+            });
+        LimitHud {
+            source,
+            limit,
+            gauge,
+            counter,
+        }
+    }
+
+    /// The gauge follows the limit's time (+0x118), the counter its hits.
+    pub fn update(&mut self, time: f32, hits: i32, slots: &visual::hud_slots::HudSlots) {
+        let l = &self.source.limits[self.limit];
+        if let (Some(g), Some(s)) = (self.gauge.as_mut(), l.gauge_sheet.as_ref()) {
+            g.set(time.max(0.));
+            g.update(&s.sequence, slots);
+        }
+        if let (Some(c), Some(s)) = (self.counter.as_mut(), l.counter_sheet.as_ref()) {
+            c.set(hits);
+            c.update(&s.sequence, slots);
+        }
+    }
+
+    /// The limit file whose sheets the widgets draw from.
+    pub fn sheets(&self) -> (std::sync::Arc<LimitSource>, usize) {
+        (self.source.clone(), self.limit)
+    }
+
+    /// The widgets' draws, the gauge's and the counter's sheets at the
+    /// texture indices given.
+    pub fn draw(&mut self, gauge_at: usize, counter_at: usize) -> Vec<visual::gauge::Draw> {
+        let l = &self.source.limits[self.limit];
+        let mut out = Vec::new();
+        if let (Some(g), Some(s)) = (self.gauge.as_mut(), l.gauge_sheet.as_ref()) {
+            out.extend(g.draw(&s.sequence, gauge_at));
+        }
+        if let (Some(c), Some(s)) = (self.counter.as_mut(), l.counter_sheet.as_ref()) {
+            out.extend(c.draw(&s.sequence, counter_at));
+        }
+        out
+    }
+
+    /// The widgets go and their slots empty (FUN_1403d8f40).
+    pub fn end(self, slots: &mut visual::hud_slots::HudSlots) {
+        if let Some(g) = &self.gauge {
+            g.release(slots);
+        }
+        if let Some(c) = &self.counter {
+            c.release(slots);
+        }
+    }
+}
+
+impl Running {
+    /// What the limit's HUD shows: its command, the gauge's time and the
+    /// combo counter's hits.
+    pub fn hud_values(&self) -> (usize, u16, f32, i32) {
+        let l = self.scene.limit();
+        (self.limit, self.command, l.time, l.hits)
+    }
 }

@@ -186,14 +186,17 @@ impl Scene {
         out
     }
 
-    /// The host landed attack `slot` on a target (its `attack_is_hit`); the
-    /// limit's combo counter counts the hit.
+    /// The host landed attack `slot` on a target (its `attack_is_hit`).
     pub fn struck(&mut self, slot: usize) {
         if let Some(Some(a)) = self.world.attacks.get_mut(slot) {
             a.mark_hit(crate::attack::flag::STRUCK);
         }
+    }
+
+    /// Hits that landed this tick, for the combo counter (+0xc0).
+    pub fn count_hits(&mut self, n: i32) {
         if let Some(l) = self.world.limit.as_mut() {
-            l.hits += 1;
+            l.hits += n;
         }
     }
 

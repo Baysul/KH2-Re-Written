@@ -138,6 +138,75 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    // LIMIT_PROBE_SHEET=<file>: the `gage` sheet's HD texture as raw RGBA
+    // (width and height in the file name), for private inspection.
+    if let Some(out) = std::env::var_os("LIMIT_PROBE_SHEET")
+        && let Some(found) = library.find(&format!("limit/us/{name}.bar"))
+        && let Ok(sheet) = visual::hud::load(
+            &source,
+            found.index,
+            found.ordinal,
+            found.name_hash,
+            b"gage",
+        )
+    {
+        let mut path = PathBuf::from(out);
+        path.set_extension(format!(
+            "{}x{}.rgba",
+            sheet.texture_size[0], sheet.texture_size[1]
+        ));
+        std::fs::write(&path, &sheet.texture_rgba)?;
+        println!("  texel scale {}", sheet.texel_scale);
+    }
+    // The gauge sheets: each group's animations.
+    for (name, _, seq) in &file.sheets {
+        if let Ok(seq) = data::sprite_sequence::read(seq) {
+            println!(
+                "  sheet {} groups {}",
+                String::from_utf8_lossy(name),
+                seq.groups.len()
+            );
+            for (g, group) in seq.groups.iter().enumerate() {
+                let anims: Vec<_> = seq.animations[group.animations.clone()]
+                    .iter()
+                    .map(|a| {
+                        (
+                            format!("{:#x}", a.flags),
+                            a.sprite_group,
+                            a.frames,
+                            a.translate,
+                            a.scale,
+                            a.scale_x,
+                            format!("{:08x}/{:08x}", a.color[0], a.color[1]),
+                        )
+                    })
+                    .collect();
+                if String::from_utf8_lossy(name) == "gage" && (g == 3 || g == 0xc || g == 9) {
+                    let mut pl = data::sprite_sequence::Player::new(&seq, g);
+                    pl.update(&seq, 1.);
+                    let m = data::sprite_sequence::Modifiers::default();
+                    let ctx = seq.child_context(&pl, &m);
+                    for q in seq.quads(&pl, [0., 0.], &m) {
+                        println!(
+                            "      quad {:?} uv {:?} col {:?} blend {}",
+                            q.corners, q.uv, q.colors[0], q.blend
+                        );
+                    }
+                    println!("      context {ctx:?}");
+                }
+                println!(
+                    "    group {g:#x} play {} loop {:?} light {} texty {} pad {} textx {} {:?}",
+                    group.play_count,
+                    group.loop_frames,
+                    group.light_position_x,
+                    group.text_position_y,
+                    group.ui_padding,
+                    group.text_position_x,
+                    anims
+                );
+            }
+        }
+    }
     // Model 0 Sora, model k the friend of character k; their weapons are
     // model 16 + character.
     let mut clips: Vec<ClipSet> = (0..32).map(|_| ClipSet::default()).collect();
