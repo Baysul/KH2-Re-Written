@@ -56,6 +56,11 @@ test = false
 bench = false
 
 [[bin]]
+name = "limit_probe"
+test = false
+bench = false
+
+[[bin]]
 name = "pose_sheet"
 test = false
 bench = false

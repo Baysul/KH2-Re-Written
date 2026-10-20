@@ -772,7 +772,8 @@ fn motion_capture(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Res
 /// 0 when none does.
 fn motion_capture_id(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let token = ctx.object(id)?.sys.capture.map_or(0, |c| c.token);
+    let sys = &ctx.object(id)?.sys;
+    let token = sys.capture.map_or(sys.limit_token, |c| c.token);
     int(args, token);
     Ok(())
 }

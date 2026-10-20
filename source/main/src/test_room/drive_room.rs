@@ -394,6 +394,7 @@ impl FormSources {
                 } else {
                     vec![player::WALL_RECOIL_AIR]
                 },
+                external: Vec::new(),
             },
         )
     }

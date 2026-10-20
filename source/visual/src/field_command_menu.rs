@@ -45,6 +45,11 @@ const CURSOR_REFRESH: [usize; 3] = [10, 79, 23];
 const ROW: [usize; 3] = [16, 85, 29];
 const LAST_ROW: [usize; 3] = [11, 80, 24];
 const ICON_FRAME: [usize; 3] = [45, 47, 46];
+/// Rows a command override replaced (item flag bit 0): the override art
+/// played in (0x1407182d0, cursor then rows and last row) and its loop
+/// (0x140718300), by style.
+const OVERRIDE_IN: [usize; 12] = [14, 83, 27, 13, 82, 26, 14, 83, 27, 14, 83, 27];
+const OVERRIDE: [usize; 12] = [15, 84, 28, 12, 81, 25, 15, 84, 28, 15, 84, 28];
 /// The bouncing pointer: 20 beside the top deck, 21 beside any other kind
 /// (FUN_14015bc30).
 const POINTER: usize = 20;
@@ -114,6 +119,8 @@ struct Slot {
     dimmed: bool,
     context: [f32; 2],
     resolved: [f32; 2],
+    /// The record's flag bit 0 when the slot was last filled (+0x140).
+    flag: bool,
 }
 
 /// The reaction command offered above the menu (e.g. Talk).
@@ -161,6 +168,10 @@ pub struct CommandMenu {
     /// FUN_1403b2780: the deck swap is refused and the pointer hidden (a
     /// scripted deck or a restricted mode).
     pub locked: bool,
+    /// Top-level rows a command override replaced this frame (FUN_1403b0f20:
+    /// override record 0 takes Attack's row, record 2 Limit's): they show
+    /// the override art.
+    pub overridden: [bool; 8],
     /// The open submenu, if any.
     pub sub: Option<Sub>,
 }
@@ -221,6 +232,7 @@ impl CommandMenu {
             style: 0,
             last_style: 0,
             locked: false,
+            overridden: [false; 8],
             sub: None,
         }
     }
@@ -408,6 +420,7 @@ impl CommandMenu {
                 dimmed: false,
                 context: [0.; 2],
                 resolved: [0.; 2],
+                flag: false,
             });
         } else if force {
             self.slots[i].player = Player::new(seq, group);
@@ -459,6 +472,7 @@ impl CommandMenu {
                     dimmed: false,
                     context: [0.; 2],
                     resolved: [0.; 2],
+                    flag: false,
                 });
             } else if force {
                 sub.slots[i].player = Player::new(seq, group);
@@ -552,13 +566,24 @@ impl CommandMenu {
         let mut cursor_y = y;
         for (i, item) in rows.iter().enumerate() {
             if i != cur {
-                let group = if i == n - 1 {
-                    LAST_ROW[style]
-                } else {
-                    ROW[style]
-                };
+                let last = i == n - 1;
+                let mut group = if last { LAST_ROW[style] } else { ROW[style] };
+                let mut queued = None;
+                let overridden = self.overridden.get(i).copied().unwrap_or(false);
+                if overridden {
+                    let k = if last { 9 } else { 6 } + style;
+                    group = OVERRIDE[k];
+                    if !self.slots.get(self.counter).is_some_and(|s| s.flag) {
+                        group = OVERRIDE_IN[k];
+                        queued = Some(OVERRIDE[k]);
+                    }
+                }
                 let (label, colour) = (item.label.clone(), ROW_TEXT[item.colour.min(8)]);
-                self.slot(seq, group, true, [x, y], Some(label), colour);
+                let s = self.slot(seq, group, true, [x, y], Some(label), colour);
+                if queued.is_some() {
+                    self.slots[s].queued = queued;
+                }
+                self.slots[s].flag = overridden;
             } else {
                 cursor_y = y;
             }
@@ -570,6 +595,21 @@ impl CommandMenu {
             if changed {
                 force = true;
                 group = CURSOR_REFRESH[style];
+            }
+            // FUN_14015ba00: an overridden cursor row plays the override art
+            // in, then loops it; a row that stops being overridden restarts.
+            let overridden = self.overridden.get(cur).copied().unwrap_or(false);
+            let was = self.slots.get(self.counter).is_some_and(|s| s.flag);
+            let mut cursor_queued = None;
+            if overridden {
+                group = OVERRIDE[3 + style];
+                if !was {
+                    group = OVERRIDE_IN[3 + style];
+                    force = true;
+                    cursor_queued = Some(OVERRIDE[3 + style]);
+                }
+            } else if was {
+                force = true;
             }
             let item = &rows[cur];
             let (label, colour, icon) = (
@@ -585,6 +625,10 @@ impl CommandMenu {
                 Some(label),
                 colour,
             );
+            if cursor_queued.is_some() {
+                self.slots[c].queued = cursor_queued;
+            }
+            self.slots[c].flag = overridden;
             // Decoration (FUN_14015bc30): icon frame, category icon and the
             // bouncing pointer, all parented to the cursor row. The pointer
             // shows only while no submenu was drawn and the menu is free.
@@ -829,6 +873,7 @@ mod tests {
             style: 0,
             last_style: 0,
             locked: false,
+            overridden: [false; 8],
             sub: None,
         }
     }

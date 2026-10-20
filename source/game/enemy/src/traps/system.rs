@@ -21,7 +21,16 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         48 => memory_free,
         50 => effect_is_active,
         53 => effect_pos,
-        38 | 39 | 40 | 41 | 44 | 51 | 52 | 66 | 67 | 85 => effect_command,
+        38 => effect_command::<38>,
+        39 => effect_command::<39>,
+        40 => effect_command::<40>,
+        41 => effect_command::<41>,
+        44 => effect_command::<44>,
+        51 => effect_command::<51>,
+        52 => effect_command::<52>,
+        66 => effect_command::<66>,
+        67 => effect_command::<67>,
+        85 => effect_command::<85>,
         79 => effect_add_dead_block,
         _ => return None,
     })
@@ -46,10 +55,15 @@ fn thread_start(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
     Ok(())
 }
 
-/// Effect commands on a handle `effect_start_bind` returned: position, scale,
-/// rotation, direction, loop end, kill, fade out, pause, colour. The effect
-/// system is the host's; the command and its operands are recorded.
-fn effect_command(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+/// Effect commands on a handle `effect_start_bind` returned (the trap index
+/// `T`): 38 position, 39 rotation, 40 scale, 41 direction, 44 loop end, 51
+/// kill, 52 fade out, 66/67 pause and colour, 85 stop. The effect system is
+/// the host's; the command and its operands are recorded.
+fn effect_command<const T: u16>(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
     let handle = args[0].value;
     let operand = [args[1], args[2]];
     let vector = ctx.read_f32(m, operand[0].value).and_then(|x| {
@@ -60,6 +74,7 @@ fn effect_command(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Res
         ])
     });
     ctx.world.events.push(Event::EffectCommand {
+        trap: T,
         handle,
         words: [operand[0].value, operand[1].value],
         vector,

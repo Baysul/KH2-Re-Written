@@ -391,6 +391,28 @@ impl Follower {
         }
     }
 
+    /// A scene drives the member (a party limit): it stands where the scene
+    /// puts it and plays the scene's motion as an attack (its windows hit),
+    /// or stands idle between motions. Its own decisions wait.
+    pub fn follow_script(&mut self, s: Scripted) {
+        self.position = s.position;
+        self.yaw = s.yaw;
+        self.tick = s.tick;
+        self.reaction = None;
+        self.slide = None;
+        self.air = None;
+        self.special = Special::new();
+        self.gait = Gait::Stand;
+        self.attack = (s.motion != 0 && !s.done).then_some(Attack {
+            record: 0,
+            motion: s.motion,
+            tick: s.tick,
+            spell: None,
+            heal: 0,
+            item: None,
+        });
+    }
+
     /// The motion id playing: an attack, or the gait (idle 0, walk 1,
     /// run 2).
     pub fn motion(&self) -> u16 {

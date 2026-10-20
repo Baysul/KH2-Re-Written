@@ -21,6 +21,15 @@ pub struct Command {
     pub flags: u32,
     /// +0x1c: the MP cost of a spell (0xff = all MP) or the Drive cost.
     pub cost: u8,
+    /// +0x20: a limit's gauge time in ticks (FUN_1403d8b40 hands it to
+    /// the limit object as a float).
+    pub time: u16,
+    /// +0x1f: whose command windows decide (FUN_1403b6950): 0 the user's,
+    /// 1 the target's, 2 both.
+    pub decider: u8,
+    /// +0x22: the motion window (range 0x1a's value, obj+0x638) that also
+    /// takes this command (FUN_1403ba070).
+    pub chain: u16,
     /// +0x2c: forms in which the command is unusable (bit f).
     pub form_mask: u16,
     /// +0x2e: the command group.
@@ -47,6 +56,9 @@ pub fn read(bytes: &[u8]) -> io::Result<Vec<Command>> {
             icon: r[7],
             flags: u32::from_le_bytes([r[12], r[13], r[14], r[15]]),
             cost: r[0x1c],
+            decider: r[0x1f],
+            time: u16::from_le_bytes([r[0x20], r[0x21]]),
+            chain: u16::from_le_bytes([r[0x22], r[0x23]]),
             form_mask: u16::from_le_bytes([r[0x2c], r[0x2d]]),
             group: r[0x2e],
         })

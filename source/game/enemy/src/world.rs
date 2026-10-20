@@ -121,6 +121,8 @@ pub enum Event {
     /// A command on an effect handle: the first operand slots, and the vector
     /// the first one points at when it is readable.
     EffectCommand {
+        /// The table 0 trap index (38 position, 41 direction, 51 kill ...).
+        trap: u16,
         handle: u32,
         words: [u32; 2],
         vector: Option<[f32; 3]>,
@@ -346,6 +348,8 @@ pub struct World {
     pub lights: Vec<Option<Light>>,
     /// The vacuums scripts made, by handle slot.
     pub vacuums: Vec<Option<Vacuum>>,
+    /// Duck Flare's flare pool (`flare_init`, DAT_142b59670).
+    pub flares: Option<crate::traps::flare::Pool>,
     /// The shouts waiting for the frame's shout job.
     pub shouts: Vec<Shout>,
     /// The engine's own random generator (DAT_140783ca0), which the shout
@@ -374,6 +378,12 @@ pub struct World {
     /// The battle target table (DAT_142a16370).
     pub battle_targets:
         [crate::traps::target::BattleTarget; crate::traps::target::BATTLE_TARGET_SLOTS],
+    /// The running limit (DAT_142a24cc0), when the host started one.
+    pub limit: Option<crate::traps::limit::LimitState>,
+    /// The host drives Sora's stand-in itself (a limit scene moves him):
+    /// traps then read its own position and heading instead of the host's
+    /// player.
+    pub player_scripted: bool,
 }
 
 /// The event path walker the `eh22_path_*` traps drive (DAT_142b59840):
@@ -426,6 +436,7 @@ impl Default for World {
             appear_depth: 0,
             lights: Vec::new(),
             vacuums: Vec::new(),
+            flares: None,
             shouts: Vec::new(),
             engine_rng: Lcg::default(),
             last_line_cross: None,
@@ -438,6 +449,8 @@ impl Default for World {
             captures: 0,
             eh22: Eh22::default(),
             battle_targets: Default::default(),
+            limit: None,
+            player_scripted: false,
         }
     }
 }
@@ -695,6 +708,17 @@ impl World {
         }
     }
 
+    /// Put a light in the first free slot; its handle.
+    pub fn add_light(&mut self, light: Light) -> u32 {
+        let slot = self.lights.iter().position(Option::is_none);
+        let slot = slot.unwrap_or_else(|| {
+            self.lights.push(None);
+            self.lights.len() - 1
+        });
+        self.lights[slot] = Some(light);
+        LIGHT_HANDLES + slot as u32 * 16
+    }
+
     /// The vacuum slot a handle names.
     pub fn vacuum_slot(&self, handle: u32) -> Option<usize> {
         let o = handle.checked_sub(VACUUM_HANDLES)?;
@@ -837,8 +861,10 @@ impl Ctx<'_> {
                 .world
                 .player_proxy
                 .get_or_insert_with(|| Box::new(Object::bare(PLAYER_OBJECT)));
-            proxy.sys.position = self.env.player_position();
-            proxy.sys.yaw = self.env.player_yaw();
+            if !self.world.player_scripted {
+                proxy.sys.position = self.env.player_position();
+                proxy.sys.yaw = self.env.player_yaw();
+            }
             return Ok(proxy);
         }
         self.world
@@ -1007,7 +1033,14 @@ impl Host for Machine<'_> {
             if offset < 16 {
                 return Some(if offset == 4 { PLAYER_HANDLE } else { 0 });
             }
-            return self.ctx.world.player_proxy.as_ref()?.sys.peek_word(offset);
+            let sys = &self.ctx.world.player_proxy.as_ref()?.sys;
+            if (TARGET_RECORD_OFFSET..TARGET_RECORD_OFFSET + 16).contains(&offset) {
+                return Some(target_record_word(
+                    sys.target,
+                    offset - TARGET_RECORD_OFFSET,
+                ));
+            }
+            return sys.peek_word(offset);
         }
         if let Some((id, offset)) = object_field(address) {
             if offset < 16 {
@@ -1064,6 +1097,22 @@ impl Host for Machine<'_> {
     }
 
     fn poke(&mut self, address: u32, value: u32) -> bool {
+        if let Some(d) = address
+            .checked_sub(TARGET_DUP_HANDLES)
+            .filter(|d| *d < 0x0100_0000)
+        {
+            // A script writing into its copy of a target record: the group
+            // (+4) and the search kind (+0xc).
+            let Some(Some(t)) = self.ctx.world.target_dups.get_mut((d / 16) as usize) else {
+                return false;
+            };
+            match d % 16 {
+                4 => t.group = value as i32,
+                0xc => t.kind = value as i32,
+                _ => {}
+            }
+            return true;
+        }
         if let Some(offset) = address.checked_sub(PLAYER_HANDLE).filter(|o| *o < 0x1000) {
             return self
                 .ctx

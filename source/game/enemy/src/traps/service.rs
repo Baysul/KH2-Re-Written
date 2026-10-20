@@ -136,7 +136,6 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (6, 59) => xemnas_get_obj,
         (1, 234) => party_get_weapon,
         (6, 58) => act_child_push,
-        (2, 57) => limit_effect_start,
         (1, 169) => effect_unbind,
         (10, 58) => friend_link_magic,
         (10, 35) => friend_get_action_param,
@@ -341,26 +340,6 @@ fn play_se_loop(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
     forward(ctx, m, args, "obj_play_se_loop", Some(0), None, None)?;
     let handle = ctx.world.next_effect_handle() as i32;
     args[0] = Slot::int(handle);
-    Ok(())
-}
-
-/// 2:57 FUN_140432fb0 -> FUN_1403d9b60: start an effect of the object's
-/// container with priority 30000 (FUN_1402c6b30); the script gets the
-/// effect handle.
-fn limit_effect_start(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let id = ctx.sys_of_ai(m, args[0].value)?;
-    let (effect, argument) = (args[1].as_int(), args[2].as_int());
-    let handle = ctx.world.next_effect_handle();
-    ctx.world.events.push(Event::EffectStart {
-        object: id,
-        effect,
-        arguments: [argument, 0],
-        handle,
-        position: None,
-        bound: true,
-        other: None,
-    });
-    args[0] = Slot::address(handle);
     Ok(())
 }
 

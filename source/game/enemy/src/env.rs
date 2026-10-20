@@ -90,6 +90,29 @@ pub trait Env {
     fn map_normal(&self, _polygon: i32) -> Option<Vec3> {
         None
     }
+    /// Whether an object may take a command now (FUN_1403ba070: its command
+    /// lockout and motion windows).
+    fn can_decide_command(&self, _object: u32, _command: u16) -> bool {
+        false
+    }
+    /// The command's flags (+0xc), as FUN_1403ba070 tests them.
+    fn command_flags(&self, _command: u16) -> u32 {
+        0
+    }
+    /// The command's +0x1f: whose windows decide it (FUN_1403b6950).
+    fn command_decider(&self, _command: u16) -> u8 {
+        0
+    }
+    /// The command's +0x22: the motion window value that also takes it.
+    fn command_chain(&self, _command: u16) -> u16 {
+        0
+    }
+    /// Sora's push shapes (his model's object-collision kind 4, FUN_1403b4f10
+    /// with FUN_1403c9c00), each centre relative to his origin in the
+    /// script's +Y-down frame.
+    fn player_push_shapes(&self) -> Vec<crate::traps::flare::Shape> {
+        Vec::new()
+    }
     /// The movement Sora's controller asks for this frame (`player_get_movement`).
     fn player_move_input(&self) -> Vec3 {
         [0.; 3]

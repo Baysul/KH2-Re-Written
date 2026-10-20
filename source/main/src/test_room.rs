@@ -88,10 +88,12 @@ mod item_drop_view;
 mod item_room;
 mod journal_tour;
 mod level_growth;
+mod limit_tour;
 mod magic_room;
 mod magic_tour;
 mod party_blade;
 mod party_hit_tour;
+mod party_limit;
 mod party_room;
 mod prize_room;
 mod second_deck;
@@ -957,6 +959,8 @@ struct Game {
     selected_target: Option<[f32; 3]>,
     target_locked: bool,
     player_target_shape: Option<object_collision::Entry>,
+    /// Sora's push shapes (object collision kind 4).
+    player_push_shapes: Vec<object_collision::Entry>,
     clips: Clips,
     world: RoomWorld,
     player: Player,
@@ -998,8 +1002,18 @@ struct Game {
     party_battle: party_room::BattleMode,
     /// The second command deck (Summon, Party, Limit) and its lists.
     second_deck: Option<second_deck::SecondDeck>,
+    /// The party limits' files, the limit running and the one the menu
+    /// asked for.
+    party_limits: Arc<party_limit::LimitSource>,
+    party_limit: Option<party_limit::Running>,
+    limit_request: Option<u16>,
+    /// Decide on a row a limit's command took this tick: its override
+    /// record (0 the Attack row, 2 the Limit row).
+    limit_decide: Option<usize>,
     /// The unattended `--command-deck-tour` (deck_tour.rs).
     deck_tour: bool,
+    /// The unattended `--party-limit-tour` (limit_tour.rs).
+    limit_tour: bool,
     /// The deck swap (left, logical 0x10000) and open (right, 0x10000000)
     /// pressed since the last tick.
     deck_queued: bool,
@@ -1481,6 +1495,10 @@ fn ptya_record(e: &ptya::PtyaEntry) -> player::ptya::Record {
 
 fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn std::error::Error>> {
     let (frame_start, frame_end, fps, frame_return) = selected.motion.frame_window()?;
+    // Some limit motions start before their first key (-1) or name a return
+    // frame past their end: sampled from 0, the return held to the window.
+    let frame_start = frame_start.max(0.);
+    let frame_return = frame_return.clamp(frame_start, frame_end.max(frame_start));
     // Final Form's motions run at 120 frames a second.
     if !(1. ..=120.).contains(&fps)
         || !(0. ..frame_end).contains(&frame_start)
@@ -1844,6 +1862,8 @@ struct Loaded {
     magic: Option<magic_room::MagicSource>,
     /// The second command deck's tables and labels.
     second_deck: Option<second_deck::SecondDeck>,
+    /// The party limits' files.
+    party_limits: party_limit::LimitSource,
     items: Option<item_room::ItemSource>,
     /// Base Sora's kit, and what builds the Drive forms' kits.
     kit: character_kit::Kit,
@@ -3118,6 +3138,12 @@ fn load(
         .as_ref()
         .and_then(|e| e.system.as_ref())
         .and_then(|l| visual::effects::load_pax(source, &l.index, l.ordinal, l.name_hash).ok());
+    // The party limits' files: Sora's motions join his kit, the friends'
+    // their motion tables.
+    let mut limit_source = match (&config.enemy, data::path_lookup::Library::open(source)) {
+        (Some(_), Ok(mut library)) => party_limit::load(&mut library, &battle, "us"),
+        _ => party_limit::LimitSource::default(),
+    };
     let kit = character_kit::load_kit(
         source,
         character_kit::KitInputs {
@@ -3142,8 +3168,12 @@ fn load(
             params,
             pax: base_pax,
             scripted: vec![player::WALL_RECOIL_AIR],
+            external: limit_source.motions(1),
         },
     )?;
+    // Donald's and Goofy's limit motions, for their motion tables.
+    let mut member_limit_motions: HashMap<u8, Vec<_>> =
+        [2u8, 3].map(|c| (c, limit_source.motions(c))).into();
     let sora_body = kit.body.clone();
     let (sora_target_radius, sora_target_lift) = (kit.target_radius, kit.target_lift);
     let (sora_body_lift, sora_heal_lift) = (kit.body_lift, kit.heal_lift);
@@ -3692,6 +3722,7 @@ fn load(
         abilities: ability_source,
         magic: magic_src,
         second_deck,
+        party_limits: std::mem::take(&mut limit_source),
         items: item_room::load(&system).ok(),
         party: match config.enemy {
             // The party stands in rooms with a fight to join.
@@ -3714,6 +3745,9 @@ fn load(
                             name,
                             character,
                             records,
+                            member_limit_motions
+                                .remove(&(character as u8))
+                                .unwrap_or_default(),
                         ) {
                             Ok(mut k) => {
                                 eprintln!("party member {} loaded", k.name);
@@ -6045,10 +6079,27 @@ fn simulate(
     let tick = game.tick;
     let deck_buttons = if game.deck_tour {
         deck_tour::press(tick)
+    } else if game.limit_tour {
+        // While a limit offers a row and no reaction command, the tour walks
+        // the cursor onto it.
+        let running = game.party_limit.is_some();
+        if limit_tour::lock(tick) {
+            game.lock_queued = true;
+        }
+        let seek = game
+            .party_limit
+            .as_ref()
+            .is_some_and(|r| r.offers[1].is_none())
+            && hud.as_ref().and_then(|h| h.menu.as_ref()).is_some_and(|m| {
+                let o = m.menu.overridden;
+                o.iter().any(|&b| b) && !o.get(m.menu.cursor).copied().unwrap_or(false)
+            });
+        limit_tour::press(tick, running, seek)
     } else {
         field_command_menu::Buttons::default()
     };
-    let (up, down) = if game.deck_tour {
+    let scripted_menu = game.deck_tour || game.limit_tour;
+    let (up, down) = if scripted_menu {
         (deck_buttons.up, deck_buttons.down)
     } else if game.ability_tour.is_some()
         || game.enemy_tour
@@ -6065,7 +6116,7 @@ fn simulate(
         game.menu_down_queued = false;
         queued
     };
-    let (stick, jump, decide) = if game.deck_tour {
+    let (stick, jump, decide) = if scripted_menu {
         (Vec2::ZERO, false, deck_buttons.decide)
     } else if game.enemy_battle_tour {
         (
@@ -6151,6 +6202,30 @@ fn simulate(
     let back = (std::mem::take(&mut game.back_queued) || deck_buttons.back) && !talking;
     let left = (std::mem::take(&mut game.deck_queued) || deck_buttons.left) && !talking;
     let right = (std::mem::take(&mut game.open_queued) || deck_buttons.right) && !talking;
+    // The limit tour: full MP before each limit, and Trinity Limit.
+    if game.limit_tour {
+        if limit_tour::refill(tick) {
+            game.player.mp.cur = game.player.mp.max;
+            game.player.mp.remaining = 0.;
+            game.player.mp.total = 0.;
+            game.player.mp_charging = false;
+            // [Tour setup] Sora stands STAND_OFF units in front of the
+            // Shadow, facing it, as a player would walk up before a limit.
+            if let Some(rt) = game.enemy.as_ref() {
+                let e = rt.enemy.position;
+                game.player.position = [e[0], e[1], e[2] + limit_tour::STAND_OFF];
+                game.player.yaw = std::f32::consts::PI;
+            }
+        }
+        if tick == 1
+            && let Some(&bit) = game
+                .second_deck
+                .as_ref()
+                .and_then(|d| d.ability_bits.get(&limit_tour::TRINITY_ABILITY))
+        {
+            game.player.abilities.set(bit);
+        }
+    }
     // The deck tour owns the summon charms.
     if game.deck_tour
         && tick == 1
@@ -6255,6 +6330,74 @@ fn simulate(
         let deck_room = second_deck::room(&game, world_index);
         second_deck::refresh(&game, &mut m.menu, &deck_room);
         m.menu.style = usize::from(second_deck::battle(&game));
+        // A party limit's commands (FUN_1403b0f20 with FUN_1403b2660): record
+        // 0 takes the row of the Attack kind (icon 1), record 2 the Limit
+        // row (command 0x51), with the override art; record 1 is the
+        // reaction command. The cursor keeps its row (FUN_1403b11e0).
+        let limit_running = game.party_limit.is_some();
+        // [Tour setup] Each limit of the tour starts from the deck's top row
+        // with no list open.
+        if game.limit_tour && limit_tour::refill(tick) {
+            m.menu.cursor = 0;
+            m.menu.close_sub();
+        }
+        m.menu.overridden = [false; 8];
+        let mut records = [None; 8];
+        if let Some(run) = game.party_limit.as_ref() {
+            let deck = game.second_deck.as_ref();
+            let name = |cmd: u16| {
+                deck.and_then(|d| d.names.get(&cmd).cloned())
+                    .unwrap_or_default()
+            };
+            m.menu.reaction = run.offers[1].map(|cmd| field_command_menu::Reaction {
+                label: name(cmd),
+                dimmed: false,
+            });
+            let second = m.menu.kind == field_command_menu::SECOND_DECK;
+            for (row, record) in [(0, 0), (second_deck::LIMIT_ROW, 2)] {
+                let Some(cmd) = run.offers[record] else {
+                    continue;
+                };
+                // The Limit row is the second deck's.
+                if record == 2 && !second {
+                    continue;
+                }
+                let item = Item {
+                    label: name(cmd),
+                    icon: deck
+                        .and_then(|d| d.commands.get(&cmd))
+                        .map_or(1, |c| c.icon),
+                    colour: 0,
+                };
+                let rows = if second {
+                    &mut m.menu.second
+                } else {
+                    &mut m.menu.items
+                };
+                if let Some(r) = rows.get_mut(row) {
+                    *r = item;
+                    m.menu.overridden[row] = true;
+                    records[row] = Some(record);
+                }
+                // The command in its place opens no list.
+                let opens = if second {
+                    &mut m.menu.second_opens
+                } else {
+                    &mut m.menu.opens
+                };
+                if let Some(o) = opens.get_mut(row) {
+                    *o = None;
+                }
+            }
+        }
+        // [Test-room choice] While a limit runs only its rows are taken:
+        // the checks other commands make during a limit are not traced.
+        let on_offer = records.get(m.menu.cursor).copied().flatten().is_some();
+        let (decide, right) = if limit_running && m.menu.sub.is_none() && !on_offer {
+            (false, false)
+        } else {
+            (decide, right)
+        };
         sub_was_open = m.menu.sub.is_some();
         let before = (
             m.menu.kind,
@@ -6274,8 +6417,17 @@ fn simulate(
             m.menu.cursor,
             m.menu.sub.as_ref().map(|s| s.cursor),
         ) != before;
-        attack =
-            decision == Decision::Execute(0) && m.menu.rows().first().is_some_and(|i| i.icon == 1);
+        attack = decision == Decision::Execute(0)
+            && !limit_running
+            && m.menu.rows().first().is_some_and(|i| i.icon == 1);
+        // A row a limit's command took runs that command, not the row's own.
+        let mut took_offer = false;
+        if let Decision::Execute(row) = decision
+            && let Some(record) = records.get(row).copied().flatten()
+        {
+            game.limit_decide = Some(record);
+            took_offer = true;
+        }
         // The command menu's own sounds (magicsfx-01 §5): a sub-menu push
         // plays se000 #3 (FUN_1403b2800 with its play flag), and backing out
         // of a sub-menu plays #4 (FUN_1403b20f0 with its play flag). Running
@@ -6303,7 +6455,9 @@ fn simulate(
         }
         // The second deck opens its own lists; what is left (Attack, an
         // unusable row) goes on like the top deck's.
-        let decision = if m.menu.kind == field_command_menu::SECOND_DECK {
+        let decision = if took_offer {
+            Decision::None
+        } else if m.menu.kind == field_command_menu::SECOND_DECK {
             second_deck::decide(&mut game, &mut m.menu, decision, &deck_room)
         } else {
             decision
@@ -6694,14 +6848,34 @@ fn simulate(
     {
         item_room::request(&mut game, slot, tick);
     }
-    let Game {
-        player,
-        params,
-        clips,
-        world,
-        ..
-    } = &mut *game;
-    let step = player.tick(&input, params, clips, world);
+    // A party limit asked for from the second deck starts here
+    // (FUN_1403d8b40); while it runs its scene moves Sora.
+    if let Some(cmd) = game.limit_request.take()
+        && game.party_limit.is_none()
+        && let Err(e) = party_limit::start(&mut game, cmd, tick)
+    {
+        game.event(
+            serde_json::json!({"event":"party_limit_refused","tick":tick,
+            "command":cmd,"error":e}),
+        );
+    }
+    let step = if game.party_limit.is_some() {
+        let rc = std::mem::take(&mut game.rc_queued)
+            || game.deck_tour && deck_tour::reaction(tick)
+            || game.limit_tour && limit_tour::reaction(tick);
+        let decide = std::mem::take(&mut game.limit_decide);
+        let stick = [direction.x, 0., direction.y];
+        party_limit::tick(&mut game, tick, rc, decide, stick)
+    } else {
+        let Game {
+            player,
+            params,
+            clips,
+            world,
+            ..
+        } = &mut *game;
+        player.tick(&input, params, clips, world)
+    };
     if game.map_fx_pending
         && let Some(a) = area.as_deref()
     {
@@ -11313,6 +11487,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut badge_tour = false;
     let mut journal_tour = false;
     let mut deck_tour = false;
+    let mut limit_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
     // Capture ticks replacing the unattended run's own list (research).
@@ -11435,6 +11610,17 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("command deck tour capture directory absent")?,
+                );
+            }
+            // The limit tour too runs in the magic tour's setup.
+            Some("--party-limit-tour") if autoplay.is_none() => {
+                magic_tour = true;
+                limit_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("party limit tour capture directory absent")?,
                 );
             }
             Some("--journal-tour") if autoplay.is_none() => {
@@ -11618,7 +11804,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         None
     };
     // A form's change takes about 260 ticks before the first cast.
-    let magic_shift = if party_hit_tour || deck_tour {
+    let magic_shift = if party_hit_tour || deck_tour || limit_tour {
         // The magic tour's schedule never comes up.
         1 << 40
     } else if magic_form != 0 {
@@ -11631,6 +11817,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         Vec::new()
     } else if deck_tour {
         deck_tour::captures()
+    } else if limit_tour {
+        limit_tour::captures()
     } else if journal_tour {
         journal_tour::CAPTURES.to_vec()
     } else if npc_tour {
@@ -11664,6 +11852,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         party_hit_tour::END
     } else if deck_tour {
         deck_tour::end()
+    } else if limit_tour {
+        limit_tour::end()
     } else if journal_tour {
         journal_tour::END
     } else if npc_tour {
@@ -11731,6 +11921,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         selected_target: None,
         target_locked: false,
         player_target_shape: loaded.kit.target_shape,
+        player_push_shapes: loaded.kit.push_shapes.clone(),
         params: loaded.params,
         clips: loaded.kit.clips,
         world: loaded.world,
@@ -11801,6 +11992,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 blade: None,
                 shield: None,
                 bash_keys: Vec::new(),
+                limit: None,
                 record: combat::HitRecord::new(true),
                 ko_fx: false,
                 cast_motion: 0,
@@ -11848,6 +12040,11 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         party_spells: !party_hit_tour,
         party_battle: party_room::BattleMode::default(),
         second_deck: loaded.second_deck.take(),
+        limit_tour,
+        party_limits: Arc::new(std::mem::take(&mut loaded.party_limits)),
+        party_limit: None,
+        limit_request: None,
+        limit_decide: None,
         deck_tour,
         deck_queued: false,
         open_queued: false,

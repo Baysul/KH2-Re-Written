@@ -77,6 +77,12 @@ pub fn layout_at(tick: u64) -> Option<&'static str> {
     LAYOUTS.get((k / LAYOUT_STEP) as usize).copied()
 }
 
+/// The reaction button the tour presses during a limit's follow-up windows:
+/// every 12 ticks (the tour does not run a limit yet).
+pub fn reaction(tick: u64) -> bool {
+    tick.is_multiple_of(12)
+}
+
 pub fn captures() -> Vec<u64> {
     let mut c = vec![60, 104, 140, 230, 320, 430, 540, 600, 700, 800];
     c.extend((0..LAYOUTS.len() as u64).map(|k| LAYOUT_START + k * LAYOUT_STEP + LAYOUT_SETTLE));

@@ -372,6 +372,11 @@ pub struct Sysobj {
     pub head_look: HeadLook,
     /// The captured motion playing, if any.
     pub capture: Option<Capture>,
+    /// +0x184 for a motion of a limit file's set: the token
+    /// `limit_motion_start` handed out (FUN_1403c64a0), and whether that
+    /// motion still counts as playing for the limit (+0x1b0).
+    pub limit_token: i32,
+    pub limit_motion: bool,
     /// +0xd48: the magic thread `obj_hook` started.
     pub hook: Option<u32>,
     /// The hook table of the motion set in use (+0x160; `obj_motion_hook`).
@@ -616,6 +621,8 @@ impl Sysobj {
             bg_press: [0.; 4],
             head_look: HeadLook::default(),
             capture: None,
+            limit_token: 0,
+            limit_motion: false,
             hook: None,
             motion_hook: None,
             sound_bank: None,
@@ -666,12 +673,51 @@ impl Sysobj {
         true
     }
 
+    /// FUN_1403c7300 / FUN_14040e5c0 as FUN_1403c65e0 calls them when a
+    /// motion has no entry: the object stops on an ended motion.
+    pub fn motion_stop(&mut self) {
+        let m = &mut self.motion;
+        m.blend = 0.;
+        m.root_step = [0.; 3];
+        m.flags.word |= motion::flag::ENDED;
+    }
+
     /// FUN_1403c6dc0: like start, but nothing happens if `slot` already plays.
     pub fn motion_change(&mut self, slot: usize, blend: f32, clips: &dyn Clips) -> bool {
         if self.motion.slot == slot {
             return true;
         }
         self.motion_start(slot, blend, clips)
+    }
+
+    /// FUN_1403ba070's motion windows: the command the window names
+    /// (+0x638) is taken while flag bit 17 holds, or a command whose +0x22
+    /// (`chain`) it names while range 0x1a (bit 21) holds; flag bit 30
+    /// (range 0x28) refuses every other. None leaves the answer to the
+    /// command lockout and the free windows. [I] The first test (command
+    /// flag bit 1 with the object's states) is not applied.
+    pub fn command_window(&self, command: u16, chain: u16) -> Option<bool> {
+        let word = self.motion.flags.word;
+        let param = self.event_parameter;
+        if word & 0x2_0000 != 0 && param == u32::from(command)
+            || chain != 0 && word & 0x20_0000 != 0 && param == u32::from(chain)
+        {
+            return Some(true);
+        }
+        (word & 0x4000_0000 != 0).then_some(false)
+    }
+
+    /// FUN_1403ba070's free windows for a command with flags `flags` (+0xc):
+    /// flag bit 8 with motion flag bit 19; a range 0 to 2; flag bit 7 clear
+    /// with motion flag bit 10 or +0x194 bit 5; or flag bit 2. [I] The
+    /// command lockout (+0xb94) is not kept for engine objects, and the
+    /// motion-less case (+0x158 null) does not arise.
+    pub fn free_window(&self, flags: u32) -> bool {
+        let (w, w3) = (self.motion.flags.word, self.motion.flags.word3);
+        flags & 0x100 != 0 && w & 0x8_0000 != 0
+            || w & 0x1c != 0
+            || flags & 0x80 == 0 && (w & 0x400 != 0 || w3 & 0x20 != 0)
+            || flags & 4 != 0
     }
 
     /// +0x18c bit 1 (the motion ended on this tick's step).

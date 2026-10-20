@@ -43,7 +43,8 @@ fn the_searcher_picks_the_nearest_enemy_in_range_and_remembers_the_pick() {
             me,
             env: &NullEnv,
         };
-        record_of(&mut ctx, record).unwrap()
+        let memory = Memory::new(&mut f.inst, &mut f.th);
+        record_of(&mut ctx, &memory, record).unwrap()
     };
     // Object 3 is past the searcher's range of 1000; object 1 is nearest.
     assert_eq!(pick(&mut world, &mut me, &mut f).id, OBJECT_TARGET | 1);
@@ -101,7 +102,11 @@ fn the_farthest_pick_and_the_angle_limit() {
         me: &mut me,
         env: &NullEnv,
     };
-    assert_eq!(record_of(&mut ctx, record).unwrap().id, OBJECT_TARGET | 2);
+    let memory = Memory::new(&mut f.inst, &mut f.th);
+    assert_eq!(
+        record_of(&mut ctx, &memory, record).unwrap().id,
+        OBJECT_TARGET | 2
+    );
     // A half angle under a quarter turn around +z excludes both objects.
     let angle_at = searcher + 24;
     let mut memory = Memory::new(&mut f.inst, &mut f.th);
@@ -113,5 +118,6 @@ fn the_farthest_pick_and_the_angle_limit() {
         me: &mut me,
         env: &NullEnv,
     };
-    assert_eq!(record_of(&mut ctx, record).unwrap().id, 0);
+    let memory = Memory::new(&mut f.inst, &mut f.th);
+    assert_eq!(record_of(&mut ctx, &memory, record).unwrap().id, 0);
 }

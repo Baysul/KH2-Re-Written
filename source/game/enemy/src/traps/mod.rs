@@ -6,7 +6,9 @@
 use crate::world::TrapFn;
 
 pub mod attack;
+pub mod flare;
 pub mod homing;
+pub mod limit;
 pub mod math;
 pub mod object;
 pub mod presentation;
@@ -25,6 +27,8 @@ pub mod weapon;
 
 pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
     math::lookup(table, index)
+        .or_else(|| limit::lookup(table, index))
+        .or_else(|| flare::lookup(table, index))
         .or_else(|| weapon::lookup(table, index))
         .or_else(|| attack::lookup(table, index))
         .or_else(|| homing::lookup(table, index))

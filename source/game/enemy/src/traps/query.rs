@@ -126,14 +126,17 @@ fn sysobj_moveto(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resu
 }
 
 /// 1:113 FUN_14042fe30 -> FUN_1403aa4c0: the movement Sora's controller asks
-/// for (+0xb50 of her controller block).
+/// for (+0xb50 of her controller block): the stick's direction with its
+/// strength, 0 to 1, in w [I: w read as the strength from Whirli-Goof's
+/// steering, which treats w below 0.1 as no input].
 fn player_get_movement(
     ctx: &mut Ctx<'_>,
     m: &mut Memory<'_>,
     args: &mut Args,
 ) -> Result<(), Fault> {
     let v = ctx.env.player_move_input();
-    return_vec(ctx, m, args, (1, 113), [v[0], v[1], v[2], 1.0]);
+    let strength = (v[0] * v[0] + v[2] * v[2]).sqrt().min(1.0);
+    return_vec(ctx, m, args, (1, 113), [v[0], v[1], v[2], strength]);
     Ok(())
 }
 
@@ -597,12 +600,13 @@ fn is_stop(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(),
 
 /// 6:56 FUN_14053e560 -> FUN_1403bee60: rewrite the record to the same target
 /// in group `n` (no second handle, kind -1).
-fn target_set_group(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+fn target_set_group(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let handle = args[0].value;
     let group = args[1].as_int();
-    let t = super::target::record_of(ctx, handle)?;
+    let t = super::target::record_of(ctx, m, handle)?;
     super::target::set_record(
         ctx,
+        m,
         handle,
         Target {
             id: t.id,
@@ -613,8 +617,8 @@ fn target_set_group(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> R
 }
 
 /// 6:57 FUN_14053e5b0: the record's group word (+4).
-fn target_get_group(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let t = super::target::record_of(ctx, args[0].value)?;
+fn target_get_group(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let t = super::target::record_of(ctx, m, args[0].value)?;
     int(args, t.group);
     Ok(())
 }

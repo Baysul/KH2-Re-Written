@@ -1,0 +1,281 @@
+//! Research probe: runs a party limit's scene program (limit/<lang>/<name>.bar)
+//! headless on the object-script engine, with clip lengths and trigger tables
+//! read from the limit file's own motions, on a flat floor. It presses the
+//! reaction button on every command the scene offers and prints what the
+//! scene asked for: motions, effects, services, missing traps and faults.
+//! Prints names and numbers only.
+use data::{limit_file, motion, path_lookup::Library, probe_source::ProbeSource};
+use enemy::{
+    env::{Clips, Env},
+    limit_scene::{Participant, Scene, Status},
+    motion::{FrameEvent, MotionEvents, RangeEvent},
+    sysobj::Sysobj,
+    traps::limit::MOTIONS,
+    world::Event,
+};
+use std::{collections::HashMap, path::PathBuf};
+
+type Vec3 = [f32; 3];
+
+#[derive(Default)]
+struct ClipSet(HashMap<usize, (u32, u32, MotionEvents)>);
+
+impl Clips for ClipSet {
+    fn length(&self, slot: usize) -> u32 {
+        self.0.get(&slot).map_or(0, |c| c.0)
+    }
+    fn loop_start(&self, slot: usize) -> u32 {
+        self.0.get(&slot).map_or(0, |c| c.1)
+    }
+    fn root_delta(&self, _: usize, _: u32) -> Vec3 {
+        [0.; 3]
+    }
+    fn events(&self, slot: usize) -> Option<&MotionEvents> {
+        self.0.get(&slot).map(|c| &c.2)
+    }
+}
+
+struct Flat {
+    clips: Vec<ClipSet>,
+    enemy: Vec3,
+}
+
+impl Env for Flat {
+    fn floor(&self, _: f32, _: f32, _: f32) -> Option<f32> {
+        Some(0.)
+    }
+    fn check_step(&self, _: Vec3, _: Vec3, _: f32, _: f32, _: f32) -> Option<u8> {
+        Some(0)
+    }
+    fn clips(&self, model: u32) -> &dyn Clips {
+        &self.clips[(model as usize).min(self.clips.len() - 1)]
+    }
+    fn player_position(&self) -> Vec3 {
+        [0.; 3]
+    }
+    fn target_position(&self, id: u32) -> Option<Vec3> {
+        (id == 2).then_some(self.enemy)
+    }
+    fn pick_target(&self, _: i32, _: Vec3) -> Option<u32> {
+        Some(2)
+    }
+}
+
+fn clip_of(anb: &[u8]) -> Result<(u32, u32, MotionEvents), Box<dyn std::error::Error>> {
+    let m = motion::read_anb(anb, 0)?;
+    let (start, end, fps, ret) = m.motion.frame_window()?;
+    let scale = 60. / fps;
+    let begin = (start.max(0.) * scale).round() as u32;
+    let length = ((end * scale).round() as u32).saturating_sub(begin);
+    let loop_start = ((ret * scale).round() as u32).saturating_sub(begin);
+    let events = MotionEvents {
+        ranges: m
+            .triggers
+            .iter()
+            .flat_map(|t| &t.records.ranges)
+            .map(|r| RangeEvent {
+                start: r.start_frame as u16,
+                end: r.end_frame as u16,
+                kind: r.trigger,
+                params: r.parameters.iter().map(|&v| v as u16).collect(),
+            })
+            .collect(),
+        frames: m
+            .triggers
+            .iter()
+            .flat_map(|t| &t.records.frames)
+            .map(|f| FrameEvent {
+                frame: f.frame as u16,
+                kind: f.trigger,
+                params: f.parameters.iter().map(|&v| v as u16).collect(),
+            })
+            .collect(),
+    };
+    Ok((length, loop_start, events))
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    if args.len() != 6 {
+        return Err("usage: limit_probe <Steam-root> <manifest> <limit name, e.g. goofy> <command id> <friend characters, e.g. 3 or 2,3> <ticks>".into());
+    }
+    let source = ProbeSource::bind(&args[0], &args[1])?;
+    let mut library = Library::open(&source)?;
+    let name = args[2].to_string_lossy().into_owned();
+    let command: u16 = args[3].to_string_lossy().parse()?;
+    let friends: Vec<u8> = args[4]
+        .to_string_lossy()
+        .split(',')
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    let ticks: u32 = args[5].to_string_lossy().parse()?;
+    let file = limit_file::read(&library.read(&format!("limit/us/{name}.bar"))?)?;
+    println!(
+        "program {} bytes, motions {:?}, pax {}, cameras {}, sheets {}",
+        file.program.len(),
+        file.motion_ids(),
+        file.pax.as_ref().map_or(0, Vec::len),
+        file.cameras.len(),
+        file.sheets.len()
+    );
+    // Model 0 Sora, model k the friend of character k; their weapons are
+    // model 16 + character.
+    let mut clips: Vec<ClipSet> = (0..32).map(|_| ClipSet::default()).collect();
+    let bodies =
+        std::iter::once((0usize, 1u8, None)).chain(friends.iter().map(|&c| (c as usize, c, None)));
+    let weapons = std::iter::once((17usize, 1u8, Some(0u8)))
+        .chain(friends.iter().map(|&c| (16 + c as usize, c, Some(0u8))));
+    for (model, character, weapon) in bodies.chain(weapons) {
+        let set = &mut clips[model];
+        set.0.insert(0, (60, 0, MotionEvents::default()));
+        for id in file.motion_ids() {
+            if let Some(anb) = file.anb(id, limit_file::motion_key(character, weapon)) {
+                let c = clip_of(&anb)?;
+                println!(
+                    "  char {character} weapon {weapon:?} motion {id}: {} ticks, loop {}, ranges {:?}, frames {:?}",
+                    c.0,
+                    c.1,
+                    c.2.ranges
+                        .iter()
+                        .map(|r| (r.kind, r.start, r.end))
+                        .collect::<Vec<_>>(),
+                    c.2.frames
+                        .iter()
+                        .map(|f| (f.kind, f.frame))
+                        .collect::<Vec<_>>()
+                );
+                set.0.insert(MOTIONS + id as usize, c);
+            }
+        }
+    }
+    let env = Flat {
+        clips,
+        enemy: [0., 0., 300.],
+    };
+    let weapon = |owner: u32, model: u32| {
+        let mut s = Sysobj::bare();
+        s.model = model;
+        s.attached = Some(enemy::sysobj::Attach {
+            to: owner,
+            bone: 0,
+            flags: 0,
+            callback: None,
+        });
+        s
+    };
+    let mut sora = Sysobj::bare();
+    sora.model = 0;
+    sora.weapons = vec![30];
+    let mut others = vec![Participant {
+        id: 30,
+        sys: weapon(enemy::world::PLAYER_OBJECT, 17),
+    }];
+    let friends: Vec<Participant> = friends
+        .iter()
+        .enumerate()
+        .map(|(k, &c)| {
+            let mut s = Sysobj::bare();
+            s.model = c as u32;
+            s.position = [100. * (k as f32 + 1.), 0., 0.];
+            let id = 10 + k as u32;
+            s.weapons = vec![31 + k as u32];
+            others.push(Participant {
+                id: 31 + k as u32,
+                sys: weapon(id, 16 + c as u32),
+            });
+            Participant { id, sys: s }
+        })
+        .collect();
+    let mut enemy = Sysobj::bare();
+    enemy.position = env.enemy;
+    others.push(Participant { id: 2, sys: enemy });
+    let mut scene = Scene::start(&env, &file.program, command, 180., sora, friends, others)?;
+    let mut offered: Option<(u32, u16)> = None;
+    for tick in 0..ticks {
+        let status = scene.tick(&env);
+        for e in scene.take_events() {
+            match &e {
+                Event::Service {
+                    name: "command_override",
+                    words,
+                    ..
+                } => {
+                    let cmd = words[1] as u16;
+                    if offered.is_none_or(|o| o.1 != cmd || tick > o.0 + 25) {
+                        println!("{tick}: offer {cmd:#x} {:x?}", &words[..4]);
+                        offered = Some((tick, cmd));
+                    }
+                }
+                Event::Service {
+                    name,
+                    words,
+                    object,
+                    ..
+                } => {
+                    println!("{tick}: service {name} {:?} {:x?}", object, &words[..4])
+                }
+                Event::EffectStart {
+                    object,
+                    effect,
+                    other,
+                    ..
+                } => {
+                    println!("{tick}: effect {effect} on {object:#x} bound {other:?}")
+                }
+                Event::MotionEvent {
+                    object,
+                    range,
+                    kind,
+                    params,
+                } => {
+                    if !*range {
+                        println!("{tick}: frame event {kind} on {object:#x} {params:?}");
+                    }
+                }
+                Event::MotionEffect { object, id, .. } => {
+                    println!("{tick}: motion effect {id} on {object:#x}")
+                }
+                Event::Presentation { name, words } => {
+                    println!("{tick}: presentation {name} {words:x?}")
+                }
+                other => println!("{tick}: {other:?}"),
+            }
+        }
+        let stop = std::env::var("LIMIT_PROBE_STOP")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(u32::MAX);
+        if let Some((at, cmd)) = offered
+            && tick == at + 20
+            && tick < stop
+        {
+            println!("{tick}: follow-up {cmd:#x}");
+            scene.follow_up(&env, cmd);
+        }
+        if tick % 30 == 0 {
+            let l = scene.limit();
+            println!(
+                "{tick}: time {:.1} pending {} sora slot {} tick {} pos {:?}",
+                l.time,
+                l.pending,
+                scene.player().motion.slot,
+                scene.player().motion.tick,
+                scene.player().position
+            );
+        }
+        if status == Status::Over {
+            println!("{tick}: over");
+            break;
+        }
+    }
+    println!("missing traps {:?}", scene.missing());
+    println!("faults {:?}", scene.faults());
+    Ok(())
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}

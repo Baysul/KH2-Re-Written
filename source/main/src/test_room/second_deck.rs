@@ -15,6 +15,8 @@ use visual::field_command_menu::{Decision, Item, SECOND_DECK};
 pub const SUMMON: u16 = 0x48;
 pub const PARTY: u16 = 0x49;
 pub const LIMIT: u16 = 0x51;
+/// The deck's Limit row (FUN_1403f3860: Attack, Summon, Party, Limit).
+pub const LIMIT_ROW: usize = 3;
 /// Shown while a summon is out (FUN_1403de250 != 0).
 pub const DISMISS: u16 = 0x13c;
 /// The empty row (message 0x8503, icon 0; FUN_140401d60 gives it 5).
@@ -51,6 +53,15 @@ pub struct LimitRow {
     pub command: u16,
     pub ability: u16,
     pub world: u8,
+    /// +4: the limit file's name (`limit/<lang>/<file>`).
+    pub file: [u8; 32],
+}
+
+impl LimitRow {
+    pub fn file_name(&self) -> String {
+        let end = self.file.iter().position(|&b| b == 0).unwrap_or(32);
+        String::from_utf8_lossy(&self.file[..end]).into_owned()
+    }
 }
 
 fn rows(table: &[u8]) -> impl Iterator<Item = &[u8; 0x40]> {
@@ -83,6 +94,7 @@ pub fn read_limits(limt: &[u8]) -> Vec<LimitRow> {
             command: u16::from_le_bytes([r[0x28], r[0x29]]),
             ability: u16::from_le_bytes([r[0x2a], r[0x2b]]),
             world: r[0x2c],
+            file: r[4..0x24].try_into().expect("32 bytes"),
         })
         .collect()
 }
@@ -121,8 +133,9 @@ pub struct SecondDeck {
     pub names: HashMap<u16, Vec<u8>>,
     /// Ability item id to its bit (item +4) for ability items.
     pub ability_bits: HashMap<u16, u16>,
-    /// The open list's commands in row order.
+    /// The open list's commands in row order, and its kind.
     pub list: Vec<u16>,
+    pub list_kind: usize,
 }
 
 pub fn load(battle: &[u8], system: &[u8]) -> Result<SecondDeck, Box<dyn std::error::Error>> {
@@ -142,6 +155,7 @@ pub fn load(battle: &[u8], system: &[u8]) -> Result<SecondDeck, Box<dyn std::err
         names: HashMap::new(),
         ability_bits,
         list: Vec::new(),
+        list_kind: 0,
     })
 }
 
@@ -152,6 +166,13 @@ impl SecondDeck {
         ids.extend(self.summons.iter().map(|s| s.command));
         ids.extend(MEMBER_COMMANDS.iter().filter(|&&c| c != 0));
         ids.extend(self.limits.iter().map(|l| l.command));
+        // The limits' follow-ups (execute 81) show as reaction commands.
+        ids.extend(
+            self.commands
+                .values()
+                .filter(|c| c.execute == 81)
+                .map(|c| c.id),
+        );
         ids.sort_unstable();
         ids.dedup();
         ids.into_iter()
@@ -435,6 +456,7 @@ pub fn decide(
             if let Some(kind) = menu.opens_of(row) {
                 let list = sd.list(room, kind);
                 sd.list = list.iter().map(|e| e.0).collect();
+                sd.list_kind = kind;
                 let items = sd.items(&list);
                 menu.open_sub(kind, items);
                 game.event(serde_json::json!({"event":"second_deck_list","tick":tick,
@@ -445,10 +467,15 @@ pub fn decide(
         }
         Decision::ExecuteSub { row, index } => {
             let command = sd.list.get(index).copied();
+            let limit = sd.list_kind == LIMIT_LIST;
             game.event(
                 serde_json::json!({"event":"second_deck_command","tick":tick,
-                "row":row,"command":command,"built":false}),
+                "row":row,"command":command,"built":limit}),
             );
+            // A party limit starts with the tick's Sora update (party_limit).
+            if limit {
+                game.limit_request = command;
+            }
             Decision::None
         }
         Decision::Execute(row) if row > 0 => {
@@ -479,6 +506,9 @@ mod tests {
                     icon,
                     flags,
                     cost,
+                    time: 0,
+                    decider: 0,
+                    chain: 0,
                     form_mask: 0,
                     group: 0,
                 },
@@ -503,6 +533,7 @@ mod tests {
                     command: 0xff,
                     ability: 0xc9,
                     world: 13,
+                    file: [0; 32],
                 },
                 LimitRow {
                     id: 3,
@@ -510,6 +541,7 @@ mod tests {
                     command: 0xfe,
                     ability: 0xc9,
                     world: 0,
+                    file: [0; 32],
                 },
                 LimitRow {
                     id: 13,
@@ -517,6 +549,7 @@ mod tests {
                     command: 0x1e4,
                     ability: 0xc6,
                     world: 0,
+                    file: [0; 32],
                 },
                 LimitRow {
                     id: 13,
@@ -524,6 +557,7 @@ mod tests {
                     command: 0x26c,
                     ability: 0xc6,
                     world: 0,
+                    file: [0; 32],
                 },
                 // A summon's limit and a Limit Form limit (no ability).
                 LimitRow {
@@ -532,6 +566,7 @@ mod tests {
                     command: 0x1d4,
                     ability: 0xa0,
                     world: 0,
+                    file: [0; 32],
                 },
                 LimitRow {
                     id: 21,
@@ -539,6 +574,7 @@ mod tests {
                     command: 0x2ba,
                     ability: 0,
                     world: 0,
+                    file: [0; 32],
                 },
             ],
             commands: HashMap::from([
@@ -558,6 +594,7 @@ mod tests {
             names: HashMap::new(),
             ability_bits: HashMap::from([(0xc6, 40), (0xc9, 41)]),
             list: Vec::new(),
+            list_kind: 0,
         }
     }
 
@@ -597,7 +634,8 @@ mod tests {
                 members: [1, 2, 3],
                 command: 0x1e4,
                 ability: 0xc6,
-                world: 0
+                world: 0,
+                file: [0; 32],
             }]
         );
     }
