@@ -463,7 +463,29 @@ pub fn tick(
                 orb.position[2],
             ]);
             let v = ::effect::math::apply(&view, [centre[0], centre[1], centre[2], 1.]);
-            list.extend(prize.quads(dpd, orb.kind, frame, [v[0], v[1], v[2]]));
+            list.extend(prize.quads(dpd, orb.kind, frame, [v[0], v[1], v[2]], 0x80));
+        }
+        if !list.is_empty() {
+            quads.push((dpd.clone(), 0, list));
+        }
+    }
+    // A limit's shot pool (Trinity Limit: FUN_140541a00 on object 0x5c3,
+    // PRIZE): FUN_140411b90 hands the records' points to the same program
+    // 203 draw (FUN_1404d7ed0), which skips a point of alpha 0 and steps its
+    // flip-book frame.
+    if let (Some((dpd, prize)), Some(run)) = (&fx.prize, game.party_limit.as_mut()) {
+        let mut list = Vec::new();
+        for p in run.shot_points() {
+            if p.alpha == 0 {
+                continue;
+            }
+            let Some((frame, next)) = prize.point_frame(p.group, p.frame, fx.rng.unit()) else {
+                continue;
+            };
+            run.set_shot_frame(p.base, next);
+            let centre = to_world(p.position);
+            let v = ::effect::math::apply(&view, [centre[0], centre[1], centre[2], 1.]);
+            list.extend(prize.quads(dpd, p.group, frame, [v[0], v[1], v[2]], p.alpha));
         }
         if !list.is_empty() {
             quads.push((dpd.clone(), 0, list));

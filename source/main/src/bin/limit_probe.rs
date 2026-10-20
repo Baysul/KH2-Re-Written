@@ -112,6 +112,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .filter_map(|s| s.parse().ok())
         .collect();
     let ticks: u32 = args[5].to_string_lossy().parse()?;
+    // LIMIT_PROBE_OBJ=<hex objentry id>: that object's model and motion names.
+    if let Ok(id) = std::env::var("LIMIT_PROBE_OBJ")
+        && let Ok(id) = u32::from_str_radix(id.trim_start_matches("0x"), 16)
+    {
+        let objects = data::objentry::read(&library.read("00objentry.bin")?)?;
+        for o in objects.iter().filter(|o| o.object_id == id) {
+            println!(
+                "object {id:#x} type {} model {} motion {}",
+                o.object_type,
+                String::from_utf8_lossy(&o.model_name),
+                String::from_utf8_lossy(&o.animation_name)
+            );
+        }
+    }
     let file = limit_file::read(&library.read(&format!("limit/us/{name}.bar"))?)?;
     println!(
         "program {} bytes, motions {:?}, pax {}, cameras {}, sheets {}",
@@ -138,8 +152,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    // LIMIT_PROBE_SHEET=<file>: the `gage` sheet's HD texture as raw RGBA
-    // (width and height in the file name), for private inspection.
+    // LIMIT_PROBE_SHEET=<file>: a sheet's HD texture as raw RGBA (width and
+    // height in the file name), for private inspection; LIMIT_PROBE_SHEET_NAME
+    // names the sheet (default `gage`).
+    let sheet_name: [u8; 4] = std::env::var("LIMIT_PROBE_SHEET_NAME")
+        .ok()
+        .and_then(|n| n.as_bytes().try_into().ok())
+        .unwrap_or(*b"gage");
     if let Some(out) = std::env::var_os("LIMIT_PROBE_SHEET")
         && let Some(found) = library.find(&format!("limit/us/{name}.bar"))
         && let Ok(sheet) = visual::hud::load(
@@ -147,7 +166,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             found.index,
             found.ordinal,
             found.name_hash,
-            b"gage",
+            &sheet_name,
         )
     {
         let mut path = PathBuf::from(out);

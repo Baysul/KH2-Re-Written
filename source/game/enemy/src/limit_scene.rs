@@ -169,6 +169,16 @@ impl Scene {
         &self.world
     }
 
+    /// The shot pool's points to draw (Trinity Limit).
+    pub fn shot_points(&self) -> Vec<crate::traps::trinity::Point> {
+        crate::traps::trinity::points(&self.world)
+    }
+
+    /// The frame the draw left in a shot's point.
+    pub fn set_shot_frame(&mut self, base: u32, frame: u8) {
+        crate::traps::trinity::set_frame(&mut self.world, base, frame);
+    }
+
     /// Record every trap the scene calls (a development aid).
     pub fn trace(&mut self) {
         self.world.trace.get_or_insert_with(Vec::new);

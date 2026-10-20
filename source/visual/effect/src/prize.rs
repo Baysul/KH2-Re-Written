@@ -85,9 +85,44 @@ impl Prize {
         Some(frame_at(g.count, g.looping, age, seed))
     }
 
+    /// FUN_1404d7ed0's frame of one point of group `kind` whose frame byte
+    /// is `byte`: 0xff starts a looping shape at `seed` (0..1) of its length.
+    /// Returns the frame drawn and the byte the draw leaves: one on, and
+    /// past the end 0 for a looping shape, the same frame otherwise.
+    pub fn point_frame(&self, kind: u8, byte: u8, seed: f32) -> Option<(usize, u8)> {
+        let g = self.groups.get(kind as usize)?.as_ref()?;
+        if g.count == 0 {
+            return None;
+        }
+        let mut frame = byte as usize;
+        if byte == 0xff && g.looping {
+            frame = ((g.count - 1) as f32 * seed) as usize;
+            if frame >= g.count {
+                frame = 0;
+            }
+        }
+        let frame = frame.min(g.count - 1);
+        let next = if frame + 1 < g.count {
+            frame + 1
+        } else if g.looping {
+            0
+        } else {
+            frame
+        };
+        Some((frame, next as u8))
+    }
+
     /// The sprites of a prize of `kind` at flip-book `frame`, centred at
-    /// `centre` in the effect view space (x right, y down, z forward).
-    pub fn quads(&self, dpd: &Dpd, kind: u8, frame: usize, centre: [f32; 3]) -> Vec<Quad> {
+    /// `centre` in the effect view space (x right, y down, z forward), with
+    /// the point's `alpha` (0x80 = 1.0).
+    pub fn quads(
+        &self,
+        dpd: &Dpd,
+        kind: u8,
+        frame: usize,
+        centre: [f32; 3],
+        alpha: u8,
+    ) -> Vec<Quad> {
         let Some(Some(g)) = self.groups.get(kind as usize) else {
             return Vec::new();
         };
@@ -103,7 +138,7 @@ impl Prize {
             g.anim,
             frame,
             &m,
-            [g.colour[0], g.colour[1], g.colour[2], 0x80],
+            [g.colour[0], g.colour[1], g.colour[2], alpha],
         );
         // The prize sprites' S and T are 12-bit fractions of the whole
         // texture (4096 = 1.0) [I: read off the installed atlases, where
@@ -131,5 +166,26 @@ mod tests {
         assert_eq!(frame_at(24, false, 30, 0.5), 23);
         assert_eq!(frame_at(24, false, 5, 0.5), 5);
         assert_eq!(frame_at(0, true, 5, 0.), 0);
+    }
+
+    #[test]
+    fn a_point_starts_looping_shapes_at_the_seed_and_steps_one_frame() {
+        let group = |looping| {
+            Some(Group {
+                anim: 0,
+                colour: [0x80; 3],
+                scale: 1.,
+                count: 4,
+                looping,
+            })
+        };
+        let mut prize = Prize::default();
+        prize.groups[7] = group(true);
+        prize.groups[2] = group(false);
+        assert_eq!(prize.point_frame(7, 0xff, 0.5), Some((1, 2)));
+        assert_eq!(prize.point_frame(7, 3, 0.5), Some((3, 0)));
+        assert_eq!(prize.point_frame(2, 3, 0.5), Some((3, 3)));
+        assert_eq!(prize.point_frame(2, 0xff, 0.5), Some((3, 3)));
+        assert_eq!(prize.point_frame(5, 0, 0.5), None);
     }
 }

@@ -980,6 +980,8 @@ struct Game {
     jump_queued: bool,
     attack_queued: bool,
     guard_queued: bool,
+    /// Face buttons pressed (logical bits 24..27) for a list-mode deck.
+    face_queued: u8,
     /// L1-held shortcut presses of this tick (bit k = slot k) and the
     /// shortcut command ids (camp Customize).
     shortcut_queued: u8,
@@ -1189,6 +1191,9 @@ struct Hud {
     panels: visual::level_up::Panels,
     /// A party limit's gauge and combo counter while it runs.
     limit_hud: Option<party_limit::LimitHud>,
+    /// The limit whose `comd` sheet the command menu wears while its
+    /// special deck is up (FUN_14015de90).
+    menu_skin: Option<(Arc<party_limit::LimitSource>, usize)>,
 }
 
 /// The original's default follow camera, ticked with the simulation in the
@@ -5255,6 +5260,7 @@ fn setup(
         commands.insert_resource(Hud {
             panels: Default::default(),
             limit_hud: None,
+            menu_skin: None,
             gauge: Gauge::new(
                 &sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(),
                 &stats,
@@ -6014,6 +6020,7 @@ fn read_pad(
     game.jump_queued |= p & 0x100 != 0;
     game.attack_queued |= p & 0x4 != 0;
     game.guard_queued |= p & 0x200 != 0;
+    game.face_queued |= (p >> 24 & 0xf) as u8;
     game.rc_queued |= p & 0x400 != 0;
     game.advance_queued |= p & 0x40c != 0;
     game.menu_up_queued |= p & 0x4000 != 0;
@@ -6214,6 +6221,11 @@ fn simulate(
     let back = (std::mem::take(&mut game.back_queued) || deck_buttons.back) && !talking;
     let left = (std::mem::take(&mut game.deck_queued) || deck_buttons.left) && !talking;
     let right = (std::mem::take(&mut game.open_queued) || deck_buttons.right) && !talking;
+    let face = if talking {
+        0
+    } else {
+        std::mem::take(&mut game.face_queued) | deck_buttons.face
+    };
     // The limit tour: full MP before each limit, and Trinity Limit.
     if game.limit_tour {
         if limit_tour::refill(tick) {
@@ -6364,6 +6376,7 @@ fn simulate(
             m.menu.close_sub();
         }
         m.menu.overridden = [false; 8];
+        m.menu.list = None;
         let mut records = [None; 8];
         if let Some(run) = game.party_limit.as_ref() {
             let deck = game.second_deck.as_ref();
@@ -6413,8 +6426,7 @@ fn simulate(
             }
         }
         // Trinity Limit's special deck (mode 3: FUN_1403b19b0 over
-        // DAT_142ae9ab0) takes the shown deck's rows. [I] The rows keep the
-        // deck's own art; the `comd` sheets are not drawn.
+        // DAT_142ae9ab0) takes the shown deck's rows.
         if let Some(rows) = game.party_limit.as_ref().and_then(|r| r.special_deck()) {
             let deck = game.second_deck.as_ref();
             let items: Vec<Item> = rows
@@ -6441,9 +6453,21 @@ fn simulate(
             for (k, r) in records.iter_mut().take(3).enumerate() {
                 *r = Some(party_limit::SPECIAL + k);
             }
+            // Deck mode 0xE (FUN_1403b1780) with the limit file's `comd`
+            // art: the list path, rows taken by their selector's button.
+            let limit = game.party_limit.as_ref().map(|r| r.hud_values().0);
+            if limit.is_some_and(|l| game.party_limits.limits[l].menu_sheet.is_some()) {
+                m.menu.list = Some(rows.iter().map(|r| r.1 as u8).collect());
+            }
         }
         // [Test-room choice] While a limit runs only its rows are taken:
         // the checks other commands make during a limit are not traced.
+        // [Tour setup] The tour's decide presses the top row's button in a
+        // list-mode deck.
+        let face = match m.menu.list.as_ref().and_then(|l| l.first()) {
+            Some(&s) if scripted_menu && decide && (1..=4).contains(&s) => face | 1 << (s - 1),
+            _ => face,
+        };
         let on_offer = records.get(m.menu.cursor).copied().flatten().is_some();
         let (decide, right) = if limit_running && m.menu.sub.is_none() && !on_offer {
             (false, false)
@@ -6463,6 +6487,7 @@ fn simulate(
             back,
             left,
             right,
+            face,
         });
         cursor_moved = (
             m.menu.kind,
@@ -8304,6 +8329,18 @@ fn hud_tick(
     s.drive_mode = drive.mode;
     (s.form_bars, s.form_time, s.form_max_time) = (drive.bars, drive.time, drive.max_time);
     hud.stats = s;
+    // Trinity Limit's special deck: FUN_1403b2a90 -> FUN_14015de90 gives the
+    // command menu the limit file's `comd` sequence and art (FUN_1401909e0,
+    // +0x3a0) until the deck closes.
+    // It goes with the list-mode deck the menu input set this frame.
+    let listed = hud.menu.as_ref().is_some_and(|m| m.menu.list.is_some());
+    let skin = game
+        .party_limit
+        .as_ref()
+        .filter(|_| listed)
+        .map(|r| r.hud_values().0)
+        .filter(|&l| game.party_limits.limits[l].menu_sheet.is_some())
+        .map(|l| (game.party_limits.clone(), l));
     let Hud {
         sheets,
         gauge,
@@ -8313,10 +8350,17 @@ fn hud_tick(
         slots,
         friends,
         friend_faces,
+        menu_skin,
         ..
     } = &mut *hud;
+    let reskin = menu_skin.as_ref().map(|s| s.1) != skin.as_ref().map(|s| s.1);
+    *menu_skin = skin;
     if let Some(m) = menu {
-        m.menu.update(&m.sheet.sequence);
+        let seq = menu_sheet(&m.sheet, menu_skin);
+        if reskin {
+            m.menu.reload(&seq.sequence);
+        }
+        m.menu.update(&seq.sequence);
     }
     let seqs: Vec<_> = sheets.iter().map(|s| &s.sequence).collect();
     gauge.update(&seqs, &s);
@@ -8421,6 +8465,16 @@ fn hud_tick(
     hud.updated = true;
 }
 
+/// The command menu's sheet: a limit's `comd` while it wears one.
+fn menu_sheet<'a>(
+    own: &'a Sheet,
+    skin: &'a Option<(Arc<party_limit::LimitSource>, usize)>,
+) -> &'a Sheet {
+    skin.as_ref()
+        .and_then(|(src, l)| src.limits[*l].menu_sheet.as_ref())
+        .unwrap_or(own)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn hud_present(
     hud: Option<ResMut<Hud>>,
@@ -8447,6 +8501,7 @@ fn hud_present(
         menu,
         panels,
         limit_hud,
+        menu_skin,
         ..
     } = &mut *hud;
     // The limit file whose sheets the texture list borrows while a limit's
@@ -8477,10 +8532,11 @@ fn hud_present(
     if let Some(m) = menu {
         let first = textures.len();
         menu_font = Some((first + 1, m.font.widths.clone()));
+        let sheet = menu_sheet(&m.sheet, menu_skin);
         textures.push(Texture {
-            rgba: &m.sheet.texture_rgba,
-            size: m.sheet.texture_size.map(|v| v as usize),
-            texel_scale: m.sheet.texel_scale as f32,
+            rgba: &sheet.texture_rgba,
+            size: sheet.texture_size.map(|v| v as usize),
+            texel_scale: sheet.texel_scale as f32,
         });
         textures.push(Texture {
             rgba: &m.font.rgba,
@@ -8493,7 +8549,7 @@ fn hud_present(
             Vec::new()
         } else {
             m.menu.draw(
-                &m.sheet.sequence,
+                &sheet.sequence,
                 &field_command_menu::Font {
                     widths: &m.font.widths,
                     pad: 1,
@@ -12033,6 +12089,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         jump_queued: false,
         attack_queued: false,
         guard_queued: false,
+        face_queued: 0,
         shortcut_queued: 0,
         back_queued: false,
         debug_blow: false,

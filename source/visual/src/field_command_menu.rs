@@ -78,6 +78,15 @@ const LEVEL_STEP: f32 = 16.;
 /// less a row pitch per item, like the panel [inferred: above the rows];
 /// a failed angle gate shows it at RGB x0.6 (0x1405b1c50 mode 5).
 const REACTION_GROUP: usize = 2;
+/// The list path's groups in deck mode 0xE (0x140718330 + 0x14): the
+/// header, then the row by selector (0 none, 1..4).
+const LIST_HEADER: usize = 8;
+const LIST_ROW: [usize; 5] = [0, 0xa, 0xc, 0xb, 9];
+/// The list rows' text colours by colour index (0x140717d50).
+const LIST_TEXT: [u32; 9] = [
+    0x80e6e6e6, 0x80646464, 0x8000a7ff, 0x80646464, 0x80646464, 0x80646464, 0x80646464, 0x80e6e6e6,
+    0x80e6e6e6,
+];
 const REACTION_Y: f32 = 377.;
 const REACTION_DIM: f32 = 0.6;
 /// Row/cursor text colours by colour index (0x140717d78, 0x140717da0).
@@ -174,6 +183,12 @@ pub struct CommandMenu {
     pub overridden: [bool; 8],
     /// The open submenu, if any.
     pub sub: Option<Sub>,
+    /// A list-mode deck's row selectors (FUN_1403b1780: deck mode 0xE,
+    /// Trinity Limit's deck): FUN_14015df90 draws a header and the rows
+    /// with no cursor, and FUN_1403b1590 takes the row whose selector's
+    /// face button is pressed.
+    pub list: Option<Vec<u8>>,
+    last_list: bool,
 }
 
 /// What the menu did with this frame's input.
@@ -209,6 +224,9 @@ pub struct Buttons {
     pub back: bool,
     pub left: bool,
     pub right: bool,
+    /// The face buttons pressed, logical bits 24..27 (bit k = bit 24 + k:
+    /// Circle, Triangle, Square, Cross in MODE_FIELD).
+    pub face: u8,
 }
 
 impl CommandMenu {
@@ -234,6 +252,8 @@ impl CommandMenu {
             locked: false,
             overridden: [false; 8],
             sub: None,
+            list: None,
+            last_list: false,
         }
     }
 
@@ -313,6 +333,22 @@ impl CommandMenu {
     /// closes the submenu. A left pressed in the same frame as decide or
     /// right is not taken.
     pub fn press(&mut self, b: Buttons) -> Decision {
+        // FUN_1403b1590: a list-mode deck takes the first row whose
+        // selector's mask (DAT_1405c4ed8: selector s = logical bit 23 + s)
+        // is pressed; FUN_1403b21d0 then runs it when its colour is under 4.
+        if let Some(sel) = self.list.as_ref() {
+            let rows = self.rows();
+            for (i, &s) in sel.iter().enumerate().take(rows.len()) {
+                if (1..=4).contains(&s) && b.face & 1 << (s - 1) != 0 {
+                    return if rows[i].colour < 4 {
+                        Decision::Execute(i)
+                    } else {
+                        Decision::Invalid
+                    };
+                }
+            }
+            return Decision::None;
+        }
         if let Some(sub) = self.sub.as_mut() {
             let n = sub.items.len();
             if b.back || b.left || n == 0 {
@@ -536,6 +572,16 @@ impl CommandMenu {
     pub fn update(&mut self, seq: &Sequence) {
         self.root.update(seq, 1.);
         self.counter = 0;
+        if self.list.is_some() != self.last_list {
+            self.slots.clear();
+            self.last_cursor = None;
+            self.last_count = 0;
+            self.last_list = self.list.is_some();
+        }
+        if let Some(sel) = self.list.clone() {
+            self.update_list(seq, &sel);
+            return;
+        }
         let style = self.style.min(2);
         let changed = style != self.last_style;
         let kind = self.kind;
@@ -696,6 +742,52 @@ impl CommandMenu {
                 s.player = Player::new(seq, next);
                 s.player.update(seq, 1.);
             }
+        }
+    }
+
+    /// The list path (FUN_14015df90 in deck mode 0xE): the header at
+    /// (0x1c, 0x184 - 22n), each row at (0x1c, 0x19a - 22(n - i)) with its
+    /// selector's group (0x140718330 + 0x14) and colour (0x140717d50), then
+    /// the reaction slot (FUN_14015d670). [Open] The row label's button
+    /// glyph (FUN_14015aba0: 0x11 codes, FUN_1402ebe70) is not drawn.
+    fn update_list(&mut self, seq: &Sequence, sel: &[u8]) {
+        let rows: Vec<Item> = self.rows().to_vec();
+        let n = rows.len();
+        if self.last_count != n {
+            self.slots.clear();
+        }
+        let x = ROOT_BASE[0];
+        self.slot(
+            seq,
+            LIST_HEADER,
+            false,
+            [x, PANEL_ANCHOR - PITCH * n as f32],
+            None,
+            0x80b4b4b4,
+        );
+        let mut y = ROW_ANCHOR - PITCH * n as f32;
+        for (i, item) in rows.iter().enumerate() {
+            let s = sel.get(i).copied().unwrap_or(0) as usize;
+            let group = LIST_ROW.get(s).copied().unwrap_or(0);
+            let colour = LIST_TEXT[item.colour.min(8)];
+            self.slot(seq, group, false, [x, y], Some(item.label.clone()), colour);
+            y += PITCH;
+        }
+        if let Some(r) = self.reaction.clone() {
+            let i = self.slot(
+                seq,
+                REACTION_GROUP,
+                false,
+                [x, REACTION_Y - PITCH * n as f32],
+                Some(r.label),
+                ROW_TEXT[0],
+            );
+            self.slots[i].dimmed = r.dimmed;
+        }
+        self.last_count = n;
+        self.slots.truncate(self.counter);
+        for s in &mut self.slots {
+            s.player.update(seq, 1.);
         }
     }
 
@@ -875,6 +967,8 @@ mod tests {
             locked: false,
             overridden: [false; 8],
             sub: None,
+            list: None,
+            last_list: false,
         }
     }
 
@@ -884,6 +978,29 @@ mod tests {
             icon,
             colour,
         }
+    }
+
+    #[test]
+    fn a_list_deck_takes_the_row_of_the_pressed_face_button() {
+        let mut menu = bare(vec![row(0, 0), row(0, 0), row(0, 5)], vec![None; 3]);
+        menu.list = Some(vec![2, 3, 4]);
+        let face = |k: u8| Buttons {
+            face: 1 << k,
+            ..Buttons::default()
+        };
+        // Square (bit 26) is selector 3: the second row.
+        assert_eq!(menu.press(face(2)), Decision::Execute(1));
+        // Cross (bit 27) names the third row, which cannot be used.
+        assert_eq!(menu.press(face(3)), Decision::Invalid);
+        // Circle names no row; decide and the D-pad do nothing.
+        assert_eq!(menu.press(face(0)), Decision::None);
+        let decide = Buttons {
+            decide: true,
+            down: true,
+            ..Buttons::default()
+        };
+        assert_eq!(menu.press(decide), Decision::None);
+        assert_eq!(menu.cursor, 0);
     }
 
     #[test]

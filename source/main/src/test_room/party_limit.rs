@@ -37,6 +37,10 @@ pub struct LoadedLimit {
     /// with their HD art.
     pub gauge_sheet: Option<visual::hud::Sheet>,
     pub counter_sheet: Option<visual::hud::Sheet>,
+    /// The command menu's sequence and art while the special deck is up
+    /// (`comd`, Trinity Limit only: FUN_1403d96d0 -> FUN_1403b2a90 ->
+    /// FUN_1404065a0 -> FUN_14015de90 swaps both).
+    pub menu_sheet: Option<visual::hud::Sheet>,
 }
 
 #[derive(Default)]
@@ -137,6 +141,7 @@ pub fn load(
                 .ok()
         };
         let (gauge_sheet, counter_sheet) = (sheet(b"gage"), sheet(b"comb"));
+        let menu_sheet = (row.command == 0x1e4).then(|| sheet(b"comd")).flatten();
         out.limits.push(LoadedLimit {
             row,
             file,
@@ -145,6 +150,7 @@ pub fn load(
             pax,
             gauge_sheet,
             counter_sheet,
+            menu_sheet,
         });
     }
     out
@@ -478,6 +484,16 @@ impl Running {
     pub fn special_deck(&self) -> Option<[(u16, u16); 3]> {
         let l = self.scene.limit();
         l.special.then_some(l.combo)
+    }
+
+    /// The shot pool's points to draw (Trinity Limit's shots).
+    pub fn shot_points(&self) -> Vec<enemy::traps::trinity::Point> {
+        self.scene.shot_points()
+    }
+
+    /// The frame the draw left in a shot's point.
+    pub fn set_shot_frame(&mut self, base: u32, frame: u8) {
+        self.scene.set_shot_frame(base, frame);
     }
 }
 
@@ -882,6 +898,7 @@ pub fn tick(
             "friends":run.members.iter().filter_map(|m| run.scene.object(m.1)
                 .map(|o| (o.sys.motion.slot, o.sys.motion.tick, o.sys.event_parameter,
                     o.sys.motion.flags.word))).collect::<Vec<_>>(),
+            "shots":run.scene.shot_points().len(),
             "faults":run.scene.faults().len()}),
         );
     }

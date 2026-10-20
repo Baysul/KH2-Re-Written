@@ -74,7 +74,16 @@ pub fn load(
         hd_image::decode_hd_image(&hd.bytes, hd.metadata.declared_decompressed_length as usize)
             .map(|d| (d.width, d.height, d.pixels_rgba))
     };
-    let (width, height, rgba) = match decode(&replacements[first_image + image_slot]) {
+    // The replacement made from this IMGD names it: its original asset
+    // offset (flag 0x2000_0000 for a BAR member) lies inside the entry.
+    let entry = images[image_slot];
+    let own = replacements.iter().find(|r| {
+        let at = u64::from(r.metadata.original_asset_offset as u32 & 0x0fff_ffff);
+        let (from, size) = (entry.offset as u32 as u64, entry.size as u32 as u64);
+        (from..from + size).contains(&at)
+    });
+    let indexed = own.unwrap_or(&replacements[first_image + image_slot]);
+    let (width, height, rgba) = match decode(indexed) {
         Ok(d) => d,
         // Some archives (a limit file) keep other replacements (a sound
         // bank) after the images: the IMGDs' replacements are then the run

@@ -123,6 +123,9 @@ fn shot_start(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<
         w.static_write(base + k, 0);
     }
     put_vec(w, base, pos);
+    // FUN_1404118e0: alpha 0x80, frame 0xff (not started), +0x16 the pool's
+    // +0xc; FUN_140541ba0 then sets the sprite to 8 and +0x16 to 0xff.
+    w.static_write(base + 0x14, u32::from_le_bytes([8, 0x80, 0xff, 0xff]));
     put_vec(w, base + 0x28, [0., 0., 0., 1.]);
     put_vec(w, base + 0x38, dir);
     w.static_write(base + 0x48, owner);
@@ -287,6 +290,49 @@ pub fn tick(world: &mut World, env: &dyn Env) {
     world.shots = Some(pool);
 }
 
+/// One drawn record. FUN_140411b90 writes a 16-byte point per record
+/// (FUN_140412450, pool mode 0): the position, then +0x14 (the group of
+/// `obj/PRIZE.mdlx`'s sprite program 203 — FUN_140541a00 builds the pool on
+/// object 0x5c3, PRIZE), +0x15 (the alpha, 0x80 = 1.0), +0x16 and +0x17
+/// (the flip-book frame; 0xff = not started). The draw (FUN_1404d7ed0)
+/// steps the frame, and FUN_140411ea0 copies it back to +0x17.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Point {
+    pub base: u32,
+    /// Engine frame (+Y up).
+    pub position: [f32; 3],
+    pub group: u8,
+    pub alpha: u8,
+    pub frame: u8,
+}
+
+/// The points of the records in use.
+pub fn points(world: &World) -> Vec<Point> {
+    let Some(pool) = world.shots.as_ref() else {
+        return Vec::new();
+    };
+    pool.shots
+        .iter()
+        .map(|s| {
+            let p = native(vec_at(world, s.base));
+            let b = world.static_read(s.base + 0x14).unwrap_or(0).to_le_bytes();
+            Point {
+                base: s.base,
+                position: [p[0], p[1], p[2]],
+                group: b[0],
+                alpha: b[1],
+                frame: b[3],
+            }
+        })
+        .collect()
+}
+
+/// The frame the draw left in a record's point (back to +0x17).
+pub fn set_frame(world: &mut World, base: u32, frame: u8) {
+    let w = world.static_read(base + 0x14).unwrap_or(0);
+    world.static_write(base + 0x14, w & 0x00ff_ffff | u32::from(frame) << 24);
+}
+
 /// FUN_140541a70: move, count down, the alpha byte follows the timer; the
 /// record ends when the timer goes below 0.
 fn fade(world: &mut World, env: &dyn Env, b: u32) -> bool {
@@ -344,5 +390,24 @@ mod tests {
             tick(&mut world, &env);
         }
         assert!(world.shots.as_ref().unwrap().shots.is_empty());
+    }
+
+    #[test]
+    fn a_point_carries_the_sprite_alpha_and_frame_in_the_engine_frame() {
+        let mut world = World::default();
+        world.shots = Some(Pool::default());
+        let base = world.alloc(RECORD);
+        put_vec(&mut world, base, [1., 2., 3., 1.]);
+        world.static_write(base + 0x14, u32::from_le_bytes([7, 0x80, 0xff, 0xff]));
+        world.shots.as_mut().unwrap().shots.push(Shot {
+            base,
+            phase: Phase::Fly,
+        });
+        let p = points(&world)[0];
+        assert_eq!(p.position, [1., -2., 3.]);
+        assert_eq!((p.group, p.alpha, p.frame), (7, 0x80, 0xff));
+        set_frame(&mut world, base, 3);
+        assert_eq!(points(&world)[0].frame, 3);
+        assert_eq!(points(&world)[0].alpha, 0x80);
     }
 }

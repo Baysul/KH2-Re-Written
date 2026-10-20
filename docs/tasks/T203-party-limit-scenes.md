@@ -115,7 +115,30 @@ file's own `gage` / `comb` sheets with their HD art (`visual::limit_hud`). Trini
 at its parent's child context once (the executable also sets each child's offset to that
 context; FUN_14016abf0's composition was not traced to the end).
 
-Still open: the shot sprites and the `comd` sheets are not drawn; summons are not done.
+Round 4, Trinity Limit's presentation (private `runs/r6e`):
+
+- The shots draw. FUN_140541a00 builds the pool on object 0x5c3 (`PRIZE`); FUN_140411b90
+  writes each record's 16-byte point (FUN_140412450, mode 0: position, +0x14 group, +0x15
+  alpha, +0x16, +0x17 frame), and program 203 of `obj/PRIZE.mdlx` (FUN_1404d7ed0, read
+  through FUN_1402bebf0 / FUN_1402c3300) draws group 7 per point, skipping alpha 0 and stepping
+  the flip-book frame (0xff starts a looping shape at a random frame). FUN_1404118e0 and
+  FUN_140541ba0 start a record at sprite 8, alpha 0x80, frame 0xff. 180–220 shots live
+  during the combo.
+- The command menu takes the limit file's `comd` sheet (FUN_1403d96d0 -> FUN_1403b2a90 ->
+  FUN_1404065a0 -> FUN_14015de90: the IMGD becomes the menu's texture, the sequence +0x3a0)
+  and, in deck mode 0xE (FUN_1403b1780), the list path FUN_14015df90: header group 8, rows
+  by selector (0x140718330 + 0x14: 1 -> 0xa, 2 -> 0xc, 3 -> 0xb, 4 -> 9), text colours
+  0x140717d50, no cursor. FUN_1403b1590 takes the row whose selector's face button is pressed
+  (DAT_1405c4ed8: logical bits 24–27, Circle / Triangle / Square / Cross in MODE_FIELD):
+  Begin Combo Triangle, Ultima Square, Break Cross.
+- `visual::hud::load` takes the HD replacement whose original asset offset lies inside the
+  IMGD (flag 0x2000_0000); trinity.bar keeps its PAX textures' replacements before its
+  sheets' and a sound bank after them, so position alone named the wrong picture.
+
+Still open: the row labels' button glyphs (FUN_14015aba0: text codes 0x11 and 0x09 with
+FUN_1402ebe70's glyph; the circles on the rows stay empty), the state sprite each slot carries
+(FUN_14015d140 +0x220, 0x140717ea0), the constants FUN_1404065a0 stores for mode 3
+(DAT_142ae9ab0/ab8), and summons.
 
 ## Uncertainty
 
@@ -123,6 +146,9 @@ Still open: the shot sprites and the `comd` sheets are not drawn; summons are no
 - Engine objects keep no command lockout (+0xb94); Sora's flag-only window terms are left to
   his kit.
 - A move request is applied as a second collision step after the frame's movement.
+- The special deck runs in deck mode 0xE: inferred from FUN_14015de90 being the only writer
+  of the `comd` sequence (+0x3a0) that the mode-0xE draws read. Leaving the deck restores the
+  menu's own sheet (the restoring routine was not traced).
 
 ## Verdict
 
@@ -131,4 +157,4 @@ hits, as far as checked against the executable; the presentation listed above is
 
 ## Next task
 
-The `comd` sheets and the shot sprites, then summons.
+Summons, then the list rows' button glyphs.
