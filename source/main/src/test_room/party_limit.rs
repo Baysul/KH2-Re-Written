@@ -16,6 +16,9 @@ use enemy::motion::{FrameEvent, MotionEvents, RangeEvent};
 
 /// Sora's (character 1) and the friends' motion keys (objentry +7).
 const SORA: u8 = 1;
+/// Rows of the special deck as decide records (above the override records).
+pub const SPECIAL: usize = 100;
+
 /// A participant's clip key: (character, weapon slot or None, clip id).
 pub type ClipKey = (u8, Option<u8>, u16);
 
@@ -241,6 +244,8 @@ struct RoomEnv<'a> {
     player: V3,
     /// Sora is locked on to the Shadow (his lock-on record, obj+0xdc8).
     locked: bool,
+    /// The Shadow's TARGET shape radius.
+    enemy_radius: Option<f32>,
     /// Sora may take a command now (FUN_1403ba070's lockout and free
     /// windows), as his motion stood at the start of the tick.
     can_command: bool,
@@ -254,6 +259,9 @@ struct RoomEnv<'a> {
     /// The room's running effects after the last effect update.
     fx_live: &'a HashMap<u64, player::magic::FxLive>,
     tick: u64,
+    /// Effect handles from here on were asked for during this tick; the
+    /// effect update has not taken them yet.
+    fresh_effects: u32,
 }
 
 impl Env for RoomEnv<'_> {
@@ -277,6 +285,9 @@ impl Env for RoomEnv<'_> {
     }
     fn lockon_target(&self) -> Option<u32> {
         (self.locked && self.enemy.is_some()).then_some(enemy::traps::target::OBJECT_TARGET | ENEMY)
+    }
+    fn target_radius(&self, id: u32) -> Option<f32> {
+        (id == ENEMY).then_some(self.enemy_radius).flatten()
     }
     fn target_position(&self, id: u32) -> Option<V3> {
         (id & !enemy::traps::target::OBJECT_TARGET == ENEMY)
@@ -309,7 +320,9 @@ impl Env for RoomEnv<'_> {
     /// has not taken yet counts as running.
     fn effect_active(&self, handle: u32) -> bool {
         let Some(&(key, started)) = self.effects.get(&handle) else {
-            return false;
+            // Asked for during this tick (a script may test it before its
+            // next halt): it runs.
+            return handle >= self.fresh_effects;
         };
         match self.fx_live.get(&key) {
             Some(l) if l.tracked => l.alive,
@@ -368,6 +381,8 @@ pub struct Running {
     pushers: Vec<FlareShape>,
     /// Commands the scene has offered (each logged once).
     seen: Vec<u16>,
+    /// The last tick a reaction command was offered.
+    pub last_reaction: u64,
 }
 
 /// The character's clip view for a limit: its idle and the limit's motions.
@@ -404,6 +419,8 @@ fn view_of(
 fn attached(owner: ObjId, model: u32) -> Sysobj {
     let mut s = Sysobj::bare();
     s.model = model;
+    // A weapon of Sora's side is not of the enemy class.
+    s.class_flags &= !enemy::sysobj::class_flag::ENEMY;
     s.team = SORA_TEAM;
     s.attached = Some(Attach {
         to: owner,
@@ -422,11 +439,26 @@ fn room_body(game: &Game) -> player::Body {
     }
 }
 
+fn room_enemy_radius(game: &Game) -> Option<f32> {
+    game.enemy
+        .as_ref()
+        .and_then(|rt| rt.targets.first())
+        .map(|t| t.2)
+}
+
 fn room_enemy(game: &Game) -> Option<V3> {
     game.enemy
         .as_ref()
         .filter(|rt| rt.enabled && rt.enemy.targetable())
         .map(|rt| rt.enemy.position)
+}
+
+impl Running {
+    /// The special deck's rows while its window is up (Trinity Limit).
+    pub fn special_deck(&self) -> Option<[(u16, u16); 3]> {
+        let l = self.scene.limit();
+        l.special.then_some(l.combo)
+    }
 }
 
 /// FUN_1403d8b40 for a party limit's command.
@@ -484,6 +516,7 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
     let mut sora = Sysobj::bare();
     sora.model = 1;
     sora.team = SORA_TEAM;
+    sora.entry_part = u16::from(SORA);
     sora.position = game.player.position;
     sora.yaw = game.player.yaw;
     sora.weapons = vec![WEAPONS];
@@ -497,6 +530,8 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
         let mut s = Sysobj::bare();
         s.model = u32::from(m.kind.character);
         s.team = SORA_TEAM;
+        // Objentry +0x4c (FUN_1403b5b20): the character (`obj_search_by_part`).
+        s.entry_part = u16::from(m.kind.character);
         s.position = m.follower.position;
         s.yaw = m.follower.yaw;
         let weapon = WEAPONS + 1 + n as ObjId;
@@ -514,11 +549,16 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
         // Enemies are team 2 (FUN_1403ab4a0, FUN_1403d0150 test +0x4dc).
         s.team = 2;
         others.push(Participant { id: ENEMY, sys: s });
-        sora.target = enemy::sysobj::Target {
+        let target = enemy::sysobj::Target {
             id: enemy::traps::target::OBJECT_TARGET | ENEMY,
             kind: -1,
             group: 0,
         };
+        sora.target = target;
+        // The friends fight the same Shadow (their battle target, obj+0xbf8).
+        for f in &mut friends {
+            f.sys.target = target;
+        }
     }
     let row = game
         .second_deck
@@ -545,12 +585,14 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
         enemy,
         player: game.player.position,
         locked: game.target_locked,
+        enemy_radius: room_enemy_radius(game),
         can_command: true,
         chains: &chains,
         pushers: &pushers,
         effects: &HashMap::new(),
         fx_live: &game.fx_live,
         tick,
+        fresh_effects: u32::MAX,
     };
     let mut scene = Scene::start(&env, &l.file.program, command, time, sora, friends, others)?;
     // KH2_LIMIT_TRACE: the end event lists every trap the scene called.
@@ -587,6 +629,7 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
         chains,
         pushers,
         seen: Vec::new(),
+        last_reaction: tick,
     });
     Ok(())
 }
@@ -619,12 +662,14 @@ pub fn tick(
             enemy,
             player: game.player.position,
             locked: game.target_locked,
+            enemy_radius: room_enemy_radius(game),
             can_command,
             chains: &run.chains,
             pushers: &run.pushers,
             effects: &run.effects,
             fx_live: &game.fx_live,
             tick,
+            fresh_effects: run.scene.effect_watermark(),
         };
         if let Some(e) = run.scene.object_mut(ENEMY)
             && let Some(p) = enemy
@@ -638,8 +683,12 @@ pub fn tick(
         };
         // FUN_1403b6950 -> FUN_1403ba070: the command is taken only inside
         // the windows of the motions that decide it.
+        let special = run.special_deck();
         let taken = record
-            .and_then(|r| Some((run.offers.get(r).copied().flatten()?, run.targets[r])))
+            .and_then(|r| match r.checked_sub(SPECIAL) {
+                Some(k) => Some((special?.get(k)?.0, None)),
+                None => Some((run.offers.get(r).copied().flatten()?, run.targets[r])),
+            })
             .filter(|&(cmd, target)| run.scene.can_decide(&env, cmd, target))
             .map(|(cmd, _)| cmd);
         let followed = taken.inspect(|&cmd| run.scene.follow_up(&env, cmd));
@@ -683,6 +732,9 @@ pub fn tick(
                     }
                     run.offers[r] = Some(cmd);
                     run.targets[r] = other;
+                    if r == 1 {
+                        run.last_reaction = tick;
+                    }
                 }
             }
             Event::EffectStart {
@@ -731,8 +783,16 @@ pub fn tick(
             Event::AttackStrike {
                 slot,
                 target: Some(ENEMY),
+                param,
+                serial,
+                owner,
                 ..
-            } => strikes.push(slot),
+            } => strikes.push(Strike {
+                slot,
+                param,
+                serial,
+                owner,
+            }),
             Event::Service { name, words, .. } if name != "player_set_exec_rc" => {
                 game.event(
                     serde_json::json!({"event":"party_limit_service","tick":tick,
@@ -805,37 +865,43 @@ pub fn tick(
     player::Step::default()
 }
 
+/// A direct strike (`attack_strike`) as its event carried it.
+struct Strike {
+    slot: usize,
+    param: [i32; 2],
+    serial: u64,
+    owner: Option<ObjId>,
+}
+
 /// The scene's attack objects (`attack_new`, 2:10) that can reach the
 /// enemies land on the Shadow like a member's: the swept volume against its
 /// bodies, the ATKP rows' damage and reaction with the owner's stats (Sora's
 /// or the friend's), and the attack's hit flag for `attack_is_hit`. A
 /// direct strike (`attack_strike`, 2:17) lands where the Shadow stands.
 /// [I] Hit callbacks and hit sparks of the scene's attacks are not run.
-fn land_attacks(game: &mut Game, run: &mut Running, strikes: &[usize], tick: u64) {
-    let mut volumes: Vec<_> = super::enemy_script::script_attacks(run.scene.world())
+fn land_attacks(game: &mut Game, run: &mut Running, strikes: &[Strike], tick: u64) {
+    let world = run.scene.world();
+    let mut volumes: Vec<_> = super::enemy_script::script_attacks(world)
         .into_iter()
         .filter(|a| !a.hits_sora)
         .map(|a| {
-            (
-                a.slot, a.serial, a.id, a.extra, a.position, a.previous, a.radius,
-            )
+            let owner = world
+                .attacks
+                .get(a.slot)
+                .and_then(|x| x.as_ref())
+                .and_then(|x| x.owner);
+            let at = (a.position, a.previous, a.radius);
+            (a.slot, a.serial, [a.id, a.extra], owner, at)
         })
         .collect();
     if let Some(at) = room_enemy(game) {
-        for &slot in strikes {
-            if let Some(Some(a)) = run.scene.world().attacks.get(slot) {
-                volumes.push((slot, a.serial, a.param_id, a.param_extra, at, None, 1.));
-            }
+        for s in strikes {
+            game.event(serde_json::json!({"event":"party_limit_strike","tick":tick,
+                "atkp":s.param[0],"serial":s.serial}));
+            volumes.push((s.slot, s.serial, s.param, s.owner, (at, None, 1.)));
         }
     }
-    for (slot, serial, id, extra, centre, previous, radius) in volumes {
-        let owner = run
-            .scene
-            .world()
-            .attacks
-            .get(slot)
-            .and_then(|x| x.as_ref())
-            .and_then(|x| x.owner);
+    for (slot, serial, [id, extra], owner, (centre, previous, radius)) in volumes {
         let member = run.members.iter().find(|m| Some(m.1) == owner).map(|m| m.0);
         let Some(rt) = game.enemy.as_mut() else {
             return;

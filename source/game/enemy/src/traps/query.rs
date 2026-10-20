@@ -19,6 +19,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 318) => play_se,
         (1, 328) => dead_mark,
         (6, 24) => bg_press,
+        (6, 23) => obj_near_parts,
         (1, 17) => leave_force,
         (1, 18) => obj_attach,
         (1, 85) => texanm_start,
@@ -805,5 +806,28 @@ fn bg_press(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<()
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);
+    Ok(())
+}
+
+/// 6:23 FUN_14053df10: the part id (collision entry byte 1) of the object's
+/// HIT shape (kind 2) whose centre is nearest the point, -1 without one.
+/// Without the host's shapes the object stands for one part, 0, at its
+/// position.
+fn obj_near_parts(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let p = read_native(ctx, m, args[1].value)?;
+    let parts = match ctx.env.hit_parts(id) {
+        Some(parts) => parts,
+        None => match ctx.object(id) {
+            Ok(o) if !o.sys.gone => vec![(0, o.sys.position)],
+            _ => Vec::new(),
+        },
+    };
+    let d = |c: [f32; 3]| (c[0] - p[0]).powi(2) + (c[1] - p[1]).powi(2) + (c[2] - p[2]).powi(2);
+    let nearest = parts
+        .iter()
+        .min_by(|a, b| d(a.1).total_cmp(&d(b.1)))
+        .map_or(-1, |&(part, _)| i32::from(part));
+    int(args, nearest);
     Ok(())
 }

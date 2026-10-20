@@ -23,12 +23,14 @@ pub mod system;
 pub mod target;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod trinity;
 pub mod weapon;
 
 pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
     math::lookup(table, index)
         .or_else(|| limit::lookup(table, index))
         .or_else(|| flare::lookup(table, index))
+        .or_else(|| trinity::lookup(table, index))
         .or_else(|| weapon::lookup(table, index))
         .or_else(|| attack::lookup(table, index))
         .or_else(|| homing::lookup(table, index))

@@ -171,6 +171,11 @@ pub enum Event {
         /// script's AI object named nothing.
         target: Option<ObjId>,
         arguments: [i32; 2],
+        /// The attack as it struck (a script may free it in the same tick):
+        /// its ATKP id and sub index, serial and owner.
+        param: [i32; 2],
+        serial: u64,
+        owner: Option<ObjId>,
     },
     /// `obj_dead`: the object finished dying and is removed.
     ObjectDead {
@@ -350,6 +355,10 @@ pub struct World {
     pub vacuums: Vec<Option<Vacuum>>,
     /// Duck Flare's flare pool (`flare_init`, DAT_142b59670).
     pub flares: Option<crate::traps::flare::Pool>,
+    /// Trinity Limit's shot pool (`trinity_shot_init`, DAT_142b596d0).
+    pub shots: Option<crate::traps::trinity::Pool>,
+    /// Static blocks of shot records a dropped pool left, to reuse.
+    pub shots_freed: Vec<u32>,
     /// The shouts waiting for the frame's shout job.
     pub shouts: Vec<Shout>,
     /// The engine's own random generator (DAT_140783ca0), which the shout
@@ -437,6 +446,8 @@ impl Default for World {
             lights: Vec::new(),
             vacuums: Vec::new(),
             flares: None,
+            shots: None,
+            shots_freed: Vec::new(),
             shouts: Vec::new(),
             engine_rng: Lcg::default(),
             last_line_cross: None,
@@ -645,6 +656,12 @@ impl World {
         let at = self.alloc(8);
         self.static_write(at + 4, handle);
         at
+    }
+
+    /// The first effect handle not handed out yet: handles from here on were
+    /// asked for after this call.
+    pub fn effect_watermark(&self) -> u32 {
+        EFFECT_HANDLES + (self.next_effect + 1) * 16
     }
 
     /// A fresh handle for an effect the host will create.

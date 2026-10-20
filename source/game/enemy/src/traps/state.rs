@@ -429,7 +429,13 @@ fn set_land_motion(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Re
 /// held before is stopped. The host runs the thread.
 fn obj_hook(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let other = super::service::object_of(ctx, m, args[2].value);
+    // FUN_14042ca20 passes the second argument only when it names
+    // something (a null word adds none).
+    let other = if args[2].value == 0 {
+        None
+    } else {
+        super::service::object_of(ctx, m, args[2].value)
+    };
     let handle = ctx.world.next_magic_handle();
     let old = ctx.object(id)?.sys.hook.replace(handle);
     if let Some(old) = old {

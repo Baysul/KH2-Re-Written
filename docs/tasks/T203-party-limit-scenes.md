@@ -65,40 +65,62 @@ private `kh2-command-deck/` folder (`bdx/`, `runs/final4`).
 | --- | --- |
 | `cargo fmt --all --check` | PASS |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | PASS |
-| `cargo test --workspace --locked` | FAIL: two `enemy::traps::weapon` tests (pre-existing on `main`, the module is unchanged); all others pass, including the flare pool and tour tests |
+| `cargo test --workspace --locked` | PASS (round 2; the two `enemy::traps::weapon` tests now use the whole trap table and pass the object to 10:31) |
 | `cargo build --workspace --locked`, release `--features skate3` | PASS |
 | Smoke `cargo run -p main --locked -- --frames 180` | PASS |
 | Unattended `--party-limit-tour` (private `runs/final4`) | see below |
 
-Unattended tour, locked on to the Shadow:
+Unattended tour, locked on to the Shadow (round 2, private `runs/final5`):
 
-| Limit | Runs to its end | Follow-ups taken | Hits on the Shadow | Notes |
-| --- | --- | --- | --- | --- |
-| Whirli-Goof | yes | 283 ×2, 256 ×3, 257 | 21 | PASS |
-| Knocksmash | yes (early) | 339 ×4, 340 ×6 | 0 | FAIL: two faults in the lock-on branch, a target record resolving to the scene program's own handle; unlocked runs landed 22 hits |
-| Comet | yes | 280 ×5, 281 | 0 | FAIL: the impact effects (elements 2–4) end on their first frame in the room's effect runner, so the 6-frame strike wait never completes |
-| Duck Flare | yes | none | 21 (flares) | FAIL: 348 waits for Donald's motion 252 (range 0x1a, chain 279); after 254/255 Donald drops to slot 0 instead |
-| Trinity | times out | none | 0 | BLOCKED: the `comd` button-combo sheet and the shot traps 7:28–7:30 (`FUN_140411840` projectile manager) are not ported |
+| Limit | Runs to its end | Commands taken | Hits on the Shadow |
+| --- | --- | --- | --- |
+| Whirli-Goof | yes | 283 ×2, 256 ×3, 257 | 23 |
+| Knocksmash | yes | 339 ×4, 340 ×3, 341 | 6 |
+| Comet | yes | 280 ×5, 281 | 23 (comets 664 ×18, finisher 665 ×5) |
+| Duck Flare | yes | 347 ×4, 348 | 173 |
+| Trinity | yes | 487, 488 | 2 (and one direct strike) |
 
-Not done this task: summons (BLOCKED, a separate system); the Party command runs trigger
-11 of the member's script, which Donald and Goofy do not have (no visible effect, as in the
-exe); the limit gauge/combo HUD and Trinity's camera are not drawn.
+No faults and no missing traps in any of the five.
+
+Fixed in round 2 (all from the executable):
+
+- `sysobj_motion_id` gives a limit motion's own id (+0x180, FUN_1403c63e0) and a limit
+  motion sets +0x18c bit 14 (FUN_1403c65e0 → FUN_1403c8a40): Donald's Duck Flare stance
+  loop (motion 252) now runs.
+- A script may test `effect_is_active` in the tick it starts the effect: handles asked
+  for during the tick count as running. Comet's impacts and Duck Flare's flares live.
+- 6:23 `obj_near_parts`, `attack_strike` events carry the attack (scripts free it in the
+  same tick), FUN_1403b6950's +0x1f decider and FUN_1403ba070's flag terms.
+- Sora's side is not of the enemy class (+0x6c8 bit 4): `enemy_each` no longer walks the
+  friends, weapons and the scene program (Knocksmash's faults).
+- `obj_move_request` (1:89) is applied: FUN_1403b89a0 adds +0xa58 × +0xa64 to the frame's
+  movement and clears it. Goofy's shield now flies to the target.
+- Participants carry their objentry part (+0x4c = character, `obj_search_by_part`) and
+  the friends the Shadow as their battle target.
+- Trinity Limit: FUN_1403d96d0's special window (+0x54 bit 3, +0x50) with the mode-3 deck
+  (FUN_1403b2a90 / FUN_1404065a0: rows 0x1e7, 0x1e6, 0x1e5), 6:43 (row → 0x1e8), 7:36
+  (the combo counter's hits), 8:0 (TARGET radius), and the shot pool 7:28–7:31
+  (FUN_140541a00, FUN_140541ba0, callbacks FUN_140541ac0 / FUN_140541a70 / FUN_140541d30,
+  turn FUN_1403b7200) in script-writable memory.
+- The tour presses Triangle while reaction commands come and a row's command once none
+  has come for 240 ticks; the top deck's rows come back after a limit.
+
+Still open: the shot sprites, the `comd` sheets and the limit gauge / combo counter are not
+drawn; summons are not done.
 
 ## Uncertainty
 
-- Lift argument order for script routines is not settled; the Knocksmash lock-on fault was
-  not traced to a cause.
+- Lift argument order: a routine's first popped slot is its last argument.
 - Engine objects keep no command lockout (+0xb94); Sora's flag-only window terms are left to
   his kit.
-- The participants' queued motion 0 during a limit may name a limit motion in the
-  executable (`FUN_1403c8310` not traced).
+- A move request is applied as a second collision step after the frame's movement.
 
 ## Verdict
 
-PARTIAL. Whirli-Goof runs 1:1 in the test room as far as checked; the other four start, take
-their commands and end, with the failures above.
+PARTIAL. All five party limits run start to finish in the test room with their commands and
+hits, as far as checked against the executable; the presentation listed above is missing.
 
 ## Next task
 
-Trace the queued-motion and lock-on gaps (Duck Flare, Knocksmash), the effect-VM lifetime of
-Comet's impact elements, then Trinity's combo sheet and shot manager.
+The limit gauge and combo counter HUD (MISSION_GAUGE / the `gage` and `comb` sheets), the
+`comd` sheets and the shot sprites, then summons.

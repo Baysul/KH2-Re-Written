@@ -43,6 +43,11 @@ pub struct LimitState {
     pub special: bool,
     /// +0x4c: the colour filter (a light, FUN_1403f6f80(0)).
     pub filter: u32,
+    /// The special command deck (mode 3, DAT_142ae9ab0) while the window is
+    /// up: three (command, extra) rows, Trinity's 0x1e7, 0x1e6, 0x1e5.
+    pub combo: [(u16, u16); 3],
+    /// +0xc0: hits the limit's combo counter holds (`limit_reset_hit_counter`).
+    pub hits: i32,
     /// +0x54 bit 2: the scene thread has ended and the limit is closing.
     pub ending: bool,
     /// DAT_14074b980: the last token a limit motion handed out.
@@ -81,12 +86,24 @@ impl LimitState {
             time,
             pending: 0,
             special: false,
+            combo: [(0, 0); 3],
+            hits: 0,
             filter,
             ending: false,
             token: 0,
             threads: Vec::new(),
             exec_rc: 0,
         }
+    }
+
+    /// FUN_1403d96d0's tail for Trinity Limit (command 0x1e4): its `comd`
+    /// sheets take the command menu in mode 3 (FUN_1403b2a90, rows seeded
+    /// by FUN_1404065a0 from DAT_1405cc4e8) and the window counts as a
+    /// motion still playing (+0x54 bit 3, +0x50).
+    pub fn open_special(&mut self) {
+        self.special = true;
+        self.combo = [(0x1e7, 2), (0x1e6, 3), (0x1e5, 4)];
+        self.pending += 1;
     }
 
     /// FUN_1403c65e0's +0x1b0 counter: a limit motion that ended, or that
@@ -125,6 +142,9 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (2, 60) => limit_time,
         (2, 63) => limit_reference,
         (2, 89) => limit_reset_special_command,
+        (6, 43) => trinity_combo_start,
+        (7, 36) => limit_reset_hit_counter,
+        (8, 0) => obj_target_radius,
         _ => return None,
     })
 }
@@ -179,6 +199,9 @@ fn limit_motion_start(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) ->
         let found = clips.length(slot) > 0;
         if found {
             obj.sys.motion_start(slot, blend, clips);
+            // FUN_1403c65e0 marks a motion of another set (+0x190 bit 2), so
+            // FUN_1403c8a40 sets +0x18c bit 14 (`obj_motion_is_capture`).
+            obj.sys.motion.flags.word |= 1 << 14;
         } else if k == 0 {
             obj.sys.motion_stop();
         }
@@ -365,5 +388,39 @@ fn limit_reset_special_command(
             vector: None,
         });
     }
+    Ok(())
+}
+
+/// 6:43 FUN_14053ea50: row `n` of the special deck becomes 0x1e8.
+fn trinity_combo_start(
+    ctx: &mut Ctx<'_>,
+    _: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let n = args[0].as_int();
+    if let Some(row) = state(ctx)?.combo.get_mut(n.max(0) as usize) {
+        row.0 = 0x1e8;
+    }
+    Ok(())
+}
+
+/// 7:36 FUN_14053fb30 -> FUN_1403d9450: the combo counter's hits (+0xc0),
+/// and the counter resets (FUN_1403fa860, its vtable +0x10).
+fn limit_reset_hit_counter(
+    ctx: &mut Ctx<'_>,
+    _: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let hits = std::mem::take(&mut state(ctx)?.hits);
+    args[0] = Slot::int(hits);
+    Ok(())
+}
+
+/// 8:0 FUN_140537dc0: the radius of the object's TARGET shape
+/// (FUN_1403be0f0 +4); 0 when the host has none.
+fn obj_target_radius(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let r = ctx.env.target_radius(id).unwrap_or(0.);
+    args[0] = Slot::float(r);
     Ok(())
 }

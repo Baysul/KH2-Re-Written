@@ -1007,6 +1007,8 @@ struct Game {
     party_limits: Arc<party_limit::LimitSource>,
     party_limit: Option<party_limit::Running>,
     limit_request: Option<u16>,
+    /// The top deck's rows while a limit has the menu.
+    deck_saved: Option<(Vec<Item>, Vec<Option<usize>>)>,
     /// Decide on a row a limit's command took this tick: its override
     /// record (0 the Attack row, 2 the Limit row).
     limit_decide: Option<usize>,
@@ -6082,14 +6084,18 @@ fn simulate(
     } else if game.limit_tour {
         // While a limit offers a row and no reaction command, the tour walks
         // the cursor onto it.
-        let running = game.party_limit.is_some();
+        // While reaction commands keep coming the tour only presses Triangle;
+        // the rows' commands are taken once none has been offered for a while.
+        let running = game.party_limit.as_ref().is_some_and(|r| {
+            r.special_deck().is_some() || tick > r.last_reaction + limit_tour::REACTION_QUIET
+        });
         if limit_tour::lock(tick) {
             game.lock_queued = true;
         }
         let seek = game
             .party_limit
             .as_ref()
-            .is_some_and(|r| r.offers[1].is_none())
+            .is_some_and(|r| tick > r.last_reaction + limit_tour::REACTION_QUIET)
             && hud.as_ref().and_then(|h| h.menu.as_ref()).is_some_and(|m| {
                 let o = m.menu.overridden;
                 o.iter().any(|&b| b) && !o.get(m.menu.cursor).copied().unwrap_or(false)
@@ -6335,6 +6341,16 @@ fn simulate(
         // row (command 0x51), with the override art; record 1 is the
         // reaction command. The cursor keeps its row (FUN_1403b11e0).
         let limit_running = game.party_limit.is_some();
+        // The top deck's rows as they were when the limit took the menu; they
+        // come back when it ends.
+        if limit_running {
+            if game.deck_saved.is_none() {
+                game.deck_saved = Some((m.menu.items.clone(), m.menu.opens.clone()));
+            }
+        } else if let Some((items, opens)) = game.deck_saved.take() {
+            m.menu.items = items;
+            m.menu.opens = opens;
+        }
         // [Tour setup] Each limit of the tour starts from the deck's top row
         // with no list open.
         if game.limit_tour && limit_tour::refill(tick) {
@@ -6388,6 +6404,36 @@ fn simulate(
                 if let Some(o) = opens.get_mut(row) {
                     *o = None;
                 }
+            }
+        }
+        // Trinity Limit's special deck (mode 3: FUN_1403b19b0 over
+        // DAT_142ae9ab0) takes the shown deck's rows. [I] The rows keep the
+        // deck's own art; the `comd` sheets are not drawn.
+        if let Some(rows) = game.party_limit.as_ref().and_then(|r| r.special_deck()) {
+            let deck = game.second_deck.as_ref();
+            let items: Vec<Item> = rows
+                .iter()
+                .map(|&(cmd, _)| Item {
+                    label: deck
+                        .and_then(|d| d.names.get(&cmd).cloned())
+                        .unwrap_or_default(),
+                    icon: deck
+                        .and_then(|d| d.commands.get(&cmd))
+                        .map_or(1, |c| c.icon),
+                    colour: 0,
+                })
+                .collect();
+            if m.menu.kind == field_command_menu::SECOND_DECK {
+                m.menu.second = items;
+                m.menu.second_opens = vec![None; 3];
+            } else {
+                m.menu.items = items;
+                m.menu.opens = vec![None; 3];
+            }
+            m.menu.overridden = [false; 8];
+            records = [None; 8];
+            for (k, r) in records.iter_mut().take(3).enumerate() {
+                *r = Some(party_limit::SPECIAL + k);
             }
         }
         // [Test-room choice] While a limit runs only its rows are taken:
@@ -12045,6 +12091,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         party_limit: None,
         limit_request: None,
         limit_decide: None,
+        deck_saved: None,
         deck_tour,
         deck_queued: false,
         open_queued: false,

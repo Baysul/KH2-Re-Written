@@ -143,6 +143,15 @@ pub trait Env {
     fn effect_direction(&self, _handle: u32) -> Option<Vec3> {
         None
     }
+    /// The radius of the object's TARGET shape (`obj_target_radius`).
+    fn target_radius(&self, _object: u32) -> Option<f32> {
+        None
+    }
+    /// The object's HIT shapes (object collision kind 2): part id and
+    /// centre, for `obj_near_parts`.
+    fn hit_parts(&self, _object: u32) -> Option<Vec<(u8, Vec3)>> {
+        None
+    }
     /// The TARGET shapes of an object for the target searcher: (shape id,
     /// centre). `None`: one shape, id 0, at the object's own position.
     fn target_shapes(&self, _object: u32) -> Option<Vec<(u32, Vec3)>> {

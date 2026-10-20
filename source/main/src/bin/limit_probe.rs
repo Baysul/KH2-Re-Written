@@ -56,6 +56,9 @@ impl Env for Flat {
     fn target_position(&self, id: u32) -> Option<Vec3> {
         (id == 2).then_some(self.enemy)
     }
+    fn lockon_target(&self) -> Option<u32> {
+        Some(enemy::traps::target::OBJECT_TARGET | 2)
+    }
     fn pick_target(&self, _: i32, _: Vec3) -> Option<u32> {
         Some(2)
     }
@@ -118,6 +121,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         file.cameras.len(),
         file.sheets.len()
     );
+    // The effect elements: id, effect number, end time and looping.
+    if let Some(pax) = file
+        .pax
+        .as_ref()
+        .and_then(|b| data::object_effect::read_pax(b).ok())
+    {
+        for e in &pax.elements {
+            let pdata = pax.effect(e.effect_number).and_then(|x| {
+                let d = pax.dpds.get(x.dpd)?.pdata.get(x.pdata)?;
+                Some((d.end_time, d.looping, d.entries.len()))
+            });
+            println!(
+                "  element {} effect {} flags {:#x} bone {} fadeout {} pdata {:?}",
+                e.id, e.effect_number, e.flags, e.bone, e.fadeout_frame, pdata
+            );
+        }
+    }
     // Model 0 Sora, model k the friend of character k; their weapons are
     // model 16 + character.
     let mut clips: Vec<ClipSet> = (0..32).map(|_| ClipSet::default()).collect();

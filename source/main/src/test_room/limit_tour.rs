@@ -12,6 +12,8 @@ pub const LIMITS: u64 = 5;
 /// Ticks each limit gets, from opening the list to the next one.
 const STEP: u64 = 1100;
 const FIRST: u64 = 200;
+/// Ticks without a reaction command before the tour takes a row's command.
+pub const REACTION_QUIET: u64 = 240;
 /// How far in front of the Shadow Sora stands before each limit.
 pub const STAND_OFF: f32 = 200.;
 /// Trinity Limit (ability item 0xc6), given to Sora for the tour.

@@ -936,6 +936,19 @@ impl Sysobj {
             };
             self.apply_movement(wished, env);
         }
+        // FUN_1403b89a0 adds the frame's move request (`obj_move_request`,
+        // +0xa58 direction, +0xa64 speed) times the frame time, then clears
+        // it. [I] Here it is a second step through the collision world.
+        if self.request_speed != 0. {
+            let dt = 1.0;
+            let d = self.request_direction;
+            let wished = d.map(|v| v * self.request_speed * dt);
+            let earlier = self.moved;
+            self.apply_movement(wished, env);
+            self.moved = [0, 1, 2].map(|k| earlier[k] + self.moved[k]);
+        }
+        self.request_direction = [0.; 3];
+        self.request_speed = 0.;
     }
 
     /// FUN_140421c80: one step of physics mode 5. Like every mode routine it

@@ -25,6 +25,8 @@ pub const PROGRAM: ObjId = 0x00ff_fffd;
 /// Frame slots: the scene thread, the action threads.
 const SCENE_SLOT: u32 = 0;
 const ACTION_SLOT: u32 = 1;
+/// Trinity Limit's command: its file brings a special command deck.
+pub const TRINITY: u16 = 0x1e4;
 /// obj+0x194 bit 0 (range event 0x2d): the gauge holds while it is set.
 const HOLDS_TIME: u32 = 1;
 
@@ -69,8 +71,21 @@ impl Scene {
         let mut world = World::default();
         world.tolerate_missing = true;
         world.player_scripted = true;
+        // Sora's side is not of the enemy class (+0x6c8 bit 4, which
+        // `enemy_each` walks); the friends and the program neither.
+        let not_enemy = |mut s: Sysobj| {
+            s.class_flags &= !crate::sysobj::class_flag::ENEMY;
+            s
+        };
         let mut proxy = Object::bare(PLAYER_OBJECT);
-        proxy.sys = player;
+        proxy.sys = not_enemy(player);
+        let friends: Vec<Participant> = friends
+            .into_iter()
+            .map(|p| Participant {
+                id: p.id,
+                sys: not_enemy(p.sys),
+            })
+            .collect();
         world.player_proxy = Some(Box::new(proxy));
         let mut members = [None; 2];
         for (k, p) in friends.iter().enumerate().take(2) {
@@ -85,10 +100,14 @@ impl Scene {
             o.sys = p.sys;
             world.objects[id] = Some(Box::new(o));
         }
-        let state = LimitState::new(&mut world, command, members, time);
+        let mut state = LimitState::new(&mut world, command, members, time);
+        // Trinity Limit's `comd` sheets (FUN_1403d96d0).
+        if command == TRINITY {
+            state.open_special();
+        }
         let handle = state.handle;
         world.limit = Some(state);
-        let program = Object::spawn(&mut world, env, PROGRAM, program, Sysobj::bare())
+        let program = Object::spawn(&mut world, env, PROGRAM, program, not_enemy(Sysobj::bare()))
             .map_err(|e| format!("limit program rejected: {e:?}"))?;
         let entry = program.script.instance.trigger(START);
         if entry <= 0 {
@@ -140,6 +159,11 @@ impl Scene {
         crate::traps::state::decides(env, command, (PLAYER_OBJECT, self.player()), them)
     }
 
+    /// The first effect handle the next tick's traps will hand out.
+    pub fn effect_watermark(&self) -> u32 {
+        self.world.effect_watermark()
+    }
+
     /// The scene's world (its attack objects, for the host to land).
     pub fn world(&self) -> &World {
         &self.world
@@ -162,10 +186,14 @@ impl Scene {
         out
     }
 
-    /// The host landed attack `slot` on a target (its `attack_is_hit`).
+    /// The host landed attack `slot` on a target (its `attack_is_hit`); the
+    /// limit's combo counter counts the hit.
     pub fn struck(&mut self, slot: usize) {
         if let Some(Some(a)) = self.world.attacks.get_mut(slot) {
             a.mark_hit(crate::attack::flag::STRUCK);
+        }
+        if let Some(l) = self.world.limit.as_mut() {
+            l.hits += 1;
         }
     }
 
@@ -337,6 +365,7 @@ impl Scene {
         self.adopt(env);
         self.world.tick_attacks(env);
         self.separate_flares(env);
+        crate::traps::trinity::tick(&mut self.world, env);
         // FUN_1403d9130: the gauge runs down while it is up and no
         // participant's motion holds it.
         let held = self.player().motion.flags.word3 & HOLDS_TIME != 0
