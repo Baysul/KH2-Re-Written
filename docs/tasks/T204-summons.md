@@ -159,6 +159,30 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
   `comd` (`obj/<model>.a.<lang>`); a row taken goes to his trigger 23; the host sets his aim
   300 along the camera.
 
+### Round (i): Chicken Little's first-person view
+
+- Camera mode 9 (`FUN_140178760`, per frame `FUN_140178810`, the camera singleton 0x140718c60
+  +0x48 = 9): Sora's object, the aim point and 100 are kept (`DAT_140abe718` / `720` / `728`).
+  `FUN_1401784a0` turns the heading (+0xc4) and pitch (+0xc8) to the aim point from 100 above
+  Sora. Each frame the eye is Sora raised by 100; R3 (pressed bit 17) turns to the aim point
+  again, else the right stick's left / right bits (`DAT_14071aa98`) turn the heading 0.05236 a
+  frame and its up / down bits (`DAT_14071aa88`) tilt the pitch by the stick's magnitude x Y x
+  0.05236; `FUN_140178580` keeps the aim point within half the projection's angles less 10
+  degrees (`FUN_14019ce90`, 0x1405b2300) and the pitch within -30..70 degrees
+  (`DAT_14071aa80`); the look point is (0, 0, 100) (0x1405b2310) turned by the pitch and the
+  heading; the eye and look point are set directly. `FUN_1401787e0` leaves the mode.
+- `FUN_1401cb830` (each frame of his limit): the lock-on button (pressed bit 11) takes the next
+  target of his list (`FUN_1401cd9c0` / `FUN_1401cd830`, 32 entries at +0xde8), a held
+  right-stick bit (0x3c0000) lets go; a target taken turns the view to it (`FUN_140178560`); the
+  aim point is the target's position (`FUN_1403bdde0`), else the camera's eye plus 300 along
+  its forward; the reticle (`FUN_14017c570`, a `dk::LockOn`) is `fiel` group 0x19 on a target,
+  else 3, bound to the aim point.
+- The rewrite: `FollowCamera` mode 9 (`aiming`, `aim_yaw`; `CameraInput::aim`,
+  `aim_recenter`); the summon host runs `FUN_1401cb830` for the room's one enemy (its first
+  TARGET shape), keeps the think's aim on the limit's first frame so the view starts on it,
+  hides Sora (the fade ramp at 0 at once) and Chicken Little for the limit and draws the
+  limit reticle in place of the lock's. The summon tour presses the lock-on button once.
+
 ### Round (d): Genie's forms
 
 - `FUN_1403de460` gives Genie one of Sora's owned forms (Valor 1, Wisdom 2, Master 4, Final 5;
@@ -245,6 +269,7 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 | `cargo build --workspace --locked`, release `--features skate3` | PASS |
 | Smoke `cargo run -p main --locked -- --frames 180` | PASS |
 | Unattended `--summon-tour` (private `runs/s5`) | exit 0; all four summons start, appear, leave and end; Peter Pan ends by time |
+| Unattended `--summon-tour` round (i) (private `runs/s56`..`runs/s58`) | exit 0; Chicken Little's limit shows the view from 100 above Sora with Sora and Chicken Little hidden, reticle group 3 at the centre; the lock press turns the view to the enemy's TARGET centre (blue group 0x19) |
 | Unattended `--summon-tour` round (h) (private `runs/s53`, `runs/s54`) | exit 0, no faults; Chicken Little's deck shows his `comd` panel with Y / X / A on Firecracker, End, Balls; the tour takes Balls (530) 15 times and 10:51 runs for each; `magic_start_thread` is reported (the shots do not fly) |
 | Unattended `--summon-tour` round (g) (private `runs/s48`, `runs/s49`) | exit 0, no faults or unsupported traps; Sora plays the captured motions in all four limits (Chicken Little 253, Genie's 253 / 255, Stitch's 253, Peter Pan 253 / 255 / 256) and stands between them |
 | Unattended `--summon-tour` round (f) (private `runs/s38`) | exit 0; no faults; the four limits start and end, 41 follow-ups; Peter Pan's script calls 6:40 once and Sora flies along his heading at the PRTY 0x3e run speed (about 11.6 a frame, no stick in the tour) until the limit ends; Chicken Little's 10:51 is not reached in the tour (NOT RUN) |
@@ -262,10 +287,14 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 - [I] The summon level is 0 (no save is loaded); the team is Sora's (not traced in
   `FUN_1401b06e0`); the placement's wall line samples the room's wall push
   (`FUN_14040c2b0` not ported) and its last fallback is Sora's point.
-- Summon limits not finished: Chicken Little's first-person view (camera mode 9, the fades,
-  the reticle, Sora's physics mode 0x3e, the target cycling) and his shots (the magic program's
-  threads, 2:20, are not translated); the limit's cost in summon mode (`FUN_1403a9cf0`); the
+- Summon limits not finished: Chicken Little's shots (the magic program's threads, 2:20, are
+  not translated); Sora's physics mode 0x3e and his turn to the camera's forward in that limit
+  (`FUN_1401cb050`); the limit's cost in summon mode (`FUN_1403a9cf0`); the
   follow-ups' motion windows are not tested before they are sent [I].
+- [I] Mode 9's pad bits are read as the field camera's turn and first person's look with the
+  inversion options off; the view's collision is not run; the room has one enemy, so the
+  target list's cycling always takes it and the refusal sound is not played; his limit reticle
+  replaces the lock's.
 - [I] Chicken Little's deck table is read for the layout with `DAT_14079cf00` +0x274 neither 0
   nor 7 (Fireworks on Cross); his aim is set by the host after the camera moves.
 - [I] A captured slot's variant is chosen as in battle with the Keyblade out; its second
@@ -309,9 +338,8 @@ Sora; Chicken Little and Peter Pan attack; Stitch roams the screen and runs his 
 Genie's forms are chosen from the deck; every summon's limit starts from the deck, takes its
 follow-ups and ends; Peter Pan's limit flies Sora, and Chicken Little's limit can pick the
 target on screen; Sora plays the motions the summons capture for him; Chicken Little's limit
-deck takes its rows. His first-person view and his shots remain.
+deck takes its rows and his first-person view runs. His shots remain.
 
 ## Next task
 
-Chicken Little's first-person view (camera mode 9, reticle, fades); the magic program's
-threads (2:20) for his shots.
+The magic program's threads (2:20) for Chicken Little's shots, if burba wants them next.

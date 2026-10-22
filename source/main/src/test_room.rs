@@ -1204,6 +1204,9 @@ struct Hud {
     field: Sheet,
     reticle: visual::lock_on::Reticle,
     reticle_draw: Option<Draw>,
+    /// Chicken Little's limit reticle (FUN_14017c570 with 3, or 0x19 on a
+    /// target), bound to his aim point.
+    limit_reticle: Option<visual::lock_on::LockOn>,
     stats: GaugeStats,
     canvas: Canvas,
     image: Handle<Image>,
@@ -1232,6 +1235,8 @@ struct CameraRig {
     /// step, FUN_1403b7810) with its end.
     was_first_person: bool,
     fade: FadeRamp,
+    /// Camera mode 9 (Chicken Little's limit) last tick.
+    was_aiming: bool,
     /// The map's camera collision in game world space.
     collision: CameraCollision,
     collision_hits: u64,
@@ -5325,6 +5330,7 @@ fn setup(
             field,
             reticle: Default::default(),
             reticle_draw: None,
+            limit_reticle: None,
             sheets,
             iris,
             menu: menu.map(|(sheet, font, icons, labels)| {
@@ -7254,6 +7260,12 @@ fn simulate(
     } else {
         None
     };
+    // Chicken Little's limit: camera mode 9 on his aim point
+    // (FUN_140178760), turned to a target as it is locked.
+    if let Some((aim, _, recenter)) = summon::aim_view(&game) {
+        camera.aim = Some(to_world(aim));
+        camera.aim_recenter = recenter;
+    }
     let CameraRig {
         camera: follow,
         collision,
@@ -7281,6 +7293,20 @@ fn simulate(
             FadeRamp::start(0., 1.)
         };
         rig.was_first_person = rig.camera.first_person;
+    }
+    // FUN_1401cb6c0 / FUN_1401cb180: the limit view hides Sora at once and
+    // shows him at once after it (FUN_1403b7810 over 0 frames).
+    if rig.camera.aiming != rig.was_aiming {
+        rig.fade = if rig.camera.aiming {
+            FadeRamp {
+                value: 0.,
+                step: 0.,
+                end: 0.,
+            }
+        } else {
+            FadeRamp::SHOWN
+        };
+        rig.was_aiming = rig.camera.aiming;
     }
     rig.fade.tick();
     rig.previous_position = game.player.position;
@@ -8497,6 +8523,7 @@ fn hud_tick(
         reticle,
         field,
         reticle_draw,
+        limit_reticle,
         ..
     } = &mut *hud;
     *reticle_draw = reticle.step(
@@ -8505,6 +8532,24 @@ fn hud_tick(
         &|at| camera.map_or([0.; 3], |camera| camera.project(at)),
         0,
     );
+    // Chicken Little's limit (FUN_1401cb830): his reticle at the aim point,
+    // group 0x19 on a locked target, else 3, in place of the lock's.
+    match summon::aim_view(&game) {
+        Some((aim, locked, _)) => {
+            let group = if locked { 0x19 } else { 3 };
+            let r = match limit_reticle {
+                Some(r) if r.group() == group => r,
+                _ => limit_reticle.insert(visual::lock_on::LockOn::new(&field.sequence, group)),
+            };
+            let at = to_world(aim);
+            r.update(
+                &field.sequence,
+                camera.map_or([0.; 3], |camera| camera.project(at)),
+            );
+            *reticle_draw = r.draw(&field.sequence, 0);
+        }
+        None => *limit_reticle = None,
+    }
     // Form levels gained this frame queue their panels (FUN_1403edb90).
     if let Some(d) = game.drive.as_mut() {
         for up in std::mem::take(&mut d.level_ups) {
@@ -12619,6 +12664,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         recenter_queued: false,
         pending_look: 0.,
         was_first_person: false,
+        was_aiming: false,
         fade: FadeRamp::SHOWN,
         collision_hits: 0,
         collision: CameraCollision::new(&loaded.room),

@@ -62,6 +62,14 @@ pub fn follow_up(tick: u64, offered: bool, special: Option<usize>) -> Option<usi
     }
 }
 
+/// Chicken Little's limit (the first summon): the lock-on button once,
+/// after his deck is up.
+const LOCK: u64 = 800;
+
+pub fn lock(tick: u64) -> bool {
+    phase(tick) == Some((0, LOCK))
+}
+
 /// The reaction button for the limit's follow-ups; the record-0 offer is
 /// taken on the same ticks ([`follow_up`]).
 pub fn reaction(tick: u64) -> bool {
@@ -177,6 +185,7 @@ mod tests {
             assert_eq!(follow_up(s + 710, false, Some(2)), Some(102));
             assert_eq!(follow_up(s + 711, true, Some(2)), None);
         }
+        assert!(lock(FIRST + LOCK) && !lock(FIRST + STEP + LOCK));
         assert!(press(FIRST + 400).decide && press(FIRST + 3 * STEP + 2000).decide);
         // Genie's form pick: Left, Down, Down, Right, decide, Left.
         let g: Vec<_> = (FIRST + STEP..FIRST + STEP + 400)

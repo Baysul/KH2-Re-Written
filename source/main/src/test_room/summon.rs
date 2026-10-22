@@ -91,6 +91,10 @@ pub struct Actor {
     camera_pose: Option<(Vec3, Quat)>,
     /// PRTY record 0x3e (Peter Pan's limit flight).
     flight_spec: Option<actor_physics::ObjParams>,
+    /// Chicken Little's limit: a target is locked (+0xbf8), and it was
+    /// locked this frame (the view turns to it, FUN_140178560).
+    aim_lock: bool,
+    aim_recenter: bool,
 }
 
 impl Actor {
@@ -283,6 +287,15 @@ pub fn hud_values(game: &Game) -> Option<(usize, u16, f32, i32)> {
         .iter()
         .position(|x| x.row.command == l.command)?;
     Some((k, l.command, l.time, l.hits))
+}
+
+/// Chicken Little's limit view (camera mode 9): his aim point (this frame's
+/// coordinates), whether a target is locked, and whether it was locked
+/// this frame.
+pub fn aim_view(game: &Game) -> Option<([f32; 3], bool, bool)> {
+    let a = game.summon.as_ref()?.actor.as_ref()?;
+    a.brain.special_deck()?;
+    Some((a.brain.aim()?, a.aim_lock, a.aim_recenter))
 }
 
 /// The summon's special deck (Chicken Little's limit, mode 5) while it is
@@ -682,14 +695,49 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
         if let Some((at, _)) = a.camera_pose {
             a.brain.set_position(at.to_array());
         }
-        // FUN_1401cb830 without a locked target: Chicken Little aims along
-        // the camera, 300 from its eye. [I] The target cycling on the
-        // lock-on button and the reticle are not ported.
+        // FUN_1401cb830, Chicken Little's limit frame: the lock-on button
+        // (pressed bit 11) takes a target, a held right-stick bit
+        // (0x3c0000) lets it go; the aim point is the target, else 300
+        // along the camera from its eye. [I] The room has one enemy: the
+        // cycling through his target list (+0xde8) takes it each time; the
+        // refusal sound (FUN_1401dd170(7)) is not played.
+        a.aim_recenter = false;
         if a.brain.special_deck().is_some() {
-            let eye = super::from_world(rig.camera.eye);
-            let look = super::from_world(rig.camera.look_at);
-            let aim = eye + (look - eye).normalize_or_zero() * enemy::friend::CHICKEN_LITTLE_AIM;
-            a.brain.set_aim(aim.to_array());
+            // The target's position (FUN_1403bdde0): its first TARGET
+            // shape's centre.
+            let enemy = super::party_limit::room_enemy(game).map(|feet| {
+                game.enemy
+                    .as_ref()
+                    .and_then(|rt| super::enemy_targets(rt).first().map(|t| t.centre))
+                    .unwrap_or(feet)
+            });
+            let lock =
+                game.pad.pressed & 0x800 != 0 || game.summon_tour && super::summon_tour::lock(tick);
+            if lock {
+                a.aim_lock = enemy.is_some();
+                a.aim_recenter = a.aim_lock;
+            } else if game.pad.held & 0x3c_0000 != 0 {
+                a.aim_lock = false;
+            }
+            let aim = match enemy.filter(|_| a.aim_lock) {
+                Some(e) => Some(Vec3::from_array(e)),
+                None => {
+                    a.aim_lock = false;
+                    // The limit's first frame keeps the aim his think left
+                    // (the target, or 200 ahead): the view starts on it
+                    // (FUN_1401cb6c0 -> FUN_140178760).
+                    rig.camera.aiming.then(|| {
+                        let eye = super::from_world(rig.camera.eye);
+                        let look = super::from_world(rig.camera.look_at);
+                        eye + (look - eye).normalize_or_zero() * enemy::friend::CHICKEN_LITTLE_AIM
+                    })
+                }
+            };
+            if let Some(aim) = aim {
+                a.brain.set_aim(aim.to_array());
+            }
+        } else {
+            a.aim_lock = false;
         }
         let blending = a.brain.blend() > 0.;
         match a
@@ -893,6 +941,8 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         last_attack: None,
         attack_serial: 0,
         camera_pose: None,
+        aim_lock: false,
+        aim_recenter: false,
         flight_spec: prty_words(&mut library, 0x3e).map(|w| {
             let mut p = actor_physics::ObjParams::defaults(sstm.fall_max);
             p.apply_prty(&w);
@@ -1055,7 +1105,7 @@ pub fn present(
     mut commands: Commands,
     game: Option<Res<Game>>,
     world: Option<Res<SceneRoot>>,
-    mut roots: Query<(Entity, &SummonRoot, &mut Transform)>,
+    mut roots: Query<(Entity, &SummonRoot, &mut Transform, &mut Visibility)>,
     mut parts: Query<PartQuery>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<FogMaterial>>,
@@ -1067,12 +1117,22 @@ pub fn present(
         .and_then(|s| Some((s.serial, s.actor.as_ref()?)))
         .filter(|(_, a)| !a.gone() && !a.pose.is_empty());
     let mut live = false;
-    for (entity, root, mut transform) in &mut roots {
+    for (entity, root, mut transform, mut visibility) in &mut roots {
         match actor {
             Some((serial, a)) if serial == root.0 => {
                 live = true;
                 transform.translation = a.position();
                 transform.rotation = a.rotation();
+                // FUN_1401cb6c0 fades Chicken Little out (+0xa10) for his
+                // limit, FUN_1401cb180 back in.
+                let shown = if a.brain.special_deck().is_some() {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                };
+                if *visibility != shown {
+                    *visibility = shown;
+                }
             }
             _ => {
                 for (_, mesh, material) in &parts {

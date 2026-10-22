@@ -773,6 +773,11 @@ impl ScriptBrain {
         f.limit.then_some(enemy::friend::CHICKEN_LITTLE_DECK)
     }
 
+    /// Chicken Little's aim point (personality +0x40).
+    pub fn aim(&self) -> Option<Vec3> {
+        Some(self.object.friend.as_deref()?.aim)
+    }
+
     /// Chicken Little's aim point (personality +0x40), as FUN_1401cb830
     /// sets it in his limit mode.
     pub fn set_aim(&mut self, aim: Vec3) {

@@ -61,6 +61,16 @@ pub const FOLLOW_STICK_LIMIT: f32 = 0.9;
 pub const RADIUS_RETURN: f32 = 0.5;
 /// Manual rotation, radians per frame at full input (default setting).
 pub const MANUAL_TURN: f32 = 0.052_359_88;
+/// Camera mode 9 (FUN_140178760 / FUN_140178810, Chicken Little's limit):
+/// the eye stands this far above the player (DAT_140abe728, the 100 the
+/// limit passes) and looks along (0, 0, 100) (0x1405b2310).
+pub const AIM_LIFT: f32 = 100.;
+const AIM_REACH: f32 = 100.;
+/// FUN_140178580: the aim point stays this far inside half the view
+/// (0x1405b2300, 10 degrees).
+const AIM_MARGIN: f32 = 0.174_532_92;
+/// Mode 9's pitch range (DAT_14071aa80, DAT_14071aa84).
+const AIM_PITCH: [f32; 2] = [-std::f32::consts::FRAC_PI_6, 1.221_730_5];
 /// Manual zoom, units per frame at full input.
 pub const MANUAL_ZOOM: f32 = 8.;
 /// Spring gains (default camera setting) and their per-unit speed change.
@@ -321,6 +331,12 @@ pub struct CameraInput {
     /// FUN_1403ba300: the player is in a state that allows first person (a
     /// physics mode with flag bit 7: ground, air; not Quick Run or a glide).
     pub first_person_ok: bool,
+    /// Camera mode 9's aim point while it runs (Chicken Little's limit),
+    /// in Y-down world coordinates.
+    pub aim: Option<Vec3>,
+    /// Mode 9 turns to the aim point this frame (a target was locked,
+    /// FUN_140178560).
+    pub aim_recenter: bool,
     /// The head's height above the player's root (PRTY word 12).
     pub head_lift: f32,
 }
@@ -349,6 +365,9 @@ pub struct FollowCamera {
     pub first_person: bool,
     /// First person's look pitch (+0xc8), positive looks up.
     pub pitch: f32,
+    /// Camera mode 9 runs; `aim_yaw` is its heading (+0xc4).
+    pub aiming: bool,
+    pub aim_yaw: f32,
 }
 
 /// The executable's angle wrap into [-pi, pi].
@@ -443,6 +462,8 @@ impl FollowCamera {
             look_at_target_prev: [0.; 3],
             first_person: false,
             pitch: 0.,
+            aiming: false,
+            aim_yaw: 0.,
         };
         camera.place_targets(input.player_position, true);
         camera
@@ -583,6 +604,28 @@ impl FollowCamera {
         // At 60 Hz the gain is halved; the look-at point adds its extra gain
         // afterwards.
         let gain = (SPRING_GAIN + speed_offset * SPRING_GAIN_PER_UNIT) * 0.5;
+        match input.aim {
+            Some(aim) => {
+                // FUN_140178760: the other modes end (FUN_140164870), the
+                // view turns to the aim point (FUN_1401784a0).
+                if !self.aiming {
+                    self.first_person = false;
+                    self.aiming = true;
+                    self.point_at(input.player_position, aim);
+                }
+                self.tick_aim(input, aim);
+                return;
+            }
+            // FUN_1401787e0 -> FUN_1401656f0: back to the field camera [I:
+            // as first person leaves it].
+            None if self.aiming => {
+                self.aiming = false;
+                self.yaw_target = behind(input.player_forward);
+                self.yaw = self.yaw_target;
+                self.place_targets(input.player_position, false);
+            }
+            None => {}
+        }
         if self.first_person {
             if input.lock_target.is_none() {
                 self.tick_first_person(input, gain, cast);
@@ -738,6 +781,69 @@ impl FollowCamera {
         if let Some(hit) = cast(self.look_at, self.eye) {
             self.look_at = hit.point;
         }
+    }
+
+    /// FUN_1401784a0: heading and pitch from the eye's place (the player
+    /// raised by [`AIM_LIFT`]) to the aim point.
+    fn point_at(&mut self, player: Vec3, aim: Vec3) {
+        let v = sub(aim, player);
+        self.aim_yaw = v[0].atan2(v[2]);
+        self.pitch = -(v[1] + AIM_LIFT).atan2(v[0].hypot(v[2]));
+    }
+
+    /// Mode 9 (FUN_140178810): the eye is the player raised by
+    /// [`AIM_LIFT`]; R3 turns the view to the aim point, else the right
+    /// stick's left / right bits turn the heading 3 degrees a frame and its
+    /// up / down bits tilt the pitch; FUN_140178580 keeps the aim point
+    /// within the view less 10 degrees and the pitch within -30..70 degrees;
+    /// the look point is (0, 0, 100) turned by the pitch and the heading.
+    /// The eye and look point are set, not eased. [I] The pad bits map to
+    /// the field camera's turn and first person's look the way they do
+    /// with the inversion options off; the view's collision is not run.
+    fn tick_aim(&mut self, input: &CameraInput, aim: Vec3) {
+        use std::f32::consts::PI;
+        let player = input.player_position;
+        let eye = [player[0], player[1] - AIM_LIFT, player[2]];
+        if input.reset_pitch || input.aim_recenter {
+            self.point_at(player, aim);
+        } else {
+            if input.turn > 0. {
+                self.aim_yaw = wrap(self.aim_yaw + MANUAL_TURN);
+            } else if input.turn < 0. {
+                self.aim_yaw = wrap(self.aim_yaw - MANUAL_TURN);
+            }
+            self.pitch = wrap(self.pitch - input.look * MANUAL_TURN);
+        }
+        self.yaw = wrap(self.aim_yaw - PI);
+        self.yaw_target = self.yaw;
+        // FUN_140178580 with the projection's horizontal and vertical
+        // angles (FUN_14019ce90).
+        let v = sub(aim, player);
+        let toward = v[0].atan2(v[2]);
+        let w = self.mode.fov * 0.5 - AIM_MARGIN;
+        let d = wrap(self.aim_yaw - toward);
+        if d < -w {
+            self.aim_yaw = wrap(toward - w);
+        } else if w < d {
+            self.aim_yaw = wrap(toward + w);
+        }
+        let rise = -(v[1] + AIM_LIFT).atan2(v[0].hypot(v[2]));
+        let w = self.vertical_fov() * 0.5 - AIM_MARGIN;
+        let d = wrap(self.pitch - rise);
+        if d < -w {
+            self.pitch = wrap(rise - w);
+        } else if w < d {
+            self.pitch = wrap(rise + w);
+        }
+        self.pitch = self.pitch.clamp(AIM_PITCH[0], AIM_PITCH[1]);
+        let (sp, cp) = self.pitch.sin_cos();
+        let (sf, cf) = self.aim_yaw.sin_cos();
+        let ahead = [AIM_REACH * cp * sf, -AIM_REACH * sp, AIM_REACH * cp * cf];
+        let look = [0, 1, 2].map(|k| eye[k] + ahead[k]);
+        self.eye_target = eye;
+        self.eye = eye;
+        self.look_at_target = look;
+        self.look_at = look;
     }
 
     /// FUN_140165700: the current look-at and eye ease toward their targets.
@@ -915,6 +1021,37 @@ mod tests {
         camera.tick(&step, &|_, _| None);
         assert!(camera.first_person);
         assert_eq!(camera.pitch, 0.);
+    }
+
+    #[test]
+    fn mode_nine_looks_from_above_the_player_and_keeps_the_aim_in_view() {
+        let mut step = input([0.; 3], [0., 0., 1.]);
+        let mut camera = FollowCamera::new(OUTDOOR, &step);
+        // An aim point 300 ahead at the eye's height: straight ahead.
+        step.aim = Some([0., -AIM_LIFT, 300.]);
+        camera.tick(&step, &|_, _| None);
+        assert!(camera.aiming);
+        assert_eq!(camera.eye, [0., -AIM_LIFT, 0.]);
+        assert!(camera.aim_yaw.abs() < 1e-6 && camera.pitch.abs() < 1e-6);
+        assert!((camera.look_at[2] - AIM_REACH).abs() < 1e-3);
+        // Turning right stops where the aim point is 10 degrees inside the
+        // view's half width.
+        step.turn = 1.;
+        for _ in 0..200 {
+            camera.tick(&step, &|_, _| None);
+        }
+        let edge = OUTDOOR.fov * 0.5 - AIM_MARGIN;
+        assert!((camera.aim_yaw - edge).abs() < 1e-4, "{}", camera.aim_yaw);
+        // R3 turns back to the aim point.
+        step.turn = 0.;
+        step.reset_pitch = true;
+        camera.tick(&step, &|_, _| None);
+        assert!(camera.aim_yaw.abs() < 1e-6);
+        // Without an aim point the field camera returns behind the player.
+        step.aim = None;
+        step.reset_pitch = false;
+        camera.tick(&step, &|_, _| None);
+        assert!(!camera.aiming);
     }
 
     #[test]
