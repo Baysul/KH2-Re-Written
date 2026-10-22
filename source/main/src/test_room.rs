@@ -6414,19 +6414,26 @@ fn simulate(
         m.menu.overridden = [false; 8];
         m.menu.list = None;
         let mut records = [None; 8];
-        if let Some(run) = game.party_limit.as_ref() {
+        // A party limit's offers, or else the summon's script's
+        // (`command_override` on records 0, 1, 2).
+        let offers = game
+            .party_limit
+            .as_ref()
+            .map(|run| run.offers)
+            .or_else(|| summon::offers(&game));
+        if let Some(offers) = offers {
             let deck = game.second_deck.as_ref();
             let name = |cmd: u16| {
                 deck.and_then(|d| d.names.get(&cmd).cloned())
                     .unwrap_or_default()
             };
-            m.menu.reaction = run.offers[1].map(|cmd| field_command_menu::Reaction {
+            m.menu.reaction = offers[1].map(|cmd| field_command_menu::Reaction {
                 label: name(cmd),
                 dimmed: false,
             });
             let second = m.menu.kind == field_command_menu::SECOND_DECK;
             for (row, record) in [(0, 0), (second_deck::LIMIT_ROW, 2)] {
-                let Some(cmd) = run.offers[record] else {
+                let Some(cmd) = offers[record] else {
                     continue;
                 };
                 // The Limit row is the second deck's.
@@ -6980,14 +6987,25 @@ fn simulate(
         let stick = [direction.x, 0., direction.y];
         party_limit::tick(&mut game, tick, rc, decide, stick)
     } else {
-        let Game {
-            player,
-            params,
-            clips,
-            world,
-            ..
-        } = &mut *game;
-        player.tick(&input, params, clips, world)
+        // The summon's offers: a decided row, or the reaction button on its
+        // record 1, starts or carries on its limit.
+        let decide = std::mem::take(&mut game.limit_decide);
+        let rc = summon::offers(&game).is_some_and(|o| o[1].is_some())
+            && (std::mem::take(&mut game.rc_queued)
+                || game.summon_tour && summon_tour::reaction(tick));
+        summon::decide(&mut game, tick, if rc { Some(1) } else { decide });
+        if summon::sora_in_limit(&mut game) {
+            player::Step::default()
+        } else {
+            let Game {
+                player,
+                params,
+                clips,
+                world,
+                ..
+            } = &mut *game;
+            player.tick(&input, params, clips, world)
+        }
     };
     if game.map_fx_pending
         && let Some(a) = area.as_deref()

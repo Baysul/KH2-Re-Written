@@ -67,6 +67,23 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 - `btlobj_target` (2:23, `FUN_1404319d0`) searches again only for an enemy-class object
   (+0x6c8 bit 4) whose record kind is not 3 (`FUN_1403be2b0` kind 2 is Sora).
 
+### Round (e): the summon limits
+
+- A summon's script offers its limit on the second deck's Limit row (`command_override`
+  record 2, `FUN_1403b2850` from 1:165 with priority 100); execute 81 starts it
+  (`FUN_1403d8b40`). Its `limt` row has the summon as second participant (200–204,
+  `FUN_1403e8300`): `FUN_1403d7fa0` marks Sora and the summon (+0x124 bit 16, physics mode 0 as
+  `FUN_1403e8180` asks), and the program is the summon's own script: trigger 22 with the limit
+  object (`peterpan.bar`, `stitch.bar`, `chickenlittle.bar`, `genie_*.bar` hold only the gauge
+  and combo sheets). The trigger-22 code clears the act, calls `friend_start_limit` and runs
+  the start command (`limit_start_command`, 7:27: the limit object's own command) through the
+  same handler as its follow-ups (trigger 23); a limit thread (`limit_start_thread`) offers
+  the follow-ups each frame while the gauge lasts (Genie: 543 on record 1 when Sora's windows
+  take it, record 0 always).
+- `player_set_exec_rc` (1:263, `FUN_14042fee0` -> `FUN_1403aaa40`): the command Sora runs.
+- 10:29 `friend_use_item` (`FUN_1401b7d90`: a command on a target), 6:36 `obj_detach_camera`
+  (`FUN_1403cc3b0`).
+
 ### Round (d): Genie's forms
 
 - `FUN_1403de460` gives Genie one of Sora's owned forms (Valor 1, Wisdom 2, Master 4, Final 5;
@@ -122,6 +139,15 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
   lookups, as they are in the executable's single list. The summon object carries its
   objentry id; direct strikes on the enemy's stand-in land like the summon's attacks.
 - `enemy::sysobj` ports the leave-ground fall; `btlobj_target` keeps the enemy-class test.
+- Round (e): `limit_scene::Scene::summon` runs a limit whose program is a participant's own
+  object (the summon), lent the summon's world and object for each tick
+  (`Scene::swap_parts`, `Scene::release`); the summon's main thread runs with it, its think and
+  acts are held (`FUN_1401b15f0` with `FUN_1403d7280`). The summon host shows the script's
+  offers on the deck, starts the limit on a decided offer and sends follow-ups (trigger 23);
+  Sora stands where the limit has him. `data::limit_file::read_summon` reads a summon's file;
+  the brain's env answers the motion-window test (chain, decider, flags; Sora's own windows
+  open). The summon tour starts each summon's limit from the deck and presses Attack and the
+  reaction button for its follow-ups.
 - Round (d): `second_deck` row 2 and menu 3 for Genie, `summon` keeps the form number, picks
   it at the start and sends a picked form to Genie (trigger 11); 10:9 shows the model and
   reports the form. The summon tour picks Genie's first form from the deck.
@@ -140,6 +166,7 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 | `cargo build --workspace --locked`, release `--features skate3` | PASS |
 | Smoke `cargo run -p main --locked -- --frames 180` | PASS |
 | Unattended `--summon-tour` (private `runs/s5`) | exit 0; all four summons start, appear, leave and end; Peter Pan ends by time |
+| Unattended `--summon-tour` round (e) (private `runs/s35`) | exit 0; all four limits start from the deck (529, 542, 519, 468), 41 follow-ups taken (Genie 543, Stitch 527, Peter Pan 470/479) and each limit ends; Peter Pan's lacks 6:40 |
 | Unattended `--summon-tour` round (d) (private `runs/s28`) | exit 0; the second deck's row 2 lists Genie's four forms (535–538), the first is picked, his trigger 11 runs `genie_change_form` and form 1 is kept |
 | Unattended `--summon-tour` round (c) (private `runs/s26`) | exit 0; no faults or missing traps; Stitch goes to the top-left point his script asks for, stands, crosses the screen; the others as in `s23` |
 | Unattended `--summon-tour` round (b) (private `runs/s23`) | exit 0; all four follow Sora; Chicken Little's fireworks strike the Shadow twice (ATKP 1261) and he falls back after `surprise`; Peter Pan starts `attack_small` on Sora's attacks; Genie waits on Sora's commands; Stitch stands (traps 10:1, 10:12, 10:32 missing) |
@@ -152,6 +179,12 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 - [I] The summon level is 0 (no save is loaded); the team is Sora's (not traced in
   `FUN_1401b06e0`); the placement's wall line samples the room's wall push
   (`FUN_14040c2b0` not ported) and its last fallback is Sora's point.
+- Summon limits not finished: 6:40 `obj_limit_peterpan_idle` (physics mode 0x34, a steered
+  flight), 6:26 / 7:21 `obj_limit_hover` (mode 0x2a and its spec), 10:51 Chicken Little's
+  target in the camera's view (`FUN_1401cb360`) and his first-person part; the summon limits'
+  gauge and combo HUD; the limit's cost in summon mode (`FUN_1403a9cf0`); Sora's own motions in
+  a summon limit [I: he stands]; the follow-ups' motion windows are not tested before they are
+  sent [I].
 - [I] The Genie form list's colours (`FUN_1403b0f20` with his record) are 0; the target
   record handed to trigger 11 is 0; the form generator starts at 1 for each summon.
 - Stitch's limit mode (traps 10:3/10:4 `FUN_1401c9d60` / `FUN_1401c7e00`, the commands
@@ -180,13 +213,11 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 PARTIAL. Summons come, last their time and leave as the executable sequences them; Chicken
 Little, Peter Pan and Genie run their scripts under the ported kn::Friend controller and follow
 Sora; Chicken Little and Peter Pan attack; Stitch roams the screen and runs his specials;
-Genie's forms are chosen from the deck. The summon limits (Genie's form limits and the
-finishers) and Stitch's limit mode remain.
+Genie's forms are chosen from the deck; every summon's limit starts from the deck, takes its
+follow-ups and ends. The limits' own movement modes and HUD remain.
 
 ## Next task
 
-The summon limits: the scripts' `command_override` offers on the deck, execute 81 starting
-the `limt` row whose second participant is the summon (`FUN_1403d7fa0`: trigger 22 of the
-summon's own script with the limit object, the file giving motions and effects), Genie's
-form limits (0x21e–0x224, `genie_*.bar`) and the finishers (`peterpan.bar`, `stitch.bar`,
-`chickenlittle.bar`), with Stitch's limit mode.
+Finish the summon limits: modes 0x34 and 0x2a with traps 6:40, 6:26, 7:21; Chicken Little's
+first-person targeting (10:51); the limit HUD from the summon files' sheets; then the Trinity
+rows' button glyphs (T203).

@@ -47,6 +47,9 @@ pub enum Status {
 pub struct Scene {
     pub world: World,
     program: Object,
+    /// The program is a summon taking part (its own object and script),
+    /// handed back when the limit is over.
+    adopted: bool,
     scene: Thread,
     /// The action thread of each participant (obj+0xd48), by object.
     actions: Vec<(ObjId, Thread)>,
@@ -123,11 +126,87 @@ impl Scene {
         Ok(Scene {
             world,
             program,
+            adopted: false,
             scene,
             actions: Vec::new(),
             gauge_shown: true,
             time_rate: 1.0,
         })
+    }
+
+    /// FUN_1403d7fa0 for a summon's limit (`limt` p2 200..204,
+    /// FUN_1403e8300): Sora and the summon take part (+0x124 bit 16, physics
+    /// mode 0 as FUN_1403e8180 asks for every summon limit), and the
+    /// program is the summon's own script: its trigger 22 thread with the
+    /// limit object. The summon's world and object are lent to the scene
+    /// and come back with [`Scene::into_parts`]; on failure they come back
+    /// at once.
+    pub fn summon(
+        mut world: World,
+        mut program: Object,
+        command: u16,
+        time: f32,
+        player: Sysobj,
+    ) -> Result<Self, Box<(String, World, Object)>> {
+        let entry = program.script.instance.trigger(START);
+        if entry <= 0 {
+            return Err(Box::new((
+                "the summon's script has no trigger 22".into(),
+                world,
+                program,
+            )));
+        }
+        world.player_scripted = true;
+        let mut proxy = Object::bare(PLAYER_OBJECT);
+        proxy.sys = player;
+        proxy.sys.class_flags &= !crate::sysobj::class_flag::ENEMY;
+        proxy.sys.state_flags |= crate::sysobj::state_flag::LIMIT;
+        world.player_proxy = Some(Box::new(proxy));
+        program.sys.state_flags |= crate::sysobj::state_flag::LIMIT;
+        program.sys.to_ground_mode();
+        program.sys.camera_space = false;
+        let state = LimitState::new(&mut world, command, [Some(program.id), None], time);
+        let handle = state.handle;
+        world.limit = Some(state);
+        let scene = Thread::with_sizes(
+            program.script.stack_bytes,
+            program.script.temp_bytes,
+            SCENE_SLOT,
+            entry,
+            &[Slot::address(handle)],
+        );
+        Ok(Scene {
+            world,
+            program,
+            adopted: true,
+            scene,
+            actions: Vec::new(),
+            gauge_shown: true,
+            time_rate: 1.0,
+        })
+    }
+
+    /// Exchange the scene's world and program with the caller's: a summon's
+    /// host keeps its own between ticks and lends them for the scene's.
+    pub fn swap_parts(&mut self, world: &mut World, program: &mut Object) {
+        std::mem::swap(&mut self.world, world);
+        std::mem::swap(&mut self.program, program);
+    }
+
+    /// A summon's world and object after its limit (FUN_1403d8f40): the
+    /// limit object and Sora's scripting end, the limit bits clear.
+    pub fn release(world: &mut World, program: &mut Object) {
+        world.limit = None;
+        world.player_scripted = false;
+        if let Some(p) = world.player_proxy.as_deref_mut() {
+            p.sys.state_flags &= !crate::sysobj::state_flag::LIMIT;
+        }
+        program.sys.state_flags &= !crate::sysobj::state_flag::LIMIT;
+    }
+
+    /// The program object (a summon's own, for an adopted limit).
+    pub fn program(&self) -> &Object {
+        &self.program
     }
 
     /// FUN_140540fa0, the flare pool's task: Sora's push shapes where he
@@ -223,10 +302,16 @@ impl Scene {
     }
 
     pub fn object(&self, id: ObjId) -> Option<&Object> {
+        if self.adopted && id == self.program.id {
+            return Some(&self.program);
+        }
         self.world.objects.get(id as usize)?.as_deref()
     }
 
     pub fn object_mut(&mut self, id: ObjId) -> Option<&mut Object> {
+        if self.adopted && id == self.program.id {
+            return Some(&mut self.program);
+        }
         self.world.objects.get_mut(id as usize)?.as_deref_mut()
     }
 
@@ -287,6 +372,10 @@ impl Scene {
     }
 
     fn tick_participant(&mut self, env: &dyn Env, id: ObjId) {
+        if self.adopted && id == self.program.id {
+            self.tick_program_participant(env);
+            return;
+        }
         let mut object = if id == PLAYER_OBJECT {
             self.world.player_proxy.take()
         } else {
@@ -343,6 +432,40 @@ impl Scene {
             if let Some(l) = self.world.limit.as_mut() {
                 l.settle(&mut o.sys);
             }
+        }
+    }
+
+    /// The summon taking part in its own limit: its motion clock and events,
+    /// its hooked action thread, its script's main thread, its physics.
+    fn tick_program_participant(&mut self, env: &dyn Env) {
+        let id = self.program.id;
+        let o = &mut self.program;
+        let before = o.sys.motion.slot;
+        o.sys.begin_tick(env);
+        if o.sys.motion.slot != before
+            && let Some(l) = self.world.limit.as_mut()
+        {
+            o.sys.limit_token = l.next_token();
+        }
+        self.program.carry_out_motion_effects(&mut self.world, env);
+        let action = self.actions.iter().position(|(a, _)| *a == id);
+        if action.is_none() {
+            self.program.sys.move_speed = 0.;
+        }
+        if let Some(k) = action {
+            let mut thread =
+                std::mem::replace(&mut self.actions[k].1, Thread::with_sizes(0, 0, 0, 0, &[]));
+            run_thread(&mut self.world, env, &mut self.program, &mut thread);
+            if thread.finished() {
+                self.actions.retain(|(a, _)| *a != id);
+            } else if let Some(slot) = self.actions.iter_mut().find(|(a, _)| *a == id) {
+                slot.1 = thread;
+            }
+        }
+        self.program.tick_main(&mut self.world, env);
+        self.program.sys.end_tick(env);
+        if let Some(l) = self.world.limit.as_mut() {
+            l.settle(&mut self.program.sys);
         }
     }
 

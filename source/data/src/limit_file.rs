@@ -58,6 +58,24 @@ pub fn motion_key(objentry_byte7: u8, weapon_slot: Option<u8>) -> [u8; 4] {
 }
 
 pub fn read(bytes: &[u8]) -> io::Result<LimitFile> {
+    let file = read_parts(bytes)?;
+    if file.program.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "limit file without a program",
+        ));
+    }
+    Ok(file)
+}
+
+/// A summon's limit file (`limt` rows whose second participant is a
+/// summon): its motions and effects; the program is the summon's own
+/// script (FUN_1403d7fa0), so the file carries none.
+pub fn read_summon(bytes: &[u8]) -> io::Result<LimitFile> {
+    read_parts(bytes)
+}
+
+fn read_parts(bytes: &[u8]) -> io::Result<LimitFile> {
     let table = bar::read_bar(bytes)?;
     let mut file = LimitFile::default();
     let mut images = Vec::new();
@@ -85,12 +103,6 @@ pub fn read(bytes: &[u8]) -> io::Result<LimitFile> {
             _ => {}
         }
     }
-    if file.program.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "limit file without a program",
-        ));
-    }
     Ok(file)
 }
 
@@ -105,6 +117,23 @@ impl LimitFile {
             .iter()
             .find(|e| e.entry_type == MOTION && e.name_bytes == key && e.size > 0)?;
         slice(set, e).ok()
+    }
+
+    /// The participant keys limit motion `id` has (`"%03d0"` names).
+    pub fn keys(&self, id: u16) -> Vec<[u8; 4]> {
+        let Some((_, set)) = self.motions.iter().find(|(m, _)| *m == id) else {
+            return Vec::new();
+        };
+        bar::read_bar(set).map_or_else(
+            |_| Vec::new(),
+            |t| {
+                t.entries
+                    .iter()
+                    .filter(|e| e.entry_type == MOTION && e.size > 0)
+                    .map(|e| e.name_bytes)
+                    .collect()
+            },
+        )
     }
 
     /// Every limit motion id the set holds.

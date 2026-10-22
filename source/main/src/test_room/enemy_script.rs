@@ -25,7 +25,12 @@ struct BrainEnv<'a> {
     player: Vec3,
     player_yaw: f32,
     facts: HostFacts,
+    /// Each command's (+0x22 chain, +0x1f decider, +0xc flags).
+    commands: &'a CommandWindows,
 }
+
+/// The command records the motion-window test reads (FUN_1403b6950).
+pub type CommandWindows = std::collections::HashMap<u16, (u16, u8, u32)>;
 
 /// The clips of an object with no motion set.
 struct NoClips;
@@ -80,6 +85,20 @@ impl Env for BrainEnv<'_> {
     }
     fn player_mp(&self) -> Option<(i32, i32)> {
         self.facts.player_mp
+    }
+    // [I] Sora's own lockout and windows are the room's; through a
+    // script he can always take a command (the menu shows it).
+    fn can_decide_command(&self, object: u32, _command: u16) -> bool {
+        object == PLAYER_OBJECT
+    }
+    fn command_chain(&self, command: u16) -> u16 {
+        self.commands.get(&command).map_or(0, |c| c.0)
+    }
+    fn command_decider(&self, command: u16) -> u8 {
+        self.commands.get(&command).map_or(0, |c| c.1)
+    }
+    fn command_flags(&self, command: u16) -> u32 {
+        self.commands.get(&command).map_or(0, |c| c.2)
     }
     fn player_velocity(&self) -> Vec3 {
         self.facts.player_velocity
@@ -220,6 +239,15 @@ pub struct ScriptBrain {
     pub mp_refills: u32,
     /// Genie's new form number (FUN_1403ddfb0) for the host to keep.
     pub genie_form: Option<u8>,
+    /// The summon's limit while it runs (its own script as the program).
+    limit: Option<enemy::limit_scene::Scene>,
+    /// The command records for the motion-window test.
+    commands: CommandWindows,
+    /// The commands the script offers this tick (`command_override`'s
+    /// records: 0 Attack's row, 1 the reaction, 2 the Limit row) and each
+    /// record's target.
+    pub offers: [Option<u16>; 8],
+    pub offer_targets: [Option<u32>; 8],
 }
 
 pub(super) fn script_payload(source: &ProbeSource, model: &str) -> Result<Vec<u8>, String> {
@@ -271,6 +299,10 @@ impl ScriptBrain {
             enemy_strikes: Vec::new(),
             mp_refills: 0,
             genie_form: None,
+            limit: None,
+            commands: CommandWindows::new(),
+            offers: [None; 8],
+            offer_targets: [None; 8],
         };
         brain.build(position, yaw, stats, sstm, &mut ScriptRandom::default())?;
         Ok(brain)
@@ -296,6 +328,7 @@ impl ScriptBrain {
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
+            commands: &self.commands,
         };
         self.object = Object::spawn(&mut self.world, &env, 0, &self.payload, sys)
             .map_err(|e| format!("object script rejected: {e:?}"))?;
@@ -306,28 +339,44 @@ impl ScriptBrain {
     pub fn tick(&mut self, room: &RoomWorld, player: Vec3, rng: &mut ScriptRandom) {
         self.player = player;
         self.world.rng.0 = rng.0;
+        self.offers = [None; 8];
+        self.offer_targets = [None; 8];
         let env = BrainEnv {
             room: Some(room),
             clips: &self.clips,
             player,
             player_yaw: self.player_yaw,
             facts: self.facts,
+            commands: &self.commands,
         };
-        self.object.tick(&mut self.world, &env);
-        // The objects the script made (and the enemy's stand-in). The
-        // host's own object stays reachable to them meanwhile (the made
-        // objects of a summon read and drive their maker).
-        let id = self.object.id;
-        let me = std::mem::replace(&mut self.object, enemy::world::Object::bare(id));
-        self.world.held.push(Box::new(me));
-        self.world.tick_objects(&env, None);
-        if let Some(k) = self.world.held.iter().rposition(|o| o.id == id) {
-            self.object = *self.world.held.remove(k);
+        if let Some(mut scene) = self.limit.take() {
+            // The limit's tick: Sora and the summon take part, the summon's
+            // script is the program (its world and object lent to it).
+            scene.swap_parts(&mut self.world, &mut self.object);
+            let status = scene.tick(&env);
+            scene.swap_parts(&mut self.world, &mut self.object);
+            if status == enemy::limit_scene::Status::Over {
+                enemy::limit_scene::Scene::release(&mut self.world, &mut self.object);
+            } else {
+                self.limit = Some(scene);
+            }
+            Self::tick_made(&mut self.world, &mut self.object, &env);
+            self.hit_the_map(room);
+            self.drain_events();
+            // `player_set_exec_rc` (player +0xdd8): the reaction command Sora
+            // runs next is the reaction offer.
+            if let Some(l) = self.world.limit.as_ref()
+                && l.exec_rc != 0
+            {
+                self.offers[1] = Some(l.exec_rc);
+            }
+            rng.0 = self.world.rng.0;
+            self.record_faults();
+            return;
         }
+        self.object.tick(&mut self.world, &env);
+        Self::tick_made(&mut self.world, &mut self.object, &env);
         self.world.tick_attacks(&env);
-        self.world.deliver_shouts(&env, Some(&mut self.object));
-        self.world.follow_attachments(&env, Some(&mut self.object));
-        self.world.tick_captures(Some(&mut self.object));
         self.hit_the_map(room);
         self.drain_events();
         if self.object.sys.gone {
@@ -351,6 +400,7 @@ impl ScriptBrain {
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
+            commands: &self.commands,
         };
         self.object
             .attack_struck(&mut self.world, &env, slot, PLAYER_OBJECT);
@@ -383,6 +433,7 @@ impl ScriptBrain {
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
+            commands: &self.commands,
         };
         self.object
             .attack_reflected(&mut self.world, &env, slot, PLAYER_OBJECT);
@@ -422,6 +473,96 @@ impl ScriptBrain {
         }
     }
 
+    /// The objects the script made (and the enemy's stand-in). The host's
+    /// own object stays reachable to them meanwhile (the made objects of a
+    /// summon read and drive their maker).
+    fn tick_made(world: &mut EnemyWorld, object: &mut Object, env: &BrainEnv<'_>) {
+        let id = object.id;
+        let me = std::mem::replace(object, enemy::world::Object::bare(id));
+        world.held.push(Box::new(me));
+        world.tick_objects(env, None);
+        if let Some(k) = world.held.iter().rposition(|o| o.id == id) {
+            *object = *world.held.remove(k);
+        }
+        world.deliver_shouts(env, Some(&mut *object));
+        world.follow_attachments(env, Some(&mut *object));
+        world.tick_captures(Some(object));
+    }
+
+    /// FUN_1403d8b40 -> FUN_1403d7fa0 for the summon's limit `command`:
+    /// the limit object with Sora (as `player` stands now) and the summon,
+    /// and its script's trigger 22. `time` is the gauge (command +0x20).
+    pub fn begin_limit(
+        &mut self,
+        command: u16,
+        time: f32,
+        player: enemy::sysobj::Sysobj,
+    ) -> Result<(), String> {
+        let id = self.object.id;
+        let world = std::mem::take(&mut self.world);
+        let object = std::mem::replace(&mut self.object, Object::bare(id));
+        match enemy::limit_scene::Scene::summon(world, object, command, time, player) {
+            Ok(mut scene) => {
+                scene.swap_parts(&mut self.world, &mut self.object);
+                self.limit = Some(scene);
+                Ok(())
+            }
+            Err(failed) => {
+                let (e, world, object) = *failed;
+                self.world = world;
+                self.object = object;
+                Err(e)
+            }
+        }
+    }
+
+    /// The command records the scripts' window tests read.
+    pub fn set_commands(&mut self, commands: CommandWindows) {
+        self.commands = commands;
+    }
+
+    /// The limit runs.
+    pub fn in_limit(&self) -> bool {
+        self.limit.is_some()
+    }
+
+    /// The limit's state (its gauge time, hits, ending), while it runs.
+    pub fn limit_state(&self) -> Option<&enemy::traps::limit::LimitState> {
+        self.limit.as_ref().and(self.world.limit.as_ref())
+    }
+
+    /// Sora as the limit has him (the scripted stand-in).
+    pub fn limit_player(&self) -> Option<&enemy::sysobj::Sysobj> {
+        self.limit.as_ref()?;
+        self.world.player_proxy.as_deref().map(|p| &p.sys)
+    }
+
+    /// A follow-up command Sora took (trigger 23 with the command).
+    pub fn limit_follow_up(&mut self, command: u16) {
+        let Some(mut scene) = self.limit.take() else {
+            return;
+        };
+        let env = BrainEnv {
+            room: None,
+            clips: &self.clips,
+            player: self.player,
+            player_yaw: self.player_yaw,
+            facts: self.facts,
+            commands: &self.commands,
+        };
+        scene.swap_parts(&mut self.world, &mut self.object);
+        if let Some(l) = scene.world.limit.as_mut()
+            && l.exec_rc == command
+        {
+            l.exec_rc = 0;
+        }
+        scene.follow_up(&env, command);
+        scene.swap_parts(&mut self.world, &mut self.object);
+        self.limit = Some(scene);
+        self.drain_events();
+        self.record_faults();
+    }
+
     /// Sort the engine's events into what the host plays and what it only
     /// reports; the list never grows past one frame.
     fn drain_events(&mut self) {
@@ -451,6 +592,19 @@ impl ScriptBrain {
                     words,
                     ..
                 } => self.genie_form = Some(words[0] as u8),
+                // FUN_1403b2850: the script offers a command on a record.
+                Event::Service {
+                    name: "command_override",
+                    words,
+                    other,
+                    ..
+                } => {
+                    let r = words[0] as usize;
+                    if r < self.offers.len() {
+                        self.offers[r] = Some(words[1] as u16);
+                        self.offer_targets[r] = other;
+                    }
+                }
                 Event::Service { name, .. } => {
                     self.services.insert(name);
                 }
@@ -635,6 +789,7 @@ impl ScriptBrain {
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
+            commands: &self.commands,
         };
         let damage = self.object.take_hit(
             &mut self.world,
@@ -656,6 +811,7 @@ impl ScriptBrain {
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
+            commands: &self.commands,
         };
         self.object.reflect(&mut self.world, &env, motion, back);
         self.record_faults();
@@ -716,6 +872,7 @@ impl ScriptBrain {
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
+            commands: &self.commands,
         };
         self.object
             .attack_struck(&mut self.world, &env, slot, target);
@@ -732,6 +889,7 @@ impl ScriptBrain {
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
+            commands: &self.commands,
         };
         self.object.fire(
             &mut self.world,
@@ -791,6 +949,7 @@ impl ScriptBrain {
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
+            commands: &self.commands,
         };
         let actions = self.object.acts.start(name);
         self.object
@@ -810,6 +969,7 @@ impl ScriptBrain {
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
+            commands: &self.commands,
         };
         let actions = self.object.acts.start(b"dead");
         self.object

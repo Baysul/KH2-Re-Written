@@ -168,6 +168,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // LIMIT_PROBE_FILE=<name>: a summon limit file's motions and keys.
+    if let Ok(name) = std::env::var("LIMIT_PROBE_FILE") {
+        let bytes = library.read(&format!("limit/us/{name}"))?;
+        let f = data::limit_file::read_summon(&bytes)?;
+        println!(
+            "file {name}: program {} pax {} sheets {:?}",
+            f.program.len(),
+            f.pax.as_ref().map_or(0, Vec::len),
+            f.sheets
+                .iter()
+                .map(|s| String::from_utf8_lossy(&s.0).into_owned())
+                .collect::<Vec<_>>()
+        );
+        for id in f.motion_ids() {
+            let keys: Vec<String> = f
+                .keys(id)
+                .iter()
+                .map(|k| String::from_utf8_lossy(k).into_owned())
+                .collect();
+            println!("motion {id} keys {keys:?}");
+        }
+    }
     // LIMIT_PROBE_SCRIPT=<model> with LIMIT_PROBE_SCRIPT_OUT=<file>: the
     // model's object script (BAR type 3), for private listing.
     if let (Ok(model), Some(out)) = (

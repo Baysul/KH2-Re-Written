@@ -1,21 +1,30 @@
 //! The unattended `--summon-tour <dir>` (in the magic tour's setup: Sora
 //! stands still, the Shadow is frozen nearby). Each summon of `sumn` in
 //! turn is asked for as the Summon list's pick would, with a full Drive
-//! gauge [tour setup]; the first three are dismissed from the second deck's
-//! Dismiss row, the last runs out of time. Between the deck swaps Sora
-//! attacks (Attack, the top row) so that the summons that answer Sora's
-//! attacks (Peter Pan, Genie) have something to answer. The tour owns the
-//! four charms.
+//! gauge [tour setup]. Sora attacks (Attack, the top row) so that the
+//! summons that answer Sora's attacks (Peter Pan, Genie) have something to
+//! answer; Genie's first form is picked from the second deck's row 2; then
+//! the second deck's Limit row, which the summon's script offers its limit
+//! on, starts the summon's limit and the reaction button takes its
+//! follow-ups. The first three summons are dismissed, the last runs out of
+//! time. The tour owns the four charms.
 use visual::field_command_menu::Buttons;
 
 /// The first summon's tick and the ticks between summons.
 const FIRST: u64 = 200;
-const STEP: u64 = 1400;
-/// Ticks after a call: the deck swap that shows Dismiss, Dismiss itself,
-/// and the swap back.
-const SHOW_DECK: u64 = 650;
-const DISMISS: u64 = 900;
-const HIDE_DECK: u64 = 1000;
+const STEP: u64 = 1600;
+/// Ticks after a call: the second deck, the walk down to its Limit row,
+/// the limit's start, its follow-ups, the top deck back, and Dismiss.
+const SHOW_DECK: u64 = 640;
+const LIMIT_ROW: [u64; 3] = [652, 664, 676];
+const LIMIT_DECIDE: u64 = 690;
+/// Back up to the top row, whose command the limit's offers on record 0
+/// take, before its follow-ups.
+const TOP_ROW: [u64; 3] = [694, 698, 702];
+const FOLLOW_UPS: std::ops::Range<u64> = 710..1000;
+const FOLLOW_UP_EVERY: u64 = 15;
+const HIDE_DECK: u64 = 1050;
+const DISMISS: u64 = 1150;
 /// The last summon's time (3 bars of 600) plus its leaving.
 const LAST: u64 = 2600;
 pub const SUMMONS: usize = 4;
@@ -26,30 +35,39 @@ pub fn request(tick: u64) -> Option<usize> {
     (k.is_multiple_of(STEP) && k / STEP < SUMMONS as u64).then_some((k / STEP) as usize)
 }
 
+/// The summon of `tick` and the ticks since it was called.
+fn phase(tick: u64) -> Option<(u64, u64)> {
+    let k = tick.checked_sub(FIRST)?;
+    let n = (k / STEP).min(SUMMONS as u64 - 1);
+    Some((n, k - n * STEP))
+}
+
 /// The tick a summon is dismissed (the last one is not).
 pub fn dismiss(tick: u64) -> bool {
-    tick.checked_sub(FIRST + DISMISS)
-        .is_some_and(|k| k.is_multiple_of(STEP) && k / STEP < SUMMONS as u64 - 1)
+    phase(tick).is_some_and(|(n, t)| t == DISMISS && n < SUMMONS as u64 - 1)
+}
+
+/// The reaction button for the limit's follow-ups; Attack (the offer on
+/// record 0) is pressed on the same ticks.
+pub fn reaction(tick: u64) -> bool {
+    phase(tick).is_some_and(|(_, t)| {
+        FOLLOW_UPS.contains(&t) && (t - FOLLOW_UPS.start).is_multiple_of(FOLLOW_UP_EVERY)
+    })
 }
 
 /// Ticks after a call when Sora attacks, every `ATTACK_EVERY` ticks: after
-/// the summon has come and before the deck swap, then after the swap back
-/// (the last summon, never dismissed, to near its end).
-const ATTACKS: [std::ops::Range<u64>; 2] = [400..600, 1050..1350];
-const LAST_ATTACKS: std::ops::Range<u64> = 1050..2400;
+/// the summon has come and before the deck swap (the last summon, never
+/// dismissed, again after its limit to near its end).
+const ATTACKS: std::ops::Range<u64> = 400..600;
+const LAST_ATTACKS: std::ops::Range<u64> = 1100..2400;
 const ATTACK_EVERY: u64 = 20;
 
 fn attack(tick: u64) -> bool {
-    let Some(k) = tick.checked_sub(FIRST) else {
+    let Some((n, t)) = phase(tick) else {
         return false;
     };
-    let n = (k / STEP).min(SUMMONS as u64 - 1);
-    let t = k - n * STEP;
     let last = n == SUMMONS as u64 - 1;
-    t.is_multiple_of(ATTACK_EVERY)
-        && (ATTACKS[0].contains(&t)
-            || (!last && ATTACKS[1].contains(&t))
-            || (last && LAST_ATTACKS.contains(&t)))
+    t.is_multiple_of(ATTACK_EVERY) && (ATTACKS.contains(&t) || (last && LAST_ATTACKS.contains(&t)))
 }
 
 /// The second summon (Genie): after he has come, the second deck's row 2
@@ -65,19 +83,24 @@ const GENIE_STEPS: [(u64, u8); 6] = [
 ];
 
 fn genie_step(tick: u64) -> Option<u8> {
-    let t = tick.checked_sub(FIRST + STEP)?;
+    let (n, t) = phase(tick)?;
+    if n != 1 {
+        return None;
+    }
     GENIE_STEPS.iter().find(|s| s.0 == t).map(|s| s.1)
 }
 
-/// Left on the second deck around the first Dismiss; Genie's form pick;
-/// Attack between.
+/// The deck walk to the Limit row and back, Genie's form pick, Attack.
 pub fn press(tick: u64) -> Buttons {
     let g = genie_step(tick);
+    let t = phase(tick).map(|p| p.1);
+    let at = |x: u64| t == Some(x);
     Buttons {
-        left: tick == FIRST + SHOW_DECK || tick == FIRST + HIDE_DECK || g == Some(b'l'),
-        down: g == Some(b'v'),
+        left: at(SHOW_DECK) || at(HIDE_DECK) || g == Some(b'l'),
+        up: TOP_ROW.iter().any(|&x| at(x)),
+        down: LIMIT_ROW.iter().any(|&x| at(x)) || g == Some(b'v'),
         right: g == Some(b'r'),
-        decide: attack(tick) || g == Some(b'd'),
+        decide: attack(tick) || at(LIMIT_DECIDE) || reaction(tick) || g == Some(b'd'),
         ..Buttons::default()
     }
 }
@@ -89,11 +112,12 @@ pub fn captures() -> Vec<u64> {
         c.extend([
             s + 20,
             s + 140,
-            s + 200,
             s + 400,
-            s + 700,
-            s + 960,
-            s + 1150,
+            s + LIMIT_DECIDE - 5,
+            s + 760,
+            s + 860,
+            s + 1000,
+            s + 1200,
         ]);
     }
     // Genie's form list open.
@@ -120,12 +144,18 @@ mod tests {
         assert_eq!((0..end()).filter(|&t| dismiss(t)).count(), SUMMONS - 1);
         assert!(captures().iter().all(|&c| c < end()));
         assert!(press(FIRST + SHOW_DECK).left && !press(FIRST).left);
-        // No Attack near a deck swap or a Dismiss.
+        // No Attack near a deck swap, the limit's start or a Dismiss.
         for k in 0..SUMMONS as u64 {
             let s = FIRST + k * STEP;
-            for t in [SHOW_DECK, DISMISS, HIDE_DECK] {
-                assert!((s + t - 30..s + t + 30).all(|x| !press(x).decide));
+            let dismissed = k < SUMMONS as u64 - 1;
+            for t in [SHOW_DECK, LIMIT_DECIDE, HIDE_DECK, DISMISS] {
+                if t == DISMISS && !dismissed {
+                    continue;
+                }
+                assert!((s + t - 30..s + t + 30).all(|x| !attack(x)), "{k} {t}");
             }
+            assert!(press(s + LIMIT_DECIDE).decide && reaction(s + 710) && !reaction(s + 1000));
+            assert!(press(s + 694).up && press(s + 710).decide);
         }
         assert!(press(FIRST + 400).decide && press(FIRST + 3 * STEP + 2000).decide);
         // Genie's form pick: Left, Down, Down, Right, decide, Left.

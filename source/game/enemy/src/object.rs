@@ -252,6 +252,21 @@ impl Object {
     }
 
     /// One frame of this object's script (FUN_1403b4460).
+    /// The script's main thread only: a summon taking part in its limit,
+    /// whose think and acts the hooked limit blocks (FUN_1401b15f0 with
+    /// FUN_1403d7280).
+    pub fn tick_main(&mut self, world: &mut World, env: &dyn Env) {
+        let Some(mut main) = self.script.main.take() else {
+            return;
+        };
+        run_thread(world, env, self, &mut main);
+        if main.finished() {
+            self.script.main_ended = true;
+        } else {
+            self.script.main = Some(main);
+        }
+    }
+
     pub fn tick_script(&mut self, world: &mut World, env: &dyn Env) {
         let Some(mut main) = self.script.main.take() else {
             return;

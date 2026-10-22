@@ -11,6 +11,9 @@ use crate::world::{Ctx, ObjId, PLAYER_OBJECT, TrapFn};
 type Args = [Slot; 16];
 
 pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
+    if table == 6 && index == 36 {
+        return Some(obj_detach_camera);
+    }
     if table == 7 {
         return Some(match index {
             19 => update_target,
@@ -46,6 +49,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         25 => peterpan_receive_notify,
         26 => peterpan_accept_notify,
         27 => enable_inertia,
+        29 => friend_use_item,
         28 => disable_inertia,
         30 => is_finish_blow,
         36 => is_control,
@@ -237,6 +241,38 @@ fn stitch_move_request(
     fr.current = Some(friend::stitch::MOVE);
     fr.flags |= flag::CONTINUES;
     o.sys.motion_change(0xa1, 4., env.clips(o.sys.model));
+    Ok(())
+}
+
+/// 6:36 FUN_14053e870 -> FUN_1403cc3b0: the object leaves camera space
+/// (+0x124 bit 6, +0x8c8 bit 12 and the matrix +0x908 clear).
+fn obj_detach_camera(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    ctx.object(id)?.sys.camera_space = false;
+    Ok(())
+}
+
+/// 10:29 FUN_140536b50 -> FUN_1401b7d90: the friend uses command `index`
+/// (FUN_1403c4200) on the object of an AI (its target record takes it).
+/// The command's effect is the host's (`friend_use_command`).
+fn friend_use_item(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = me(ctx, m, args[0].value)?;
+    let target = match ctx.sys_ref_ai(m, args[2].value) {
+        Ok(crate::world::SysRef::Player) => Some(PLAYER_OBJECT),
+        Ok(crate::world::SysRef::Object(o)) => Some(o),
+        Err(_) => None,
+    };
+    let Some(target) = target else {
+        return Ok(());
+    };
+    with_friend(ctx, id, |f| f.band = 0)?;
+    ctx.world.events.push(crate::world::Event::Service {
+        name: "friend_use_command",
+        object: Some(id),
+        other: Some(target),
+        words: [args[1].value, args[3].value, 0, 0, 0, 0, 0, 0],
+        vector: None,
+    });
     Ok(())
 }
 
@@ -552,13 +588,20 @@ fn call(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Faul
     Ok(())
 }
 
-/// 7:27 FUN_14053fa40 -> FUN_1403d89f0: the running limit's command.
+/// 7:27 FUN_14053fa40 -> FUN_1403d89f0: the running limit's command: the
+/// limit object's own when the script runs in one (a summon's limit),
+/// else the host's.
 fn limit_start_command(
     ctx: &mut Ctx<'_>,
     _: &mut Memory<'_>,
     args: &mut Args,
 ) -> Result<(), Fault> {
-    int(args, i32::from(ctx.env.limit_command()));
+    let command = ctx
+        .world
+        .limit
+        .as_ref()
+        .map_or_else(|| ctx.env.limit_command(), |l| l.command);
+    int(args, i32::from(command));
     Ok(())
 }
 

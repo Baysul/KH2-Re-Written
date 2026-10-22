@@ -205,6 +205,98 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// The commands the summon's script offers this tick (`command_override`,
+/// FUN_1403b2850 records) and their targets, while it is out.
+pub fn offers(game: &Game) -> Option<[Option<u16>; 8]> {
+    let a = game.summon.as_ref()?.actor.as_ref()?;
+    a.brain
+        .offers
+        .iter()
+        .any(Option::is_some)
+        .then_some(a.brain.offers)
+}
+
+/// A deck row the summon's offer took (`record`), or the reaction button on
+/// its record 1: outside its limit, FUN_1403d8b40 for the offered command
+/// (the `limt` row whose second participant is the summon); inside, the
+/// limit's follow-up (trigger 23 of the summon's script). [I] The motion
+/// windows that decide a follow-up (FUN_1403b6950) are not tested; the
+/// limit's cost (FUN_1403a9cf0 in summon mode) is not taken.
+pub fn decide(game: &mut Game, tick: u64, record: Option<usize>) {
+    let Some(record) = record else {
+        return;
+    };
+    let player = sora_sys(game);
+    let Some(s) = game.summon.as_mut() else {
+        return;
+    };
+    let Some(a) = s.actor.as_mut() else {
+        return;
+    };
+    let Some(cmd) = a.brain.offers.get(record).copied().flatten() else {
+        return;
+    };
+    if a.brain.in_limit() {
+        a.brain.limit_follow_up(cmd);
+        game.event(serde_json::json!({"event":"summon_limit_follow_up","tick":tick,"command":cmd}));
+        return;
+    }
+    let time = game
+        .second_deck
+        .as_ref()
+        .and_then(|d| d.commands.get(&cmd))
+        .map_or(180., |c| f32::from(c.time));
+    let known = game.second_deck.as_ref().is_some_and(|d| {
+        d.limits
+            .iter()
+            .any(|l| l.command == cmd && l.members[1].wrapping_add(0x38) < 5)
+    });
+    let result = if known {
+        a.brain.begin_limit(cmd, time, player)
+    } else {
+        Err("no summon limit row for the command".into())
+    };
+    match result {
+        Ok(()) => game.event(serde_json::json!({"event":"summon_limit_start","tick":tick,
+            "command":cmd,"time":time})),
+        Err(e) => game.event(
+            serde_json::json!({"event":"summon_limit_refused","tick":tick,
+            "command":cmd,"error":e}),
+        ),
+    }
+}
+
+/// Sora as a limit's user (FUN_1403d7fa0 takes him as he stands).
+fn sora_sys(game: &Game) -> enemy::sysobj::Sysobj {
+    let mut sora = enemy::sysobj::Sysobj::bare();
+    sora.model = 1;
+    sora.team = super::enemy_script::SORA_TEAM as i32;
+    sora.entry_part = 1;
+    sora.position = game.player.position;
+    sora.yaw = game.player.yaw;
+    sora
+}
+
+/// While the summon's limit runs Sora stands and turns where it has him
+/// (the scripted stand-in); his own update does not run. Returns false
+/// when no summon limit runs. [I] His own motions are not played: the
+/// summon scripts move him through the limit traps only.
+pub fn sora_in_limit(game: &mut Game) -> bool {
+    let Some(p) = game
+        .summon
+        .as_ref()
+        .and_then(|s| s.actor.as_ref())
+        .and_then(|a| a.brain.limit_player())
+    else {
+        return false;
+    };
+    let (position, yaw) = (p.position, p.yaw);
+    game.player.position = position;
+    game.player.yaw = yaw;
+    game.player.action = player::Action::Idle;
+    true
+}
+
 /// Genie's and Peter Pan's summon commands (FUN_1403de460).
 pub const GENIE: u16 = 0x59;
 pub const PETER_PAN: u16 = 0x132;
@@ -488,7 +580,8 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
                 serde_json::json!({"event":"summon_tick","tick":tick,"state":s.state,
                 "position":a.brain.position(),"motion":motion,"act":act,"time":time,
                 "missing":missing,"fade":a.brain.fade().0,"friend":a.brain.friend_state(),
-                "control":a.brain.motion_flags(),"sora":game.player.position}),
+                "control":a.brain.motion_flags(),"sora":game.player.position,
+                "limit":a.brain.limit_state().map(|l| (l.time, l.exec_rc, l.pending)),"offers":a.brain.offers}),
             );
         }
     }
@@ -556,6 +649,14 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         Friend::new(p, walk, run)
     });
     brain.make_summon(object.object_id, friend);
+    if let Some(d) = game.second_deck.as_ref() {
+        brain.set_commands(
+            d.commands
+                .iter()
+                .map(|(&id, c)| (id, (c.chain, c.decider, c.flags)))
+                .collect(),
+        );
+    }
     if s.command == GENIE {
         brain.set_genie_form(genie_form_command(game.summon_form));
     }
