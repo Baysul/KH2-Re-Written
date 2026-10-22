@@ -86,6 +86,35 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 - The summon limit file's `gage` and `comb` sheets draw the LIMIT GAUGE and HIT COMBO counter as
   a party limit's do (`FUN_1403d96d0`); the summon's landed hits count toward the combo.
 
+### Round (f): the limits' movement modes
+
+- 6:40 `obj_limit_peterpan_idle` (`FUN_14053e900`, in Peter Pan's script) puts the AI's
+  object (Sora in his limit) in physics mode 0x34 (mode object `0x140750c58`, flags 0x10a).
+  Entry `FUN_14053da60`: the movement block from PRTY record 0x3e (`FUN_14040a480`), no
+  velocity, +0x108 = +0x140. Velocity `FUN_14053d850`: with a request whose x and z are both
+  nonzero the wished heading (+0x7a8) is its atan2 (`FUN_1403b65c0`); horizontally the forward
+  vector (`FUN_1403b56e0`) times the run speed (+0x12c); vertically the request's y × speed ×
+  (1 − inertia) + inertia × the last vertical speed; times the step. Exit `FUN_14053d9b0` loads
+  PRTY record 1.
+- 6:26 `obj_limit_hover` (`FUN_14053e1a0` -> `FUN_14053d680`) and 7:21
+  `obj_limit_hover_set_spec` (`FUN_14053f880` -> `FUN_14053d660`) are called by Aladdin's
+  script (`P_AL010`), not by a summon's. 7:21 copies nine words to `DAT_142b59470` (walk, run,
+  turn, steering inertia, fast and slow inertia, the speed between them, hover height, climb
+  speed); 6:26 writes the call's two inertias into it, sets the velocity to the vector's
+  direction × w (NaN lanes 0) and enters mode 0x2a (flags 0x100). Its entry
+  (`FUN_14053d9e0`) takes walk, run and turn from the spec, its exit (`FUN_14053d980`) the
+  object's own record (+0x148). Velocity `FUN_14053d720`: a slower request is raised to the
+  current speed (`FUN_1403b9da0`); `FUN_1403b7ad0` steers toward the request (blend
+  `FUN_140141ae0`, the steering inertia kept) or keeps 1 − fast/slow of the velocity without
+  one; the heading turns toward it (`FUN_1403b9f70`); `FUN_140540470` casts from 200 above to
+  10200 below (10000 without a floor) and moves the height `climb` × step toward the spec's
+  when it is more than that plus 10 off.
+- 10:51 `chickenlittle_get_nearest_target` (`FUN_140537060` -> `FUN_1401cb360`, called by
+  Chicken Little's script with a 120 × 60 box): the friend's aim point (+0x40, the one 10:5 /
+  10:59 read and write) and each enemy TARGET go through the view matrix (`FUN_14019ce40`)
+  and are scaled by the projection's +0x40 (`FUN_14019d010`) over their depth; the record
+  names the nearest one inside the box, or is cleared.
+
 ### Round (d): Genie's forms
 
 - `FUN_1403de460` gives Genie one of Sora's owned forms (Valor 1, Wisdom 2, Master 4, Final 5;
@@ -153,6 +182,10 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 - Round (d): `second_deck` row 2 and menu 3 for Genie, `summon` keeps the form number, picks
   it at the start and sends a picked form to Genie (trigger 11); 10:9 shows the model and
   reports the form. The summon tour picks Genie's first form from the deck.
+- Round (f): `Sysobj::limit_flight` (mode 0x34) and `Sysobj::limit_hover` (mode 0x2a), run
+  every physics step like the other modes; `World::hover_spec`; traps 6:40, 6:26, 7:21 and
+  10:51; `Env::movement_spec` (PRTY 0x3e, read by the summon host) and `Env::camera_view` (the
+  follow camera's view); the summon host passes the stick (`player_get_movement`).
 - `enemy::friend::stitch` (round (c)): Stitch's state, think, actions and effect slots, traps
   10:1, 10:2, 10:12, 10:13, 10:16, 10:32; `Sysobj::camera_space` (mode 3). The summon host
   places him in front of the follow camera from his screen point and refills Sora's MP for
@@ -168,6 +201,8 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 | `cargo build --workspace --locked`, release `--features skate3` | PASS |
 | Smoke `cargo run -p main --locked -- --frames 180` | PASS |
 | Unattended `--summon-tour` (private `runs/s5`) | exit 0; all four summons start, appear, leave and end; Peter Pan ends by time |
+| Unattended `--summon-tour` round (f) (private `runs/s38`) | exit 0; no faults; the four limits start and end, 41 follow-ups; Peter Pan's script calls 6:40 once and Sora flies along his heading at the PRTY 0x3e run speed (about 11.6 a frame, no stick in the tour) until the limit ends; Chicken Little's 10:51 is not reached in the tour (NOT RUN) |
+| Probe `limit_probe aladdin` (private `probe-aladdin.txt`) | runs to its end without faults; without Aladdin as a participant 6:26 / 7:21 are not reached (NOT RUN for the hover) |
 | Unattended `--summon-tour` round (e) (private `runs/s35`) | exit 0; all four limits start from the deck (529, 542, 519, 468), 41 follow-ups taken (Genie 543, Stitch 527, Peter Pan 470/479) and each limit ends; Peter Pan's lacks 6:40 |
 | Unattended `--summon-tour` round (d) (private `runs/s28`) | exit 0; the second deck's row 2 lists Genie's four forms (535–538), the first is picked, his trigger 11 runs `genie_change_form` and form 1 is kept |
 | Unattended `--summon-tour` round (c) (private `runs/s26`) | exit 0; no faults or missing traps; Stitch goes to the top-left point his script asks for, stands, crosses the screen; the others as in `s23` |
@@ -181,12 +216,18 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 - [I] The summon level is 0 (no save is loaded); the team is Sora's (not traced in
   `FUN_1401b06e0`); the placement's wall line samples the room's wall push
   (`FUN_14040c2b0` not ported) and its last fallback is Sora's point.
-- Summon limits not finished: 6:40 `obj_limit_peterpan_idle` (physics mode 0x34, a steered
-  flight), 6:26 / 7:21 `obj_limit_hover` (mode 0x2a and its spec), 10:51 Chicken Little's
-  target in the camera's view (`FUN_1401cb360`) and his first-person part; the summon limits'
-  gauge and combo HUD; the limit's cost in summon mode (`FUN_1403a9cf0`); Sora's own motions in
-  a summon limit [I: he stands]; the follow-ups' motion windows are not tested before they are
-  sent [I].
+- Summon limits not finished: Chicken Little's first-person part (he is not drawn in his
+  limit); the limit's cost in summon mode (`FUN_1403a9cf0`); Sora's own motions in a summon
+  limit [I: he stands, or flies in Peter Pan's]; the follow-ups' motion windows are not tested
+  before they are sent [I].
+- [I] Mode 0x34's forward vector (`FUN_1403b56e0`, +0x680 or the +0x60/+0x68 matrix terms
+  while `FUN_1403da520` holds) is read as the heading's; its exit's PRTY record 1 is read as
+  the turn rate the object had before. Mode 0x2a copies `DAT_142b59470` when it is entered
+  (the executable reads it each step); a mode change gives the turn rate back.
+- [I] 10:51: the projection's scale is read as the follow camera's focal length on the
+  640-wide screen (320 / tan(fov / 2)); the iterator's skips (`FUN_1401b51a0`,
+  `FUN_1403bd420`, `FUN_1403ba4a0`) are read as the nearest-target search's alive test; the
+  cleared record's kind is −1.
 - [I] The Genie form list's colours (`FUN_1403b0f20` with his record) are 0; the target
   record handed to trigger 11 is 0; the form generator starts at 1 for each summon.
 - Stitch's limit mode (traps 10:3/10:4 `FUN_1401c9d60` / `FUN_1401c7e00`, the commands
@@ -216,10 +257,10 @@ PARTIAL. Summons come, last their time and leave as the executable sequences the
 Little, Peter Pan and Genie run their scripts under the ported kn::Friend controller and follow
 Sora; Chicken Little and Peter Pan attack; Stitch roams the screen and runs his specials;
 Genie's forms are chosen from the deck; every summon's limit starts from the deck, takes its
-follow-ups and ends. The limits' own movement modes and HUD remain.
+follow-ups and ends; Peter Pan's limit flies Sora, and Chicken Little's limit can pick the
+target on screen. Chicken Little's first-person part and Sora's own limit motions remain.
 
 ## Next task
 
-Finish the summon limits: modes 0x34 and 0x2a with traps 6:40, 6:26, 7:21; Chicken Little's
-first-person targeting (10:51); the limit HUD from the summon files' sheets; then the Trinity
-rows' button glyphs (T203).
+The Trinity rows' button glyphs (T203, text codes 0x11 / 0x09); then Chicken Little's
+first-person part of his limit.

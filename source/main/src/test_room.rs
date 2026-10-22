@@ -1024,6 +1024,8 @@ struct Game {
     summon_form: u8,
     /// A Genie form command picked from the deck (trigger 11 on Genie).
     genie_command: Option<u16>,
+    /// The stick's request the summon's script reads (`player_get_movement`).
+    summon_stick: [f32; 3],
     /// The top deck's rows while a limit has the menu.
     deck_saved: Option<(Vec<Item>, Vec<Option<usize>>)>,
     /// Decide on a row a limit's command took this tick: its override
@@ -6990,6 +6992,7 @@ fn simulate(
         // The summon's offers: a decided row, or the reaction button on its
         // record 1, starts or carries on its limit.
         let decide = std::mem::take(&mut game.limit_decide);
+        game.summon_stick = [direction.x, 0., direction.y];
         let rc = summon::offers(&game).is_some_and(|o| o[1].is_some())
             && (std::mem::take(&mut game.rc_queued)
                 || game.summon_tour && summon_tour::reaction(tick));
@@ -12271,6 +12274,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         summon_octant: 0,
         summon_form: 0,
         genie_command: None,
+        summon_stick: [0.; 3],
         limit_tour,
         party_limits: Arc::new(std::mem::take(&mut loaded.party_limits)),
         party_limit: None,

@@ -14,6 +14,12 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
     if table == 6 && index == 36 {
         return Some(obj_detach_camera);
     }
+    if table == 6 && index == 40 {
+        return Some(obj_limit_peterpan_idle);
+    }
+    if table == 6 && index == 26 {
+        return Some(obj_limit_hover);
+    }
     if table == 7 {
         return Some(match index {
             19 => update_target,
@@ -21,6 +27,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
             25 => disable_system_wishdir,
             26 => call,
             27 => limit_start_command,
+            21 => obj_limit_hover_set_spec,
             _ => return None,
         });
     }
@@ -45,6 +52,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         18 => is_boss,
         20 => follow_player,
         21 => follow_enemy,
+        51 => chickenlittle_get_nearest_target,
         23 => enemy_is_attacked_from,
         25 => peterpan_receive_notify,
         26 => peterpan_accept_notify,
@@ -252,6 +260,48 @@ fn obj_detach_camera(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> 
     Ok(())
 }
 
+/// 6:40 FUN_14053e900: physics mode 0x34 (Peter Pan's limit flight) for
+/// the AI's object; Peter Pan's limit puts Sora in it.
+fn obj_limit_peterpan_idle(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let spec = ctx.env.movement_spec(0x3e);
+    ctx.object(id)?.sys.to_limit_flight(spec);
+    Ok(())
+}
+
+/// 6:26 FUN_14053e1a0 -> FUN_14053d680: the AI's object hovers (physics
+/// mode 0x2a) from a velocity of the vector's direction times its w (NaN
+/// lanes read 0); the two numbers are the spec's fast and slow inertia
+/// (DAT_142b59480 / 84).
+fn obj_limit_hover(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let v = read_sanitized(ctx, m, args[1].value)?;
+    ctx.world.hover_spec[4] = args[2].as_float();
+    ctx.world.hover_spec[5] = args[3].as_float();
+    let spec = ctx.world.hover_spec;
+    ctx.object(id)?.sys.to_limit_hover(v, spec);
+    Ok(())
+}
+
+/// 7:21 FUN_14053f880 -> FUN_14053d660: the hover spec's nine words
+/// (DAT_142b59470..+0x24) from the script's block.
+fn obj_limit_hover_set_spec(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let at = args[0].value;
+    for k in 0..9u32 {
+        let a = at + 4 * k;
+        ctx.world.hover_spec[k as usize] = ctx.read_f32(m, a).ok_or(Fault::Memory(a))?;
+    }
+    Ok(())
+}
+
 /// 10:29 FUN_140536b50 -> FUN_1401b7d90: the friend uses command `index`
 /// (FUN_1403c4200) on the object of an AI (its target record takes it).
 /// The command's effect is the host's (`friend_use_command`).
@@ -300,6 +350,63 @@ fn chickenlittle_get_shoot_target(
     let aim = with_friend(ctx, id, |f| f.aim)?.unwrap_or_default();
     vector(ctx, m, 5, aim, args);
     Ok(())
+}
+
+/// 10:51 FUN_140537060 -> FUN_1401cb360: the record (arg 1) names the
+/// enemy TARGET nearest Chicken Little's aim point on the screen, within
+/// the half width and height (args 2, 3) of it; empty without one. Points
+/// go through the view and are scaled by the projection over their depth.
+/// [I] The iterator's own skips (FUN_1401b51a0, FUN_1403bd420,
+/// FUN_1403ba4a0) are read as the nearest-target search's.
+fn chickenlittle_get_nearest_target(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = me(ctx, m, args[0].value)?;
+    let (w, h) = (args[2].as_float(), args[3].as_float());
+    let aim = with_friend(ctx, id, |f| f.aim)?.unwrap_or_default();
+    let screen = |v: [f32; 4]| [v[0] * (v[3] / v[2]), v[1] * (v[3] / v[2])];
+    let mut best: Option<(ObjId, u32, f32)> = None;
+    if let Some(centre) = ctx.env.camera_view(aim).map(screen) {
+        let mut ids: Vec<ObjId> = ctx.world.objects.iter().flatten().map(|o| o.id).collect();
+        ids.push(ctx.me.id);
+        ids.sort_unstable();
+        ids.dedup();
+        for o in ids {
+            let s = &ctx.object(o)?.sys;
+            let alive = !s.gone
+                && s.hp > 0
+                && s.state_flags & crate::sysobj::state_flag::DEAD_MARKED == 0
+                && s.flags & crate::world::SEARCH_SKIP_FLAGS == 0;
+            if s.class_flags & class_flag::ENEMY == 0 || !alive {
+                continue;
+            }
+            for (shape, at) in super::searcher::shapes(ctx, o) {
+                let Some(p) = ctx.env.camera_view(at).map(screen) else {
+                    continue;
+                };
+                let (dx, dy) = (p[0] - centre[0], p[1] - centre[1]);
+                let d = dx * dx + dy * dy;
+                if dx.abs() <= w && dy.abs() <= h && best.is_none_or(|b| d < b.2) {
+                    best = Some((o, shape, d));
+                }
+            }
+        }
+    }
+    let t = match best {
+        Some((o, shape, _)) => crate::sysobj::Target {
+            id: super::target::target_id_of(o),
+            kind: -1,
+            group: shape as i32,
+        },
+        None => crate::sysobj::Target {
+            id: 0,
+            kind: -1,
+            group: 0,
+        },
+    };
+    super::target::set_record(ctx, m, args[1].value, t)
 }
 
 /// 10:53 FUN_140537110 -> FUN_1401ce1e0: watch an effect (arg 1) for the

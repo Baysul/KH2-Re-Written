@@ -410,6 +410,10 @@ pub struct World {
     /// traps then read its own position and heading instead of the host's
     /// player.
     pub player_scripted: bool,
+    /// The limit hover's spec (DAT_142b59470, `obj_limit_hover_set_spec`):
+    /// walk, run, turn, steering inertia, fast and slow inertia, the speed
+    /// between them, hover height and climb speed.
+    pub hover_spec: [f32; 9],
 }
 
 /// The event path walker the `eh22_path_*` traps drive (DAT_142b59840):
@@ -482,6 +486,7 @@ impl Default for World {
             battle_targets: Default::default(),
             limit: None,
             player_scripted: false,
+            hover_spec: [0.; 9],
         }
     }
 }

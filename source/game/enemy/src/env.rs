@@ -117,6 +117,11 @@ pub trait Env {
     fn player_move_input(&self) -> Vec3 {
         [0.; 3]
     }
+    /// A PRTY movement record (FUN_1403e9590 index), as FUN_14040a480
+    /// would copy it to +0x128.
+    fn movement_spec(&self, _index: i32) -> Option<player::actor_physics::ObjParams> {
+        None
+    }
     /// The pad buttons held and pressed this frame, one bit per button
     /// (`pad_is_button`, `pad_is_trigger`).
     fn pad_held(&self) -> u64 {
@@ -137,6 +142,11 @@ pub trait Env {
     }
     /// The camera's answer to a point (its projection or inverse transform).
     fn camera_vector(&self, _v: [f32; 4]) -> Option<[f32; 4]> {
+        None
+    }
+    /// A point in the view (FUN_14019ce40's matrix: x right, y down, z
+    /// forward) and the projection's scale (FUN_14019d010, +0x40) in w.
+    fn camera_view(&self, _p: Vec3) -> Option<[f32; 4]> {
         None
     }
     /// The direction an effect handle faces.

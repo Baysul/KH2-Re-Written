@@ -63,6 +63,14 @@ pub struct HostFacts {
     /// Sora's MP and maximum MP.
     pub player_mp: Option<(i32, i32)>,
     pub player_velocity: Vec3,
+    /// The stick's movement request (`player_get_movement`).
+    pub stick: Vec3,
+    /// The camera's eye and look-at (this frame's coordinates) and the
+    /// projection's scale.
+    pub camera: Option<(Vec3, Vec3, f32)>,
+    /// PRTY record 0x3e, the movement block of Peter Pan's limit flight
+    /// (`obj_limit_peterpan_idle`).
+    pub flight_spec: Option<player::actor_physics::ObjParams>,
     /// The TARGET radius of the room's enemy (its stand-in, [`ENEMY`]).
     pub enemy_radius: f32,
 }
@@ -85,6 +93,19 @@ impl Env for BrainEnv<'_> {
     }
     fn player_mp(&self) -> Option<(i32, i32)> {
         self.facts.player_mp
+    }
+    fn player_move_input(&self) -> Vec3 {
+        self.facts.stick
+    }
+    fn camera_view(&self, p: Vec3) -> Option<[f32; 4]> {
+        let (eye, look, scale) = self.facts.camera?;
+        let cam = bevy::prelude::Transform::from_translation(eye.into())
+            .looking_at(look.into(), bevy::prelude::Vec3::Y);
+        let v = cam.compute_affine().inverse().transform_point3(p.into());
+        (v.z < 0.).then_some([v.x, -v.y, -v.z, scale])
+    }
+    fn movement_spec(&self, index: i32) -> Option<player::actor_physics::ObjParams> {
+        (index == 0x3e).then_some(self.facts.flight_spec).flatten()
     }
     // [I] Sora's own lockout and windows are the room's; through a
     // script he can always take a command (the menu shows it).

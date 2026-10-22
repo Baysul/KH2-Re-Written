@@ -172,3 +172,63 @@ fn a_summon_left_in_the_air_by_a_frozen_range_falls_and_lands() {
     h.end_tick(&Flat);
     assert!(!h.is_jump());
 }
+
+#[test]
+fn limit_flight_runs_along_the_heading_and_blends_the_climb() {
+    let mut s = Sysobj::bare();
+    s.turn_rate = 0.1;
+    let mut spec = actor_physics::ObjParams::defaults(-30.);
+    spec.run = 10.;
+    spec.turn = 0.2;
+    spec.word10 = 0.5;
+    s.to_limit_flight(Some(spec));
+    assert_eq!(s.mode_flags(), 0x10a);
+    assert!(close(s.turn_rate, 0.2));
+    // A straight-up request: no new heading, half of its climb.
+    s.move_direction = [0., 1., 0.];
+    s.move_speed = 4.;
+    s.end_tick(&Flat);
+    assert!(
+        close(s.velocity[2], 10.) && close(s.velocity[1], 2.),
+        "{:?}",
+        s.velocity
+    );
+    assert!(s.wish_yaw.is_none());
+    // A request with x and z sets the wished heading.
+    s.move_direction = [1., 0., 1.];
+    s.end_tick(&Flat);
+    s.end_tick(&Flat);
+    assert!(
+        s.wish_yaw
+            .is_some_and(|y| close(y, std::f32::consts::FRAC_PI_4))
+    );
+    // Leaving gives the turn rate back.
+    s.start_steer([1., 0., 0.], 1., 0.5);
+    assert!(s.limit_flight.is_none() && close(s.turn_rate, 0.1));
+}
+
+#[test]
+fn limit_hover_slows_without_a_request_and_climbs_to_its_height() {
+    let mut s = Sysobj::bare();
+    // walk, run, turn, steering, fast, slow, between, height, climb
+    let spec = [0., 0., 0.3, 0.5, 0.2, 0.4, 5., 100., 3.];
+    s.to_limit_hover([2., 0., 0., 4.], spec);
+    assert_eq!(s.mode_flags(), 0x100);
+    assert!(close(s.velocity[0], 4.) && close(s.turn_rate, 0.3));
+    s.end_tick(&Flat);
+    // Without a request the slow inertia applies; 100 below its height it
+    // rises 3 a frame.
+    assert!(close(s.velocity[0], 2.4), "{:?}", s.velocity);
+    assert!(s.position[1] > 0., "{:?}", s.position);
+    // A request faster than the speed is steered toward with the steering
+    // inertia.
+    s.move_direction = [0., 0., 1.];
+    s.move_speed = 10.;
+    s.end_tick(&Flat);
+    s.end_tick(&Flat);
+    assert!(
+        close(s.velocity[2], 5.) && close(s.velocity[0], 1.2),
+        "{:?}",
+        s.velocity
+    );
+}

@@ -89,6 +89,8 @@ pub struct Actor {
     attack_serial: u32,
     /// Where a summon in camera space (Stitch) stands and faces this frame.
     camera_pose: Option<(Vec3, Quat)>,
+    /// PRTY record 0x3e (Peter Pan's limit flight).
+    flight_spec: Option<actor_physics::ObjParams>,
 }
 
 impl Actor {
@@ -461,6 +463,15 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
                 .map(|rt| (rt.sora_hp, rt.sora_target.max_hp)),
             player_mp: Some((game.player.mp.cur, game.player.mp.max)),
             player_velocity: velocity,
+            stick: game.summon_stick,
+            // [I] The projection's scale (+0x40) read as the follow
+            // camera's focal length on the 640-wide screen.
+            camera: Some((
+                super::from_world(rig.camera.eye).to_array(),
+                super::from_world(rig.camera.look_at).to_array(),
+                320. / (rig.camera.mode.fov * 0.5).tan(),
+            )),
+            flight_spec: a.flight_spec,
             enemy_radius: super::party_limit::room_enemy_radius(game).unwrap_or(0.),
         };
         let enemy = super::party_limit::room_enemy(game);
@@ -706,6 +717,11 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         last_attack: None,
         attack_serial: 0,
         camera_pose: None,
+        flight_spec: prty_words(&mut library, 0x3e).map(|w| {
+            let mut p = actor_physics::ObjParams::defaults(sstm.fall_max);
+            p.apply_prty(&w);
+            p
+        }),
     })
 }
 
@@ -713,18 +729,20 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
 /// objentry +0x4e names (FUN_1403d5840 keeps it at +0xd50) [I: as the party
 /// members' read].
 fn prty_speeds(library: &mut data::path_lookup::Library, moveset: u16) -> Option<(f32, f32)> {
+    let w = prty_words(library, moveset as i16 as i32)?;
+    Some((f32::from_bits(w[0]), f32::from_bits(w[1])))
+}
+
+/// The PRTY record (03system pref/prty) of `index` (FUN_1403e9590).
+fn prty_words(library: &mut data::path_lookup::Library, index: i32) -> Option<[u32; 13]> {
     let system = library.read("03system.bin").ok()?;
     let pref = super::bar_entry(&system, b"pref").ok()?;
     let prty = data::party_records::read_prty(super::bar_entry(pref, b"prty").ok()?).ok()?;
-    let offset = actor_physics::prty_offset(&prty.offsets, moveset as i16 as i32)?;
-    let r = prty
-        .records
+    let offset = actor_physics::prty_offset(&prty.offsets, index)?;
+    prty.records
         .iter()
-        .find(|r| r.offset == offset && !r.overlaps_table)?;
-    Some((
-        f32::from_bits(*r.words.first()?),
-        f32::from_bits(*r.words.get(1)?),
-    ))
+        .find(|r| r.offset == offset && !r.overlaps_table)
+        .map(|r| r.words)
 }
 
 /// The host side of the summon's `sysobj_appear` (FUN_1403df930): the
