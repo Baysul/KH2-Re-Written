@@ -47,8 +47,23 @@ pub fn dismiss(tick: u64) -> bool {
     phase(tick).is_some_and(|(n, t)| t == DISMISS && n < SUMMONS as u64 - 1)
 }
 
-/// The reaction button for the limit's follow-ups; Attack (the offer on
-/// record 0) is pressed on the same ticks.
+/// The follow-up taken as its deck row would be, on the reaction ticks:
+/// a special deck's row `special` (Chicken Little's limit; the deck shows
+/// it once Sora's opening motion ends, so a cursor walk would take the
+/// deck's own row before that), else the record-0 offer while there is
+/// one.
+pub fn follow_up(tick: u64, offered: bool, special: Option<usize>) -> Option<usize> {
+    if !reaction(tick) {
+        return None;
+    }
+    match special {
+        Some(row) => Some(super::party_limit::SPECIAL + row),
+        None => offered.then_some(0),
+    }
+}
+
+/// The reaction button for the limit's follow-ups; the record-0 offer is
+/// taken on the same ticks ([`follow_up`]).
 pub fn reaction(tick: u64) -> bool {
     phase(tick).is_some_and(|(_, t)| {
         FOLLOW_UPS.contains(&t) && (t - FOLLOW_UPS.start).is_multiple_of(FOLLOW_UP_EVERY)
@@ -91,6 +106,7 @@ fn genie_step(tick: u64) -> Option<u8> {
 }
 
 /// The deck walk to the Limit row and back, Genie's form pick, Attack.
+/// The follow-ups are taken by [`follow_up`], not by the cursor.
 pub fn press(tick: u64) -> Buttons {
     let g = genie_step(tick);
     let t = phase(tick).map(|p| p.1);
@@ -100,7 +116,7 @@ pub fn press(tick: u64) -> Buttons {
         up: TOP_ROW.iter().any(|&x| at(x)),
         down: LIMIT_ROW.iter().any(|&x| at(x)) || g == Some(b'v'),
         right: g == Some(b'r'),
-        decide: attack(tick) || at(LIMIT_DECIDE) || reaction(tick) || g == Some(b'd'),
+        decide: attack(tick) || at(LIMIT_DECIDE) || g == Some(b'd'),
         ..Buttons::default()
     }
 }
@@ -155,7 +171,11 @@ mod tests {
                 assert!((s + t - 30..s + t + 30).all(|x| !attack(x)), "{k} {t}");
             }
             assert!(press(s + LIMIT_DECIDE).decide && reaction(s + 710) && !reaction(s + 1000));
-            assert!(press(s + 694).up && press(s + 710).decide);
+            assert!(press(s + 694).up && !press(s + 710).decide);
+            assert_eq!(follow_up(s + 710, true, None), Some(0));
+            assert_eq!(follow_up(s + 710, false, None), None);
+            assert_eq!(follow_up(s + 710, false, Some(2)), Some(102));
+            assert_eq!(follow_up(s + 711, true, Some(2)), None);
         }
         assert!(press(FIRST + 400).decide && press(FIRST + 3 * STEP + 2000).decide);
         // Genie's form pick: Left, Down, Down, Right, decide, Left.

@@ -235,7 +235,11 @@ pub fn decide(game: &mut Game, tick: u64, record: Option<usize>) {
     let Some(a) = s.actor.as_mut() else {
         return;
     };
-    let Some(cmd) = a.brain.offers.get(record).copied().flatten() else {
+    // A special deck's row (Chicken Little's mode 5), else an offer.
+    let special = record
+        .checked_sub(super::party_limit::SPECIAL)
+        .and_then(|k| Some(a.brain.special_deck()?.get(k)?.0));
+    let Some(cmd) = special.or_else(|| a.brain.offers.get(record).copied().flatten()) else {
         return;
     };
     if a.brain.in_limit() {
@@ -279,6 +283,12 @@ pub fn hud_values(game: &Game) -> Option<(usize, u16, f32, i32)> {
         .iter()
         .position(|x| x.row.command == l.command)?;
     Some((k, l.command, l.time, l.hits))
+}
+
+/// The summon's special deck (Chicken Little's limit, mode 5) while it is
+/// up: (command, selector) rows.
+pub fn special_deck(game: &Game) -> Option<[(u16, u16); 3]> {
+    game.summon.as_ref()?.actor.as_ref()?.brain.special_deck()
 }
 
 /// Sora as a limit's user (FUN_1403d7fa0 takes him as he stands).
@@ -671,6 +681,15 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
         });
         if let Some((at, _)) = a.camera_pose {
             a.brain.set_position(at.to_array());
+        }
+        // FUN_1401cb830 without a locked target: Chicken Little aims along
+        // the camera, 300 from its eye. [I] The target cycling on the
+        // lock-on button and the reticle are not ported.
+        if a.brain.special_deck().is_some() {
+            let eye = super::from_world(rig.camera.eye);
+            let look = super::from_world(rig.camera.look_at);
+            let aim = eye + (look - eye).normalize_or_zero() * enemy::friend::CHICKEN_LITTLE_AIM;
+            a.brain.set_aim(aim.to_array());
         }
         let blending = a.brain.blend() > 0.;
         match a

@@ -767,6 +767,20 @@ impl ScriptBrain {
     pub fn set_position(&mut self, p: Vec3) {
         self.object.sys.position = p;
     }
+    /// Chicken Little's limit deck (mode 5) while his limit mode is on.
+    pub fn special_deck(&self) -> Option<[(u16, u16); 3]> {
+        let f = self.object.friend.as_deref()?;
+        f.limit.then_some(enemy::friend::CHICKEN_LITTLE_DECK)
+    }
+
+    /// Chicken Little's aim point (personality +0x40), as FUN_1401cb830
+    /// sets it in his limit mode.
+    pub fn set_aim(&mut self, aim: Vec3) {
+        if let Some(f) = self.object.friend.as_deref_mut() {
+            f.aim = aim;
+        }
+    }
+
     /// Stitch's screen position (x right, y down, depth, heading), once
     /// it is set.
     pub fn stitch_screen(&self) -> Option<[f32; 4]> {

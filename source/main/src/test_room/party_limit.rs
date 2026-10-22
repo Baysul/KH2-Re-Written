@@ -95,6 +95,27 @@ pub fn load(
     };
     let mut out = LimitSource::default();
     let mut names: Vec<String> = Vec::new();
+    // The summons' models by character (the `sumn` rows' objects), whose
+    // own archive may hold a limit deck's `comd` sheet (FUN_1403db140).
+    let summon_models: HashMap<u8, String> = match (
+        super::bar_entry(battle, b"sumn"),
+        library
+            .read("00objentry.bin")
+            .ok()
+            .and_then(|b| data::objentry::read(&b).ok()),
+    ) {
+        (Ok(sumn), Some(objects)) => second_deck::read_summons(sumn)
+            .iter()
+            .filter_map(|r| objects.iter().find(|o| o.object_id == u32::from(r.object)))
+            .map(|o| {
+                (
+                    o.character as u8,
+                    String::from_utf8_lossy(&o.model_name).into_owned(),
+                )
+            })
+            .collect(),
+        _ => HashMap::new(),
+    };
     for row in second_deck::read_limits(limt) {
         // A summon's row (second participant 200-204) has a file of sheets
         // only: its program is the summon's own script (FUN_1403d7fa0).
@@ -148,7 +169,26 @@ pub fn load(
                 .ok()
         };
         let (gauge_sheet, counter_sheet) = (sheet(b"gage"), sheet(b"comb"));
-        let menu_sheet = (row.command == 0x1e4).then(|| sheet(b"comd")).flatten();
+        // Trinity Limit's `comd` (FUN_1403d96d0, mode 3), or the summon's
+        // own (Chicken Little's FUN_1401cb6c0 -> FUN_1403db140, mode 5).
+        let menu_sheet = if summon {
+            summon_models.get(&row.members[1]).and_then(|model| {
+                // The object's archive (+0x928): its language one, else its
+                // model's.
+                [
+                    format!("obj/{model}.a.{language}"),
+                    format!("obj/{model}.mdlx"),
+                ]
+                .iter()
+                .find_map(|path| {
+                    let found = library.find(path)?;
+                    visual::hud::load(source, found.index, found.ordinal, found.name_hash, b"comd")
+                        .ok()
+                })
+            })
+        } else {
+            (row.command == 0x1e4).then(|| sheet(b"comd")).flatten()
+        };
         out.limits.push(LoadedLimit {
             row,
             file,

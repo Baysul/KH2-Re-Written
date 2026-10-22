@@ -86,15 +86,30 @@ const LIST_ROW: [usize; 5] = [0, 0xa, 0xc, 0xb, 9];
 /// none): 1 0xdb, 2 and 3 FUN_1402ebe70(0x1000 / 0x8000) = 0xdf / 0xde
 /// (the table at 0x1405ba7e0), 4 0xda.
 const LIST_GLYPH: [Option<u8>; 5] = [None, Some(0xdb), Some(0xdf), Some(0xde), Some(0xda)];
-/// FUN_14015aba0's first pen move for a deck whose sheet mode
-/// (PLAYER_COMMAND +0xab0, FUN_1403b1820) is 3, a limit's `comd`: 0xe2,
-/// x = 0xffe2 = -30.
-const LIST_GLYPH_X: u8 = 0xe2;
+/// FUN_14015aba0's first pen move by the deck's sheet mode (PLAYER_COMMAND
+/// +0xab0, tested by FUN_1403b16e0..FUN_1403b1820), the low byte of x =
+/// 0xffXX: mode 3 (a limit's `comd`) 0xe2, x = -30; mode 5 (Chicken
+/// Little's) 0xe3, x = -29, as FUN_14015aab0 also gives it [I: in the
+/// layout DAT_14079cf00 +0x274 other than 0 and 7].
+pub fn list_pen(mode: u8) -> u8 {
+    match mode {
+        2 => 0xdd,
+        3 | 4 | 10 => 0xe2,
+        0xb => 0xe4,
+        1 | 9 => 0xde,
+        5 => 0xe3,
+        6 | 7 => 0xdc,
+        8 => 0xe1,
+        0xc => 0xe0,
+        _ => 0xff,
+    }
+}
 
 /// FUN_14015aba0: a list row's label with its button glyph in front: the
-/// pen to (x, 28), `09 glyph`, the pen to (2, 28), then the message.
-pub fn glyph_label(glyph: u8, label: &[u8]) -> Vec<u8> {
-    let mut out = vec![0x11, LIST_GLYPH_X, 0xff, 0x1c, 0x00, 0x09, glyph];
+/// pen to (x, 28) (`pen`, [`list_pen`]), `09 glyph`, the pen to (2, 28),
+/// then the message.
+pub fn glyph_label(pen: u8, glyph: u8, label: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x11, pen, 0xff, 0x1c, 0x00, 0x09, glyph];
     out.extend([0x11, 0x02, 0x00, 0x1c, 0x00]);
     out.extend_from_slice(label);
     out
@@ -206,6 +221,9 @@ pub struct CommandMenu {
     /// with no cursor, and FUN_1403b1590 takes the row whose selector's
     /// face button is pressed.
     pub list: Option<Vec<u8>>,
+    /// The list deck's sheet mode (PLAYER_COMMAND +0xab0): 3 for a party
+    /// limit's `comd`, 5 for Chicken Little's.
+    pub list_mode: u8,
     last_list: bool,
 }
 
@@ -271,6 +289,7 @@ impl CommandMenu {
             overridden: [false; 8],
             sub: None,
             list: None,
+            list_mode: 3,
             last_list: false,
         }
     }
@@ -789,7 +808,7 @@ impl CommandMenu {
             let group = LIST_ROW.get(s).copied().unwrap_or(0);
             let colour = LIST_TEXT[item.colour.min(8)];
             let label = match LIST_GLYPH.get(s).copied().flatten() {
-                Some(g) => glyph_label(g, &item.label),
+                Some(g) => glyph_label(list_pen(self.list_mode), g, &item.label),
                 None => item.label.clone(),
             };
             self.slot(seq, group, false, [x, y], Some(label), colour);
@@ -1058,6 +1077,7 @@ mod tests {
             overridden: [false; 8],
             sub: None,
             list: None,
+            list_mode: 3,
             last_list: false,
         }
     }
@@ -1166,7 +1186,7 @@ mod tests {
 
     #[test]
     fn list_label_puts_the_button_glyph_left_of_the_text() {
-        let label = glyph_label(0xdf, &[0x2e]);
+        let label = glyph_label(list_pen(3), 0xdf, &[0x2e]);
         assert_eq!(
             label,
             [

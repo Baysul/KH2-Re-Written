@@ -6492,8 +6492,14 @@ fn simulate(
             }
         }
         // Trinity Limit's special deck (mode 3: FUN_1403b19b0 over
-        // DAT_142ae9ab0) takes the shown deck's rows.
-        if let Some(rows) = game.party_limit.as_ref().and_then(|r| r.special_deck()) {
+        // DAT_142ae9ab0), or Chicken Little's (mode 5), takes the shown
+        // deck's rows.
+        let special = game
+            .party_limit
+            .as_ref()
+            .and_then(|r| r.special_deck())
+            .or_else(|| summon::special_deck(&game));
+        if let Some(rows) = special {
             let deck = game.second_deck.as_ref();
             let items: Vec<Item> = rows
                 .iter()
@@ -6521,9 +6527,14 @@ fn simulate(
             }
             // Deck mode 0xE (FUN_1403b1780) with the limit file's `comd`
             // art: the list path, rows taken by their selector's button.
-            let limit = game.party_limit.as_ref().map(|r| r.hud_values().0);
+            let limit = game
+                .party_limit
+                .as_ref()
+                .map(|r| r.hud_values().0)
+                .or_else(|| summon::hud_values(&game).map(|h| h.0));
             if limit.is_some_and(|l| game.party_limits.limits[l].menu_sheet.is_some()) {
                 m.menu.list = Some(rows.iter().map(|r| r.1 as u8).collect());
+                m.menu.list_mode = if game.party_limit.is_some() { 3 } else { 5 };
             }
         }
         // [Test-room choice] While a limit runs only its rows are taken:
@@ -7012,7 +7023,14 @@ fn simulate(
     } else {
         // The summon's offers: a decided row, or the reaction button on its
         // record 1, starts or carries on its limit.
-        let decide = std::mem::take(&mut game.limit_decide);
+        let offered = summon::offers(&game).is_some_and(|o| o[0].is_some());
+        // [Tour setup] The special deck's Cross row (Chicken Little's shot).
+        let special = summon::special_deck(&game).and_then(|r| r.iter().position(|x| x.1 == 4));
+        let decide = std::mem::take(&mut game.limit_decide).or_else(|| {
+            game.summon_tour
+                .then(|| summon_tour::follow_up(tick, offered, special))
+                .flatten()
+        });
         game.summon_stick = [direction.x, 0., direction.y];
         let rc = summon::offers(&game).is_some_and(|o| o[1].is_some())
             && (std::mem::take(&mut game.rc_queued)
@@ -8415,8 +8433,9 @@ fn hud_tick(
     let skin = game
         .party_limit
         .as_ref()
-        .filter(|_| listed)
         .map(|r| r.hud_values().0)
+        .or_else(|| summon::hud_values(&game).map(|h| h.0))
+        .filter(|_| listed)
         .filter(|&l| game.party_limits.limits[l].menu_sheet.is_some())
         .map(|l| (game.party_limits.clone(), l));
     let Hud {

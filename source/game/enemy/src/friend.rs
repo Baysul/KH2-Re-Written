@@ -304,7 +304,21 @@ pub struct Friend {
     pub wait: f32,
     /// kn::Stitch's personality state.
     pub stitch: Option<Box<stitch::Stitch>>,
+    /// +0x28 bit 0: Chicken Little's limit mode (FUN_1401cb6c0 sets it,
+    /// FUN_1401cb180 clears it).
+    pub limit: bool,
 }
+
+/// Chicken Little's limit deck: FUN_1401cb6c0 -> FUN_1403db140(obj, 5)
+/// gives Sora's command menu his own `comd` sheet in mode 5, whose rows
+/// FUN_1404060e0 takes from 0x1405cc488 (command, selector): 0x213
+/// Triangle, 0x214 Square, 0x212 (his shot) Cross. [I] The other table
+/// (0x1405cc478, chosen while DAT_14079cf00 +0x274 is 0 or 7) is read as
+/// the circle-confirm layout this build does not use.
+pub const CHICKEN_LITTLE_DECK: [(u16, u16); 3] = [(0x213, 2), (0x214, 3), (0x212, 4)];
+/// FUN_1401cb830 without a locked target: the aim point lies this far
+/// along the camera's forward from its eye (DAT_140623bf8).
+pub const CHICKEN_LITTLE_AIM: f32 = 300.;
 
 impl Friend {
     /// FUN_1401b06e0 for a summon: flags 0x10000000 plus the personality's
@@ -343,6 +357,7 @@ impl Friend {
             wait: 0.,
             stitch: (personality == Personality::Stitch)
                 .then(|| Box::new(stitch::Stitch::default())),
+            limit: false,
         }
     }
 }

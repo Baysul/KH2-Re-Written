@@ -328,15 +328,28 @@ fn friend_use_item(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Re
 
 /// 10:3 FUN_140536480: the personality's start-limit (vtable +0x48). The
 /// summons outside Stitch and Chicken Little take FUN_1401cd1f0: the
-/// current action ends. [Open] Stitch's FUN_1401c9d60 and Chicken Little's
-/// FUN_1401cb6c0.
+/// current action ends. Chicken Little's FUN_1401cb6c0 also enters his
+/// limit mode (+0x28 bit 0), whose deck the host shows
+/// ([`friend::CHICKEN_LITTLE_DECK`]). [Open] Stitch's FUN_1401c9d60; the
+/// rest of FUN_1401cb6c0 (the attach to Sora, the fades, the reticle and
+/// camera mode 9, Sora's physics mode 0x3e).
 fn start_limit(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    action_clear(ctx, m, args)
+    action_clear(ctx, m, args)?;
+    let id = me(ctx, m, args[0].value)?;
+    with_friend(ctx, id, |f| {
+        if f.personality == friend::Personality::ChickenLittle {
+            f.limit = true;
+        }
+    })?;
+    Ok(())
 }
 
-/// 10:4 FUN_1405364b0: the personality's end-limit (vtable +0x50); a
-/// no-op for the summons outside Stitch and Chicken Little [open].
-fn end_limit(_: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
+/// 10:4 FUN_1405364b0: the personality's end-limit (vtable +0x50). Chicken
+/// Little's FUN_1401cb180 leaves his limit mode; a no-op for the summons
+/// outside Stitch and Chicken Little. [Open] Stitch's FUN_1401c7e00.
+fn end_limit(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = me(ctx, m, args[0].value)?;
+    with_friend(ctx, id, |f| f.limit = false)?;
     Ok(())
 }
 

@@ -131,6 +131,34 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
   slot's length from them (`ClipView`), so the capture lasts its motion; `sora_in_limit` plays
   the stand-in's capture.
 
+### Round (h): Chicken Little's limit deck
+
+- His trigger 22 starts his act `fps`, attaches him to Sora, captures motion 253 for Sora and
+  starts an object camera; when Sora's motion ends a hook calls `friend_start_limit` (10:3,
+  vtable +0x48 of `kn::ChickenLittle` at 0x1405b4058: `FUN_1401cb6c0`). His script's offer
+  thread (`limit_start_thread` 4377) reads a table it only ever clears, so it offers nothing.
+- `FUN_1401cb6c0`: limit mode (+0x28 bit 0), Sora's +0x120 |= 0x100 and +0x124 |= 0x4000, Chicken
+  Little attached to Sora (`FUN_1403d9fe0`), both faded (+0xa10), a screen object of type 3
+  bound to the aim point (`FUN_14017c570`), Sora in physics mode 0x3e, camera mode 9 from Sora
+  to the aim point at 100 (`FUN_140178760`), and `FUN_1403db140(obj, 5)`: his own archive's
+  `comd` sheet takes Sora's command menu in sheet mode 5 (`FUN_1403b2a90`). `FUN_1404060e0`
+  gives mode 5 the rows of 0x1405cc478 or, while `DAT_14079cf00` +0x274 is neither 0 nor 7,
+  0x1405cc488: 0x213 Triangle, 0x214 Square, 0x212 Cross ("Firecracker", "End", "Balls").
+  End-limit `FUN_1401cb180` undoes it.
+- Each frame in limit mode his think (`FUN_1401cb050`) runs `FUN_1401cb830` and turns Sora to
+  the camera's forward: the lock-on button cycles his target list (+0xde8, 32 entries; reticle
+  type 0x19 when one is locked, else 3); the aim point is the locked target, else the camera's
+  eye plus 300 (`DAT_140623bf8`) along its forward.
+- His shot (530, trigger 23, a 10-frame cooldown) starts a thread of the global magic program
+  (`magic_start_thread`, 2:20 -> `FUN_1403c5ec0` on `DAT_142a25048`, entry 676) and asks 10:51
+  for the nearest target in a 120 x 60 box.
+- `FUN_14015aab0` / `FUN_14015aba0` give mode 5's row glyph pen x 0xffe3.
+- The rewrite: 10:3 / 10:4 set and clear `Friend::limit` for Chicken Little;
+  `friend::CHICKEN_LITTLE_DECK` (0x1405cc488) is his special deck, shown through the special
+  deck path (list mode, face buttons, `field_command_menu::list_pen` 0xe3) with his archive's
+  `comd` (`obj/<model>.a.<lang>`); a row taken goes to his trigger 23; the host sets his aim
+  300 along the camera.
+
 ### Round (d): Genie's forms
 
 - `FUN_1403de460` gives Genie one of Sora's owned forms (Valor 1, Wisdom 2, Master 4, Final 5;
@@ -217,6 +245,7 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 | `cargo build --workspace --locked`, release `--features skate3` | PASS |
 | Smoke `cargo run -p main --locked -- --frames 180` | PASS |
 | Unattended `--summon-tour` (private `runs/s5`) | exit 0; all four summons start, appear, leave and end; Peter Pan ends by time |
+| Unattended `--summon-tour` round (h) (private `runs/s53`, `runs/s54`) | exit 0, no faults; Chicken Little's deck shows his `comd` panel with Y / X / A on Firecracker, End, Balls; the tour takes Balls (530) 15 times and 10:51 runs for each; `magic_start_thread` is reported (the shots do not fly) |
 | Unattended `--summon-tour` round (g) (private `runs/s48`, `runs/s49`) | exit 0, no faults or unsupported traps; Sora plays the captured motions in all four limits (Chicken Little 253, Genie's 253 / 255, Stitch's 253, Peter Pan 253 / 255 / 256) and stands between them |
 | Unattended `--summon-tour` round (f) (private `runs/s38`) | exit 0; no faults; the four limits start and end, 41 follow-ups; Peter Pan's script calls 6:40 once and Sora flies along his heading at the PRTY 0x3e run speed (about 11.6 a frame, no stick in the tour) until the limit ends; Chicken Little's 10:51 is not reached in the tour (NOT RUN) |
 | Probe `limit_probe aladdin` (private `probe-aladdin.txt`) | runs to its end without faults; without Aladdin as a participant 6:26 / 7:21 are not reached (NOT RUN for the hover) |
@@ -233,9 +262,12 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 - [I] The summon level is 0 (no save is loaded); the team is Sora's (not traced in
   `FUN_1401b06e0`); the placement's wall line samples the room's wall push
   (`FUN_14040c2b0` not ported) and its last fallback is Sora's point.
-- Summon limits not finished: Chicken Little's first-person part (he is not drawn in his
-  limit); the limit's cost in summon mode (`FUN_1403a9cf0`); the follow-ups' motion windows are
-  not tested before they are sent [I].
+- Summon limits not finished: Chicken Little's first-person view (camera mode 9, the fades,
+  the reticle, Sora's physics mode 0x3e, the target cycling) and his shots (the magic program's
+  threads, 2:20, are not translated); the limit's cost in summon mode (`FUN_1403a9cf0`); the
+  follow-ups' motion windows are not tested before they are sent [I].
+- [I] Chicken Little's deck table is read for the layout with `DAT_14079cf00` +0x274 neither 0
+  nor 7 (Fireworks on Cross); his aim is set by the host after the camera moves.
 - [I] A captured slot's variant is chosen as in battle with the Keyblade out; its second
   weapon part ("0012") is not loaded; a capture of another victim than Sora is not drawn.
 - [I] Mode 0x34's forward vector (`FUN_1403b56e0`, +0x680 or the +0x60/+0x68 matrix terms
@@ -276,9 +308,10 @@ Little, Peter Pan and Genie run their scripts under the ported kn::Friend contro
 Sora; Chicken Little and Peter Pan attack; Stitch roams the screen and runs his specials;
 Genie's forms are chosen from the deck; every summon's limit starts from the deck, takes its
 follow-ups and ends; Peter Pan's limit flies Sora, and Chicken Little's limit can pick the
-target on screen; Sora plays the motions the summons capture for him. Chicken Little's
-first-person part remains.
+target on screen; Sora plays the motions the summons capture for him; Chicken Little's limit
+deck takes its rows. His first-person view and his shots remain.
 
 ## Next task
 
-Chicken Little's first-person part of his limit.
+Chicken Little's first-person view (camera mode 9, reticle, fades); the magic program's
+threads (2:20) for his shots.
