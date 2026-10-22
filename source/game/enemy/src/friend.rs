@@ -14,6 +14,8 @@
 //! the warp trail's teleport (FUN_1401b7750), the step and ledge probes and
 //! their jump requests (FUN_1403b7f10), the support items, limits.
 
+pub mod stitch;
+
 use crate::env::Env;
 use crate::sysobj::class_flag;
 use crate::traps::target::{OBJECT_TARGET, PLAYER_TARGET};
@@ -93,6 +95,8 @@ pub struct Blob {
     pub search: f32,
     pub drop: f32,
     pub leash: f32,
+    /// B+0x70 / +0x74: the wait after an action, its least and most.
+    pub wait: (f32, f32),
 }
 
 const BANDS: [(f32, f32); 4] = [(0., 200.), (160., 240.), (200., 1000.), (0., 0.)];
@@ -111,12 +115,17 @@ impl Blob {
             ),
             _ => (BANDS, BANDS_ENEMY),
         };
+        let wait = match p {
+            Personality::Stitch => (90., 180.),
+            _ => (30., 90.),
+        };
         Blob {
             field,
             enemy,
             search: 600.,
             drop: 1000.,
             leash: 1000.,
+            wait,
         }
     }
 
@@ -150,6 +159,15 @@ pub enum Action {
     Follow,
     /// FUN_1401cf470: Sora's HP under 25% → command 1 on Sora.
     HealPlayer,
+    /// Stitch (table 0x140724340): FUN_1401c7f40 stand, FUN_1401c8950
+    /// cross the screen, FUN_1401ca6e0 / FUN_1401c8100 the HP and MP
+    /// specials, FUN_1401c8610 / FUN_1401c8700 / FUN_1401c8440 the limit
+    /// commands (their motions 0xc9, 0xcd, 0xf2).
+    StitchIdle,
+    StitchMove,
+    StitchHp,
+    StitchMp,
+    StitchCommand(u16),
 }
 
 /// The action tables (decoded from their static initializers).
@@ -168,11 +186,42 @@ pub fn table(p: Personality) -> &'static [Entry] {
             action: Action::HealPlayer,
         },
     ];
+    const STITCH: [Entry; 7] = [
+        Entry {
+            flags: 0x201,
+            action: Action::StitchIdle,
+        },
+        Entry {
+            flags: 0x201,
+            action: Action::StitchMove,
+        },
+        Entry {
+            flags: 0x212,
+            action: Action::StitchHp,
+        },
+        Entry {
+            flags: 0x220,
+            action: Action::StitchMp,
+        },
+        Entry {
+            flags: 0x212,
+            action: Action::StitchCommand(0xc9),
+        },
+        Entry {
+            flags: 0x212,
+            action: Action::StitchCommand(0xcd),
+        },
+        Entry {
+            flags: 0x212,
+            action: Action::StitchCommand(0xf2),
+        },
+    ];
     match p {
         Personality::ChickenLittle | Personality::PeterPan => &BATTLE,
         Personality::Genie => &GENIE,
-        // Stitch's seven entries need his controller [open]; Tink has none.
-        Personality::Stitch | Personality::Tink => &[],
+        Personality::Stitch => &STITCH,
+        // Tink has none.
+        Personality::Tink => &[],
     }
 }
 
@@ -251,6 +300,10 @@ pub struct Friend {
     /// effect and serial; our effect handles are never reused, so the
     /// handle is both).
     pub watch: Vec<u32>,
+    /// +0xf64: the wait timer (down a frame at a time while above 0).
+    pub wait: f32,
+    /// kn::Stitch's personality state.
+    pub stitch: Option<Box<stitch::Stitch>>,
 }
 
 impl Friend {
@@ -287,6 +340,9 @@ impl Friend {
             genie_form: 0,
             aim: [0.; 3],
             watch: Vec::new(),
+            wait: 0.,
+            stitch: (personality == Personality::Stitch)
+                .then(|| Box::new(stitch::Stitch::default())),
         }
     }
 }
@@ -320,7 +376,15 @@ pub fn tick(
     }
     f.wish = [0.; 4];
     f.flags &= !flag::MANUAL_WISH;
-    think(world, id, me, &mut f, env, &mut out);
+    // FUN_1401b15f0: the wait timer runs down while it is above 0.
+    if f.wait > 0. {
+        f.wait -= 1.;
+    }
+    if f.personality == Personality::Stitch {
+        stitch::tick(world, me, &mut f, env, &mut out);
+    } else {
+        think(world, id, me, &mut f, env, &mut out);
+    }
     f.flags &= !flag::FRESH;
     me.friend = Some(f);
     out
@@ -749,7 +813,7 @@ fn locomote(me: &crate::world::Object, f: &mut Friend, env: &dyn Env, b: Block, 
 /// passes runs. Nothing passing restores the current action.
 fn support_pass(
     world: &World,
-    me: &crate::world::Object,
+    me: &mut crate::world::Object,
     f: &mut Friend,
     env: &dyn Env,
     out: &mut Requests,
@@ -762,7 +826,7 @@ fn support_pass(
     for bit in [0x10, 0x20] {
         let passing: Vec<usize> = (0..table.len())
             .filter(|&i| table[i].flags & bit != 0)
-            .filter(|&i| test(&table[i], world, me, env))
+            .filter(|&i| test(&table[i], world, me, f, env))
             .collect();
         if !passing.is_empty() {
             let k = passing[f.rand(passing.len() as u32) as usize];
@@ -780,9 +844,9 @@ fn support_pass(
 /// FUN_1401b1d40: carry on a continuable action, else (the rest rule
 /// aside) a uniform pick among the entries whose test passes; nothing →
 /// follow and stand, facing the way.
-fn choose(
+pub(crate) fn choose(
     world: &World,
-    me: &crate::world::Object,
+    me: &mut crate::world::Object,
     f: &mut Friend,
     env: &dyn Env,
     out: &mut Requests,
@@ -793,7 +857,7 @@ fn choose(
         && e.flags & 0x200 != 0
     {
         f.flags |= flag::CONTINUES;
-        if test(e, world, me, env) {
+        if test(e, world, me, f, env) {
             run(e, world, me, f, env, out);
             return;
         }
@@ -808,7 +872,7 @@ fn choose(
     // Summons (index >= 0xe) have no banned entry and no ability slots: one
     // pass over the table.
     let passing: Vec<usize> = (0..table.len())
-        .filter(|&i| test(&table[i], world, me, env))
+        .filter(|&i| test(&table[i], world, me, f, env))
         .collect();
     if !passing.is_empty() {
         let k = passing[f.rand(passing.len() as u32) as usize];
@@ -833,9 +897,24 @@ impl Friend {
     /// generator (×214013 + 2531011, bits 16..30) [I: its seed is the
     /// process's; here 1].
     fn rand(&mut self, n: u32) -> u32 {
-        self.seed = self.seed.wrapping_mul(214013).wrapping_add(2531011);
-        let r = (self.seed >> 16) & 0x7fff;
+        let r = self.crt_rand();
         ((r as f32) * n as f32 * 3.051_757_8e-5) as u32
+    }
+
+    /// The C runtime's `rand()`: 0..=0x7fff.
+    fn crt_rand(&mut self) -> u32 {
+        self.seed = self.seed.wrapping_mul(214013).wrapping_add(2531011);
+        (self.seed >> 16) & 0x7fff
+    }
+
+    /// FUN_1401b4960: `rand(20001) × 5.0e-5`, 0..=1.
+    fn rand01(&mut self) -> f32 {
+        self.rand(0x4e21) as f32 * 5.0e-5
+    }
+
+    /// FUN_14019bf50: `rand() × (hi − lo) × 3.0517578e-05 + lo`.
+    fn rand_range(&mut self, lo: f32, hi: f32) -> f32 {
+        self.crt_rand() as f32 * (hi - lo) * 3.051_757_8e-5 + lo
     }
 
     /// FUN_1401ce620: keep the effects that still play, in order.
@@ -867,21 +946,27 @@ impl Friend {
     }
 }
 
-fn test(e: &Entry, world: &World, me: &crate::world::Object, env: &dyn Env) -> bool {
-    let _ = (world, me);
+fn test(
+    e: &Entry,
+    world: &World,
+    me: &crate::world::Object,
+    f: &mut Friend,
+    env: &dyn Env,
+) -> bool {
     match e.action {
         Action::Battle | Action::Follow => true,
         // FUN_1401b3310(Sora, 0.25): HP under (int)(MaxHP × 0.25).
         Action::HealPlayer => env
             .player_hp()
             .is_some_and(|(hp, max)| hp < (max as f32 * 0.25) as i32),
+        a => stitch::test(a, world, me, f, env),
     }
 }
 
 fn run(
     e: &Entry,
     world: &World,
-    me: &crate::world::Object,
+    me: &mut crate::world::Object,
     f: &mut Friend,
     env: &dyn Env,
     out: &mut Requests,
@@ -894,6 +979,7 @@ fn run(
             f.band = 0;
             out.command = Some((1, PLAYER_OBJECT));
         }
+        a => stitch::run(a, me, f, env),
     }
 }
 

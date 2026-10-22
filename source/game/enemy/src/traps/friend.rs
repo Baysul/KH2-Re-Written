@@ -25,6 +25,12 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         return None;
     }
     Some(match index {
+        1 => stitch_set_screen_position,
+        2 => stitch_get_screen_position,
+        12 => stitch_effect_start,
+        13 => stitch_shot_effect,
+        16 => stitch_effect_kill,
+        32 => stitch_move_request,
         33 => get_player_attacker,
         34 => remove_player_attacker,
         3 => start_limit,
@@ -100,6 +106,138 @@ fn vector(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, index: u16, v: [f32; 3], args: 
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);
+}
+
+fn with_stitch<R>(
+    ctx: &mut Ctx<'_>,
+    id: ObjId,
+    f: impl FnOnce(&mut friend::stitch::Stitch) -> R,
+) -> Result<Option<R>, Fault> {
+    Ok(ctx
+        .object(id)?
+        .friend
+        .as_deref_mut()
+        .and_then(|fr| fr.stitch.as_deref_mut())
+        .map(f))
+}
+
+/// 10:1 FUN_1405363a0 -> FUN_1401c9620: Stitch's screen position (x, y,
+/// depth, heading; NaN lanes 0).
+fn stitch_set_screen_position(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = me(ctx, m, args[0].value)?;
+    let v = read_sanitized(ctx, m, args[1].value)?;
+    with_stitch(ctx, id, |s| s.set_screen(v))?;
+    Ok(())
+}
+
+/// 10:2 FUN_140536420 -> FUN_1401c7f30: a copy of the screen position in
+/// the trap's own cell (DAT_140787500).
+fn stitch_get_screen_position(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = me(ctx, m, args[0].value)?;
+    let v = with_stitch(ctx, id, |s| s.screen)?.unwrap_or_default();
+    let cell = ctx.world.static_cell(10, 2, 0);
+    for (k, lane) in v.iter().enumerate() {
+        ctx.write_f32(m, cell + 4 * k as u32, *lane);
+    }
+    args[0] = Slot::address(cell);
+    Ok(())
+}
+
+/// 10:12 FUN_140536680 -> FUN_1401c9c10: an effect slot (effect, bound
+/// object's AI or 0, bone, motion, stay, start flags, argument); returns
+/// the slot.
+fn stitch_effect_start(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = me(ctx, m, args[0].value)?;
+    let on = if args[2].value == 0 {
+        None
+    } else {
+        match ctx.sys_ref_ai(m, args[2].value) {
+            Ok(crate::world::SysRef::Player) => Some(PLAYER_OBJECT),
+            Ok(crate::world::SysRef::Object(o)) => Some(o),
+            Err(_) => None,
+        }
+    };
+    let (effect, bone, link) = (args[1].as_int(), args[3].as_int(), args[4].as_int());
+    let stay = args[5].value != 0;
+    let start = [args[6].as_int(), args[7].as_int()];
+    let k = with_stitch(ctx, id, |s| {
+        s.effect(effect, on, id, bone, link, stay, start)
+    })?;
+    int(args, k.map_or(0, |k| k as i32));
+    Ok(())
+}
+
+/// 10:13 FUN_140536720 -> FUN_1401c9920: the shot's muzzle effect (effect 1
+/// at bone 0x6c for 0 / 2, 0x36 for 1 / 3, left in camera space); outside
+/// a limit shot 0 counts toward the next special. [Open] The limit's
+/// damage shots (+0x126 bit 0: Sora's effect 0x4003 and the hits of attack
+/// 0x373 on the target, FUN_1401b8250).
+fn stitch_shot_effect(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = me(ctx, m, args[0].value)?;
+    let n = args[1].as_int();
+    let limit = ctx.object(id)?.sys.state_flags & crate::sysobj::state_flag::LIMIT != 0;
+    with_stitch(ctx, id, |s| {
+        let bone = match n {
+            0 | 2 => Some(0x6c),
+            1 | 3 => Some(0x36),
+            _ => None,
+        };
+        if let Some(bone) = bone {
+            let k = s.effect(1, Some(id), id, bone, -1, false, [1, 0]);
+            s.slots[k].flags |= friend::stitch::slot_flag::DETACH;
+        }
+        if !limit && n == 0 {
+            s.counter += 1;
+        }
+    })?;
+    Ok(())
+}
+
+/// 10:16 FUN_1405367e0 -> FUN_1401c80f0: end an effect slot.
+fn stitch_effect_kill(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = me(ctx, m, args[0].value)?;
+    let slot = args[1].as_int();
+    if slot >= 0 {
+        with_stitch(ctx, id, |s| s.kill(slot as usize))?;
+    }
+    Ok(())
+}
+
+/// 10:32 FUN_140536c70 -> FUN_1401c8cf0: a goal of `kind`
+/// (FUN_1401c75e0), motion 0xa1 over 4 frames, and the screen move as the
+/// current action, continuing.
+fn stitch_move_request(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = me(ctx, m, args[0].value)?;
+    let kind = args[1].as_int();
+    let env = ctx.env;
+    let o = ctx.object(id)?;
+    let Some(fr) = o.friend.as_deref_mut() else {
+        return Ok(());
+    };
+    if let Some(mut s) = fr.stitch.take() {
+        s.pick_goal(kind, &mut friend::stitch::FriendRng(fr));
+        fr.stitch = Some(s);
+    }
+    fr.current = Some(friend::stitch::MOVE);
+    fr.flags |= flag::CONTINUES;
+    o.sys.motion_change(0xa1, 4., env.clips(o.sys.model));
+    Ok(())
 }
 
 /// 10:3 FUN_140536480: the personality's start-limit (vtable +0x48). The

@@ -1,7 +1,7 @@
 //! Synthetic objects only.
 use super::*;
 use crate::env::{Clips, NullEnv};
-use crate::world::Object;
+use crate::world::{Event, Object};
 
 struct Room {
     player: Vec3,
@@ -197,4 +197,199 @@ fn soras_attack_notice_lasts_eight_frames_of_the_same_attack_and_untakes() {
     assert_eq!(world.player_notify.target, 0);
     age_player_notify(&mut world, None);
     assert_eq!(world.player_notify, PlayerNotify::default());
+}
+
+fn stitch_state(me: &mut Object) -> &mut stitch::Stitch {
+    me.friend
+        .as_deref_mut()
+        .and_then(|f| f.stitch.as_deref_mut())
+        .expect("Stitch")
+}
+
+#[test]
+fn stitch_crosses_the_screen_fifteen_a_frame_and_wraps_at_its_edges() {
+    let mut world = World::default();
+    let mut me = summon(Personality::Stitch, [0., 0., 0.]);
+    let room = Room {
+        player: [0., 0., 0.],
+        battle: false,
+        hp: None,
+    };
+    tick(&mut world, 0, &mut me, &room);
+    assert!(me.sys.camera_space);
+    assert!(stitch_state(&mut me).valid);
+    // A screen move under way (as trap 10:32 leaves it).
+    let s = stitch_state(&mut me);
+    s.screen = [0., 0., stitch::DEPTH, 0.];
+    s.goal = [150., 0., stitch::DEPTH, std::f32::consts::FRAC_PI_2];
+    me.friend.as_deref_mut().unwrap().current = Some(stitch::MOVE);
+    tick(&mut world, 0, &mut me, &room);
+    assert!((stitch_state(&mut me).screen[0] - 15.).abs() < 1e-3);
+    for _ in 0..9 {
+        tick(&mut world, 0, &mut me, &room);
+    }
+    assert!((stitch_state(&mut me).screen[0] - 150.).abs() < 1e-3);
+    // Past the left edge with the goal there too: both wrap a screen width.
+    let s = stitch_state(&mut me);
+    s.screen[0] = -410.;
+    s.goal[0] = -420.;
+    tick(&mut world, 0, &mut me, &room);
+    let s = stitch_state(&mut me);
+    assert!(s.screen[0] > 350. && s.goal[0] > 350., "{:?}", s.goal);
+    // Camera space: the object never moves by itself.
+    assert_eq!(me.sys.position, [0., 0., 0.]);
+}
+
+/// Every motion 30 frames long.
+struct Thirty;
+
+impl Clips for Thirty {
+    fn length(&self, _: usize) -> u32 {
+        30
+    }
+    fn loop_start(&self, _: usize) -> u32 {
+        0
+    }
+    fn root_delta(&self, _: usize, _: u32) -> Vec3 {
+        [0.; 3]
+    }
+    fn events(&self, _: usize) -> Option<&crate::motion::MotionEvents> {
+        None
+    }
+}
+
+/// A battle with Sora hurt, and motions that play.
+struct Hurt;
+
+impl Env for Hurt {
+    fn floor(&self, _: f32, _: f32, _: f32) -> Option<f32> {
+        Some(0.)
+    }
+    fn clips(&self, _: u32) -> &dyn Clips {
+        &Thirty
+    }
+    fn player_position(&self) -> Vec3 {
+        [0.; 3]
+    }
+    fn target_position(&self, _: u32) -> Option<Vec3> {
+        None
+    }
+    fn battle(&self) -> bool {
+        true
+    }
+    fn player_hp(&self) -> Option<(i32, i32)> {
+        Some((10, 100))
+    }
+}
+
+#[test]
+fn stitchs_hp_special_strikes_each_enemy_once_and_starts_its_effects() {
+    let mut world = World::default();
+    world.objects.push(None);
+    let foe = enemy(&mut world, [0., 0., 300.]);
+    let mut me = summon(Personality::Stitch, [0., 0., 0.]);
+    let room = Hurt;
+    tick(&mut world, 0, &mut me, &room);
+    // The special under way at its point (FUN_1401ca6e0's steps 0..3).
+    let s = stitch_state(&mut me);
+    s.screen = [-230., 90., stitch::DEPTH, 0.];
+    s.goal = s.screen;
+    s.step = 0;
+    me.friend.as_deref_mut().unwrap().current = Some(stitch::HP);
+    world.events.clear();
+    // The motion clock is the object's; step it as the object's tick does.
+    for _ in 0..40 {
+        me.sys.begin_tick(&room);
+        // The range flags re-evaluate each frame; keep the free window.
+        me.sys.motion.flags.word |= 0x4;
+        tick(&mut world, 0, &mut me, &room);
+        if stitch_state(&mut me).step == 4 {
+            break;
+        }
+    }
+    me.sys.begin_tick(&room);
+    me.sys.motion.flags.word |= 0x4;
+    tick(&mut world, 0, &mut me, &room);
+    // One more frame starts the slots' effects; Sora still hurt, the
+    // special is chosen again (the only entry that passes).
+    let strikes = world
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::AttackStrike { target: Some(t), param, .. } if *t == foe && param[0] == 0x4ba))
+        .count();
+    assert_eq!(strikes, 1);
+    let started: Vec<i32> = world
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::EffectStart { effect, .. } => Some(*effect),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        started.contains(&0xc) && started.contains(&0xd),
+        "{started:?}"
+    );
+    assert_eq!(me.sys.motion.slot, 0xcb);
+}
+
+/// Sora with this MP.
+struct Mp(i32, i32);
+
+impl Env for Mp {
+    fn floor(&self, _: f32, _: f32, _: f32) -> Option<f32> {
+        Some(0.)
+    }
+    fn clips(&self, model: u32) -> &dyn Clips {
+        NullEnv.clips(model)
+    }
+    fn player_position(&self) -> Vec3 {
+        [0.; 3]
+    }
+    fn target_position(&self, _: u32) -> Option<Vec3> {
+        None
+    }
+    fn battle(&self) -> bool {
+        true
+    }
+    fn player_mp(&self) -> Option<(i32, i32)> {
+        Some((self.0, self.1))
+    }
+}
+
+#[test]
+fn stitchs_mp_special_tests_sora_mp_and_asks_for_it_once() {
+    let mut world = World::default();
+    let mut me = summon(Personality::Stitch, [0., 0., 0.]);
+    let full = Mp(100, 100);
+    let low = Mp(10, 100);
+    let mut f = me.friend.take().unwrap();
+    assert!(!stitch::test(Action::StitchMp, &world, &me, &mut f, &full));
+    assert!(stitch::test(Action::StitchMp, &world, &me, &mut f, &low));
+    me.friend = Some(f);
+    tick(&mut world, 0, &mut me, &low);
+    let s = stitch_state(&mut me);
+    s.screen = [138., 106., stitch::DEPTH, 0.];
+    s.goal = s.screen;
+    s.step = 0;
+    me.friend.as_deref_mut().unwrap().current = Some(stitch::MP);
+    world.events.clear();
+    for _ in 0..5 {
+        tick(&mut world, 0, &mut me, &low);
+    }
+    let asked = world
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                Event::Service {
+                    name: "stitch_mp_refill",
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(asked, 1);
+    assert_eq!(stitch_state(&mut me).step, 3);
 }

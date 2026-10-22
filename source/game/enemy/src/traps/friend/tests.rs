@@ -101,3 +101,72 @@ fn chicken_littles_aim_point_goes_in_and_out_in_the_scripts_frame() {
     let lane = |k: u32| f32::from_bits(world.static_read(r.value + 4 * k).unwrap());
     assert_eq!([lane(0), lane(1), lane(2)], [1., -2., 3.]);
 }
+
+#[test]
+fn stitchs_screen_point_and_effect_slots_round_trip() {
+    let mut world = World::default();
+    let mut me = Object::bare(0);
+    me.friend = Some(Box::new(Friend::new(Personality::Stitch, 2., 8.)));
+    let mut f = frame();
+    let ai = ai_object(&mut f, 0, 0);
+    // 10:1 with a NaN lane: depth 1024, the heading kept as the goal's.
+    let v = put_vector(&mut f, 32, [-260., f32::NAN, 5., 0.5]);
+    call(
+        &mut world,
+        &mut me,
+        &mut f,
+        lookup(10, 1).unwrap(),
+        &[Slot::address(ai), Slot::address(v)],
+    );
+    let back = call(
+        &mut world,
+        &mut me,
+        &mut f,
+        lookup(10, 2).unwrap(),
+        &[Slot::address(ai)],
+    );
+    let read = |w: &World, k: u32| f32::from_bits(w.static_read(back.value + 4 * k).unwrap());
+    assert_eq!(
+        [
+            read(&world, 0),
+            read(&world, 1),
+            read(&world, 2),
+            read(&world, 3)
+        ],
+        [-260., 0., 1024., 0.5]
+    );
+    // 10:12 takes the first free slot each time; 10:16 marks one for
+    // ending.
+    let start = |w: &mut World, me: &mut Object, f: &mut _| {
+        call(
+            w,
+            me,
+            f,
+            lookup(10, 12).unwrap(),
+            &[
+                Slot::address(ai),
+                Slot::int(3),
+                Slot::address(ai),
+                Slot::int(0x6c),
+                Slot::int(-1),
+                Slot::int(0),
+                Slot::int(1),
+                Slot::int(0),
+            ],
+        )
+        .as_int()
+    };
+    assert_eq!(start(&mut world, &mut me, &mut f), 0);
+    assert_eq!(start(&mut world, &mut me, &mut f), 1);
+    call(
+        &mut world,
+        &mut me,
+        &mut f,
+        lookup(10, 16).unwrap(),
+        &[Slot::address(ai), Slot::int(1)],
+    );
+    let s = me.friend.as_ref().unwrap().stitch.as_deref().unwrap();
+    assert_eq!(s.slots[0].effect, 3);
+    assert_eq!(s.slots[0].flags & friend::stitch::slot_flag::KIND, 1);
+    assert!(s.slots[1].flags & friend::stitch::slot_flag::KILL != 0);
+}

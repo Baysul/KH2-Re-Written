@@ -67,6 +67,27 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 - `btlobj_target` (2:23, `FUN_1404319d0`) searches again only for an enemy-class object
   (+0x6c8 bit 4) whose record kind is not 3 (`FUN_1403be2b0` kind 2 is Sora).
 
+### Round (c): Stitch
+
+- kn::Stitch (`FUN_1401c6d00`, think `FUN_1401ca240`) lives in camera space: a screen point
+  (x right, y down, depth 1024) and a heading, turned each frame into the matrix the renderer
+  draws him with (`FUN_1401cad30`, scale 0.503644, handed over by `FUN_1403cbfc0`); his object
+  stays in physics mode 3, which never moves it. The think wraps the point at ±400 / ±320
+  (by 800 / 640), runs the action table (0x140724340: stand `FUN_1401c7f40`, cross the screen
+  `FUN_1401c8950` at most 15 a frame turning π/16 a frame, the HP special `FUN_1401ca6e0`, the MP
+  special `FUN_1401c8100`, three limit commands) and, in battle after more than 5 actions, half
+  the time runs a special directly (the HP one when Sora's HP part is not above his MP part);
+  while Sora is hurt, his class's +0xe8 runs every 600 frames.
+- The HP special (Sora under a quarter HP with an enemy up) walks to (−230, 90), turns, plays
+  motion 0xcb and strikes every enemy once with ATKP 0x4ba (`FUN_1401caac0`); the MP special
+  (Sora under three quarters MP) walks to (138, 106), plays 0xcc, fills Sora's MP
+  (`FUN_1403c2040`) and starts effect 10 on him.
+- Traps 10:1/10:2 set and read the screen point, 10:12 fills one of 24 effect slots
+  (`FUN_1401c9c10`) that the personality's pre-update starts, follows and ends
+  (`FUN_1401c9080`), 10:13 the shot's muzzle effect (`FUN_1401c9920`), 10:16 ends a slot,
+  10:32 a goal (`FUN_1401c75e0`: eight fixed points or a random one from the tables at
+  0x140724538 / 0x140724568) with motion 0xa1.
+
 ## What the rewrite does
 
 - `test_room::summon`: the start, wait, placement, spawn and leaving above; the summon is a
@@ -86,6 +107,10 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
   lookups, as they are in the executable's single list. The summon object carries its
   objentry id; direct strikes on the enemy's stand-in land like the summon's attacks.
 - `enemy::sysobj` ports the leave-ground fall; `btlobj_target` keeps the enemy-class test.
+- `enemy::friend::stitch` (round (c)): Stitch's state, think, actions and effect slots, traps
+  10:1, 10:2, 10:12, 10:13, 10:16, 10:32; `Sysobj::camera_space` (mode 3). The summon host
+  places him in front of the follow camera from his screen point and refills Sora's MP for
+  the MP special.
 
 ## Checks
 
@@ -97,6 +122,7 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 | `cargo build --workspace --locked`, release `--features skate3` | PASS |
 | Smoke `cargo run -p main --locked -- --frames 180` | PASS |
 | Unattended `--summon-tour` (private `runs/s5`) | exit 0; all four summons start, appear, leave and end; Peter Pan ends by time |
+| Unattended `--summon-tour` round (c) (private `runs/s26`) | exit 0; no faults or missing traps; Stitch goes to the top-left point his script asks for, stands, crosses the screen; the others as in `s23` |
 | Unattended `--summon-tour` round (b) (private `runs/s23`) | exit 0; all four follow Sora; Chicken Little's fireworks strike the Shadow twice (ATKP 1261) and he falls back after `surprise`; Peter Pan starts `attack_small` on Sora's attacks; Genie waits on Sora's commands; Stitch stands (traps 10:1, 10:12, 10:32 missing) |
 
 ## Uncertainty
@@ -107,9 +133,17 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 - [I] The summon level is 0 (no save is loaded); the team is Sora's (not traced in
   `FUN_1401b06e0`); the placement's wall line samples the room's wall push
   (`FUN_14040c2b0` not ported) and its last fallback is Sora's point.
-- Stitch's think (`FUN_1401ca240`) and his traps 10:1, 10:12, 10:32 are not ported: he plays
-  his appearance and stands. Genie's limit commands and forms, and the summon finishers, are
-  not ported.
+- Stitch's limit mode (traps 10:3/10:4 `FUN_1401c9d60` / `FUN_1401c7e00`, the commands
+  0x20d–0x20f, the damage shots of 10:13 with attack 0x373 and the target cycling
+  `FUN_1401c96c0`) is not ported; Genie's limit commands and forms and the summon finishers
+  are not ported. The summon host does not draw script effects for any summon yet.
+- [I] Stitch's camera-space matrix: the extra terms `FUN_1401cad30` writes into the second
+  matrix (+0x6e4 −10, +0x704 1024) and the second block (+0x708, the point at 0x140724330)
+  are not interpreted; he is placed at his scaled screen point in front of the follow camera
+  (view x right, y down, z forward) and drawn at his model's own size. The motion root's
+  heading is not subtracted. The special strikes land with Sora's stats; FUN_1403cf830's
+  operands are taken as `attack_new`'s. His class's +0xe8 call (the regeneration) is reported,
+  not carried out [U]. The limit test (`FUN_1403d8ad0`) is the running limit's command.
 - [I] One Sora attack notice per Attack/AirAttack action change (Sora's +0x180 is not kept),
   aimed at the room's enemy while one is there; the notice ages once per frame after it is
   noted.
@@ -124,9 +158,10 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 
 PARTIAL. Summons come, last their time and leave as the executable sequences them; Chicken
 Little, Peter Pan and Genie run their scripts under the ported kn::Friend controller and follow
-Sora; Chicken Little and Peter Pan attack. Stitch, Genie's forms and the finishers remain.
+Sora; Chicken Little and Peter Pan attack; Stitch roams the screen and runs his specials.
+Stitch's limit mode, Genie's forms and the finishers remain.
 
 ## Next task
 
-Stitch's controller (`FUN_1401ca240`, traps 10:1, 10:12, 10:32), Genie's limit commands and
-forms, then the summon finishers (`limt` rows with members 200–204).
+Genie's limit commands and forms, then the summon finishers (`limt` rows with members
+200–204) with Stitch's limit mode.

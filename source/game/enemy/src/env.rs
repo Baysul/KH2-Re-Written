@@ -275,6 +275,10 @@ pub trait Env {
     fn player_hp(&self) -> Option<(i32, i32)> {
         None
     }
+    /// Sora's sheet MP and maximum MP (+0x180 / +0x184).
+    fn player_mp(&self) -> Option<(i32, i32)> {
+        None
+    }
     /// Sora's sheet +0x1b4: the form or summon time left.
     fn drive_time(&self) -> f32 {
         0.

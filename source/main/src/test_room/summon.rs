@@ -87,6 +87,8 @@ pub struct Actor {
     /// Sora's attack action last tick and the attacks noted so far.
     last_attack: Option<player::Action>,
     attack_serial: u32,
+    /// Where a summon in camera space (Stitch) stands and faces this frame.
+    camera_pose: Option<(Vec3, Quat)>,
 }
 
 impl Actor {
@@ -95,6 +97,11 @@ impl Actor {
     }
     pub fn yaw(&self) -> f32 {
         self.brain.yaw()
+    }
+    /// The drawn heading: camera space's for Stitch, else the yaw.
+    pub fn rotation(&self) -> Quat {
+        self.camera_pose
+            .map_or_else(|| Quat::from_rotation_y(self.yaw()), |(_, r)| r)
     }
     /// The object removed itself, or [I] its leaving fade has ended: the
     /// summon class's removal (FUN_1403dd850 clears DAT_142a24ee8 and the
@@ -242,7 +249,7 @@ fn placement(
 /// One frame of the summon: FUN_1403de610's wait and spawn, the object's
 /// script, the summon time (FUN_1403a92c0) and its end (FUN_140404a40),
 /// and the leaving (FUN_1403de080 / FUN_140400440).
-pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>) {
+pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::CameraRig>) {
     let game = &mut *game;
     let tick = game.tick.saturating_sub(1);
     // [Tour setup] Each summon of the tour starts from a full gauge.
@@ -306,6 +313,7 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>) {
                 .enemy
                 .as_ref()
                 .map(|rt| (rt.sora_hp, rt.sora_target.max_hp)),
+            player_mp: Some((game.player.mp.cur, game.player.mp.max)),
             player_velocity: velocity,
             enemy_radius: super::party_limit::room_enemy_radius(game).unwrap_or(0.),
         };
@@ -337,6 +345,28 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>) {
         }
         a.sora_hp = hp;
         a.brain.tick(&game.world, game.player.position, &mut a.rng);
+        // FUN_1403c2040: Stitch's MP special fills Sora's MP and ends a
+        // charge.
+        for _ in 0..std::mem::take(&mut a.brain.mp_refills) {
+            game.player.mp = player::magic::Mp::new(game.player.mp.max);
+        }
+        // Stitch is drawn in camera space (FUN_1401cad30, FUN_1403cbfc0):
+        // his screen point at depth 1024, scaled by 0.503644, in front of
+        // the follow camera; his heading turns about the view's vertical.
+        // [I] View x right, y down, z forward, as the engine's; the motion
+        // root's heading is not subtracted.
+        a.camera_pose = a.brain.stitch_screen().map(|v| {
+            let s = enemy::friend::stitch::SCALE;
+            let eye = super::from_world(rig.camera.eye);
+            let look = super::from_world(rig.camera.look_at);
+            let cam = Transform::from_translation(eye).looking_at(look, Vec3::Y);
+            let at = eye + cam.rotation * Vec3::new(v[0] * s, -v[1] * s, -v[2] * s);
+            let turn = cam.rotation * Quat::from_rotation_y(std::f32::consts::PI - v[3]);
+            (at, turn)
+        });
+        if let Some((at, _)) = a.camera_pose {
+            a.brain.set_position(at.to_array());
+        }
         let blending = a.brain.blend() > 0.;
         match a
             .clips
@@ -374,7 +404,11 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>) {
                 serde_json::json!({"event":"summon_trace","tick":tick,"state":s.state,"calls":calls,
                 "y":a.brain.position()[1],"mode":a.brain.mode_flags(),"motion":a.brain.motion(),
                 "frame":a.brain.elapsed(),
-                "target":a.brain.friend_state().map(|f| f.4)}),
+                "target":a.brain.friend_state().map(|f| f.4),
+                "screen":a.brain.stitch_screen(),
+                "eye":super::from_world(rig.camera.eye).to_array(),
+                "look":super::from_world(rig.camera.look_at).to_array(),
+                "sora":game.player.position}),
             );
         }
         land_attacks(game, a, tick);
@@ -504,6 +538,7 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         sora_hp: None,
         last_attack: None,
         attack_serial: 0,
+        camera_pose: None,
     })
 }
 
@@ -675,7 +710,7 @@ pub fn present(
             Some((serial, a)) if serial == root.0 => {
                 live = true;
                 transform.translation = a.position();
-                transform.rotation = Quat::from_rotation_y(a.yaw());
+                transform.rotation = a.rotation();
             }
             _ => {
                 for (_, mesh, material) in &parts {
@@ -697,8 +732,7 @@ pub fn present(
             .spawn((
                 SummonRoot(serial),
                 ChildOf(world.0),
-                Transform::from_translation(a.position())
-                    .with_rotation(Quat::from_rotation_y(a.yaw())),
+                Transform::from_translation(a.position()).with_rotation(a.rotation()),
                 Visibility::default(),
             ))
             .id();

@@ -55,6 +55,8 @@ pub struct HostFacts {
     pub tink: bool,
     /// Sora's HP and maximum HP, and his velocity (+0xa38).
     pub player_hp: Option<(i32, i32)>,
+    /// Sora's MP and maximum MP.
+    pub player_mp: Option<(i32, i32)>,
     pub player_velocity: Vec3,
     /// The TARGET radius of the room's enemy (its stand-in, [`ENEMY`]).
     pub enemy_radius: f32,
@@ -75,6 +77,9 @@ impl Env for BrainEnv<'_> {
     }
     fn player_hp(&self) -> Option<(i32, i32)> {
         self.facts.player_hp
+    }
+    fn player_mp(&self) -> Option<(i32, i32)> {
+        self.facts.player_mp
     }
     fn player_velocity(&self) -> Vec3 {
         self.facts.player_velocity
@@ -211,6 +216,8 @@ pub struct ScriptBrain {
     /// Attack slots the script's objects applied to the enemy's stand-in
     /// directly (Chicken Little's fireworks), with their ATKP ids and serials.
     pub enemy_strikes: Vec<(usize, [i32; 2], u64)>,
+    /// Stitch's MP specials not yet carried out (FUN_1403c2040 on Sora).
+    pub mp_refills: u32,
 }
 
 pub(super) fn script_payload(source: &ProbeSource, model: &str) -> Result<Vec<u8>, String> {
@@ -260,6 +267,7 @@ impl ScriptBrain {
             reported: Default::default(),
             strikes: Vec::new(),
             enemy_strikes: Vec::new(),
+            mp_refills: 0,
         };
         brain.build(position, yaw, stats, sstm, &mut ScriptRandom::default())?;
         Ok(brain)
@@ -431,6 +439,10 @@ impl ScriptBrain {
                 Event::Presentation { name, .. } => {
                     self.unsupported.insert(name);
                 }
+                Event::Service {
+                    name: "stitch_mp_refill",
+                    ..
+                } => self.mp_refills += 1,
                 Event::Service { name, .. } => {
                     self.services.insert(name);
                 }
@@ -499,6 +511,17 @@ impl ScriptBrain {
 
     pub fn position(&self) -> Vec3 {
         self.object.sys.position
+    }
+    /// Where the host put an object it places itself (Stitch's camera
+    /// space).
+    pub fn set_position(&mut self, p: Vec3) {
+        self.object.sys.position = p;
+    }
+    /// Stitch's screen position (x right, y down, depth, heading), once
+    /// it is set.
+    pub fn stitch_screen(&self) -> Option<[f32; 4]> {
+        let s = self.object.friend.as_deref()?.stitch.as_deref()?;
+        s.valid.then_some(s.screen)
     }
     /// The object's fade (+0xa08): its alpha and whether it is falling.
     pub fn fade(&self) -> (f32, bool) {

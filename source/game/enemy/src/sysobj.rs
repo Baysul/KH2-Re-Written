@@ -350,6 +350,10 @@ pub struct Sysobj {
     pub damage_parts: u8,
     /// +0x6a0..: carried by another object (`obj_attach`, physics mode 3).
     pub attached: Option<Attach>,
+    /// Physics mode 3 with a camera-space matrix (FUN_1403b4da0(obj, 3),
+    /// FUN_1403cbfc0: +0x124 bit 6, +0x8c8 bit 12): the object does not
+    /// move by itself; its host places it from the camera (Stitch).
+    pub camera_space: bool,
     /// FUN_1401a7cf0 / FUN_1401a8a90: the model is hidden (`obj_hide_part`
     /// and `obj_show_part` take a part but the routines ignore it).
     pub model_hidden: bool,
@@ -612,6 +616,7 @@ impl Sysobj {
             damage_attack_type: 0,
             damage_parts: 0,
             attached: None,
+            camera_space: false,
             model_hidden: false,
             texture_animation: false,
             tex_fade: Fade::default(),
@@ -634,7 +639,10 @@ impl Sysobj {
     /// bit 6 blow, bit 7 ground, bit 8 always. The modes this crate runs are
     /// listed; the others are not entered here.
     pub fn mode_flags(&self) -> u32 {
-        if self.blow.is_some() {
+        if self.camera_space {
+            // Mode 3's +0xc.
+            0x100
+        } else if self.blow.is_some() {
             0x1c1
         } else if self.jump.is_some() {
             0x181
@@ -912,8 +920,8 @@ impl Sysobj {
         self.fade.step(1.0);
         self.tex_fade.step(1.0);
         // A carried object does not move by itself (physics mode 3); the
-        // world places it on its holder.
-        if self.attached.is_some() {
+        // world places it on its holder. Nor does one in camera space.
+        if self.attached.is_some() || self.camera_space {
             return;
         }
         if self.fly.is_some() {
@@ -1356,6 +1364,17 @@ impl Sysobj {
         self.start_fall(0.);
         self.state_flags &= !state_flag::GROUND_ARMED;
         self.flags |= 0x400_0000;
+    }
+
+    /// FUN_1403b4da0(obj, 3) with FUN_1403cbfc0: physics mode 3 in camera
+    /// space; any jump, fall, steering or hop ends.
+    pub fn to_camera_mode(&mut self) {
+        self.camera_space = true;
+        self.jump = None;
+        self.fly = None;
+        self.steer = None;
+        self.hop = None;
+        self.airborne = false;
     }
 
     /// Physics mode entry for a fall (FUN_1403b8150): the parabola continues
