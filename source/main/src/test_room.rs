@@ -3220,7 +3220,11 @@ fn load(
                 summon::CALL_MOTION,
                 summon::APPEAR_MOTION,
             ],
-            external: limit_source.motions(1),
+            external: {
+                let mut m = limit_source.motions(1);
+                m.extend(summon::capture_motions(source, &battle));
+                m
+            },
         },
     )?;
     // Donald's and Goofy's limit motions, for their motion tables.

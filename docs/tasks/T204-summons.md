@@ -115,6 +115,22 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
   and are scaled by the projection's +0x40 (`FUN_14019d010`) over their depth; the record
   names the nearest one inside the box, or is cleared.
 
+### Round (g): Sora's motions in a summon limit
+
+- No summon script starts a motion on Sora's stand-in; they capture one for him:
+  `obj_motion_capture` (1:29, `FUN_14042d160` -> `FUN_1403c6cc0`) with the summon as captor
+  and Sora as victim, slots 252..256 of the summon's own set (Peter Pan 252, 253, 255, 256;
+  Chicken Little 252, 253; Genie's object 252; Stitch's script none).
+- `FUN_1403c6cc0` resolves the slot through the captor's set (`FUN_1403c7c50`, direct for these
+  sets) and hands the slot's archive to `FUN_1403c64a0`, which starts it on the victim's body
+  (+0x158) and, for an object with +0x6c8 bit 2, on its two weapon parts (+0xd60). The slot's
+  archive is a set of its own: entries "0010" (body) and "0011" / "0012" (the weapons), four
+  variants each.
+- The rewrite: `summon::capture_motions` loads Sora's body and Keyblade halves of those slots
+  into his kit (ids 0x7800 | row << 8 | slot − 240); the summon brain answers a captured
+  slot's length from them (`ClipView`), so the capture lasts its motion; `sora_in_limit` plays
+  the stand-in's capture.
+
 ### Round (d): Genie's forms
 
 - `FUN_1403de460` gives Genie one of Sora's owned forms (Valor 1, Wisdom 2, Master 4, Final 5;
@@ -201,6 +217,7 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 | `cargo build --workspace --locked`, release `--features skate3` | PASS |
 | Smoke `cargo run -p main --locked -- --frames 180` | PASS |
 | Unattended `--summon-tour` (private `runs/s5`) | exit 0; all four summons start, appear, leave and end; Peter Pan ends by time |
+| Unattended `--summon-tour` round (g) (private `runs/s48`, `runs/s49`) | exit 0, no faults or unsupported traps; Sora plays the captured motions in all four limits (Chicken Little 253, Genie's 253 / 255, Stitch's 253, Peter Pan 253 / 255 / 256) and stands between them |
 | Unattended `--summon-tour` round (f) (private `runs/s38`) | exit 0; no faults; the four limits start and end, 41 follow-ups; Peter Pan's script calls 6:40 once and Sora flies along his heading at the PRTY 0x3e run speed (about 11.6 a frame, no stick in the tour) until the limit ends; Chicken Little's 10:51 is not reached in the tour (NOT RUN) |
 | Probe `limit_probe aladdin` (private `probe-aladdin.txt`) | runs to its end without faults; without Aladdin as a participant 6:26 / 7:21 are not reached (NOT RUN for the hover) |
 | Unattended `--summon-tour` round (e) (private `runs/s35`) | exit 0; all four limits start from the deck (529, 542, 519, 468), 41 follow-ups taken (Genie 543, Stitch 527, Peter Pan 470/479) and each limit ends; Peter Pan's lacks 6:40 |
@@ -217,9 +234,10 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
   `FUN_1401b06e0`); the placement's wall line samples the room's wall push
   (`FUN_14040c2b0` not ported) and its last fallback is Sora's point.
 - Summon limits not finished: Chicken Little's first-person part (he is not drawn in his
-  limit); the limit's cost in summon mode (`FUN_1403a9cf0`); Sora's own motions in a summon
-  limit [I: he stands, or flies in Peter Pan's]; the follow-ups' motion windows are not tested
-  before they are sent [I].
+  limit); the limit's cost in summon mode (`FUN_1403a9cf0`); the follow-ups' motion windows are
+  not tested before they are sent [I].
+- [I] A captured slot's variant is chosen as in battle with the Keyblade out; its second
+  weapon part ("0012") is not loaded; a capture of another victim than Sora is not drawn.
 - [I] Mode 0x34's forward vector (`FUN_1403b56e0`, +0x680 or the +0x60/+0x68 matrix terms
   while `FUN_1403da520` holds) is read as the heading's; its exit's PRTY record 1 is read as
   the turn rate the object had before. Mode 0x2a copies `DAT_142b59470` when it is entered
@@ -258,9 +276,9 @@ Little, Peter Pan and Genie run their scripts under the ported kn::Friend contro
 Sora; Chicken Little and Peter Pan attack; Stitch roams the screen and runs his specials;
 Genie's forms are chosen from the deck; every summon's limit starts from the deck, takes its
 follow-ups and ends; Peter Pan's limit flies Sora, and Chicken Little's limit can pick the
-target on screen. Chicken Little's first-person part and Sora's own limit motions remain.
+target on screen; Sora plays the motions the summons capture for him. Chicken Little's
+first-person part remains.
 
 ## Next task
 
-The Trinity rows' button glyphs (T203, text codes 0x11 / 0x09); then Chicken Little's
-first-person part of his limit.
+Chicken Little's first-person part of his limit.

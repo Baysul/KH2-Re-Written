@@ -21,7 +21,7 @@ pub(super) const SORA_TEAM: u8 = 1;
 /// The host view the engine reads each tick.
 struct BrainEnv<'a> {
     room: Option<&'a RoomWorld>,
-    clips: &'a Clips,
+    clips: ClipView<'a>,
     player: Vec3,
     player_yaw: f32,
     facts: HostFacts,
@@ -31,6 +31,35 @@ struct BrainEnv<'a> {
 
 /// The command records the motion-window test reads (FUN_1403b6950).
 pub type CommandWindows = std::collections::HashMap<u16, (u16, u8, u32)>;
+
+/// The object's clips, and the lengths of the motions of its set its
+/// script captures for Sora (`obj_motion_capture`), which only his kit
+/// holds.
+struct ClipView<'a> {
+    base: &'a Clips,
+    captured: &'a std::collections::HashMap<usize, u32>,
+}
+
+impl EnemyClips for ClipView<'_> {
+    fn length(&self, slot: usize) -> u32 {
+        match EnemyClips::length(self.base, slot) {
+            0 => self.captured.get(&slot).copied().unwrap_or(0),
+            n => n,
+        }
+    }
+    fn loop_start(&self, slot: usize) -> u32 {
+        EnemyClips::loop_start(self.base, slot)
+    }
+    fn root_delta(&self, slot: usize, tick: u32) -> Vec3 {
+        EnemyClips::root_delta(self.base, slot, tick)
+    }
+    fn advance(&self, slot: usize, tick: u32) -> u32 {
+        EnemyClips::advance(self.base, slot, tick)
+    }
+    fn events(&self, slot: usize) -> Option<&enemy::motion::MotionEvents> {
+        EnemyClips::events(self.base, slot)
+    }
+}
 
 /// The clips of an object with no motion set.
 struct NoClips;
@@ -130,7 +159,7 @@ impl Env for BrainEnv<'_> {
     // Objects the script made (`sysobj_appear`) carry their entry as the
     // model and have no motions of their own here.
     fn clips(&self, model: u32) -> &dyn EnemyClips {
-        if model == 0 { self.clips } else { &NoClips }
+        if model == 0 { &self.clips } else { &NoClips }
     }
     fn player_position(&self) -> Vec3 {
         self.player
@@ -228,6 +257,8 @@ pub struct ScriptBrain {
     world: EnemyWorld,
     object: Object,
     clips: Arc<Clips>,
+    /// Lengths of the captured motions (see [`ClipView`]).
+    captured: std::collections::HashMap<usize, u32>,
     payload: Vec<u8>,
     spawn: Vec3,
     player: Vec3,
@@ -316,6 +347,7 @@ impl ScriptBrain {
             unsupported: Default::default(),
             services: Default::default(),
             reported: Default::default(),
+            captured: Default::default(),
             strikes: Vec::new(),
             enemy_strikes: Vec::new(),
             mp_refills: 0,
@@ -345,7 +377,10 @@ impl ScriptBrain {
         self.world.rng.0 = rng.0;
         let env = BrainEnv {
             room: None,
-            clips: &self.clips,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
@@ -364,7 +399,10 @@ impl ScriptBrain {
         self.offer_targets = [None; 8];
         let env = BrainEnv {
             room: Some(room),
-            clips: &self.clips,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
             player,
             player_yaw: self.player_yaw,
             facts: self.facts,
@@ -417,7 +455,10 @@ impl ScriptBrain {
     pub fn mark_attack_hit(&mut self, slot: usize) {
         let env = BrainEnv {
             room: None,
-            clips: &self.clips,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
@@ -450,7 +491,10 @@ impl ScriptBrain {
     pub fn mark_attack_reflected(&mut self, slot: usize) {
         let env = BrainEnv {
             room: None,
-            clips: &self.clips,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
@@ -537,6 +581,12 @@ impl ScriptBrain {
         }
     }
 
+    /// The lengths of the motions of the object's set its script captures
+    /// for Sora.
+    pub fn set_captured(&mut self, lengths: std::collections::HashMap<usize, u32>) {
+        self.captured = lengths;
+    }
+
     /// The command records the scripts' window tests read.
     pub fn set_commands(&mut self, commands: CommandWindows) {
         self.commands = commands;
@@ -574,7 +624,10 @@ impl ScriptBrain {
         };
         let env = BrainEnv {
             room: None,
-            clips: &self.clips,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
@@ -639,6 +692,11 @@ impl ScriptBrain {
                     self.services.insert(name);
                 }
                 Event::Sound { id, position, .. } => self.sounds.push((id, position)),
+                // Sora plays what a running limit captures for him (the
+                // summon host reads his stand-in's capture); another
+                // victim's is not drawn.
+                Event::MotionCapture { victim, .. }
+                    if victim == PLAYER_OBJECT && self.limit.is_some() => {}
                 Event::MotionCapture { .. } => {
                     self.unsupported.insert("obj_motion_capture");
                 }
@@ -815,7 +873,10 @@ impl ScriptBrain {
     ) -> Option<i32> {
         let env = BrainEnv {
             room: None,
-            clips: &self.clips,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
@@ -837,7 +898,10 @@ impl ScriptBrain {
     pub fn reflect(&mut self, motion: usize, back: f32) {
         let env = BrainEnv {
             room: None,
-            clips: &self.clips,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
@@ -898,7 +962,10 @@ impl ScriptBrain {
     pub fn mark_attack_hit_on(&mut self, slot: usize, target: u32) {
         let env = BrainEnv {
             room: None,
-            clips: &self.clips,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
@@ -915,7 +982,10 @@ impl ScriptBrain {
     pub fn command(&mut self, command: u16) {
         let env = BrainEnv {
             room: None,
-            clips: &self.clips,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
@@ -975,7 +1045,10 @@ impl ScriptBrain {
     pub fn start_act(&mut self, name: &[u8]) {
         let env = BrainEnv {
             room: None,
-            clips: &self.clips,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,
@@ -995,7 +1068,10 @@ impl ScriptBrain {
         self.object.sys.hp = 0;
         let env = BrainEnv {
             room: None,
-            clips: &self.clips,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
             player: self.player,
             player_yaw: self.player_yaw,
             facts: self.facts,

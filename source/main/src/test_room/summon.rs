@@ -293,23 +293,162 @@ fn sora_sys(game: &Game) -> enemy::sysobj::Sysobj {
 }
 
 /// While the summon's limit runs Sora stands and turns where it has him
-/// (the scripted stand-in); his own update does not run. Returns false
-/// when no summon limit runs. [I] His own motions are not played: the
-/// summon scripts move him through the limit traps only.
+/// (the scripted stand-in); his own update does not run. He plays what the
+/// summon's script captures for him (`obj_motion_capture`, FUN_1403c6cc0:
+/// a motion of the summon's own set), else stands. Returns false when no
+/// summon limit runs.
 pub fn sora_in_limit(game: &mut Game) -> bool {
-    let Some(p) = game
-        .summon
-        .as_ref()
-        .and_then(|s| s.actor.as_ref())
-        .and_then(|a| a.brain.limit_player())
-    else {
+    let Some(s) = game.summon.as_ref() else {
         return false;
     };
+    let Some(a) = s.actor.as_ref() else {
+        return false;
+    };
+    let Some(p) = a.brain.limit_player() else {
+        return false;
+    };
+    let row = game
+        .summons
+        .as_ref()
+        .and_then(|t| t.rows.iter().position(|r| r.object == s.row.object));
+    let captured = p.capture.and_then(|c| {
+        // A slot Sora's kit does not hold (not of his skeleton) is not
+        // played.
+        let clip =
+            capture_clip(row?, c.motion).filter(|&m| game.clips.scripted_clip(m).is_some())?;
+        let length = enemy::env::Clips::length(&*a.clips, c.motion as usize);
+        Some((clip, length.saturating_sub(c.remaining)))
+    });
     let (position, yaw) = (p.position, p.yaw);
     game.player.position = position;
     game.player.yaw = yaw;
-    game.player.action = player::Action::Idle;
+    match captured {
+        Some((clip, frame)) => {
+            game.player.action = player::Action::Scripted(clip);
+            game.player.frame = frame;
+        }
+        None => game.player.action = player::Action::Idle,
+    }
     true
+}
+
+/// The slots of a summon's own motion set its scripts capture for Sora
+/// (`obj_motion_capture` in P_EX330 / P_EX340 / P_EX350: 252..256).
+const CAPTURE_SLOTS: std::ops::RangeInclusive<usize> = 252..=256;
+
+/// The id Sora's kit keeps a summon's captured motion under: the `sumn`
+/// row above the limits' ids (0x4000..).
+fn capture_clip(row: usize, slot: i32) -> Option<u16> {
+    let slot = usize::try_from(slot)
+        .ok()
+        .filter(|s| CAPTURE_SLOTS.contains(s))?;
+    Some(0x7800 | (row as u16) << 8 | (slot - 240) as u16)
+}
+
+/// A captured slot's motions for the victim (FUN_1403c6cc0 ->
+/// FUN_1403c64a0): the slot is a set of its own, motion 0 for the body
+/// (entries "0010"), 1 for the first weapon ("0011"), each in four variants
+/// chosen as a set's are (FUN_1403c7c50's table) [I: in battle with the
+/// Keyblade out]. The body's slot is made unique as the limits' are.
+fn capture_parts(
+    anb: &[u8],
+    clip: u16,
+) -> Option<(
+    data::motion::SelectedMotion,
+    Option<data::motion::SelectedMotion>,
+)> {
+    let table = data::bar::read_bar(anb).ok()?;
+    let part = |id: u16, tag: usize| {
+        let present = |k: usize| {
+            table
+                .entries
+                .get(k)
+                .is_some_and(|e| e.offset > 0 && e.size > 0)
+        };
+        let k = data::motion::motion_set_index(present, id, true, true)?;
+        let e = &table.entries[k];
+        let bytes = anb.get(e.offset as usize..e.offset as usize + e.size as usize)?;
+        data::motion::read_anb(bytes, tag).ok()
+    };
+    let body = part(0, 0x1_0000 + clip as usize)?;
+    Some((body, part(1, 0x1_0000 + clip as usize)))
+}
+
+/// Sora's captured motions of every summon (the `sumn` rows' objects'
+/// sets, [`CAPTURE_SLOTS`]) for his kit: (clip id, body motion, Keyblade
+/// motion).
+pub fn capture_motions(
+    source: &data::probe_source::ProbeSource,
+    battle: &[u8],
+) -> Vec<(
+    u16,
+    data::motion::SelectedMotion,
+    Option<data::motion::SelectedMotion>,
+)> {
+    let mut out = Vec::new();
+    let Ok(mut library) = data::path_lookup::Library::open(source) else {
+        return out;
+    };
+    let Some(objects) = library
+        .read("00objentry.bin")
+        .ok()
+        .and_then(|b| objentry::read(&b).ok())
+    else {
+        return out;
+    };
+    let Ok(sumn) = super::bar_entry(battle, b"sumn") else {
+        return out;
+    };
+    for (row, r) in super::second_deck::read_summons(sumn).iter().enumerate() {
+        let Some(object) = objects.iter().find(|o| o.object_id == u32::from(r.object)) else {
+            continue;
+        };
+        let name: Vec<u8> = object
+            .animation_name
+            .iter()
+            .copied()
+            .take_while(|&b| b != 0)
+            .collect();
+        let name = String::from_utf8_lossy(&name);
+        let path = if name.ends_with(".mset") {
+            format!("obj/{name}")
+        } else {
+            format!("obj/{name}.mset")
+        };
+        let Ok(bytes) = library.read(&path) else {
+            continue;
+        };
+        let Ok(table) = data::bar::read_bar(&bytes) else {
+            continue;
+        };
+        for slot in CAPTURE_SLOTS {
+            let Some(clip) = capture_clip(row, slot as i32) else {
+                continue;
+            };
+            let Some(anb) = table
+                .entries
+                .get(slot)
+                .filter(|e| e.offset > 0 && e.size > 0)
+                .and_then(|e| bytes.get(e.offset as usize..e.offset as usize + e.size as usize))
+            else {
+                continue;
+            };
+            let Some((body, weapon)) = capture_parts(anb, clip) else {
+                eprintln!("{path}: slot {slot} holds no motion for Sora; left out");
+                continue;
+            };
+            let usable = body
+                .motion
+                .frame_window()
+                .is_ok_and(|(start, end, fps, _)| {
+                    (1. ..=120.).contains(&fps) && end > start.max(0.)
+                });
+            if usable {
+                out.push((clip, body, weapon));
+            }
+        }
+    }
+    out
 }
 
 /// Genie's and Peter Pan's summon commands (FUN_1403de460).
@@ -572,6 +711,8 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
                 "frame":a.brain.elapsed(),
                 "target":a.brain.friend_state().map(|f| f.4),
                 "screen":a.brain.stitch_screen(),
+                "sora_motion":a.brain.limit_player().map(|p| (p.motion.slot, p.capture.map(|c| (c.motion, c.remaining)))),
+                "sora_action":format!("{:?}", game.player.action),
                 "eye":super::from_world(rig.camera.eye).to_array(),
                 "look":super::from_world(rig.camera.look_at).to_array(),
                 "sora":game.player.position}),
@@ -673,6 +814,22 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         Friend::new(p, walk, run)
     });
     brain.make_summon(object.object_id, friend);
+    // The motions its script captures for Sora last as long as his kit's
+    // clips of them.
+    let row = game
+        .summons
+        .as_ref()
+        .and_then(|t| t.rows.iter().position(|r| r.object == s.row.object));
+    if let Some(row) = row {
+        brain.set_captured(
+            CAPTURE_SLOTS
+                .filter_map(|slot| {
+                    let clip = capture_clip(row, slot as i32)?;
+                    Some((slot, game.clips.scripted_clip(clip)?.1.end))
+                })
+                .collect(),
+        );
+    }
     if let Some(d) = game.second_deck.as_ref() {
         brain.set_commands(
             d.commands
@@ -958,6 +1115,16 @@ pub fn present(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_clips_sit_above_the_limits_and_apart_per_summon() {
+        assert_eq!(capture_clip(3, 256), Some(0x7b10));
+        assert_eq!(capture_clip(0, 252), Some(0x780c));
+        assert_eq!(capture_clip(0, 251), None);
+        assert_eq!(capture_clip(0, -1), None);
+        // The limits' ids (0x4000 | index << 9 | motion) stay below.
+        assert!(super::super::party_limit::clip_id(15, 0x1ff) < 0x7800);
+    }
 
     #[test]
     fn genies_form_is_a_uniform_pick_of_the_owned_ones() {
