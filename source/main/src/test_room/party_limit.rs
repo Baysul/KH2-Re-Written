@@ -465,14 +465,14 @@ fn room_body(game: &Game) -> player::Body {
     }
 }
 
-fn room_enemy_radius(game: &Game) -> Option<f32> {
+pub(super) fn room_enemy_radius(game: &Game) -> Option<f32> {
     game.enemy
         .as_ref()
         .and_then(|rt| rt.targets.first())
         .map(|t| t.2)
 }
 
-fn room_enemy(game: &Game) -> Option<V3> {
+pub(super) fn room_enemy(game: &Game) -> Option<V3> {
     game.enemy
         .as_ref()
         .filter(|rt| rt.enabled && rt.enemy.targetable())

@@ -38,6 +38,8 @@ pub struct Object {
     pub script: ScriptSpace,
     /// Callbacks traps queued for the interpreter to run (see [`Host::take_callbacks`]).
     pub pending: Vec<Callback>,
+    /// The kn::Friend controller of a summon (FUN_1401b06e0).
+    pub friend: Option<Box<crate::friend::Friend>>,
 }
 
 impl Object {
@@ -48,6 +50,7 @@ impl Object {
             sys: Sysobj::bare(),
             acts: act::Manager::default(),
             pending: Vec::new(),
+            friend: None,
             script: ScriptSpace {
                 instance: Instance::placeholder(),
                 stack_bytes: 0,
@@ -269,6 +272,10 @@ pub mod status {
     pub const PRIZE_DRAIN: u32 = 1 << 3;
     /// `status_force_leave_start` / `_end`: every enemy leaves.
     pub const FORCE_LEAVE: u32 = 1 << 7;
+    /// `status_peterpan_prize_drain_start` / `_end`.
+    pub const PETERPAN_PRIZE_DRAIN: u32 = 1 << 11;
+    /// `status_hide_shadow` / `status_show_shadow`.
+    pub const HIDE_SHADOW: u32 = 1 << 12;
 }
 
 /// An object search a script made (kept while `World::trace` is on).
@@ -317,6 +324,11 @@ pub struct World {
     static_words: Vec<u32>,
     /// Traps a script called that nothing implements yet.
     pub missing: Vec<(u16, u16)>,
+    /// Sora's attackers (DAT_140ad6a30, at most 8, newest last), pushed by
+    /// FUN_1401b56e0 mode 0 when he is hit and taken by the friend traps.
+    pub player_attackers: Vec<ObjId>,
+    /// Sora's attack notification (FUN_1401b56e0 mode 1).
+    pub player_notify: crate::friend::PlayerNotify,
     /// Every trap called, newest last, when `trace` is on (development aid).
     pub trace: Option<Vec<(u16, u16)>>,
     /// The object searches scripts made, when `trace` is on.
@@ -338,6 +350,11 @@ pub struct World {
     pub bg_hidden: u64,
     /// The stand-in traps reach when a script names Sora (see [`PLAYER_OBJECT`]).
     pub player_proxy: Option<Box<Object>>,
+    /// Objects that are in the engine's list but held outside `objects`
+    /// for now: the one the host runs itself while the others tick, and the
+    /// object whose `sysobj_appear` is building another (its OBJ_INIT runs
+    /// inside the maker's trap). Searches and handle lookups see them.
+    pub held: Vec<Box<Object>>,
     /// The attack objects scripts created (`attack_new`), by slot.
     pub attacks: Vec<Option<crate::attack::Attack>>,
     /// `attack_new_combo_group`'s counter (DAT_142a24afc).
@@ -425,6 +442,8 @@ impl Default for World {
             statics: HashMap::new(),
             static_words: Vec::new(),
             missing: Vec::new(),
+            player_attackers: Vec::new(),
+            player_notify: crate::friend::PlayerNotify::default(),
             trace: None,
             searches: Vec::new(),
             act_log: None,
@@ -437,6 +456,7 @@ impl Default for World {
             control_off: Vec::new(),
             bg_hidden: 0,
             player_proxy: Some(Box::new(Object::bare(PLAYER_OBJECT))),
+            held: Vec::new(),
             attacks: Vec::new(),
             combo_group: 0,
             attack_serial: 0,
@@ -884,6 +904,9 @@ impl Ctx<'_> {
             }
             return Ok(proxy);
         }
+        if let Some(k) = self.world.held.iter().position(|o| o.id == id) {
+            return Ok(&mut self.world.held[k]);
+        }
         self.world
             .objects
             .get_mut(id as usize)
@@ -905,6 +928,11 @@ impl Ctx<'_> {
         };
         consider(self.me);
         for o in self.world.objects.iter().flatten() {
+            if o.id != self.me.id {
+                consider(o);
+            }
+        }
+        for o in &self.world.held {
             if o.id != self.me.id {
                 consider(o);
             }
@@ -932,6 +960,11 @@ impl Ctx<'_> {
         };
         consider(self.me);
         for o in self.world.objects.iter().flatten() {
+            if o.id != self.me.id {
+                consider(o);
+            }
+        }
+        for o in &self.world.held {
             if o.id != self.me.id {
                 consider(o);
             }

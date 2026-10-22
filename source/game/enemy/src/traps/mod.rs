@@ -7,6 +7,7 @@ use crate::world::TrapFn;
 
 pub mod attack;
 pub mod flare;
+pub mod friend;
 pub mod homing;
 pub mod limit;
 pub mod math;
@@ -31,6 +32,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         .or_else(|| limit::lookup(table, index))
         .or_else(|| flare::lookup(table, index))
         .or_else(|| trinity::lookup(table, index))
+        .or_else(|| friend::lookup(table, index))
         .or_else(|| weapon::lookup(table, index))
         .or_else(|| attack::lookup(table, index))
         .or_else(|| homing::lookup(table, index))

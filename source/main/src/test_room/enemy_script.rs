@@ -24,14 +24,68 @@ struct BrainEnv<'a> {
     clips: &'a Clips,
     player: Vec3,
     player_yaw: f32,
+    facts: HostFacts,
 }
 
+/// The clips of an object with no motion set.
+struct NoClips;
+impl EnemyClips for NoClips {
+    fn length(&self, _: usize) -> u32 {
+        0
+    }
+    fn loop_start(&self, _: usize) -> u32 {
+        0
+    }
+    fn root_delta(&self, _: usize, _: u32) -> Vec3 {
+        [0.; 3]
+    }
+    fn events(&self, _: usize) -> Option<&enemy::motion::MotionEvents> {
+        None
+    }
+}
+
+/// What the host tells a script about the game around it each tick.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HostFacts {
+    /// The battle flag (DAT_142a11404).
+    pub battle: bool,
+    /// Sora's form or summon time (sheet +0x1b4).
+    pub drive_time: f32,
+    /// Peter Pan is out with Tinker Bell (FUN_1403de320).
+    pub tink: bool,
+    /// Sora's HP and maximum HP, and his velocity (+0xa38).
+    pub player_hp: Option<(i32, i32)>,
+    pub player_velocity: Vec3,
+    /// The TARGET radius of the room's enemy (its stand-in, [`ENEMY`]).
+    pub enemy_radius: f32,
+}
+
+/// The id of the room's enemy as a stand-in in a script's world.
+pub const ENEMY: u32 = 1;
+
 impl Env for BrainEnv<'_> {
+    fn battle(&self) -> bool {
+        self.facts.battle
+    }
+    fn drive_time(&self) -> f32 {
+        self.facts.drive_time
+    }
+    fn summon_with_tink(&self) -> bool {
+        self.facts.tink
+    }
+    fn player_hp(&self) -> Option<(i32, i32)> {
+        self.facts.player_hp
+    }
+    fn player_velocity(&self) -> Vec3 {
+        self.facts.player_velocity
+    }
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         self.room?.floor(x, z, top)
     }
-    fn clips(&self, _model: u32) -> &dyn EnemyClips {
-        self.clips
+    // Objects the script made (`sysobj_appear`) carry their entry as the
+    // model and have no motions of their own here.
+    fn clips(&self, model: u32) -> &dyn EnemyClips {
+        if model == 0 { self.clips } else { &NoClips }
     }
     fn player_position(&self) -> Vec3 {
         self.player
@@ -50,6 +104,9 @@ impl Env for BrainEnv<'_> {
     }
     fn target_position(&self, _id: u32) -> Option<Vec3> {
         None
+    }
+    fn target_radius(&self, id: u32) -> Option<f32> {
+        (id == ENEMY).then_some(self.facts.enemy_radius)
     }
     // The generated development arena is flat and has no step obstacles.
     fn check_step(&self, _: Vec3, _: Vec3, _: f32, _: f32, _: f32) -> Option<u8> {
@@ -131,6 +188,8 @@ pub struct ScriptBrain {
     player: Vec3,
     /// Sora's heading, set by the host before each tick.
     pub player_yaw: f32,
+    /// The game state the host passes in before each tick.
+    pub facts: HostFacts,
     /// Faults the interpreter or a missing trap reported, for the host log.
     pub fault: Option<String>,
     /// Effects the script started since the host last took them.
@@ -149,6 +208,9 @@ pub struct ScriptBrain {
     /// Attack slots the script applied to Sora directly (`attack_strike`),
     /// for the host's hit resolution to take.
     pub strikes: Vec<usize>,
+    /// Attack slots the script's objects applied to the enemy's stand-in
+    /// directly (Chicken Little's fireworks), with their ATKP ids and serials.
+    pub enemy_strikes: Vec<(usize, [i32; 2], u64)>,
 }
 
 pub(super) fn script_payload(source: &ProbeSource, model: &str) -> Result<Vec<u8>, String> {
@@ -188,6 +250,7 @@ impl ScriptBrain {
             spawn: position,
             player: position,
             player_yaw: 0.,
+            facts: HostFacts::default(),
             fault: None,
             effects: Vec::new(),
             voices: Vec::new(),
@@ -196,6 +259,7 @@ impl ScriptBrain {
             services: Default::default(),
             reported: Default::default(),
             strikes: Vec::new(),
+            enemy_strikes: Vec::new(),
         };
         brain.build(position, yaw, stats, sstm, &mut ScriptRandom::default())?;
         Ok(brain)
@@ -220,6 +284,7 @@ impl ScriptBrain {
             clips: &self.clips,
             player: self.player,
             player_yaw: self.player_yaw,
+            facts: self.facts,
         };
         self.object = Object::spawn(&mut self.world, &env, 0, &self.payload, sys)
             .map_err(|e| format!("object script rejected: {e:?}"))?;
@@ -235,8 +300,19 @@ impl ScriptBrain {
             clips: &self.clips,
             player,
             player_yaw: self.player_yaw,
+            facts: self.facts,
         };
         self.object.tick(&mut self.world, &env);
+        // The objects the script made (and the enemy's stand-in). The
+        // host's own object stays reachable to them meanwhile (the made
+        // objects of a summon read and drive their maker).
+        let id = self.object.id;
+        let me = std::mem::replace(&mut self.object, enemy::world::Object::bare(id));
+        self.world.held.push(Box::new(me));
+        self.world.tick_objects(&env, None);
+        if let Some(k) = self.world.held.iter().rposition(|o| o.id == id) {
+            self.object = *self.world.held.remove(k);
+        }
         self.world.tick_attacks(&env);
         self.world.deliver_shouts(&env, Some(&mut self.object));
         self.world.follow_attachments(&env, Some(&mut self.object));
@@ -263,10 +339,16 @@ impl ScriptBrain {
             clips: &self.clips,
             player: self.player,
             player_yaw: self.player_yaw,
+            facts: self.facts,
         };
         self.object
             .attack_struck(&mut self.world, &env, slot, PLAYER_OBJECT);
         self.record_faults();
+    }
+
+    /// The attacks the script's objects applied to the enemy directly.
+    pub fn take_enemy_strikes(&mut self) -> Vec<(usize, [i32; 2], u64)> {
+        std::mem::take(&mut self.enemy_strikes)
     }
 
     /// The attacks the script applied to Sora directly, with their parameter
@@ -289,6 +371,7 @@ impl ScriptBrain {
             clips: &self.clips,
             player: self.player,
             player_yaw: self.player_yaw,
+            facts: self.facts,
         };
         self.object
             .attack_reflected(&mut self.world, &env, slot, PLAYER_OBJECT);
@@ -360,6 +443,13 @@ impl ScriptBrain {
                     target: Some(PLAYER_OBJECT),
                     ..
                 } => self.strikes.push(slot),
+                Event::AttackStrike {
+                    slot,
+                    target: Some(ENEMY),
+                    param,
+                    serial,
+                    ..
+                } => self.enemy_strikes.push((slot, param, serial)),
                 Event::MagicStart { .. } => {
                     self.unsupported.insert("magic_start_thread");
                 }
@@ -391,6 +481,16 @@ impl ScriptBrain {
         if self.fault.is_none() {
             if let Some((word, fault)) = self.object.script.faults.first() {
                 self.fault = Some(format!("script fault at word {word}: {fault:?}"));
+            } else if let Some((entry, (word, fault))) = self
+                .world
+                .objects
+                .iter()
+                .flatten()
+                .find_map(|o| o.script.faults.first().map(|f| (o.sys.entry_id, f)))
+            {
+                self.fault = Some(format!(
+                    "made object {entry:#x}: script fault at word {word}: {fault:?}"
+                ));
             } else if let Some((table, index)) = self.world.missing.first() {
                 self.fault = Some(format!("trap {table}:{index} has no translation"));
             }
@@ -420,6 +520,20 @@ impl ScriptBrain {
             .unwrap_or_default()
     }
 
+    /// The summon's friend state for the host log: band, speed, walk, run,
+    /// target, flags.
+    pub fn friend_state(&self) -> Option<(usize, f32, f32, f32, u32, u32)> {
+        let f = self.object.friend.as_deref()?;
+        Some((
+            f.band,
+            self.object.sys.move_speed,
+            f.walk,
+            f.run,
+            self.object.sys.target.id,
+            f.flags,
+        ))
+    }
+
     /// The traps the script called that have no translation, once each.
     pub fn missing_traps(&self) -> Vec<(u16, u16)> {
         let mut m = self.world.missing.clone();
@@ -441,6 +555,14 @@ impl ScriptBrain {
     }
     pub fn record_mut(&mut self) -> &mut combat::HitRecord {
         &mut self.object.sys.record
+    }
+    /// The motion's control word (+0x18c).
+    pub fn motion_flags(&self) -> u32 {
+        self.object.sys.motion.flags.word
+    }
+    /// The physics mode word (`SysObj::mode_flags`).
+    pub fn mode_flags(&self) -> u32 {
+        self.object.sys.mode_flags()
     }
     pub fn motion(&self) -> usize {
         self.object.sys.motion.slot
@@ -481,6 +603,7 @@ impl ScriptBrain {
             clips: &self.clips,
             player: self.player,
             player_yaw: self.player_yaw,
+            facts: self.facts,
         };
         let damage = self.object.take_hit(
             &mut self.world,
@@ -501,6 +624,7 @@ impl ScriptBrain {
             clips: &self.clips,
             player: self.player,
             player_yaw: self.player_yaw,
+            facts: self.facts,
         };
         self.object.reflect(&mut self.world, &env, motion, back);
         self.record_faults();
@@ -509,11 +633,89 @@ impl ScriptBrain {
     /// FUN_1403de610's summon: +0x6c8 |= 0x400000 (`sysobj_is_summon`),
     /// not of the enemy class, on Sora's team [I: the team follows the
     /// object type in the constructor FUN_1401b06e0, not traced].
-    pub fn make_summon(&mut self) {
+    pub fn make_summon(&mut self, entry: u32, friend: Option<enemy::friend::Friend>) {
         use enemy::sysobj::class_flag;
         let s = &mut self.object.sys;
+        // The objentry id `obj_search_by_entry` matches (+0x6c4's entry);
+        // Chicken Little's fireworks find him by it.
+        s.entry_id = entry;
         s.class_flags = s.class_flags & !class_flag::ENEMY | class_flag::SUMMON;
         s.team = SORA_TEAM as i32;
+        self.object.friend = friend.map(Box::new);
+    }
+
+    /// FUN_1401b56e0 mode 1: Sora began attack `attack` at `target` (the
+    /// enemy's stand-in, or nothing).
+    pub fn note_player_attack(&mut self, attack: u32, target: Option<u32>) {
+        enemy::friend::note_player_attack(
+            &mut self.world,
+            Some(&mut self.object),
+            attack,
+            target.unwrap_or(0),
+        );
+    }
+
+    /// FUN_1401b5d60: Sora's attack now (his +0x180), once a frame.
+    pub fn age_player_notify(&mut self, current: Option<u32>) {
+        enemy::friend::age_player_notify(&mut self.world, current);
+    }
+
+    /// FUN_1401b56e0 mode 0: Sora was hit by `attacker`; it joins his
+    /// attacker list (once, at most 8, the oldest dropped).
+    pub fn note_player_attacker(&mut self, attacker: u32) {
+        let list = &mut self.world.player_attackers;
+        list.retain(|&o| o != attacker);
+        if list.len() == 8 {
+            list.remove(0);
+        }
+        list.push(attacker);
+    }
+
+    /// The host builds the objects `sysobj_appear` asks for.
+    pub fn set_spawner(&mut self, spawner: Box<dyn enemy::world::Spawner>) {
+        self.world.spawner = Some(spawner);
+    }
+
+    /// An attack of the script struck `target` (the enemy's stand-in): its
+    /// hit callback runs (FUN_1403d1730).
+    pub fn mark_attack_hit_on(&mut self, slot: usize, target: u32) {
+        let env = BrainEnv {
+            room: None,
+            clips: &self.clips,
+            player: self.player,
+            player_yaw: self.player_yaw,
+            facts: self.facts,
+        };
+        self.object
+            .attack_struck(&mut self.world, &env, slot, target);
+        self.record_faults();
+    }
+
+    /// The owner object of an attack the script placed.
+    pub fn attack_owner(&self, slot: usize) -> Option<u32> {
+        self.world.attacks.get(slot)?.as_ref()?.owner
+    }
+
+    /// The room's enemy as a stand-in in this script's world (an enemy-class
+    /// object at [`ENEMY`], team 2), kept at its place; `None` leaves it at
+    /// 0 HP (the slot stays the stand-in's).
+    pub fn set_enemy(&mut self, at: Option<Vec3>) {
+        use enemy::sysobj::class_flag;
+        let slots = &mut self.world.objects;
+        if slots.len() <= ENEMY as usize {
+            slots.resize_with(ENEMY as usize + 1, || None);
+        }
+        let o = slots[ENEMY as usize].get_or_insert_with(|| {
+            let mut o = Object::bare(ENEMY);
+            o.sys.class_flags |= class_flag::ENEMY;
+            o.sys.team = 2;
+            o.sys.model = u32::MAX;
+            Box::new(o)
+        });
+        o.sys.hp = at.is_some() as i32;
+        if let Some(p) = at {
+            o.sys.position = p;
+        }
     }
 
     /// Start the named act (FUN_1403cac50 / FUN_1403cae60): the running act
@@ -524,6 +726,7 @@ impl ScriptBrain {
             clips: &self.clips,
             player: self.player,
             player_yaw: self.player_yaw,
+            facts: self.facts,
         };
         let actions = self.object.acts.start(name);
         self.object
@@ -542,6 +745,7 @@ impl ScriptBrain {
             clips: &self.clips,
             player: self.player,
             player_yaw: self.player_yaw,
+            facts: self.facts,
         };
         let actions = self.object.acts.start(b"dead");
         self.object

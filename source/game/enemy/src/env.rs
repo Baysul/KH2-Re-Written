@@ -250,6 +250,35 @@ pub trait Env {
     fn area_world(&self) -> i32 {
         0
     }
+    /// The battle flag (`DAT_142a11404` != 0, FUN_1403abb20).
+    fn battle(&self) -> bool {
+        false
+    }
+    /// Peter Pan is out with Tinker Bell (FUN_1403de320: summon state set,
+    /// summon 0x132, `DAT_1409acdd7`).
+    fn summon_with_tink(&self) -> bool {
+        false
+    }
+    /// The running event's time left (FUN_1403ac190, an event in mode 8).
+    fn event_rest_time(&self) -> f32 {
+        0.
+    }
+    /// The command of the running limit (FUN_1403d89f0), 0 for none.
+    fn limit_command(&self) -> u16 {
+        0
+    }
+    /// Sora's velocity (+0xa38).
+    fn player_velocity(&self) -> Vec3 {
+        [0.; 3]
+    }
+    /// Sora's sheet HP and maximum HP.
+    fn player_hp(&self) -> Option<(i32, i32)> {
+        None
+    }
+    /// Sora's sheet +0x1b4: the form or summon time left.
+    fn drive_time(&self) -> f32 {
+        0.
+    }
     /// A game progress flag (FUN_14039a980).
     fn progress_flag(&self, _flag: u32) -> bool {
         false

@@ -194,3 +194,29 @@ fn enemy_each_walks_only_the_enemy_class() {
     assert_eq!(crate::world::object_from_handle(first.value), Some(1));
     assert_eq!(call(&mut world, &mut me, &mut f, each, &[first]).value, 0);
 }
+
+#[test]
+fn the_shadow_and_peter_pan_drain_bits_and_the_battle_and_tink_queries() {
+    let (mut world, mut me, mut f) = setup();
+    for (index, bit) in [(286u16, status::HIDE_SHADOW), (287, 0)] {
+        call(&mut world, &mut me, &mut f, lookup(1, index).unwrap(), &[]);
+        assert_eq!(world.status & status::HIDE_SHADOW, bit);
+    }
+    call(&mut world, &mut me, &mut f, lookup(6, 19).unwrap(), &[]);
+    assert_ne!(world.status & status::PETERPAN_PRIZE_DRAIN, 0);
+    call(&mut world, &mut me, &mut f, lookup(6, 20).unwrap(), &[]);
+    assert_eq!(world.status & status::PETERPAN_PRIZE_DRAIN, 0);
+    // NullEnv: no battle, no Tinker Bell, no event.
+    for (table, index) in [(1u16, 244u16), (2, 75)] {
+        let r = call(
+            &mut world,
+            &mut me,
+            &mut f,
+            lookup(table, index).unwrap(),
+            &[],
+        );
+        assert_eq!(r.as_int(), 0);
+    }
+    let r = call(&mut world, &mut me, &mut f, lookup(1, 274).unwrap(), &[]);
+    assert_eq!(r.as_float(), 0.);
+}

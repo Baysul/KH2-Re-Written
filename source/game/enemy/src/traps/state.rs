@@ -4,7 +4,7 @@
 use super::math::{read_native, read_sanitized};
 use crate::script::{Fault, Memory, Slot};
 use crate::sysobj::Vec3;
-use crate::world::{Ctx, Event, TrapFn, object_handle};
+use crate::world::{Ctx, Event, Object, TrapFn, object_handle};
 
 type Args = [Slot; 16];
 
@@ -528,7 +528,14 @@ unsupported_vector_traps! {}
 fn sysobj_appear(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let entry = args[0].value & 0x0fff_ffff;
     let me = ctx.me.id;
+    // The maker stays in the engine's list while the new object's OBJ_INIT
+    // runs (Chicken Little's fireworks search for him by entry).
+    let maker = std::mem::replace(ctx.me, Object::bare(me));
+    ctx.world.held.push(Box::new(maker));
     let id = ctx.world.appear(ctx.env, me, entry);
+    if let Some(k) = ctx.world.held.iter().rposition(|o| o.id == me) {
+        *ctx.me = *ctx.world.held.remove(k);
+    }
     if id.is_none() {
         ctx.world.events.push(Event::Unsupported("sysobj_appear"));
     }

@@ -128,3 +128,35 @@ fn nearest_target_kinds_pick_the_closest_enemy_and_prefer_flagged_ones() {
     ctx.world.objects[2].as_mut().unwrap().sys.state_flags |= state_flag::DEAD_MARKED;
     assert_eq!(search(&mut ctx, 3, 1).unwrap().id, 0);
 }
+
+#[test]
+fn only_an_enemy_class_object_falls_back_to_sora_for_an_empty_record() {
+    let mut world = world_with(&[0., 10.]);
+    let mut f = frame();
+    let mut me = Object::bare(0);
+    if let Some(o) = world.objects[1].as_deref_mut() {
+        o.sys.class_flags |= class_flag::ENEMY;
+    }
+    if let Some(o) = world.objects[2].as_deref_mut() {
+        o.sys.class_flags = class_flag::SUMMON;
+    }
+    let enemy = ai_object(&mut f, 0, 1);
+    call(
+        &mut world,
+        &mut me,
+        &mut f,
+        btlobj_target,
+        &[Slot::address(enemy)],
+    );
+    let summon = ai_object(&mut f, 16, 2);
+    call(
+        &mut world,
+        &mut me,
+        &mut f,
+        btlobj_target,
+        &[Slot::address(summon)],
+    );
+    let id = |w: &World, k: usize| w.objects[k].as_ref().unwrap().sys.target.id;
+    assert_eq!(id(&world, 1), PLAYER_TARGET);
+    assert_eq!(id(&world, 2), 0);
+}

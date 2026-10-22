@@ -160,6 +160,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // LIMIT_PROBE_SCRIPT=<model> with LIMIT_PROBE_SCRIPT_OUT=<file>: the
+    // model's object script (BAR type 3), for private listing.
+    if let (Ok(model), Some(out)) = (
+        std::env::var("LIMIT_PROBE_SCRIPT"),
+        std::env::var_os("LIMIT_PROBE_SCRIPT_OUT"),
+    ) {
+        let bytes = library.read(&format!("obj/{model}.mdlx"))?;
+        let bar = data::bar::read_bar(&bytes)?;
+        if let Some(e) = bar
+            .entries
+            .iter()
+            .find(|e| e.entry_type == 3 && e.size != 0)
+        {
+            let at = e.offset as usize;
+            std::fs::write(out, &bytes[at..at + e.size as usize])?;
+        }
+    }
     // LIMIT_PROBE_OBJ=<hex objentry id>: that object's model and motion names.
     if let Ok(id) = std::env::var("LIMIT_PROBE_OBJ")
         && let Ok(id) = u32::from_str_radix(id.trim_start_matches("0x"), 16)

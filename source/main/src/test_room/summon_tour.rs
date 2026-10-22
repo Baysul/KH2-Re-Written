@@ -2,7 +2,10 @@
 //! stands still, the Shadow is frozen nearby). Each summon of `sumn` in
 //! turn is asked for as the Summon list's pick would, with a full Drive
 //! gauge [tour setup]; the first three are dismissed from the second deck's
-//! Dismiss row, the last runs out of time. The tour owns the four charms.
+//! Dismiss row, the last runs out of time. Between the deck swaps Sora
+//! attacks (Attack, the top row) so that the summons that answer Sora's
+//! attacks (Peter Pan, Genie) have something to answer. The tour owns the
+//! four charms.
 use visual::field_command_menu::Buttons;
 
 /// The first summon's tick and the ticks between summons.
@@ -29,10 +32,31 @@ pub fn dismiss(tick: u64) -> bool {
         .is_some_and(|k| k.is_multiple_of(STEP) && k / STEP < SUMMONS as u64 - 1)
 }
 
-/// Left on the second deck around the first Dismiss.
+/// Ticks after a call when Sora attacks, every `ATTACK_EVERY` ticks: after
+/// the summon has come and before the deck swap, then after the swap back
+/// (the last summon, never dismissed, to near its end).
+const ATTACKS: [std::ops::Range<u64>; 2] = [300..600, 1050..1350];
+const LAST_ATTACKS: std::ops::Range<u64> = 1050..2400;
+const ATTACK_EVERY: u64 = 20;
+
+fn attack(tick: u64) -> bool {
+    let Some(k) = tick.checked_sub(FIRST) else {
+        return false;
+    };
+    let n = (k / STEP).min(SUMMONS as u64 - 1);
+    let t = k - n * STEP;
+    let last = n == SUMMONS as u64 - 1;
+    t.is_multiple_of(ATTACK_EVERY)
+        && (ATTACKS[0].contains(&t)
+            || (!last && ATTACKS[1].contains(&t))
+            || (last && LAST_ATTACKS.contains(&t)))
+}
+
+/// Left on the second deck around the first Dismiss; Attack between.
 pub fn press(tick: u64) -> Buttons {
     Buttons {
         left: tick == FIRST + SHOW_DECK || tick == FIRST + HIDE_DECK,
+        decide: attack(tick),
         ..Buttons::default()
     }
 }
@@ -73,5 +97,13 @@ mod tests {
         assert_eq!((0..end()).filter(|&t| dismiss(t)).count(), SUMMONS - 1);
         assert!(captures().iter().all(|&c| c < end()));
         assert!(press(FIRST + SHOW_DECK).left && !press(FIRST).left);
+        // No Attack near a deck swap or a Dismiss.
+        for k in 0..SUMMONS as u64 {
+            let s = FIRST + k * STEP;
+            for t in [SHOW_DECK, DISMISS, HIDE_DECK] {
+                assert!((s + t - 30..s + t + 30).all(|x| !press(x).decide));
+            }
+        }
+        assert!(press(FIRST + 300).decide && press(FIRST + 3 * STEP + 2000).decide);
     }
 }

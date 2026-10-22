@@ -25,6 +25,7 @@ use super::{
 };
 use bevy::prelude::*;
 use data::objentry;
+use enemy::friend::{Friend, Personality};
 use player::{World, actor_physics, combat, shadow::ScriptRandom};
 use std::sync::Arc;
 use visual::area_fog::FogMaterial;
@@ -81,6 +82,11 @@ pub struct Actor {
     fading: bool,
     /// Faults already logged.
     faults: std::collections::BTreeSet<String>,
+    last_sora: Option<[f32; 3]>,
+    sora_hp: Option<i32>,
+    /// Sora's attack action last tick and the attacks noted so far.
+    last_attack: Option<player::Action>,
+    attack_serial: u32,
 }
 
 impl Actor {
@@ -94,6 +100,14 @@ impl Actor {
     /// summon class's removal (FUN_1403dd850 clears DAT_142a24ee8 and the
     /// summon state) runs from the kn::Friend update, which is not traced;
     /// the act `leave` ends in `sysobj_fadeout` and a wait.
+    /// Sora's position last frame (his velocity, +0xa38).
+    fn sora_velocity(&mut self, now: [f32; 3]) -> [f32; 3] {
+        let v = self
+            .last_sora
+            .map_or([0.; 3], |p| [0, 1, 2].map(|k| now[k] - p[k]));
+        self.last_sora = Some(now);
+        v
+    }
     pub fn gone(&self) -> bool {
         self.brain.gone() || self.fading && self.brain.fade().0 <= 0.
     }
@@ -282,6 +296,46 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>) {
     }
     if let Some(a) = s.actor.as_mut() {
         a.brain.player_yaw = game.player.yaw;
+        let velocity = a.sora_velocity(game.player.position);
+        a.brain.facts = super::enemy_script::HostFacts {
+            battle: super::second_deck::battle(game),
+            drive_time: game.player.drive.time,
+            // FUN_1403de460 sets DAT_1409acdd7 for Peter Pan (0x132).
+            tink: s.command == 0x132,
+            player_hp: game
+                .enemy
+                .as_ref()
+                .map(|rt| (rt.sora_hp, rt.sora_target.max_hp)),
+            player_velocity: velocity,
+            enemy_radius: super::party_limit::room_enemy_radius(game).unwrap_or(0.),
+        };
+        let enemy = super::party_limit::room_enemy(game);
+        a.brain.set_enemy(enemy);
+        // Sora's attacks notify the friends (FUN_1401b56e0 mode 1); each
+        // attack step is a new +0x180 [I: one per Attack/AirAttack action
+        // change; it aims at the room's enemy while one is there].
+        let action = game.player.action;
+        let attacking = matches!(
+            action,
+            player::Action::Attack(_) | player::Action::AirAttack(_)
+        );
+        if attacking && a.last_attack != Some(action) {
+            a.attack_serial += 1;
+            a.brain
+                .note_player_attack(a.attack_serial, enemy.map(|_| super::enemy_script::ENEMY));
+        }
+        a.last_attack = attacking.then_some(action);
+        a.brain
+            .age_player_notify(attacking.then_some(a.attack_serial));
+        // [I] A drop in Sora's HP while the room's enemy is there is its hit.
+        let hp = game.enemy.as_ref().map(|rt| rt.sora_hp);
+        if let (Some(now), Some(before)) = (hp, a.sora_hp)
+            && now < before
+            && enemy.is_some()
+        {
+            a.brain.note_player_attacker(super::enemy_script::ENEMY);
+        }
+        a.sora_hp = hp;
         a.brain.tick(&game.world, game.player.position, &mut a.rng);
         let blending = a.brain.blend() > 0.;
         match a
@@ -314,10 +368,16 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>) {
             a.fading = true;
         }
         let trace = a.brain.take_trace();
-        if !trace.is_empty() && (s.state == state::LEAVING || tick.is_multiple_of(30)) {
+        if !trace.is_empty() {
             let calls: Vec<String> = trace.iter().map(|(t, i)| format!("{t}:{i}")).collect();
-            game.event(serde_json::json!({"event":"summon_trace","tick":tick,"state":s.state,"calls":calls}));
+            game.event(
+                serde_json::json!({"event":"summon_trace","tick":tick,"state":s.state,"calls":calls,
+                "y":a.brain.position()[1],"mode":a.brain.mode_flags(),"motion":a.brain.motion(),
+                "frame":a.brain.elapsed(),
+                "target":a.brain.friend_state().map(|f| f.4)}),
+            );
         }
+        land_attacks(game, a, tick);
         let reports = a.brain.take_reports();
         if !reports.unsupported.is_empty() || !reports.services.is_empty() {
             game.event(
@@ -343,7 +403,8 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>) {
             game.event(
                 serde_json::json!({"event":"summon_tick","tick":tick,"state":s.state,
                 "position":a.brain.position(),"motion":motion,"act":act,"time":time,
-                "missing":missing,"fade":a.brain.fade().0}),
+                "missing":missing,"fade":a.brain.fade().0,"friend":a.brain.friend_state(),
+                "control":a.brain.motion_flags(),"sora":game.player.position}),
             );
         }
     }
@@ -406,11 +467,28 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         sstm,
         clips.clone(),
     )?;
-    brain.make_summon();
+    let friend = Personality::of_character(object.character).map(|p| {
+        let (walk, run) = prty_speeds(&mut library, object.neo_moveset).unwrap_or((2., 8.));
+        Friend::new(p, walk, run)
+    });
+    brain.make_summon(object.object_id, friend);
     if std::env::var_os("KH2_SUMMON_TRACE").is_some() {
         brain.trace();
     }
     brain.player_yaw = game.player.yaw;
+    brain.set_spawner(Box::new(Spawner {
+        source: source.clone(),
+        models: objects
+            .iter()
+            .map(|o| {
+                (
+                    o.object_id,
+                    String::from_utf8_lossy(&o.model_name).into_owned(),
+                )
+            })
+            .collect(),
+        scripts: Default::default(),
+    }));
     brain.start_act(b"appear_skip");
     Ok(Actor {
         pose: Vec::new(),
@@ -422,7 +500,125 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         reported: false,
         fading: false,
         faults: Default::default(),
+        last_sora: None,
+        sora_hp: None,
+        last_attack: None,
+        attack_serial: 0,
     })
+}
+
+/// +0x128 / +0x12c: walk and run speed, PRTY words 0 and 1 of the record
+/// objentry +0x4e names (FUN_1403d5840 keeps it at +0xd50) [I: as the party
+/// members' read].
+fn prty_speeds(library: &mut data::path_lookup::Library, moveset: u16) -> Option<(f32, f32)> {
+    let system = library.read("03system.bin").ok()?;
+    let pref = super::bar_entry(&system, b"pref").ok()?;
+    let prty = data::party_records::read_prty(super::bar_entry(pref, b"prty").ok()?).ok()?;
+    let offset = actor_physics::prty_offset(&prty.offsets, moveset as i16 as i32)?;
+    let r = prty
+        .records
+        .iter()
+        .find(|r| r.offset == offset && !r.overlaps_table)?;
+    Some((
+        f32::from_bits(*r.words.first()?),
+        f32::from_bits(*r.words.get(1)?),
+    ))
+}
+
+/// The host side of the summon's `sysobj_appear` (FUN_1403df930): the
+/// entry's model script, a bare object otherwise. [Open] The made objects'
+/// models are not drawn.
+struct Spawner {
+    source: Arc<data::probe_source::ProbeSource>,
+    models: std::collections::HashMap<u32, String>,
+    scripts: std::collections::HashMap<u32, Option<Vec<u8>>>,
+}
+
+impl enemy::world::Spawner for Spawner {
+    fn appear(&mut self, request: &enemy::world::AppearRequest) -> Option<enemy::world::Appeared> {
+        let entry = request.entry & 0x0fff_ffff;
+        let payload = self
+            .scripts
+            .entry(entry)
+            .or_insert_with(|| {
+                let model = self.models.get(&entry)?;
+                super::enemy_script::script_payload(&self.source, model).ok()
+            })
+            .clone();
+        let mut sys = enemy::sysobj::Sysobj::bare();
+        sys.appear_way = 2;
+        sys.model = entry;
+        Some(enemy::world::Appeared { payload, sys })
+    }
+}
+
+/// The summon's attack objects (its own and its made objects') land on
+/// the room's enemy (FUN_1403cf830 hit tests through `party_room`).
+/// [I] With the attacker's stats Sora's: the summon sheet's are not traced.
+fn land_attacks(game: &mut Game, a: &mut Actor, tick: u64) {
+    let strikes = a.brain.take_enemy_strikes();
+    let Some(enemy_at) = super::party_limit::room_enemy(game) else {
+        return;
+    };
+    // A direct strike (`attack_strike`, 2:17) lands where the enemy stands.
+    let struck =
+        strikes.into_iter().map(
+            |(slot, [id, extra], serial)| super::enemy_script::ScriptAttack {
+                slot,
+                id,
+                extra,
+                serial,
+                position: enemy_at,
+                previous: None,
+                radius: 1.,
+                hits_sora: false,
+            },
+        );
+    let volumes: Vec<_> = a
+        .brain
+        .attacks()
+        .into_iter()
+        .filter(|x| !x.hits_sora)
+        .chain(struck)
+        .collect();
+    for at in volumes {
+        let Some(rt) = game.enemy.as_mut() else {
+            return;
+        };
+        let key = 1 << 59 | 1 << 57 | at.serial;
+        let v = player::magic::Volume {
+            key,
+            atkp: at.id as u16,
+            sub: at.extra as u8,
+            centre: at.position,
+            radius: at.radius,
+            height: at.radius,
+            previous: at.previous,
+            moving: None,
+            role: player::magic::Role::Damage,
+        };
+        let yaw = a.brain.yaw();
+        let facing = bevy::math::Vec3::new(yaw.sin(), 0., yaw.cos());
+        let stats = rt.sora;
+        let landed = super::party_room::land_volume(
+            rt,
+            usize::MAX,
+            "summon",
+            &stats,
+            &v,
+            key,
+            facing,
+            tick,
+            &mut game.sound_queue,
+            &mut game.log,
+        );
+        if landed.is_some() {
+            a.brain
+                .mark_attack_hit_on(at.slot, super::enemy_script::ENEMY);
+            game.event(serde_json::json!({"event":"summon_hit","tick":tick,
+                "atkp":at.id,"owner":a.brain.attack_owner(at.slot)}));
+        }
+    }
 }
 
 /// FUN_140400440: the members come back; the summon state clears.

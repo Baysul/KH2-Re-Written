@@ -341,8 +341,35 @@ impl Object {
     pub fn tick(&mut self, world: &mut World, env: &dyn Env) {
         self.sys.begin_tick(env);
         self.carry_out_motion_effects(world, env);
+        // FUN_1401b15f0: a friend's think runs before its acts (FUN_1403b4f80),
+        // so a script's movement request has the last word.
+        self.tick_friend(world, env);
         self.tick_script(world, env);
         self.sys.end_tick(env);
+    }
+
+    /// A summon's kn::Friend update (FUN_1401b15f0): the think, then what
+    /// it asked for: a script label (FUN_1403caa90) or a command for the
+    /// host (FUN_1401b7d90).
+    fn tick_friend(&mut self, world: &mut World, env: &dyn Env) {
+        if self.friend.is_none() || self.sys.gone {
+            return;
+        }
+        let id = self.id;
+        let requests = crate::friend::tick(world, id, self, env);
+        if let Some(label) = requests.label {
+            let actions = self.acts.start_if_not_outranked(label);
+            self.apply_actions(Some((world, env)), actions);
+        }
+        if let Some((index, target)) = requests.command {
+            world.events.push(Event::Service {
+                name: "friend_use_command",
+                object: Some(id),
+                other: Some(target),
+                words: [index, 0, 0, 0, 0, 0, 0, 0],
+                vector: None,
+            });
+        }
     }
 
     /// What the motion events asked for: take-off, and the script triggers

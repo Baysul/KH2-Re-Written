@@ -937,6 +937,7 @@ impl Sysobj {
                 ]
             };
             self.apply_movement(wished, env);
+            self.leave_ground(clips, env);
         }
         // FUN_1403b89a0 adds the frame's move request (`obj_move_request`,
         // +0xa58 direction, +0xa64 speed) times the frame time, then clears
@@ -1325,6 +1326,36 @@ impl Sysobj {
     /// +0x18c bit 9: the playing clip holds the actor out of control.
     pub fn no_control(&self) -> bool {
         self.motion.flags.word & motion::flag::NO_CONTROL != 0
+    }
+
+    /// FUN_1403b9090's leave-ground branch for the ground mode: an object
+    /// off the floor that is not rising while FUN_1403ba1e0 holds (range
+    /// 0x1e or +0x120 bit 23, without range 3) gets script event 0xe and
+    /// its class's leave handler. Every class wrapper ends in FUN_1403b7850:
+    /// the mode's slot 4 with height 0 (FUN_140409b00 -> FUN_1403cbc30: no
+    /// vertical speed, no fall motion, motion 5 on landing; mode 1). The
+    /// summon class (FUN_1403d6430) first changes to motion 4 over 16
+    /// frames unless +0x194 bit 4. [I] The collision-enabled test
+    /// (FUN_1403ba940) is taken as true; "on the floor" is within one unit
+    /// of the floor under the object; event 0xe is not sent.
+    fn leave_ground(&mut self, clips: &dyn Clips, env: &dyn Env) {
+        let w = self.motion.flags.word;
+        let held = (w & motion::flag::GRAVITY_FROZEN_2 != 0 || self.flags >> 23 & 1 != 0)
+            && w & motion::flag::GRAVITY_FROZEN == 0;
+        if !held || self.wished[1] > 0. {
+            return;
+        }
+        let [x, y, z] = self.position;
+        if env.floor(x, z, y + 1.).is_some_and(|f| y - f <= 1.) {
+            return;
+        }
+        if self.class_flags & class_flag::SUMMON != 0 && self.motion.flags.word3 & 0x10 == 0 {
+            self.motion_change(4, 16., clips);
+        }
+        self.jump_motions = JumpMotions::default();
+        self.start_fall(0.);
+        self.state_flags &= !state_flag::GROUND_ARMED;
+        self.flags |= 0x400_0000;
     }
 
     /// Physics mode entry for a fall (FUN_1403b8150): the parabola continues
