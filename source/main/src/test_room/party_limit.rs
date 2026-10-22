@@ -96,17 +96,24 @@ pub fn load(
     let mut out = LimitSource::default();
     let mut names: Vec<String> = Vec::new();
     for row in second_deck::read_limits(limt) {
+        // A summon's row (second participant 200-204) has a file of sheets
+        // only: its program is the summon's own script (FUN_1403d7fa0).
         let summon = row.members[1].wrapping_add(0x38) < 5;
         let party = row.members.iter().all(|&m| m <= 3);
         let name = row.file_name();
-        if summon || !party || row.ability == 0 || row.world != 0 || names.contains(&name) {
+        if !(summon || party) || row.ability == 0 || row.world != 0 || names.contains(&name) {
             continue;
         }
         let path = format!("limit/{language}/{name}");
+        let read = if summon {
+            limit_file::read_summon
+        } else {
+            limit_file::read
+        };
         let file = match library
             .read(&path)
             .map_err(|e| e.to_string())
-            .and_then(|b| limit_file::read(&b).map_err(|e| e.to_string()))
+            .and_then(|b| read(&b).map_err(|e| e.to_string()))
         {
             Ok(f) => f,
             Err(e) => {

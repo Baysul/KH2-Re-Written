@@ -521,6 +521,15 @@ impl ScriptBrain {
         self.commands = commands;
     }
 
+    /// Hits that landed this tick count toward the limit's combo (+0xc0).
+    pub fn count_limit_hits(&mut self, n: i32) {
+        if self.limit.is_some()
+            && let Some(l) = self.world.limit.as_mut()
+        {
+            l.hits += n;
+        }
+    }
+
     /// The limit runs.
     pub fn in_limit(&self) -> bool {
         self.limit.is_some()

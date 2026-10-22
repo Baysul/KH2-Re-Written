@@ -83,6 +83,8 @@ private `kh2-command-deck/bdx`; unattended runs in the private `kh2-command-deck
 - `player_set_exec_rc` (1:263, `FUN_14042fee0` -> `FUN_1403aaa40`): the command Sora runs.
 - 10:29 `friend_use_item` (`FUN_1401b7d90`: a command on a target), 6:36 `obj_detach_camera`
   (`FUN_1403cc3b0`).
+- The summon limit file's `gage` and `comb` sheets draw the LIMIT GAUGE and HIT COMBO counter as
+  a party limit's do (`FUN_1403d96d0`); the summon's landed hits count toward the combo.
 
 ### Round (d): Genie's forms
 

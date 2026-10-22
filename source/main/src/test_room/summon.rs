@@ -266,6 +266,19 @@ pub fn decide(game: &mut Game, tick: u64, record: Option<usize>) {
     }
 }
 
+/// What a running summon limit's HUD shows (FUN_1403d96d0 shows the
+/// file's gauge and combo counter): the file among the room's limits, the
+/// command, the gauge's time and the hits.
+pub fn hud_values(game: &Game) -> Option<(usize, u16, f32, i32)> {
+    let l = game.summon.as_ref()?.actor.as_ref()?.brain.limit_state()?;
+    let k = game
+        .party_limits
+        .limits
+        .iter()
+        .position(|x| x.row.command == l.command)?;
+    Some((k, l.command, l.time, l.hits))
+}
+
 /// Sora as a limit's user (FUN_1403d7fa0 takes him as he stands).
 fn sora_sys(game: &Game) -> enemy::sysobj::Sysobj {
     let mut sora = enemy::sysobj::Sysobj::bare();
@@ -802,6 +815,7 @@ fn land_attacks(game: &mut Game, a: &mut Actor, tick: u64) {
             &mut game.log,
         );
         if landed.is_some() {
+            a.brain.count_limit_hits(1);
             a.brain
                 .mark_attack_hit_on(at.slot, super::enemy_script::ENEMY);
             game.event(serde_json::json!({"event":"summon_hit","tick":tick,

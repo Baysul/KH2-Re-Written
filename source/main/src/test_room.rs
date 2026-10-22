@@ -8499,7 +8499,11 @@ fn hud_tick(
     panels.update(&sheets[0].sequence);
     // A party limit's gauge and combo counter (FUN_1403d96d0 shows them,
     // FUN_1403d8f40 hides them).
-    let values = game.party_limit.as_ref().map(|r| r.hud_values());
+    let values = game
+        .party_limit
+        .as_ref()
+        .map(|r| r.hud_values())
+        .or_else(|| summon::hud_values(&game));
     let Hud {
         limit_hud, slots, ..
     } = &mut *hud;
