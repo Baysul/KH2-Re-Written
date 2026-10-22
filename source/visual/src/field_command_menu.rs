@@ -82,6 +82,24 @@ const REACTION_GROUP: usize = 2;
 /// header, then the row by selector (0 none, 1..4).
 const LIST_HEADER: usize = 8;
 const LIST_ROW: [usize; 5] = [0, 0xa, 0xc, 0xb, 9];
+/// FUN_14015df90's glyph for a list row's selector in deck mode 0xE (0
+/// none): 1 0xdb, 2 and 3 FUN_1402ebe70(0x1000 / 0x8000) = 0xdf / 0xde
+/// (the table at 0x1405ba7e0), 4 0xda.
+const LIST_GLYPH: [Option<u8>; 5] = [None, Some(0xdb), Some(0xdf), Some(0xde), Some(0xda)];
+/// FUN_14015aba0's first pen move for a deck whose sheet mode
+/// (PLAYER_COMMAND +0xab0, FUN_1403b1820) is 3, a limit's `comd`: 0xe2,
+/// x = 0xffe2 = -30.
+const LIST_GLYPH_X: u8 = 0xe2;
+
+/// FUN_14015aba0: a list row's label with its button glyph in front: the
+/// pen to (x, 28), `09 glyph`, the pen to (2, 28), then the message.
+pub fn glyph_label(glyph: u8, label: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x11, LIST_GLYPH_X, 0xff, 0x1c, 0x00, 0x09, glyph];
+    out.extend([0x11, 0x02, 0x00, 0x1c, 0x00]);
+    out.extend_from_slice(label);
+    out
+}
+
 /// The list rows' text colours by colour index (0x140717d50).
 const LIST_TEXT: [u32; 9] = [
     0x80e6e6e6, 0x80646464, 0x8000a7ff, 0x80646464, 0x80646464, 0x80646464, 0x80646464, 0x80e6e6e6,
@@ -748,8 +766,8 @@ impl CommandMenu {
     /// The list path (FUN_14015df90 in deck mode 0xE): the header at
     /// (0x1c, 0x184 - 22n), each row at (0x1c, 0x19a - 22(n - i)) with its
     /// selector's group (0x140718330 + 0x14) and colour (0x140717d50), then
-    /// the reaction slot (FUN_14015d670). [Open] The row label's button
-    /// glyph (FUN_14015aba0: 0x11 codes, FUN_1402ebe70) is not drawn.
+    /// the reaction slot (FUN_14015d670). A row with a selector carries its
+    /// button glyph in front of its label ([`glyph_label`]).
     fn update_list(&mut self, seq: &Sequence, sel: &[u8]) {
         let rows: Vec<Item> = self.rows().to_vec();
         let n = rows.len();
@@ -770,7 +788,11 @@ impl CommandMenu {
             let s = sel.get(i).copied().unwrap_or(0) as usize;
             let group = LIST_ROW.get(s).copied().unwrap_or(0);
             let colour = LIST_TEXT[item.colour.min(8)];
-            self.slot(seq, group, false, [x, y], Some(item.label.clone()), colour);
+            let label = match LIST_GLYPH.get(s).copied().flatten() {
+                Some(g) => glyph_label(g, &item.label),
+                None => item.label.clone(),
+            };
+            self.slot(seq, group, false, [x, y], Some(label), colour);
             y += PITCH;
         }
         if let Some(r) = self.reaction.clone() {
@@ -792,13 +814,15 @@ impl CommandMenu {
     }
 
     /// Draws the root, then each slot: sprite, then its label in the system
-    /// font. `sheet` and `font_sheet` index the canvas textures.
+    /// font. `sheet`, `font_sheet` and `icon_sheet` (the font's 0x09 icon
+    /// plane) index the canvas textures.
     pub fn draw(
         &mut self,
         seq: &Sequence,
         font: &Font,
         sheet: usize,
         font_sheet: usize,
+        icon_sheet: usize,
     ) -> Vec<Draw> {
         let m = Modifiers::default();
         let mut out = vec![Draw::Quads {
@@ -806,21 +830,22 @@ impl CommandMenu {
             z: 0,
             sheet,
         }];
-        draw_slots(&mut self.slots, seq, font, sheet, font_sheet, &mut out);
+        let sheets = [sheet, font_sheet, icon_sheet];
+        draw_slots(&mut self.slots, seq, font, sheets, &mut out);
         if let Some(sub) = self.sub.as_mut() {
-            draw_slots(&mut sub.slots, seq, font, sheet, font_sheet, &mut out);
+            draw_slots(&mut sub.slots, seq, font, sheets, &mut out);
         }
         out
     }
 }
 
-/// Draws one level's slots in creation order: sprite, then label.
+/// Draws one level's slots in creation order: sprite, then label (glyphs,
+/// then icons). `sheets`: the menu's, the font's and its icon plane's.
 fn draw_slots(
     slots: &mut [Slot],
     seq: &Sequence,
     font: &Font,
-    sheet: usize,
-    font_sheet: usize,
+    [sheet, font_sheet, icon_sheet]: [usize; 3],
     out: &mut Vec<Draw>,
 ) {
     let m = Modifiers::default();
@@ -857,11 +882,19 @@ fn draw_slots(
                 X_ORIGIN + base[0] + s.context[0] + TEXT_OFFSET[0],
                 base[1] + s.context[1] + TEXT_OFFSET[1],
             ];
+            let (glyphs, icons) = label_quads(text, origin, rgba, font, TEXT_SIZE);
             out.push(Draw::Quads {
-                quads: text_quads(text, origin, rgba, font),
+                quads: glyphs,
                 z: 0,
                 sheet: font_sheet,
             });
+            if !icons.is_empty() {
+                out.push(Draw::Quads {
+                    quads: icons,
+                    z: 0,
+                    sheet: icon_sheet,
+                });
+            }
         }
     }
 }
@@ -900,17 +933,75 @@ pub fn text_quads_sized(
     font: &Font,
     size: f32,
 ) -> Vec<Quad> {
+    label_quads(text, origin, rgba, font, size).0
+}
+
+/// Glyph and icon quads of a system-font string. Control codes take their
+/// parameters (FUN_1403b0280's lengths); 0x11 moves the pen to x from the
+/// origin (y: the line's own baseline [I]); 0x09 draws an icon as the text
+/// routines do (FUN_1403af9e0, [`crate::sprite_player::text_quads`]): a
+/// square of trunc(28k) - 4 px, 2 px right of the pen, its bottom at the
+/// baseline + 4k - 1, at the text alpha.
+pub fn label_quads(
+    text: &[u8],
+    origin: [f32; 2],
+    rgba: [f32; 4],
+    font: &Font,
+    size: f32,
+) -> (Vec<Quad>, Vec<Quad>) {
+    use crate::sprite_player::{icon_width, keyboard_prompt, prompt_icon};
     let scale = size / FONT_REFERENCE;
+    let (w, h) = (CELL[0] * scale, CELL[1] * scale);
+    let qh = ((CELL[1] * 16. * scale) as i32) as f32 / 16.;
+    let baseline16 = (origin[1] - 2. + qh) * 16.;
     let mut x = origin[0];
-    let mut out = Vec::new();
-    for &byte in text {
+    let mut glyphs = Vec::new();
+    let mut icons = Vec::new();
+    let mut i = 0;
+    while i < text.len() {
+        let byte = text[i];
         if byte == 0x01 {
             x += ((CELL[0] / 3.) as f64 * scale as f64 + 0.5).floor() as f32;
+            i += 1;
             continue;
         }
         if byte < 0x20 {
+            let n = crate::dialogue::code_length(byte).max(1);
+            let p = text.get(i + 1..i + n).unwrap_or(&[]);
+            match (byte, p) {
+                (0x11, &[x0, x1, ..]) => {
+                    x = origin[0] + f32::from(i16::from_le_bytes([x0, x1]));
+                }
+                (0x09, &[raw]) => {
+                    let cells: Vec<u8> = match keyboard_prompt(raw) {
+                        Some(cells) if font.pad == 0 => cells.to_vec(),
+                        _ => vec![prompt_icon(raw, font.pad.max(1))],
+                    };
+                    for icon in cells {
+                        let side = ((28. * scale) as i32 - 4) as f32;
+                        let bottom = ((scale * 64. + baseline16) as i32 - 16) as f32 / 16.;
+                        let left = x + 2.;
+                        let (u, v) = ((icon as i32 % 21) * 24, (icon as i32 / 21) * 24);
+                        icons.push(Quad {
+                            corners: [
+                                [left, bottom - side],
+                                [left + side, bottom - side],
+                                [left, bottom],
+                                [left + side, bottom],
+                            ],
+                            uv: [u, v, u + 24, v + 24],
+                            colors: [[1., 1., 1., rgba[3]]; 4],
+                            blend: 0,
+                        });
+                        x += ((icon_width(icon) as f32 * 16.) * scale) as i32 as f32 / 16.;
+                    }
+                }
+                _ => {}
+            }
+            i += n;
             continue;
         }
+        i += 1;
         let index = (byte - 0x20) as usize;
         let Some(&width) = font.widths.get(index) else {
             continue;
@@ -919,9 +1010,8 @@ pub fn text_quads_sized(
             (index % CELL_COLUMNS) as f32 * CELL[0],
             (index / CELL_COLUMNS) as f32 * CELL[1],
         );
-        let (w, h) = (CELL[0] * scale, CELL[1] * scale);
         let y = origin[1];
-        out.push(Quad {
+        glyphs.push(Quad {
             corners: [[x, y], [x + w, y], [x, y + h], [x + w, y + h]],
             uv: [
                 u as i32,
@@ -934,7 +1024,7 @@ pub fn text_quads_sized(
         });
         x += (width as f64 * scale as f64 + 0.5).floor() as f32;
     }
-    out
+    (glyphs, icons)
 }
 
 #[cfg(test)]
@@ -1072,6 +1162,37 @@ mod tests {
         assert_eq!(q[0].uv, [252, 0, 270, 24]);
         // 11 * 14/18 + 0.5 -> 9; space 6 * 14/18 + 0.5 -> 5.
         assert_eq!(q[1].corners[0][0], 10. + 9. + 5.);
+    }
+
+    #[test]
+    fn list_label_puts_the_button_glyph_left_of_the_text() {
+        let label = glyph_label(0xdf, &[0x2e]);
+        assert_eq!(
+            label,
+            [
+                0x11, 0xe2, 0xff, 0x1c, 0, 0x09, 0xdf, 0x11, 2, 0, 0x1c, 0, 0x2e
+            ]
+        );
+        let widths = [11u8; 100];
+        let font = Font {
+            widths: &widths,
+            pad: 2,
+        };
+        let (glyphs, icons) = label_quads(&label, [10., 20.], [1.; 4], &font, 14.);
+        // The codes' parameters draw nothing; the text starts 2 right of
+        // the origin.
+        assert_eq!(glyphs.len(), 1);
+        assert_eq!(glyphs[0].corners[0][0], 12.);
+        // Triangle on a PlayStation pad (0x1405c4d40 row 3): icon 67, a
+        // 17 px square 2 right of x - 30.
+        assert_eq!(icons.len(), 1);
+        let i = &icons[0];
+        assert_eq!(
+            i.uv,
+            [(67 % 21) * 24, (67 / 21) * 24, (67 % 21) * 24 + 24, 72 + 24]
+        );
+        assert_eq!(i.corners[0][0], 10. - 30. + 2.);
+        assert_eq!(i.corners[3][0] - i.corners[0][0], 17.);
     }
 
     #[test]

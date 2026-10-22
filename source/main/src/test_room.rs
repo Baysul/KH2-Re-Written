@@ -509,7 +509,7 @@ struct HudSource {
     /// The field 2D archive's 'mapj' area-change iris (areas only).
     iris: Option<Sheet>,
     stats: (i32, i32),
-    menu: Option<(Sheet, SystemFont, Vec<Vec<u8>>)>,
+    menu: Option<(Sheet, SystemFont, SystemFont, Vec<Vec<u8>>)>,
 }
 
 /// Top-menu labels: Attack, Magic, Items, Drive (03system 'cmd' message ids).
@@ -1172,6 +1172,8 @@ struct MenuState {
     menu: CommandMenu,
     sheet: Sheet,
     font: SystemFont,
+    /// The font image's icon plane (0x09 icons: the list rows' buttons).
+    icons: SystemFont,
     /// The layout file loaded for the current world (None: the configured
     /// one) and the language its world layouts are read in.
     layout: Option<String>,
@@ -3070,6 +3072,20 @@ fn load(
                             m.font_info.ordinal,
                             m.font_info.name_hash,
                         ),
+                    )?,
+                    hud::load_font(
+                        source,
+                        (
+                            &m.font_image.index,
+                            m.font_image.ordinal,
+                            m.font_image.name_hash,
+                        ),
+                        (
+                            &m.font_info.index,
+                            m.font_info.ordinal,
+                            m.font_info.name_hash,
+                        ),
+                        b"icon",
                     )?,
                     hud::load_messages(
                         source,
@@ -5307,7 +5323,7 @@ fn setup(
             reticle_draw: None,
             sheets,
             iris,
-            menu: menu.map(|(sheet, font, labels)| {
+            menu: menu.map(|(sheet, font, icons, labels)| {
                 // Test-room choices for the opening state: Magic and Drive
                 // have no entries yet (colour 5), Items is usable.
                 let items = labels
@@ -5326,6 +5342,7 @@ fn setup(
                     menu,
                     sheet,
                     font,
+                    icons,
                     layout: None,
                     language: "us".into(),
                 }
@@ -8604,6 +8621,11 @@ fn hud_present(
             size: m.font.size.map(|v| v as usize),
             texel_scale: m.font.texel_scale as f32,
         });
+        textures.push(Texture {
+            rgba: &m.icons.rgba,
+            size: m.icons.size.map(|v| v as usize),
+            texel_scale: m.icons.texel_scale as f32,
+        });
         // While riding, Skate 3's score HUD replaces the command menu and
         // the gauge.
         draws = if skate.replaces_hud() {
@@ -8617,6 +8639,7 @@ fn hud_present(
                 },
                 first,
                 first + 1,
+                first + 2,
             )
         };
     }

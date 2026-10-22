@@ -135,10 +135,30 @@ Round 4, Trinity Limit's presentation (private `runs/r6e`):
   IMGD (flag 0x2000_0000); trinity.bar keeps its PAX textures' replacements before its
   sheets' and a sound bank after them, so position alone named the wrong picture.
 
-Still open: the row labels' button glyphs (FUN_14015aba0: text codes 0x11 and 0x09 with
-FUN_1402ebe70's glyph; the circles on the rows stay empty), the state sprite each slot carries
-(FUN_14015d140 +0x220, 0x140717ea0), the constants FUN_1404065a0 stores for mode 3
-(DAT_142ae9ab0/ab8), and summons.
+Still open: the state sprite each slot carries (FUN_14015d140 +0x220, 0x140717ea0), the
+constants FUN_1404065a0 stores for mode 3 (DAT_142ae9ab0/ab8).
+
+Round 5, the list rows' button glyphs (private evidence `command-deck-20261020/glyph/`):
+
+- FUN_14015df90 in deck mode 0xE builds each row's label with FUN_14015aba0 when the row has a
+  selector: selector 1 glyph 0xdb, 2 and 3 FUN_1402ebe70(0x1000) / (0x8000), 4 0xda.
+  FUN_1402ebe70 looks the pad bit up in the table at 0x1405ba7e0 (0x1000 -> 0xdf, 0x8000 ->
+  0xde, 0x2000 -> 0xdb, 0x4000 -> 0xda, ...): Begin Combo Triangle, Ultima Square, Break
+  Cross.
+- FUN_14015aba0 writes `11 X ff 1c 00`, `09 glyph`, `11 02 00 1c 00`, then the message
+  (FUN_1403ae260). X follows the PLAYER_COMMAND's sheet mode (+0xab0, the first word
+  FUN_1404065a0 stores; FUN_1403b17c0..FUN_1403b1820 test it): a limit's `comd` sheet is
+  loaded with mode 3 (FUN_1403d96d0 -> FUN_1403b2a90), which gives 0xe2.
+- In the text routine (FUN_1403b0280) 0x11 moves the pen to two signed 16-bit offsets from
+  the text's origin (x = 0xffe2 = -30, then 2; y = 28) and 0x09 draws the pad icon
+  (FUN_1403af9e0). The glyph sits 30 px left of the label and the label 2 px right of its
+  usual place.
+- The rewrite: `field_command_menu::glyph_label` and `label_quads` (control codes take their
+  parameters, 0x11 sets the pen's x, 0x09 icons as `sprite_player::text_quads` draws them);
+  the command menu loads the font's icon plane and draws the icons from it.
+- Unattended `--party-limit-tour` (private `runs/g1`): exit 0; Trinity Limit's rows show
+  their buttons inside the rows' circles (Xbox kind: Y Begin Combo, X Ultima, A Break) on the
+  rows' line, the labels as before.
 
 ## Uncertainty
 
@@ -149,6 +169,10 @@ FUN_1402ebe70's glyph; the circles on the rows stay empty), the state sprite eac
 - The special deck runs in deck mode 0xE: inferred from FUN_14015de90 being the only writer
   of the `comd` sequence (+0x3a0) that the mode-0xE draws read. Leaving the deck restores the
   menu's own sheet (the restoring routine was not traced).
+- [I] 0x11's y (28, less the first line's height FUN_1403ae670 measures) is read as the
+  line's own baseline: the icon and the label stay on the row's line. The deck struct's +8
+  is read as the PLAYER_COMMAND whose +0xab0 the predicates test. The HUD's pad kind is the
+  room's fixed one (1).
 
 ## Verdict
 
@@ -157,4 +181,4 @@ hits, as far as checked against the executable; the presentation listed above is
 
 ## Next task
 
-Summons, then the list rows' button glyphs.
+The slots' state sprites (FUN_14015d140 +0x220) and the mode-3 constants.
