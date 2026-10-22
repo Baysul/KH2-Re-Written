@@ -31,7 +31,9 @@ fn run(
     .unwrap();
     let mut th = Thread::new(&inst, 0, 0, &[]);
     let mut memory = Memory::new(&mut inst, &mut th);
-    let f = lookup(trap.0, trap.1).expect("the trap is translated");
+    // Some traps the shield uses (attach, detach, motion sync) live in other
+    // trap modules: the whole table answers.
+    let f = crate::traps::lookup(trap.0, trap.1).expect("the trap is translated");
     f(&mut ctx, &mut memory, args)
 }
 
@@ -120,6 +122,8 @@ fn the_bone_point_falls_back_to_the_object_and_nothing_is_a_summon() {
     let cell = args[0].value;
     let read = |k: u32| f32::from_bits(world.static_read(cell + 4 * k).unwrap());
     assert_eq!([read(0), read(1), read(2), read(3)], [10., -20., 30., 1.]);
+    // `sysobj_is_summon` takes the object again.
+    args[0] = Slot::address(me);
     run(&mut world, &mut goofy, (10, 31), &mut args).unwrap();
     assert_eq!(args[0].as_int(), 0);
 }

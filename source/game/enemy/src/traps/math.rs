@@ -33,6 +33,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         23 => absf,
         35 => vector_scale,
         36 => vector_mul,
+        37 => vector_div,
         42 => vector_atan_xz,
         43 => fix_rad,
         45 => vector_addf,
@@ -462,6 +463,14 @@ fn vector_mul(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<
     let v = read_sanitized(ctx, m, args[0].value)?;
     let s = args[1].as_float();
     return_vector(ctx, m, 36, v.map(|lane| s * lane), args)
+}
+
+/// 0:37 FUN_14041ce70: the vector times 1 / the scalar (FUN_14013fcc0), all
+/// four lanes, into its own static vector.
+fn vector_div(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let v = read_vec(ctx, m, args[0].value)?;
+    let r = 1.0 / args[1].as_float();
+    return_vector(ctx, m, 37, v.map(|lane| lane * r), args)
 }
 
 /// 0:42 FUN_14041d250: `atan2f(x, z)`.

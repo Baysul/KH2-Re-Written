@@ -70,18 +70,67 @@ pub fn load(
         .len()
         .checked_sub(images.len())
         .ok_or("fewer HD replacements than IMGDs")?;
-    let hd = &replacements[first_image + image_slot];
-    let decoded =
-        hd_image::decode_hd_image(&hd.bytes, hd.metadata.declared_decompressed_length as usize)?;
+    let decode = |hd: &replacement_payload::ReplacementSample| {
+        hd_image::decode_hd_image(&hd.bytes, hd.metadata.declared_decompressed_length as usize)
+            .map(|d| (d.width, d.height, d.pixels_rgba))
+    };
+    // The replacement made from this IMGD names it: its original asset
+    // offset (flag 0x2000_0000 for a BAR member) lies inside the entry.
+    let entry = images[image_slot];
+    let own = replacements.iter().find(|r| {
+        let at = u64::from(r.metadata.original_asset_offset as u32 & 0x0fff_ffff);
+        let (from, size) = (entry.offset as u32 as u64, entry.size as u32 as u64);
+        (from..from + size).contains(&at)
+    });
+    let indexed = own.unwrap_or(&replacements[first_image + image_slot]);
+    let (width, height, rgba) = match decode(indexed) {
+        Ok(d) => d,
+        // Some archives (a limit file) keep other replacements (a sound
+        // bank) after the images: the IMGDs' replacements are then the run
+        // of consecutive replacements that upscale every IMGD, in order, by
+        // one integer scale.
+        Err(e) => {
+            let sizes = images
+                .iter()
+                .map(|i| {
+                    let h = image_structure::read_imgd_header(slice(i)?)?;
+                    Ok((u32::from(h.width), u32::from(h.height)))
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            let decoded: Vec<_> = replacements.iter().map(|r| decode(r).ok()).collect();
+            let fits = |k: usize| {
+                let first = decoded[k].as_ref()?;
+                let scale = first.0.checked_div(sizes.first()?.0).filter(|s| *s > 0)?;
+                sizes
+                    .iter()
+                    .enumerate()
+                    .all(|(j, &(w, h))| {
+                        decoded
+                            .get(k + j)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|d| d.0 == w * scale && d.1 == h * scale)
+                    })
+                    .then_some(())
+            };
+            let start = (0..=replacements.len().saturating_sub(images.len()))
+                .rev()
+                .find(|&k| fits(k).is_some())
+                .ok_or(e)?;
+            replacements
+                .get(start + image_slot)
+                .and_then(|r| decode(r).ok())
+                .ok_or("HUD IMGD absent")?
+        }
+    };
     let (w, h) = (header.width as u32, header.height as u32);
-    let scale = decoded.width / w;
-    if scale == 0 || decoded.width != w * scale || decoded.height != h * scale {
+    let scale = width / w;
+    if scale == 0 || width != w * scale || height != h * scale {
         return Err("HD replacement is not an integer upscale of the IMGD".into());
     }
     Ok(Sheet {
         sequence,
-        texture_size: [decoded.width, decoded.height],
-        texture_rgba: decoded.pixels_rgba,
+        texture_size: [width, height],
+        texture_rgba: rgba,
         texel_scale: scale,
     })
 }

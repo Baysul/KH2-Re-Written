@@ -66,7 +66,9 @@ struct Locator {
 }
 mod ability_inventory;
 mod character_kit;
+mod command_layout;
 mod debug_menu;
+mod deck_tour;
 mod drive_fx;
 mod drive_room;
 mod enemy_battle;
@@ -86,14 +88,19 @@ mod item_drop_view;
 mod item_room;
 mod journal_tour;
 mod level_growth;
+mod limit_tour;
 mod magic_room;
 mod magic_tour;
 mod party_blade;
 mod party_hit_tour;
+mod party_limit;
 mod party_room;
 mod prize_room;
+mod second_deck;
 mod settings_room;
 mod spell_fx;
+mod summon;
+mod summon_tour;
 mod victim_hit;
 mod wall_hit;
 mod weapon_trail;
@@ -502,7 +509,7 @@ struct HudSource {
     /// The field 2D archive's 'mapj' area-change iris (areas only).
     iris: Option<Sheet>,
     stats: (i32, i32),
-    menu: Option<(Sheet, SystemFont, Vec<Vec<u8>>)>,
+    menu: Option<(Sheet, SystemFont, SystemFont, Vec<Vec<u8>>)>,
 }
 
 /// Top-menu labels: Attack, Magic, Items, Drive (03system 'cmd' message ids).
@@ -662,6 +669,8 @@ const AMBIENT_KEY: u32 = 0x4000_0000;
 const SE_CURSOR: u32 = 1;
 const SE_OPEN: u32 = 3;
 const SE_CLOSE: u32 = 4;
+/// The command deck swap (FUN_1403f2470).
+const SE_DECK: u32 = 0x14;
 const SE_LOW_HP: u32 = 9;
 /// Manual lock engaged, and released by the toggle (FUN_1401dd170(7) / (8) in
 /// the lock manager, FUN_1403dd650 / FUN_1403dcd70).
@@ -952,6 +961,8 @@ struct Game {
     selected_target: Option<[f32; 3]>,
     target_locked: bool,
     player_target_shape: Option<object_collision::Entry>,
+    /// Sora's push shapes (object collision kind 4).
+    player_push_shapes: Vec<object_collision::Entry>,
     clips: Clips,
     world: RoomWorld,
     player: Player,
@@ -971,6 +982,8 @@ struct Game {
     jump_queued: bool,
     attack_queued: bool,
     guard_queued: bool,
+    /// Face buttons pressed (logical bits 24..27) for a list-mode deck.
+    face_queued: u8,
     /// L1-held shortcut presses of this tick (bit k = slot k) and the
     /// shortcut command ids (camp Customize).
     shortcut_queued: u8,
@@ -991,6 +1004,43 @@ struct Game {
     party_spells: bool,
     /// The battle flag (`DAT_142a11404`) with its switching delay.
     party_battle: party_room::BattleMode,
+    /// The second command deck (Summon, Party, Limit) and its lists.
+    second_deck: Option<second_deck::SecondDeck>,
+    /// The party limits' files, the limit running and the one the menu
+    /// asked for.
+    party_limits: Arc<party_limit::LimitSource>,
+    party_limit: Option<party_limit::Running>,
+    limit_request: Option<u16>,
+    /// The summons' tables, the summon out, and what the menu asked for.
+    summons: Option<summon::Source>,
+    summon: Option<summon::Summoned>,
+    summon_request: Option<u16>,
+    summon_dismiss: bool,
+    summon_serial: u64,
+    /// FUN_1403f3fa0's direction counter (DAT_142ae5d78).
+    summon_octant: u32,
+    /// DAT_1409acdd7: Genie's form number (1 Valor, 2 Wisdom, 4 Master,
+    /// 5 Final), kept between summons.
+    summon_form: u8,
+    /// A Genie form command picked from the deck (trigger 11 on Genie).
+    genie_command: Option<u16>,
+    /// The stick's request the summon's script reads (`player_get_movement`).
+    summon_stick: [f32; 3],
+    /// The top deck's rows while a limit has the menu.
+    deck_saved: Option<(Vec<Item>, Vec<Option<usize>>)>,
+    /// Decide on a row a limit's command took this tick: its override
+    /// record (0 the Attack row, 2 the Limit row).
+    limit_decide: Option<usize>,
+    /// The unattended `--command-deck-tour` (deck_tour.rs).
+    deck_tour: bool,
+    /// The unattended `--party-limit-tour` (limit_tour.rs).
+    limit_tour: bool,
+    /// The unattended `--summon-tour` (summon_tour.rs).
+    summon_tour: bool,
+    /// The deck swap (left, logical 0x10000) and open (right, 0x10000000)
+    /// pressed since the last tick.
+    deck_queued: bool,
+    open_queued: bool,
     /// The party-hit tour (`--party-hit-tour`).
     party_hit_tour: bool,
     party_hit_state: party_hit_tour::State,
@@ -1122,6 +1172,12 @@ struct MenuState {
     menu: CommandMenu,
     sheet: Sheet,
     font: SystemFont,
+    /// The font image's icon plane (0x09 icons: the list rows' buttons).
+    icons: SystemFont,
+    /// The layout file loaded for the current world (None: the configured
+    /// one) and the language its world layouts are read in.
+    layout: Option<String>,
+    language: String,
 }
 
 /// Sora's field gauge: the translated GAUGE_PLAYER logic, drawn into a
@@ -1148,12 +1204,20 @@ struct Hud {
     field: Sheet,
     reticle: visual::lock_on::Reticle,
     reticle_draw: Option<Draw>,
+    /// Chicken Little's limit reticle (FUN_14017c570 with 3, or 0x19 on a
+    /// target), bound to his aim point.
+    limit_reticle: Option<visual::lock_on::LockOn>,
     stats: GaugeStats,
     canvas: Canvas,
     image: Handle<Image>,
     updated: bool,
     /// The form level-up panels (sprite priority 9000, after the gauge).
     panels: visual::level_up::Panels,
+    /// A party limit's gauge and combo counter while it runs.
+    limit_hud: Option<party_limit::LimitHud>,
+    /// The limit whose `comd` sheet the command menu wears while its
+    /// special deck is up (FUN_14015de90).
+    menu_skin: Option<(Arc<party_limit::LimitSource>, usize)>,
 }
 
 /// The original's default follow camera, ticked with the simulation in the
@@ -1171,6 +1235,8 @@ struct CameraRig {
     /// step, FUN_1403b7810) with its end.
     was_first_person: bool,
     fade: FadeRamp,
+    /// Camera mode 9 (Chicken Little's limit) last tick.
+    was_aiming: bool,
     /// The map's camera collision in game world space.
     collision: CameraCollision,
     collision_hits: u64,
@@ -1464,6 +1530,10 @@ fn ptya_record(e: &ptya::PtyaEntry) -> player::ptya::Record {
 
 fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn std::error::Error>> {
     let (frame_start, frame_end, fps, frame_return) = selected.motion.frame_window()?;
+    // Some limit motions start before their first key (-1) or name a return
+    // frame past their end: sampled from 0, the return held to the window.
+    let frame_start = frame_start.max(0.);
+    let frame_return = frame_return.clamp(frame_start, frame_end.max(frame_start));
     // Final Form's motions run at 120 frames a second.
     if !(1. ..=120.).contains(&fps)
         || !(0. ..frame_end).contains(&frame_start)
@@ -1825,6 +1895,11 @@ struct Loaded {
     vibration: Option<player::vibration::Library>,
     abilities: AbilitySource,
     magic: Option<magic_room::MagicSource>,
+    /// The second command deck's tables and labels.
+    second_deck: Option<second_deck::SecondDeck>,
+    summons: Option<summon::Source>,
+    /// The party limits' files.
+    party_limits: party_limit::LimitSource,
     items: Option<item_room::ItemSource>,
     /// Base Sora's kit, and what builds the Drive forms' kits.
     kit: character_kit::Kit,
@@ -2433,6 +2508,9 @@ struct EnemyRuntime {
     /// The last player-side attacker of the Shadow (obj+0xd40,
     /// FUN_140411300): the revenge target.
     last_attacker: party_room::Attacker,
+    /// Hits that landed on it (Sora's, the members', a limit scene's): a
+    /// party limit's combo counter counts them.
+    hits_landed: u32,
 }
 
 /// A placeholder for a spell's hit volume: the spell effects (the `.mag`
@@ -3000,6 +3078,20 @@ fn load(
                             m.font_info.name_hash,
                         ),
                     )?,
+                    hud::load_font(
+                        source,
+                        (
+                            &m.font_image.index,
+                            m.font_image.ordinal,
+                            m.font_image.name_hash,
+                        ),
+                        (
+                            &m.font_info.index,
+                            m.font_info.ordinal,
+                            m.font_info.name_hash,
+                        ),
+                        b"icon",
+                    )?,
                     hud::load_messages(
                         source,
                         &m.messages.index,
@@ -3099,6 +3191,12 @@ fn load(
         .as_ref()
         .and_then(|e| e.system.as_ref())
         .and_then(|l| visual::effects::load_pax(source, &l.index, l.ordinal, l.name_hash).ok());
+    // The party limits' files: Sora's motions join his kit, the friends'
+    // their motion tables.
+    let mut limit_source = match (&config.enemy, data::path_lookup::Library::open(source)) {
+        (Some(_), Ok(mut library)) => party_limit::load(source, &mut library, &battle, "us"),
+        _ => party_limit::LimitSource::default(),
+    };
     let kit = character_kit::load_kit(
         source,
         character_kit::KitInputs {
@@ -3122,9 +3220,21 @@ fn load(
             basic_fk,
             params,
             pax: base_pax,
-            scripted: vec![player::WALL_RECOIL_AIR],
+            scripted: vec![
+                player::WALL_RECOIL_AIR,
+                summon::CALL_MOTION,
+                summon::APPEAR_MOTION,
+            ],
+            external: {
+                let mut m = limit_source.motions(1);
+                m.extend(summon::capture_motions(source, &battle));
+                m
+            },
         },
     )?;
+    // Donald's and Goofy's limit motions, for their motion tables.
+    let mut member_limit_motions: HashMap<u8, Vec<_>> =
+        [2u8, 3].map(|c| (c, limit_source.motions(c))).into();
     let sora_body = kit.body.clone();
     let (sora_target_radius, sora_target_lift) = (kit.target_radius, kit.target_lift);
     let (sora_body_lift, sora_heal_lift) = (kit.body_lift, kit.heal_lift);
@@ -3515,6 +3625,41 @@ fn load(
         }
         (m, _) => m,
     };
+    // The second deck's tables (00battle sumn / limt, 03system cmd and
+    // item) and its labels.
+    let second_deck = match &config.menu {
+        Some(menu) => match second_deck::load(&battle, &system) {
+            Ok(mut d) => {
+                let wanted = d.wanted_names();
+                let ids: Vec<u32> = wanted.iter().map(|w| w.1).collect();
+                let texts = hud::load_messages_optional(
+                    source,
+                    &menu.messages.index,
+                    menu.messages.ordinal,
+                    menu.messages.name_hash,
+                    &ids,
+                )?;
+                for ((cmd, _), text) in wanted.into_iter().zip(texts) {
+                    if let Some(t) = text {
+                        d.names.insert(cmd, t);
+                    }
+                }
+                Some(d)
+            }
+            Err(e) => {
+                eprintln!("second command deck tables: {e}");
+                None
+            }
+        },
+        None => None,
+    };
+    // The summons: the `sumn` rows and the SSTM record (03system pref).
+    let summons = second_deck.as_ref().and_then(|d| {
+        let pref = bar_entry(&system, b"pref").ok()?;
+        let sstm = bar_entry(pref, b"sstm").ok()?;
+        let at = u32::from_le_bytes(sstm.get(4..8)?.try_into().ok()?) as usize;
+        summon::Source::new(d.summons.clone(), sstm.get(at..)?)
+    });
     let enemy = match &config.enemy {
         Some(e) => Some(load_enemy(
             source,
@@ -3644,6 +3789,9 @@ fn load(
         sstm,
         abilities: ability_source,
         magic: magic_src,
+        second_deck,
+        summons,
+        party_limits: std::mem::take(&mut limit_source),
         items: item_room::load(&system).ok(),
         party: match config.enemy {
             // The party stands in rooms with a fight to join.
@@ -3666,6 +3814,9 @@ fn load(
                             name,
                             character,
                             records,
+                            member_limit_motions
+                                .remove(&(character as u8))
+                                .unwrap_or_default(),
                         ) {
                             Ok(mut k) => {
                                 eprintln!("party member {} loaded", k.name);
@@ -5165,6 +5316,8 @@ fn setup(
         let mut slots = visual::hud_slots::HudSlots::default();
         commands.insert_resource(Hud {
             panels: Default::default(),
+            limit_hud: None,
+            menu_skin: None,
             gauge: Gauge::new(
                 &sheets.iter().map(|s| &s.sequence).collect::<Vec<_>>(),
                 &stats,
@@ -5177,9 +5330,10 @@ fn setup(
             field,
             reticle: Default::default(),
             reticle_draw: None,
+            limit_reticle: None,
             sheets,
             iris,
-            menu: menu.map(|(sheet, font, labels)| {
+            menu: menu.map(|(sheet, font, icons, labels)| {
                 // Test-room choices for the opening state: Magic and Drive
                 // have no entries yet (colour 5), Items is usable.
                 let items = labels
@@ -5194,7 +5348,14 @@ fn setup(
                 let mut menu = CommandMenu::new(&sheet.sequence, items);
                 // The Magic row opens submenu 1 (command-01 section 0.6).
                 menu.opens = vec![None, Some(1), Some(2), None];
-                MenuState { menu, sheet, font }
+                MenuState {
+                    menu,
+                    sheet,
+                    font,
+                    icons,
+                    layout: None,
+                    language: "us".into(),
+                }
             }),
             stats,
             canvas,
@@ -5918,10 +6079,16 @@ fn read_pad(
     game.jump_queued |= p & 0x100 != 0;
     game.attack_queued |= p & 0x4 != 0;
     game.guard_queued |= p & 0x200 != 0;
+    game.face_queued |= (p >> 24 & 0xf) as u8;
     game.rc_queued |= p & 0x400 != 0;
     game.advance_queued |= p & 0x40c != 0;
     game.menu_up_queued |= p & 0x4000 != 0;
     game.menu_down_queued |= p & 0x8000 != 0;
+    // Left swaps the command decks, right opens the row's submenu
+    // (FUN_1403f2470, FUN_1403b11e0; MODE_FIELD: the D-pad, or the right
+    // stick in its menu role).
+    game.deck_queued |= p & 0x1_0000 != 0;
+    game.open_queued |= p & 0x1000_0000 != 0;
     game.lock_queued |= p & 0x800 != 0;
     game.cycle_queued |= p & 0x30_0000_0000 != 0;
     targeting.queue_cycle(p);
@@ -5984,7 +6151,37 @@ fn simulate(
     mut targeting: ResMut<enemy_target::Targeting>,
 ) {
     let tick = game.tick;
-    let (up, down) = if game.ability_tour.is_some()
+    let deck_buttons = if game.deck_tour {
+        deck_tour::press(tick)
+    } else if game.summon_tour {
+        summon_tour::press(tick)
+    } else if game.limit_tour {
+        // While a limit offers a row and no reaction command, the tour walks
+        // the cursor onto it.
+        // While reaction commands keep coming the tour only presses Triangle;
+        // the rows' commands are taken once none has been offered for a while.
+        let running = game.party_limit.as_ref().is_some_and(|r| {
+            r.special_deck().is_some() || tick > r.last_reaction + limit_tour::REACTION_QUIET
+        });
+        if limit_tour::lock(tick) {
+            game.lock_queued = true;
+        }
+        let seek = game
+            .party_limit
+            .as_ref()
+            .is_some_and(|r| tick > r.last_reaction + limit_tour::REACTION_QUIET)
+            && hud.as_ref().and_then(|h| h.menu.as_ref()).is_some_and(|m| {
+                let o = m.menu.overridden;
+                o.iter().any(|&b| b) && !o.get(m.menu.cursor).copied().unwrap_or(false)
+            });
+        limit_tour::press(tick, running, seek)
+    } else {
+        field_command_menu::Buttons::default()
+    };
+    let scripted_menu = game.deck_tour || game.limit_tour || game.summon_tour;
+    let (up, down) = if scripted_menu {
+        (deck_buttons.up, deck_buttons.down)
+    } else if game.ability_tour.is_some()
         || game.enemy_tour
         || game.enemy_battle_tour
         || game.magic_tour
@@ -5999,7 +6196,9 @@ fn simulate(
         game.menu_down_queued = false;
         queued
     };
-    let (stick, jump, decide) = if game.enemy_battle_tour {
+    let (stick, jump, decide) = if scripted_menu {
+        (Vec2::ZERO, false, deck_buttons.decide)
+    } else if game.enemy_battle_tour {
         (
             Vec2::ZERO,
             false,
@@ -6039,8 +6238,12 @@ fn simulate(
     // Field talk locks control (player+0xdc8 → +0x40 bit 0); an area
     // change zeroes the pad while DAT_142a10500 is set (FUN_1403b2340).
     // Riding the skateboard hands the pad to the Skate 3 skater.
-    let talking =
-        game.talking || area.as_deref().is_some_and(|a| a.transition.is_some()) || skate.riding();
+    // FUN_1403de460 holds Sora (player +0x120 |= 0x104) until the summon is
+    // out (FUN_1403de610 clears it).
+    let talking = game.talking
+        || area.as_deref().is_some_and(|a| a.transition.is_some())
+        || skate.riding()
+        || game.summon.as_ref().is_some_and(|s| s.holds_sora);
     let (stick, jump, decide) = if talking {
         (Vec2::ZERO, false, false)
     } else {
@@ -6080,7 +6283,48 @@ fn simulate(
     // The decide button executes the command under the cursor; Attack
     // (icon 1) is the only command this room implements.
     let mut cursor_moved = false;
-    let back = std::mem::take(&mut game.back_queued) && !talking;
+    let back = (std::mem::take(&mut game.back_queued) || deck_buttons.back) && !talking;
+    let left = (std::mem::take(&mut game.deck_queued) || deck_buttons.left) && !talking;
+    let right = (std::mem::take(&mut game.open_queued) || deck_buttons.right) && !talking;
+    let face = if talking {
+        0
+    } else {
+        std::mem::take(&mut game.face_queued) | deck_buttons.face
+    };
+    // The limit tour: full MP before each limit, and Trinity Limit.
+    if game.limit_tour {
+        if limit_tour::refill(tick) {
+            game.player.mp.cur = game.player.mp.max;
+            game.player.mp.remaining = 0.;
+            game.player.mp.total = 0.;
+            game.player.mp_charging = false;
+            // [Tour setup] Sora stands STAND_OFF units in front of the
+            // Shadow, facing it, as a player would walk up before a limit.
+            if let Some(rt) = game.enemy.as_ref() {
+                let e = rt.enemy.position;
+                game.player.position = [e[0], e[1], e[2] + limit_tour::STAND_OFF];
+                game.player.yaw = std::f32::consts::PI;
+            }
+        }
+        if tick == 1
+            && let Some(&bit) = game
+                .second_deck
+                .as_ref()
+                .and_then(|d| d.ability_bits.get(&limit_tour::TRINITY_ABILITY))
+        {
+            game.player.abilities.set(bit);
+        }
+    }
+    // The deck and summon tours own the summon charms.
+    if (game.deck_tour || game.summon_tour)
+        && tick == 1
+        && let Some(it) = game.items.as_mut()
+    {
+        for c in deck_tour::CHARMS {
+            it.stock.insert(c, 1);
+        }
+    }
+    let world_index = area.as_deref().map(|a| a.current.world);
     let mut attack = decide;
     let mut sub_was_open = false;
     let mut menu_cast = None;
@@ -6170,12 +6414,180 @@ fn simulate(
                 }
             }
         }
+        // The second deck's rows and open list, and the art set: battle
+        // style 1 while the battle flag is on (DAT_142a11404).
+        let deck_room = second_deck::room(&game, world_index);
+        second_deck::refresh(&game, &mut m.menu, &deck_room);
+        m.menu.style = usize::from(second_deck::battle(&game));
+        // A party limit's commands (FUN_1403b0f20 with FUN_1403b2660): record
+        // 0 takes the row of the Attack kind (icon 1), record 2 the Limit
+        // row (command 0x51), with the override art; record 1 is the
+        // reaction command. The cursor keeps its row (FUN_1403b11e0).
+        let limit_running = game.party_limit.is_some();
+        // The top deck's rows as they were when the limit took the menu; they
+        // come back when it ends.
+        if limit_running {
+            if game.deck_saved.is_none() {
+                game.deck_saved = Some((m.menu.items.clone(), m.menu.opens.clone()));
+            }
+        } else if let Some((items, opens)) = game.deck_saved.take() {
+            m.menu.items = items;
+            m.menu.opens = opens;
+        }
+        // [Tour setup] Each limit of the tour starts from the deck's top row
+        // with no list open.
+        if game.limit_tour && limit_tour::refill(tick) {
+            m.menu.cursor = 0;
+            m.menu.close_sub();
+        }
+        m.menu.overridden = [false; 8];
+        m.menu.list = None;
+        let mut records = [None; 8];
+        // A party limit's offers, or else the summon's script's
+        // (`command_override` on records 0, 1, 2).
+        let offers = game
+            .party_limit
+            .as_ref()
+            .map(|run| run.offers)
+            .or_else(|| summon::offers(&game));
+        if let Some(offers) = offers {
+            let deck = game.second_deck.as_ref();
+            let name = |cmd: u16| {
+                deck.and_then(|d| d.names.get(&cmd).cloned())
+                    .unwrap_or_default()
+            };
+            m.menu.reaction = offers[1].map(|cmd| field_command_menu::Reaction {
+                label: name(cmd),
+                dimmed: false,
+            });
+            let second = m.menu.kind == field_command_menu::SECOND_DECK;
+            for (row, record) in [(0, 0), (second_deck::LIMIT_ROW, 2)] {
+                let Some(cmd) = offers[record] else {
+                    continue;
+                };
+                // The Limit row is the second deck's.
+                if record == 2 && !second {
+                    continue;
+                }
+                let item = Item {
+                    label: name(cmd),
+                    icon: deck
+                        .and_then(|d| d.commands.get(&cmd))
+                        .map_or(1, |c| c.icon),
+                    colour: 0,
+                };
+                let rows = if second {
+                    &mut m.menu.second
+                } else {
+                    &mut m.menu.items
+                };
+                if let Some(r) = rows.get_mut(row) {
+                    *r = item;
+                    m.menu.overridden[row] = true;
+                    records[row] = Some(record);
+                }
+                // The command in its place opens no list.
+                let opens = if second {
+                    &mut m.menu.second_opens
+                } else {
+                    &mut m.menu.opens
+                };
+                if let Some(o) = opens.get_mut(row) {
+                    *o = None;
+                }
+            }
+        }
+        // Trinity Limit's special deck (mode 3: FUN_1403b19b0 over
+        // DAT_142ae9ab0), or Chicken Little's (mode 5), takes the shown
+        // deck's rows.
+        let special = game
+            .party_limit
+            .as_ref()
+            .and_then(|r| r.special_deck())
+            .or_else(|| summon::special_deck(&game));
+        if let Some(rows) = special {
+            let deck = game.second_deck.as_ref();
+            let items: Vec<Item> = rows
+                .iter()
+                .map(|&(cmd, _)| Item {
+                    label: deck
+                        .and_then(|d| d.names.get(&cmd).cloned())
+                        .unwrap_or_default(),
+                    icon: deck
+                        .and_then(|d| d.commands.get(&cmd))
+                        .map_or(1, |c| c.icon),
+                    colour: 0,
+                })
+                .collect();
+            if m.menu.kind == field_command_menu::SECOND_DECK {
+                m.menu.second = items;
+                m.menu.second_opens = vec![None; 3];
+            } else {
+                m.menu.items = items;
+                m.menu.opens = vec![None; 3];
+            }
+            m.menu.overridden = [false; 8];
+            records = [None; 8];
+            for (k, r) in records.iter_mut().take(3).enumerate() {
+                *r = Some(party_limit::SPECIAL + k);
+            }
+            // Deck mode 0xE (FUN_1403b1780) with the limit file's `comd`
+            // art: the list path, rows taken by their selector's button.
+            let limit = game
+                .party_limit
+                .as_ref()
+                .map(|r| r.hud_values().0)
+                .or_else(|| summon::hud_values(&game).map(|h| h.0));
+            if limit.is_some_and(|l| game.party_limits.limits[l].menu_sheet.is_some()) {
+                m.menu.list = Some(rows.iter().map(|r| r.1 as u8).collect());
+                m.menu.list_mode = if game.party_limit.is_some() { 3 } else { 5 };
+            }
+        }
+        // [Test-room choice] While a limit runs only its rows are taken:
+        // the checks other commands make during a limit are not traced.
+        // [Tour setup] The tour's decide presses the top row's button in a
+        // list-mode deck.
+        let face = match m.menu.list.as_ref().and_then(|l| l.first()) {
+            Some(&s) if scripted_menu && decide && (1..=4).contains(&s) => face | 1 << (s - 1),
+            _ => face,
+        };
+        let on_offer = records.get(m.menu.cursor).copied().flatten().is_some();
+        let (decide, right) = if limit_running && m.menu.sub.is_none() && !on_offer {
+            (false, false)
+        } else {
+            (decide, right)
+        };
         sub_was_open = m.menu.sub.is_some();
-        let before = (m.menu.cursor, m.menu.sub.as_ref().map(|s| s.cursor));
-        let decision = m.menu.input_with_back(up, down, decide, back);
-        cursor_moved = (m.menu.cursor, m.menu.sub.as_ref().map(|s| s.cursor)) != before;
-        attack =
-            decision == Decision::Execute(0) && m.menu.items.first().is_some_and(|i| i.icon == 1);
+        let before = (
+            m.menu.kind,
+            m.menu.cursor,
+            m.menu.sub.as_ref().map(|s| s.cursor),
+        );
+        let decision = m.menu.press(field_command_menu::Buttons {
+            up,
+            down,
+            decide,
+            back,
+            left,
+            right,
+            face,
+        });
+        cursor_moved = (
+            m.menu.kind,
+            m.menu.cursor,
+            m.menu.sub.as_ref().map(|s| s.cursor),
+        ) != before;
+        attack = decision == Decision::Execute(0)
+            && !limit_running
+            && m.menu.rows().first().is_some_and(|i| i.icon == 1);
+        // A row a limit's command took runs that command, not the row's own.
+        let mut took_offer = false;
+        if let Decision::Execute(row) = decision
+            && let Some(record) = records.get(row).copied().flatten()
+        {
+            game.limit_decide = Some(record);
+            took_offer = true;
+        }
         // The command menu's own sounds (magicsfx-01 §5): a sub-menu push
         // plays se000 #3 (FUN_1403b2800 with its play flag), and backing out
         // of a sub-menu plays #4 (FUN_1403b20f0 with its play flag). Running
@@ -6191,8 +6603,25 @@ fn simulate(
                 cursor_moved = false;
                 game.sound_queue.push((SE_CLOSE, "menu_close"));
             }
+            // The deck swap plays se000 #20 (FUN_1401dd170(0x14)); a cursor
+            // move in the same frame plays its own sound.
+            Decision::Toggled => {
+                cursor_moved = m.menu.cursor != before.1;
+                game.sound_queue.push((SE_DECK, "menu_deck"));
+                game.event(serde_json::json!({"event":"command_deck","tick":tick,
+                    "kind":m.menu.kind,"cursor":m.menu.cursor}));
+            }
             _ => {}
         }
+        // The second deck opens its own lists; what is left (Attack, an
+        // unusable row) goes on like the top deck's.
+        let decision = if took_offer {
+            Decision::None
+        } else if m.menu.kind == field_command_menu::SECOND_DECK {
+            second_deck::decide(&mut game, &mut m.menu, decision, &deck_room)
+        } else {
+            decision
+        };
         match decision {
             // Limit Form: the Magic slot is "Limit" (0x2c3, submenu 12).
             Decision::Open(1) if game.drive.as_ref().is_some_and(|d| d.limit_form()) => {
@@ -6579,14 +7008,53 @@ fn simulate(
     {
         item_room::request(&mut game, slot, tick);
     }
-    let Game {
-        player,
-        params,
-        clips,
-        world,
-        ..
-    } = &mut *game;
-    let step = player.tick(&input, params, clips, world);
+    // A party limit asked for from the second deck starts here
+    // (FUN_1403d8b40); while it runs its scene moves Sora.
+    if let Some(cmd) = game.limit_request.take()
+        && game.party_limit.is_none()
+        && let Err(e) = party_limit::start(&mut game, cmd, tick)
+    {
+        game.event(
+            serde_json::json!({"event":"party_limit_refused","tick":tick,
+            "command":cmd,"error":e}),
+        );
+    }
+    let step = if game.party_limit.is_some() {
+        let rc = std::mem::take(&mut game.rc_queued)
+            || game.deck_tour && deck_tour::reaction(tick)
+            || game.limit_tour && limit_tour::reaction(tick);
+        let decide = std::mem::take(&mut game.limit_decide);
+        let stick = [direction.x, 0., direction.y];
+        party_limit::tick(&mut game, tick, rc, decide, stick)
+    } else {
+        // The summon's offers: a decided row, or the reaction button on its
+        // record 1, starts or carries on its limit.
+        let offered = summon::offers(&game).is_some_and(|o| o[0].is_some());
+        // [Tour setup] The special deck's Cross row (Chicken Little's shot).
+        let special = summon::special_deck(&game).and_then(|r| r.iter().position(|x| x.1 == 4));
+        let decide = std::mem::take(&mut game.limit_decide).or_else(|| {
+            game.summon_tour
+                .then(|| summon_tour::follow_up(tick, offered, special))
+                .flatten()
+        });
+        game.summon_stick = [direction.x, 0., direction.y];
+        let rc = summon::offers(&game).is_some_and(|o| o[1].is_some())
+            && (std::mem::take(&mut game.rc_queued)
+                || game.summon_tour && summon_tour::reaction(tick));
+        summon::decide(&mut game, tick, if rc { Some(1) } else { decide });
+        if summon::sora_in_limit(&mut game) {
+            player::Step::default()
+        } else {
+            let Game {
+                player,
+                params,
+                clips,
+                world,
+                ..
+            } = &mut *game;
+            player.tick(&input, params, clips, world)
+        }
+    };
     if game.map_fx_pending
         && let Some(a) = area.as_deref()
     {
@@ -6792,6 +7260,12 @@ fn simulate(
     } else {
         None
     };
+    // Chicken Little's limit: camera mode 9 on his aim point
+    // (FUN_140178760), turned to a target as it is locked.
+    if let Some((aim, _, recenter)) = summon::aim_view(&game) {
+        camera.aim = Some(to_world(aim));
+        camera.aim_recenter = recenter;
+    }
     let CameraRig {
         camera: follow,
         collision,
@@ -6819,6 +7293,20 @@ fn simulate(
             FadeRamp::start(0., 1.)
         };
         rig.was_first_person = rig.camera.first_person;
+    }
+    // FUN_1401cb6c0 / FUN_1401cb180: the limit view hides Sora at once and
+    // shows him at once after it (FUN_1403b7810 over 0 frames).
+    if rig.camera.aiming != rig.was_aiming {
+        rig.fade = if rig.camera.aiming {
+            FadeRamp {
+                value: 0.,
+                step: 0.,
+                end: 0.,
+            }
+        } else {
+            FadeRamp::SHOWN
+        };
+        rig.was_aiming = rig.camera.aiming;
     }
     rig.fade.tick();
     rig.previous_position = game.player.position;
@@ -7963,6 +8451,19 @@ fn hud_tick(
     s.drive_mode = drive.mode;
     (s.form_bars, s.form_time, s.form_max_time) = (drive.bars, drive.time, drive.max_time);
     hud.stats = s;
+    // Trinity Limit's special deck: FUN_1403b2a90 -> FUN_14015de90 gives the
+    // command menu the limit file's `comd` sequence and art (FUN_1401909e0,
+    // +0x3a0) until the deck closes.
+    // It goes with the list-mode deck the menu input set this frame.
+    let listed = hud.menu.as_ref().is_some_and(|m| m.menu.list.is_some());
+    let skin = game
+        .party_limit
+        .as_ref()
+        .map(|r| r.hud_values().0)
+        .or_else(|| summon::hud_values(&game).map(|h| h.0))
+        .filter(|_| listed)
+        .filter(|&l| game.party_limits.limits[l].menu_sheet.is_some())
+        .map(|l| (game.party_limits.clone(), l));
     let Hud {
         sheets,
         gauge,
@@ -7972,10 +8473,17 @@ fn hud_tick(
         slots,
         friends,
         friend_faces,
+        menu_skin,
         ..
     } = &mut *hud;
+    let reskin = menu_skin.as_ref().map(|s| s.1) != skin.as_ref().map(|s| s.1);
+    *menu_skin = skin;
     if let Some(m) = menu {
-        m.menu.update(&m.sheet.sequence);
+        let seq = menu_sheet(&m.sheet, menu_skin);
+        if reskin {
+            m.menu.reload(&seq.sequence);
+        }
+        m.menu.update(&seq.sequence);
     }
     let seqs: Vec<_> = sheets.iter().map(|s| &s.sequence).collect();
     gauge.update(&seqs, &s);
@@ -8015,6 +8523,7 @@ fn hud_tick(
         reticle,
         field,
         reticle_draw,
+        limit_reticle,
         ..
     } = &mut *hud;
     *reticle_draw = reticle.step(
@@ -8023,6 +8532,24 @@ fn hud_tick(
         &|at| camera.map_or([0.; 3], |camera| camera.project(at)),
         0,
     );
+    // Chicken Little's limit (FUN_1401cb830): his reticle at the aim point,
+    // group 0x19 on a locked target, else 3, in place of the lock's.
+    match summon::aim_view(&game) {
+        Some((aim, locked, _)) => {
+            let group = if locked { 0x19 } else { 3 };
+            let r = match limit_reticle {
+                Some(r) if r.group() == group => r,
+                _ => limit_reticle.insert(visual::lock_on::LockOn::new(&field.sequence, group)),
+            };
+            let at = to_world(aim);
+            r.update(
+                &field.sequence,
+                camera.map_or([0.; 3], |camera| camera.project(at)),
+            );
+            *reticle_draw = r.draw(&field.sequence, 0);
+        }
+        None => *limit_reticle = None,
+    }
     // Form levels gained this frame queue their panels (FUN_1403edb90).
     if let Some(d) = game.drive.as_mut() {
         for up in std::mem::take(&mut d.level_ups) {
@@ -8058,7 +8585,40 @@ fn hud_tick(
     }
     let Hud { sheets, panels, .. } = &mut *hud;
     panels.update(&sheets[0].sequence);
+    // A party limit's gauge and combo counter (FUN_1403d96d0 shows them,
+    // FUN_1403d8f40 hides them).
+    let values = game
+        .party_limit
+        .as_ref()
+        .map(|r| r.hud_values())
+        .or_else(|| summon::hud_values(&game));
+    let Hud {
+        limit_hud, slots, ..
+    } = &mut *hud;
+    match values {
+        Some((limit, command, time, hits)) => {
+            let h = limit_hud.get_or_insert_with(|| {
+                party_limit::LimitHud::start(game.party_limits.clone(), limit, command, time, slots)
+            });
+            h.update(time, hits, slots);
+        }
+        None => {
+            if let Some(h) = limit_hud.take() {
+                h.end(slots);
+            }
+        }
+    }
     hud.updated = true;
+}
+
+/// The command menu's sheet: a limit's `comd` while it wears one.
+fn menu_sheet<'a>(
+    own: &'a Sheet,
+    skin: &'a Option<(Arc<party_limit::LimitSource>, usize)>,
+) -> &'a Sheet {
+    skin.as_ref()
+        .and_then(|(src, l)| src.limits[*l].menu_sheet.as_ref())
+        .unwrap_or(own)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8086,8 +8646,13 @@ fn hud_present(
         image,
         menu,
         panels,
+        limit_hud,
+        menu_skin,
         ..
     } = &mut *hud;
+    // The limit file whose sheets the texture list borrows while a limit's
+    // HUD is up.
+    let limit_sheets = limit_hud.as_ref().map(|h| h.sheets());
     let mut textures: Vec<Texture> = sheets
         .iter()
         .map(|s| Texture {
@@ -8113,15 +8678,21 @@ fn hud_present(
     if let Some(m) = menu {
         let first = textures.len();
         menu_font = Some((first + 1, m.font.widths.clone()));
+        let sheet = menu_sheet(&m.sheet, menu_skin);
         textures.push(Texture {
-            rgba: &m.sheet.texture_rgba,
-            size: m.sheet.texture_size.map(|v| v as usize),
-            texel_scale: m.sheet.texel_scale as f32,
+            rgba: &sheet.texture_rgba,
+            size: sheet.texture_size.map(|v| v as usize),
+            texel_scale: sheet.texel_scale as f32,
         });
         textures.push(Texture {
             rgba: &m.font.rgba,
             size: m.font.size.map(|v| v as usize),
             texel_scale: m.font.texel_scale as f32,
+        });
+        textures.push(Texture {
+            rgba: &m.icons.rgba,
+            size: m.icons.size.map(|v| v as usize),
+            texel_scale: m.icons.texel_scale as f32,
         });
         // While riding, Skate 3's score HUD replaces the command menu and
         // the gauge.
@@ -8129,13 +8700,14 @@ fn hud_present(
             Vec::new()
         } else {
             m.menu.draw(
-                &m.sheet.sequence,
+                &sheet.sequence,
                 &field_command_menu::Font {
                     widths: &m.font.widths,
                     pad: 1,
                 },
                 first,
                 first + 1,
+                first + 2,
             )
         };
     }
@@ -8150,6 +8722,22 @@ fn hud_present(
         }
         draws.extend(gauge.draw(&seqs));
         draws.extend(enemy_gauge.draw(&sheets[0].sequence, 0));
+        // A party limit's gauge and combo counter (MISSION_GAUGE, COUNTER).
+        if let (Some(h), Some((src, limit))) = (limit_hud.as_mut(), limit_sheets.as_ref()) {
+            let l = &src.limits[*limit];
+            let mut at = [usize::MAX; 2];
+            for (k, sheet) in [&l.gauge_sheet, &l.counter_sheet].into_iter().enumerate() {
+                if let Some(s) = sheet {
+                    at[k] = textures.len();
+                    textures.push(Texture {
+                        rgba: &s.texture_rgba,
+                        size: s.texture_size.map(|v| v as usize),
+                        texel_scale: s.texel_scale as f32,
+                    });
+                }
+            }
+            draws.extend(h.draw(at[0], at[1]));
+        }
         if let Some((font_sheet, widths)) = menu_font.as_ref() {
             draws.extend(panels.draw(
                 &sheets[0].sequence,
@@ -8644,6 +9232,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
                     );
                 }
             }
+            rt.hits_landed += 1;
             let record = serde_json::json!({"event":"hit","tick":tick,"atkp":atkp,"sub":sub,"damage":damage,
                 "step":row,"combo":player.combo.step,"enemy_hp":rt.enemy.hp,"reaction":format!("{:?}", rt.enemy.reaction),
                 "act":format!("{:?}", rt.enemy.current_act()),"high":high});
@@ -11197,6 +11786,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut npc_tour = false;
     let mut badge_tour = false;
     let mut journal_tour = false;
+    let mut deck_tour = false;
+    let mut summon_tour = false;
+    let mut limit_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
     // Capture ticks replacing the unattended run's own list (research).
@@ -11307,6 +11899,40 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("npc tour capture directory absent")?,
+                );
+            }
+            // The deck tour runs in the magic tour's setup (Sora still, the
+            // Shadow frozen nearby) with the magic schedule pushed away.
+            Some("--command-deck-tour") if autoplay.is_none() => {
+                magic_tour = true;
+                deck_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("command deck tour capture directory absent")?,
+                );
+            }
+            // So does the summon tour.
+            Some("--summon-tour") if autoplay.is_none() => {
+                magic_tour = true;
+                summon_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("summon tour capture directory absent")?,
+                );
+            }
+            // The limit tour too runs in the magic tour's setup.
+            Some("--party-limit-tour") if autoplay.is_none() => {
+                magic_tour = true;
+                limit_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("party limit tour capture directory absent")?,
                 );
             }
             Some("--journal-tour") if autoplay.is_none() => {
@@ -11490,7 +12116,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         None
     };
     // A form's change takes about 260 ticks before the first cast.
-    let magic_shift = if party_hit_tour {
+    let magic_shift = if party_hit_tour || deck_tour || limit_tour || summon_tour {
         // The magic tour's schedule never comes up.
         1 << 40
     } else if magic_form != 0 {
@@ -11501,6 +12127,12 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let captures = if party_hit_tour {
         // The tour asks for its captures as its cases happen.
         Vec::new()
+    } else if deck_tour {
+        deck_tour::captures()
+    } else if summon_tour {
+        summon_tour::captures()
+    } else if limit_tour {
+        limit_tour::captures()
     } else if journal_tour {
         journal_tour::CAPTURES.to_vec()
     } else if npc_tour {
@@ -11532,6 +12164,12 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     };
     let autoplay_end = if party_hit_tour {
         party_hit_tour::END
+    } else if deck_tour {
+        deck_tour::end()
+    } else if summon_tour {
+        summon_tour::end()
+    } else if limit_tour {
+        limit_tour::end()
     } else if journal_tour {
         journal_tour::END
     } else if npc_tour {
@@ -11599,6 +12237,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         selected_target: None,
         target_locked: false,
         player_target_shape: loaded.kit.target_shape,
+        player_push_shapes: loaded.kit.push_shapes.clone(),
         params: loaded.params,
         clips: loaded.kit.clips,
         world: loaded.world,
@@ -11618,6 +12257,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         jump_queued: false,
         attack_queued: false,
         guard_queued: false,
+        face_queued: 0,
         shortcut_queued: 0,
         back_queued: false,
         debug_blow: false,
@@ -11669,6 +12309,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 blade: None,
                 shield: None,
                 bash_keys: Vec::new(),
+                limit: None,
                 record: combat::HitRecord::new(true),
                 ko_fx: false,
                 cast_motion: 0,
@@ -11715,6 +12356,26 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         fx_calls: Vec::new(),
         party_spells: !party_hit_tour,
         party_battle: party_room::BattleMode::default(),
+        second_deck: loaded.second_deck.take(),
+        summons: loaded.summons.take(),
+        summon: None,
+        summon_request: None,
+        summon_dismiss: false,
+        summon_serial: 0,
+        summon_octant: 0,
+        summon_form: 0,
+        genie_command: None,
+        summon_stick: [0.; 3],
+        limit_tour,
+        party_limits: Arc::new(std::mem::take(&mut loaded.party_limits)),
+        party_limit: None,
+        limit_request: None,
+        limit_decide: None,
+        deck_saved: None,
+        deck_tour,
+        summon_tour,
+        deck_queued: false,
+        open_queued: false,
         party_hit_tour,
         party_hit_state: party_hit_tour::State::default(),
         enemy_guards: Vec::new(),
@@ -11956,6 +12617,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             target_reach: e.target_reach,
             claws_now: Vec::new(),
             last_attacker: party_room::Attacker::Sora,
+            hits_landed: 0,
             sora_record: combat::HitRecord::new(true),
             ids: combat::AttackIds::default(),
             instance_ids: HashMap::new(),
@@ -12002,6 +12664,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         recenter_queued: false,
         pending_look: 0.,
         was_first_person: false,
+        was_aiming: false,
         fade: FadeRamp::SHOWN,
         collision_hits: 0,
         collision: CameraCollision::new(&loaded.room),
@@ -12158,8 +12821,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 read_pad,
                 camp_tick,
                 game_over::tick,
+                command_layout::follow,
                 (
                     simulate,
+                    summon::tick,
                     skate_tick,
                     area_tick,
                     enemy_battle::tick,
@@ -12207,7 +12872,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 drive_room::thrown_keyblade,
                 skate_present,
                 present_enemy,
-                (enemy_gallery::present, present_spells).chain(),
+                (enemy_gallery::present, present_spells, summon::present).chain(),
                 party_room::present,
                 drive_room::party_visibility,
                 present_npc,

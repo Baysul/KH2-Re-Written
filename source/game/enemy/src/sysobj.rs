@@ -96,6 +96,90 @@ impl Default for JumpMotions {
     }
 }
 
+/// Physics mode 0x34 (FUN_14053d850): flight at the run speed along the
+/// heading, which turns toward the request (`+0x10`, with +0x134 a frame);
+/// the vertical speed blends the request's toward the last by the inertia
+/// (+0x108 = +0x140).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LimitFlight {
+    pub run: f32,
+    pub inertia: f32,
+    /// The turn rate before the mode.
+    pub turn: f32,
+}
+
+/// Physics mode 0x2a (FUN_14053d720): the velocity steers toward the move
+/// request (FUN_1403b7ad0) with the spec's inertias, the heading follows
+/// it, and the height above the floor is held at the spec's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LimitHover {
+    /// DAT_142b59470..+0x24 as entered.
+    pub spec: [f32; 9],
+    /// The turn rate before the mode.
+    pub turn: f32,
+}
+
+impl LimitHover {
+    /// One step's displacement.
+    fn step(&self, s: &mut Sysobj, env: &dyn Env) -> Vec3 {
+        let dt = actor_physics::PHYSICS_STEP;
+        let [_, _, _, steer, fast, slow, between, height, climb] = self.spec;
+        let v = s.velocity;
+        let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        // FUN_1403b9da0: a slower request is raised to the speed.
+        if 0. < s.move_speed && s.move_speed <= speed {
+            let d = s.move_direction;
+            let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if l != 0. {
+                s.move_direction = d.map(|c| c / l);
+            }
+            s.move_speed = speed;
+        }
+        let keep = 1. - if between < s.move_speed { fast } else { slow };
+        // FUN_1403b7ad0 (FUN_140141ae0 blends toward the request).
+        let nv = if s.move_speed > 0. {
+            let t = s.move_direction.map(|c| c * s.move_speed);
+            [0, 1, 2].map(|k| t[k] * (1. - steer) + v[k] * steer)
+        } else {
+            [v[0], v[1], v[2]].map(|c| c * keep)
+        };
+        s.velocity = [nv[0], nv[1], nv[2], v[3]];
+        let mut d = nv.map(|c| c * dt);
+        if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 0. {
+            s.turn_dir(d, 0.);
+        }
+        // FUN_140540470: the floor along a line from 200 above to 10200
+        // below (10000 without one); the height moves `climb` a frame
+        // toward the spec's when it is more than that plus 10 off.
+        let p = s.position;
+        let above = env
+            .floor(p[0], p[2], p[1] + 200.)
+            .filter(|f| *f >= p[1] - 10200.)
+            .map_or(10000., |f| p[1] - f);
+        let step = dt * climb;
+        let off = above - height;
+        if step + 10. < off.abs() {
+            d[1] += if off >= 0. { -step } else { step };
+        }
+        d
+    }
+}
+
+impl LimitFlight {
+    /// The velocity (+0x20) of one step. [I] The forward vector
+    /// (FUN_1403b56e0, +0x680) is read as the heading's.
+    fn velocity(&self, s: &mut Sysobj) -> Vec3 {
+        let d = s.move_direction;
+        // FUN_1403b65c0: the wished heading (+0x7a8).
+        if s.move_speed > 0. && d[0] != 0. && d[2] != 0. {
+            s.wish_yaw = Some(d[0].atan2(d[2]));
+        }
+        let (sin, cos) = s.yaw.sin_cos();
+        let vy = d[1] * s.move_speed * (1. - self.inertia) + self.inertia * s.velocity[1];
+        [sin * self.run, vy, cos * self.run]
+    }
+}
+
 /// Physics mode 9 (`trap_obj_hop`): a ballistic hop whose vertical speed is
 /// integrated every step (FUN_1403cbdd0) and whose horizontal velocity follows
 /// the object's move request with one inertia (+0x108) for both the pull and
@@ -350,6 +434,14 @@ pub struct Sysobj {
     pub damage_parts: u8,
     /// +0x6a0..: carried by another object (`obj_attach`, physics mode 3).
     pub attached: Option<Attach>,
+    /// Physics mode 0x34 (Peter Pan's limit flight, `obj_limit_peterpan_idle`).
+    pub limit_flight: Option<LimitFlight>,
+    /// Physics mode 0x2a (Genie's limit hover, `obj_limit_hover`).
+    pub limit_hover: Option<LimitHover>,
+    /// Physics mode 3 with a camera-space matrix (FUN_1403b4da0(obj, 3),
+    /// FUN_1403cbfc0: +0x124 bit 6, +0x8c8 bit 12): the object does not
+    /// move by itself; its host places it from the camera (Stitch).
+    pub camera_space: bool,
     /// FUN_1401a7cf0 / FUN_1401a8a90: the model is hidden (`obj_hide_part`
     /// and `obj_show_part` take a part but the routines ignore it).
     pub model_hidden: bool,
@@ -372,6 +464,11 @@ pub struct Sysobj {
     pub head_look: HeadLook,
     /// The captured motion playing, if any.
     pub capture: Option<Capture>,
+    /// +0x184 for a motion of a limit file's set: the token
+    /// `limit_motion_start` handed out (FUN_1403c64a0), and whether that
+    /// motion still counts as playing for the limit (+0x1b0).
+    pub limit_token: i32,
+    pub limit_motion: bool,
     /// +0xd48: the magic thread `obj_hook` started.
     pub hook: Option<u32>,
     /// The hook table of the motion set in use (+0x160; `obj_motion_hook`).
@@ -607,6 +704,9 @@ impl Sysobj {
             damage_attack_type: 0,
             damage_parts: 0,
             attached: None,
+            camera_space: false,
+            limit_flight: None,
+            limit_hover: None,
             model_hidden: false,
             texture_animation: false,
             tex_fade: Fade::default(),
@@ -616,6 +716,8 @@ impl Sysobj {
             bg_press: [0.; 4],
             head_look: HeadLook::default(),
             capture: None,
+            limit_token: 0,
+            limit_motion: false,
             hook: None,
             motion_hook: None,
             sound_bank: None,
@@ -627,7 +729,16 @@ impl Sysobj {
     /// bit 6 blow, bit 7 ground, bit 8 always. The modes this crate runs are
     /// listed; the others are not entered here.
     pub fn mode_flags(&self) -> u32 {
-        if self.blow.is_some() {
+        if self.camera_space {
+            // Mode 3's +0xc.
+            0x100
+        } else if self.limit_flight.is_some() {
+            // Mode 0x34's +0xc.
+            0x10a
+        } else if self.limit_hover.is_some() {
+            // Mode 0x2a's +0xc.
+            0x100
+        } else if self.blow.is_some() {
             0x1c1
         } else if self.jump.is_some() {
             0x181
@@ -666,12 +777,51 @@ impl Sysobj {
         true
     }
 
+    /// FUN_1403c7300 / FUN_14040e5c0 as FUN_1403c65e0 calls them when a
+    /// motion has no entry: the object stops on an ended motion.
+    pub fn motion_stop(&mut self) {
+        let m = &mut self.motion;
+        m.blend = 0.;
+        m.root_step = [0.; 3];
+        m.flags.word |= motion::flag::ENDED;
+    }
+
     /// FUN_1403c6dc0: like start, but nothing happens if `slot` already plays.
     pub fn motion_change(&mut self, slot: usize, blend: f32, clips: &dyn Clips) -> bool {
         if self.motion.slot == slot {
             return true;
         }
         self.motion_start(slot, blend, clips)
+    }
+
+    /// FUN_1403ba070's motion windows: the command the window names
+    /// (+0x638) is taken while flag bit 17 holds, or a command whose +0x22
+    /// (`chain`) it names while range 0x1a (bit 21) holds; flag bit 30
+    /// (range 0x28) refuses every other. None leaves the answer to the
+    /// command lockout and the free windows. [I] The first test (command
+    /// flag bit 1 with the object's states) is not applied.
+    pub fn command_window(&self, command: u16, chain: u16) -> Option<bool> {
+        let word = self.motion.flags.word;
+        let param = self.event_parameter;
+        if word & 0x2_0000 != 0 && param == u32::from(command)
+            || chain != 0 && word & 0x20_0000 != 0 && param == u32::from(chain)
+        {
+            return Some(true);
+        }
+        (word & 0x4000_0000 != 0).then_some(false)
+    }
+
+    /// FUN_1403ba070's free windows for a command with flags `flags` (+0xc):
+    /// flag bit 8 with motion flag bit 19; a range 0 to 2; flag bit 7 clear
+    /// with motion flag bit 10 or +0x194 bit 5; or flag bit 2. [I] The
+    /// command lockout (+0xb94) is not kept for engine objects, and the
+    /// motion-less case (+0x158 null) does not arise.
+    pub fn free_window(&self, flags: u32) -> bool {
+        let (w, w3) = (self.motion.flags.word, self.motion.flags.word3);
+        flags & 0x100 != 0 && w & 0x8_0000 != 0
+            || w & 0x1c != 0
+            || flags & 0x80 == 0 && (w & 0x400 != 0 || w3 & 0x20 != 0)
+            || flags & 4 != 0
     }
 
     /// +0x18c bit 1 (the motion ended on this tick's step).
@@ -861,11 +1011,34 @@ impl Sysobj {
             let step = self.turn_rate.max(0.) * 2.;
             self.yaw = wrap(self.yaw + delta.clamp(-step, step));
         }
-        // The texture fade runs with the frame.
+        // FUN_1403cc730: the alpha fade (+0xa08), then the texture fade
+        // (+0xaa4), run with the frame.
+        self.fade.step(1.0);
         self.tex_fade.step(1.0);
         // A carried object does not move by itself (physics mode 3); the
-        // world places it on its holder.
-        if self.attached.is_some() {
+        // world places it on its holder. Nor does one in camera space.
+        if self.attached.is_some() || self.camera_space {
+            return;
+        }
+        if let Some(f) = self.limit_flight {
+            // Like every mode routine it runs every `PHYSICS_STEP` frames.
+            if self.sampler.due(self.move_speed) {
+                let v = f.velocity(self);
+                self.velocity = [v[0], v[1], v[2], self.velocity[3]];
+                self.sampler
+                    .store(v.map(|c| c * actor_physics::PHYSICS_STEP));
+            }
+            let d = self.sampler.displacement();
+            self.apply_movement(d, env);
+            return;
+        }
+        if let Some(h) = self.limit_hover {
+            if self.sampler.due(self.move_speed) {
+                let d = h.step(self, env);
+                self.sampler.store(d);
+            }
+            let d = self.sampler.displacement();
+            self.apply_movement(d, env);
             return;
         }
         if self.fly.is_some() {
@@ -889,7 +1062,21 @@ impl Sysobj {
                 ]
             };
             self.apply_movement(wished, env);
+            self.leave_ground(clips, env);
         }
+        // FUN_1403b89a0 adds the frame's move request (`obj_move_request`,
+        // +0xa58 direction, +0xa64 speed) times the frame time, then clears
+        // it. [I] Here it is a second step through the collision world.
+        if self.request_speed != 0. {
+            let dt = 1.0;
+            let d = self.request_direction;
+            let wished = d.map(|v| v * self.request_speed * dt);
+            let earlier = self.moved;
+            self.apply_movement(wished, env);
+            self.moved = [0, 1, 2].map(|k| earlier[k] + self.moved[k]);
+        }
+        self.request_direction = [0.; 3];
+        self.request_speed = 0.;
     }
 
     /// FUN_140421c80: one step of physics mode 5. Like every mode routine it
@@ -960,6 +1147,15 @@ impl Sysobj {
 
     /// Entering a physics mode leaves the others (FUN_1403b4da0).
     fn leave_air_modes(&mut self) {
+        // Mode 0x34's exit loads PRTY record 1, mode 0x2a's (FUN_14053d980)
+        // the object's own record (+0x148): the turn rate comes back [I:
+        // as it was on entry].
+        if let Some(f) = self.limit_flight.take() {
+            self.turn_rate = f.turn;
+        }
+        if let Some(h) = self.limit_hover.take() {
+            self.turn_rate = h.turn;
+        }
         self.jump = None;
         self.hop = None;
         self.fly = None;
@@ -1264,6 +1460,87 @@ impl Sysobj {
     /// +0x18c bit 9: the playing clip holds the actor out of control.
     pub fn no_control(&self) -> bool {
         self.motion.flags.word & motion::flag::NO_CONTROL != 0
+    }
+
+    /// FUN_1403b9090's leave-ground branch for the ground mode: an object
+    /// off the floor that is not rising while FUN_1403ba1e0 holds (range
+    /// 0x1e or +0x120 bit 23, without range 3) gets script event 0xe and
+    /// its class's leave handler. Every class wrapper ends in FUN_1403b7850:
+    /// the mode's slot 4 with height 0 (FUN_140409b00 -> FUN_1403cbc30: no
+    /// vertical speed, no fall motion, motion 5 on landing; mode 1). The
+    /// summon class (FUN_1403d6430) first changes to motion 4 over 16
+    /// frames unless +0x194 bit 4. [I] The collision-enabled test
+    /// (FUN_1403ba940) is taken as true; "on the floor" is within one unit
+    /// of the floor under the object; event 0xe is not sent.
+    fn leave_ground(&mut self, clips: &dyn Clips, env: &dyn Env) {
+        let w = self.motion.flags.word;
+        let held = (w & motion::flag::GRAVITY_FROZEN_2 != 0 || self.flags >> 23 & 1 != 0)
+            && w & motion::flag::GRAVITY_FROZEN == 0;
+        if !held || self.wished[1] > 0. {
+            return;
+        }
+        let [x, y, z] = self.position;
+        if env.floor(x, z, y + 1.).is_some_and(|f| y - f <= 1.) {
+            return;
+        }
+        if self.class_flags & class_flag::SUMMON != 0 && self.motion.flags.word3 & 0x10 == 0 {
+            self.motion_change(4, 16., clips);
+        }
+        self.jump_motions = JumpMotions::default();
+        self.start_fall(0.);
+        self.state_flags &= !state_flag::GROUND_ARMED;
+        self.flags |= 0x400_0000;
+    }
+
+    /// `obj_limit_peterpan_idle` (FUN_14053e900): physics mode 0x34 with
+    /// its entry (FUN_14053da60): the movement block from PRTY record 0x3e
+    /// (FUN_14040a480), no velocity, the vertical inertia from +0x140.
+    pub fn to_limit_flight(&mut self, spec: Option<actor_physics::ObjParams>) {
+        self.leave_air_modes();
+        self.camera_space = false;
+        self.steer = None;
+        self.sampler.reset();
+        let spec = spec.unwrap_or_else(|| actor_physics::ObjParams::defaults(self.sstm.fall_max));
+        let turn = self.turn_rate;
+        self.turn_rate = spec.turn;
+        self.velocity = [0., 0., 0., self.velocity[3]];
+        self.limit_flight = Some(LimitFlight {
+            run: spec.run,
+            inertia: spec.word10,
+            turn,
+        });
+    }
+
+    /// `obj_limit_hover` (FUN_14053d680): a velocity of `v`'s direction
+    /// times its w, then physics mode 0x2a with its entry (FUN_14053d9e0:
+    /// the spec's turn rate, +0x134). `spec` is DAT_142b59470 with the
+    /// call's inertias in place.
+    pub fn to_limit_hover(&mut self, v: [f32; 4], spec: [f32; 9]) {
+        let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        let d = if len != 0. {
+            [v[0] / len, v[1] / len, v[2] / len]
+        } else {
+            [v[0], v[1], v[2]]
+        };
+        self.leave_air_modes();
+        self.camera_space = false;
+        self.steer = None;
+        self.sampler.reset();
+        self.velocity = [d[0] * v[3], d[1] * v[3], d[2] * v[3], self.velocity[3]];
+        let turn = self.turn_rate;
+        self.turn_rate = spec[2];
+        self.limit_hover = Some(LimitHover { spec, turn });
+    }
+
+    /// FUN_1403b4da0(obj, 3) with FUN_1403cbfc0: physics mode 3 in camera
+    /// space; any jump, fall, steering or hop ends.
+    pub fn to_camera_mode(&mut self) {
+        self.camera_space = true;
+        self.jump = None;
+        self.fly = None;
+        self.steer = None;
+        self.hop = None;
+        self.airborne = false;
     }
 
     /// Physics mode entry for a fall (FUN_1403b8150): the parabola continues

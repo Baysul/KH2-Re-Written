@@ -139,6 +139,11 @@ impl SettingsRes {
         }
     }
 
+    /// The selected source the menus are read from.
+    pub fn source(&self) -> &ProbeSource {
+        &self.source
+    }
+
     /// The chosen language differs from the one the menus are in.
     pub fn language_pending(&self) -> bool {
         !self.languages.is_empty() && self.current.language != self.loaded
@@ -308,6 +313,10 @@ impl SettingsRes {
             }
             ms.sheet = sheet;
             ms.font = font;
+            // The world layout is read again in the new language.
+            ms.menu.reload(&ms.sheet.sequence);
+            ms.layout = None;
+            ms.language = to.clone();
             h.updated = true;
         }
         self.loaded = to;

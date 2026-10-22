@@ -307,6 +307,24 @@ impl Clip {
     }
 }
 pub(super) struct Clips(HashMap<usize, Clip>);
+impl Clips {
+    /// The clip a brain's motion slot plays: its choice, motion and the
+    /// source key at `elapsed` (the first key while blending), as
+    /// [`BattleActor::tick`] poses it.
+    pub(super) fn pose_key(
+        &self,
+        slot: usize,
+        elapsed: u32,
+        blending: bool,
+    ) -> Option<(usize, Arc<SelectedMotion>, f32)> {
+        let c = self.0.get(&slot)?;
+        Some((
+            c.choice,
+            c.motion.clone(),
+            c.key(if blending { 0 } else { elapsed }),
+        ))
+    }
+}
 impl shadow::Clips for Clips {
     fn advance(&self, _s: usize, t: u32) -> u32 {
         if t == 0 { 2 } else { t.saturating_add(1) }
@@ -534,6 +552,117 @@ pub fn lock_range(source: &ProbeSource) -> Result<f32, String> {
     }
     Ok(range)
 }
+/// The clips of a kind's motion set: native clock, root motion, the attack
+/// windows `windows` gives and the trigger tables the engine reads.
+pub(super) fn build_clips(
+    kind: &Kind,
+    mut windows: impl FnMut(&SelectedMotion) -> Result<Vec<AttackWindow>, String>,
+) -> Result<Clips, String> {
+    let mut clips = HashMap::new();
+    for (choice, m) in kind
+        .motions
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.status.is_none())
+    {
+        let motion = kind.load_motion(choice).map_err(|e| e.to_string())?;
+        if motion.motion.raw.is_some() {
+            return Err("raw native combat pose sampling is not qualified".into());
+        }
+        // An absent type-16 entry means no events, including the ordinary
+        // Shadow/Soldier idle clips. It is not a malformed event table.
+        if motion.triggers.len() > 1
+            || motion.triggers.iter().any(|t| {
+                t.records.declared_frame_offset < 0
+                    || t.records.declared_frame_offset as usize != t.records.sequential_frame_offset
+            })
+        {
+            return Err("native event table offset differs from admitted decoder".into());
+        }
+        let (start, _, fps, repeat) = motion.motion.frame_window().map_err(|e| e.to_string())?;
+        let duration = motion.motion.raw.as_ref().map_or_else(
+            || {
+                motion
+                    .motion
+                    .interpolated_header_words
+                    .get(1)
+                    .copied()
+                    .unwrap_or(0)
+            },
+            |r| r.raw_header_words[4],
+        );
+        let loop_top = (repeat - start) * 60. / fps;
+        if duration == 0
+            || duration > 4096
+            || !loop_top.is_finite()
+            || loop_top < 0.
+            || loop_top > duration as f32
+            || loop_top.fract() != 0.
+            || !start.is_finite()
+            || start < 0.
+            || !fps.is_finite()
+            || fps <= 0.
+        {
+            return Err(format!(
+                "slot {} native clock outside admitted profile",
+                m.slot
+            ));
+        }
+        let mut roots = Vec::new();
+        for t in 0..=duration {
+            let pose = motion_eval::evaluate(
+                &kind.model.skinning.bones,
+                &motion.motion,
+                t as f32 + start * 60. / fps,
+            )
+            .map_err(|e| e.to_string())?;
+            if pose.root_translation.iter().any(|v| !v.is_finite()) {
+                return Err("nonfinite root motion".into());
+            }
+            roots.push(pose.root_translation);
+        }
+        let windows = windows(&motion)?;
+        let events = enemy::motion::MotionEvents {
+            ranges: motion
+                .triggers
+                .iter()
+                .flat_map(|t| &t.records.ranges)
+                .map(|r| enemy::motion::RangeEvent {
+                    start: r.start_frame as u16,
+                    end: r.end_frame as u16,
+                    kind: r.trigger,
+                    params: r.parameters.iter().map(|&v| v as u16).collect(),
+                })
+                .collect(),
+            frames: motion
+                .triggers
+                .iter()
+                .flat_map(|t| &t.records.frames)
+                .map(|f| enemy::motion::FrameEvent {
+                    frame: f.frame as u16,
+                    kind: f.trigger,
+                    params: f.parameters.iter().map(|&v| v as u16).collect(),
+                })
+                .collect(),
+        };
+        clips.insert(
+            m.slot,
+            Clip {
+                choice,
+                motion,
+                duration,
+                loop_top: loop_top.round() as u32,
+                start,
+                fps,
+                roots,
+                windows,
+                events,
+            },
+        );
+    }
+    Ok(Clips(clips))
+}
+
 impl BattleActor {
     pub fn load(
         source: &ProbeSource,
@@ -569,111 +698,7 @@ impl BattleActor {
             }
         };
         let assets = EnemyCombat::load(source, entry, kind, binding, level, difficulty)?;
-        let mut clips = HashMap::new();
-        for (choice, m) in kind
-            .motions
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| m.status.is_none())
-        {
-            let motion = kind.load_motion(choice).map_err(|e| e.to_string())?;
-            if motion.motion.raw.is_some() {
-                return Err("raw native combat pose sampling is not qualified".into());
-            }
-            // An absent type-16 entry means no events, including the ordinary
-            // Shadow/Soldier idle clips. It is not a malformed event table.
-            if motion.triggers.len() > 1
-                || motion.triggers.iter().any(|t| {
-                    t.records.declared_frame_offset < 0
-                        || t.records.declared_frame_offset as usize
-                            != t.records.sequential_frame_offset
-                })
-            {
-                return Err("native event table offset differs from admitted decoder".into());
-            }
-            let (start, _, fps, repeat) =
-                motion.motion.frame_window().map_err(|e| e.to_string())?;
-            let duration = motion.motion.raw.as_ref().map_or_else(
-                || {
-                    motion
-                        .motion
-                        .interpolated_header_words
-                        .get(1)
-                        .copied()
-                        .unwrap_or(0)
-                },
-                |r| r.raw_header_words[4],
-            );
-            let loop_top = (repeat - start) * 60. / fps;
-            if duration == 0
-                || duration > 4096
-                || !loop_top.is_finite()
-                || loop_top < 0.
-                || loop_top > duration as f32
-                || loop_top.fract() != 0.
-                || !start.is_finite()
-                || start < 0.
-                || !fps.is_finite()
-                || fps <= 0.
-            {
-                return Err(format!(
-                    "slot {} native clock outside admitted profile",
-                    m.slot
-                ));
-            }
-            let mut roots = Vec::new();
-            for t in 0..=duration {
-                let pose = motion_eval::evaluate(
-                    &kind.model.skinning.bones,
-                    &motion.motion,
-                    t as f32 + start * 60. / fps,
-                )
-                .map_err(|e| e.to_string())?;
-                if pose.root_translation.iter().any(|v| !v.is_finite()) {
-                    return Err("nonfinite root motion".into());
-                }
-                roots.push(pose.root_translation);
-            }
-            let windows = assets.windows(&motion)?;
-            let events = enemy::motion::MotionEvents {
-                ranges: motion
-                    .triggers
-                    .iter()
-                    .flat_map(|t| &t.records.ranges)
-                    .map(|r| enemy::motion::RangeEvent {
-                        start: r.start_frame as u16,
-                        end: r.end_frame as u16,
-                        kind: r.trigger,
-                        params: r.parameters.iter().map(|&v| v as u16).collect(),
-                    })
-                    .collect(),
-                frames: motion
-                    .triggers
-                    .iter()
-                    .flat_map(|t| &t.records.frames)
-                    .map(|f| enemy::motion::FrameEvent {
-                        frame: f.frame as u16,
-                        kind: f.trigger,
-                        params: f.parameters.iter().map(|&v| v as u16).collect(),
-                    })
-                    .collect(),
-            };
-            clips.insert(
-                m.slot,
-                Clip {
-                    choice,
-                    motion,
-                    duration,
-                    loop_top: loop_top.round() as u32,
-                    start,
-                    fps,
-                    roots,
-                    windows,
-                    events,
-                },
-            );
-        }
-        let clips = Arc::new(Clips(clips));
+        let clips = Arc::new(build_clips(kind, |m| assets.windows(m))?);
         let brain = if std::env::var("KH2RW_ENEMY_AI").is_ok_and(|v| v == "script") {
             Brain::Script(Box::new(super::enemy_script::ScriptBrain::load(
                 source,

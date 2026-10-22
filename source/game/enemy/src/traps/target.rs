@@ -55,12 +55,37 @@ fn locate(handle: u32) -> Option<Slot3> {
     {
         return Some(Slot3::Dup((d / 16) as usize));
     }
+    // Sora's own record (a limit scene asks for his battle target).
+    if handle == PLAYER_HANDLE + TARGET_RECORD_OFFSET {
+        return Some(Slot3::Object(crate::world::PLAYER_OBJECT));
+    }
     let o = handle.checked_sub(OBJECT_HANDLES)?;
     (o % 0x1000 == TARGET_RECORD_OFFSET && o < 0x0100_0000).then_some(Slot3::Object(o / 0x1000))
 }
 
-fn record(ctx: &mut Ctx<'_>, handle: u32) -> Result<Target, Fault> {
-    match locate(handle).ok_or(Fault::Memory(handle))? {
+/// A record a script keeps in its own memory (a thread's locals or a
+/// `memory_alloc` block): +0 the target's engine handle, +4 the shape
+/// group, +0xc the search kind.
+fn memory_record(ctx: &Ctx<'_>, m: &Memory<'_>, handle: u32) -> Option<Target> {
+    let w = |k: u32| ctx.read_u32(m, handle.checked_add(k)?);
+    let object = w(0)?;
+    let id = match object {
+        0 => 0,
+        crate::world::PLAYER_HANDLE => PLAYER_TARGET,
+        h => OBJECT_TARGET | crate::world::object_from_handle(h)?,
+    };
+    Some(Target {
+        id,
+        kind: w(0xc)? as i32,
+        group: w(4)? as i32,
+    })
+}
+
+fn record(ctx: &mut Ctx<'_>, m: &Memory<'_>, handle: u32) -> Result<Target, Fault> {
+    let Some(slot) = locate(handle) else {
+        return memory_record(ctx, m, handle).ok_or(Fault::Memory(handle));
+    };
+    match slot {
         Slot3::Object(id) => Ok(ctx.object(id)?.sys.target),
         Slot3::Dup(i) => ctx
             .world
@@ -87,12 +112,26 @@ pub(super) fn target_id_of(id: crate::world::ObjId) -> u32 {
 }
 
 /// The record at `handle`, for the other trap modules.
-pub(super) fn record_of(ctx: &mut Ctx<'_>, handle: u32) -> Result<Target, Fault> {
-    record(ctx, handle)
+pub(super) fn record_of(ctx: &mut Ctx<'_>, m: &Memory<'_>, handle: u32) -> Result<Target, Fault> {
+    record(ctx, m, handle)
 }
 
-pub(super) fn set_record(ctx: &mut Ctx<'_>, handle: u32, t: Target) -> Result<(), Fault> {
-    match locate(handle).ok_or(Fault::Memory(handle))? {
+pub(super) fn set_record(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    handle: u32,
+    t: Target,
+) -> Result<(), Fault> {
+    let Some(slot) = locate(handle) else {
+        for k in [0u32, 4, 8, 0xc] {
+            let word = crate::world::target_record_word(t, k);
+            if !ctx.write_u32(m, handle.wrapping_add(k), word) {
+                return Err(Fault::Memory(handle));
+            }
+        }
+        return Ok(());
+    };
+    match slot {
         Slot3::Object(id) => ctx.object(id)?.sys.target = t,
         // The player's lock-on belongs to the player.
         Slot3::Lockon => {}
@@ -108,8 +147,8 @@ pub(super) fn set_record(ctx: &mut Ctx<'_>, handle: u32, t: Target) -> Result<()
 
 /// Whether the record at `handle` names something that still exists
 /// (FUN_1403bde30): Sora, or a target the host can still place.
-pub(super) fn record_exists(ctx: &mut Ctx<'_>, handle: u32) -> bool {
-    let Ok(t) = record(ctx, handle) else {
+pub(super) fn record_exists(ctx: &mut Ctx<'_>, m: &Memory<'_>, handle: u32) -> bool {
+    let Ok(t) = record(ctx, m, handle) else {
         return false;
     };
     target_point(ctx, t).is_some()
@@ -131,15 +170,15 @@ pub(super) fn target_point(ctx: &mut Ctx<'_>, t: Target) -> Option<Vec3> {
 }
 
 /// The record handle's target position (`target_pos`), for other modules.
-pub(super) fn record_point(ctx: &mut Ctx<'_>, handle: u32) -> Option<Vec3> {
-    let t = record(ctx, handle).ok()?;
+pub(super) fn record_point(ctx: &mut Ctx<'_>, m: &Memory<'_>, handle: u32) -> Option<Vec3> {
+    let t = record(ctx, m, handle).ok()?;
     target_point(ctx, t)
 }
 
 /// 1:120 FUN_140430350 -> FUN_1403bdde0: the centre of the target's TARGET
 /// shape, in the shared result vector.
 fn target_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let t = record(ctx, args[0].value)?;
+    let t = record(ctx, m, args[0].value)?;
     let p = target_point(ctx, t).unwrap_or([0.; 3]);
     let cell = ctx.world.static_cell(1, 0, 1);
     for (k, lane) in [p[0], -p[1], p[2], 1.0].iter().enumerate() {
@@ -341,12 +380,12 @@ fn search(ctx: &mut Ctx<'_>, kind: i32, from: u32) -> Result<Target, Fault> {
 fn target_search(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let from = ctx.sys_of_ai(m, args[1].value)?;
     let t = search(ctx, args[2].as_int(), from)?;
-    set_record(ctx, args[0].value, t)
+    set_record(ctx, m, args[0].value, t)
 }
 
 /// 1:131 FUN_1404303f0 -> FUN_1403bda80: a copy of a record.
-fn target_dup(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let t = record(ctx, args[0].value)?;
+fn target_dup(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let t = record(ctx, m, args[0].value)?;
     let slot = ctx.world.target_dups.iter().position(Option::is_none);
     let i = match slot {
         Some(i) => i,
@@ -402,12 +441,14 @@ fn set_sheet(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(
     Ok(())
 }
 
-/// 2:23 FUN_1404319d0: the object's own target record, searched again for
-/// Sora when it has become invalid.
+/// 2:23 FUN_1404319d0: the object's own target record (+0xbf8), searched
+/// again (kind 2, Sora) when it has become invalid, for an enemy-class
+/// object (+0x6c8 bit 4) whose record kind is not 3. A summon's record is
+/// its friend's choice and is left as it is.
 fn btlobj_target(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let sys = &ctx.object(id)?.sys;
-    let (t, bit4) = (sys.target, true);
+    let (t, bit4) = (sys.target, sys.class_flags & class_flag::ENEMY != 0);
     let valid = target_point(ctx, t).is_some();
     if !valid && bit4 && t.kind != 3 {
         let found = search(ctx, 2, id)?;

@@ -38,6 +38,8 @@ pub struct Object {
     pub script: ScriptSpace,
     /// Callbacks traps queued for the interpreter to run (see [`Host::take_callbacks`]).
     pub pending: Vec<Callback>,
+    /// The kn::Friend controller of a summon (FUN_1401b06e0).
+    pub friend: Option<Box<crate::friend::Friend>>,
 }
 
 impl Object {
@@ -48,6 +50,7 @@ impl Object {
             sys: Sysobj::bare(),
             acts: act::Manager::default(),
             pending: Vec::new(),
+            friend: None,
             script: ScriptSpace {
                 instance: Instance::placeholder(),
                 stack_bytes: 0,
@@ -121,6 +124,8 @@ pub enum Event {
     /// A command on an effect handle: the first operand slots, and the vector
     /// the first one points at when it is readable.
     EffectCommand {
+        /// The table 0 trap index (38 position, 41 direction, 51 kill ...).
+        trap: u16,
         handle: u32,
         words: [u32; 2],
         vector: Option<[f32; 3]>,
@@ -169,6 +174,11 @@ pub enum Event {
         /// script's AI object named nothing.
         target: Option<ObjId>,
         arguments: [i32; 2],
+        /// The attack as it struck (a script may free it in the same tick):
+        /// its ATKP id and sub index, serial and owner.
+        param: [i32; 2],
+        serial: u64,
+        owner: Option<ObjId>,
     },
     /// `obj_dead`: the object finished dying and is removed.
     ObjectDead {
@@ -262,6 +272,10 @@ pub mod status {
     pub const PRIZE_DRAIN: u32 = 1 << 3;
     /// `status_force_leave_start` / `_end`: every enemy leaves.
     pub const FORCE_LEAVE: u32 = 1 << 7;
+    /// `status_peterpan_prize_drain_start` / `_end`.
+    pub const PETERPAN_PRIZE_DRAIN: u32 = 1 << 11;
+    /// `status_hide_shadow` / `status_show_shadow`.
+    pub const HIDE_SHADOW: u32 = 1 << 12;
 }
 
 /// An object search a script made (kept while `World::trace` is on).
@@ -310,6 +324,11 @@ pub struct World {
     static_words: Vec<u32>,
     /// Traps a script called that nothing implements yet.
     pub missing: Vec<(u16, u16)>,
+    /// Sora's attackers (DAT_140ad6a30, at most 8, newest last), pushed by
+    /// FUN_1401b56e0 mode 0 when he is hit and taken by the friend traps.
+    pub player_attackers: Vec<ObjId>,
+    /// Sora's attack notification (FUN_1401b56e0 mode 1).
+    pub player_notify: crate::friend::PlayerNotify,
     /// Every trap called, newest last, when `trace` is on (development aid).
     pub trace: Option<Vec<(u16, u16)>>,
     /// The object searches scripts made, when `trace` is on.
@@ -331,6 +350,11 @@ pub struct World {
     pub bg_hidden: u64,
     /// The stand-in traps reach when a script names Sora (see [`PLAYER_OBJECT`]).
     pub player_proxy: Option<Box<Object>>,
+    /// Objects that are in the engine's list but held outside `objects`
+    /// for now: the one the host runs itself while the others tick, and the
+    /// object whose `sysobj_appear` is building another (its OBJ_INIT runs
+    /// inside the maker's trap). Searches and handle lookups see them.
+    pub held: Vec<Box<Object>>,
     /// The attack objects scripts created (`attack_new`), by slot.
     pub attacks: Vec<Option<crate::attack::Attack>>,
     /// `attack_new_combo_group`'s counter (DAT_142a24afc).
@@ -346,6 +370,12 @@ pub struct World {
     pub lights: Vec<Option<Light>>,
     /// The vacuums scripts made, by handle slot.
     pub vacuums: Vec<Option<Vacuum>>,
+    /// Duck Flare's flare pool (`flare_init`, DAT_142b59670).
+    pub flares: Option<crate::traps::flare::Pool>,
+    /// Trinity Limit's shot pool (`trinity_shot_init`, DAT_142b596d0).
+    pub shots: Option<crate::traps::trinity::Pool>,
+    /// Static blocks of shot records a dropped pool left, to reuse.
+    pub shots_freed: Vec<u32>,
     /// The shouts waiting for the frame's shout job.
     pub shouts: Vec<Shout>,
     /// The engine's own random generator (DAT_140783ca0), which the shout
@@ -374,6 +404,16 @@ pub struct World {
     /// The battle target table (DAT_142a16370).
     pub battle_targets:
         [crate::traps::target::BattleTarget; crate::traps::target::BATTLE_TARGET_SLOTS],
+    /// The running limit (DAT_142a24cc0), when the host started one.
+    pub limit: Option<crate::traps::limit::LimitState>,
+    /// The host drives Sora's stand-in itself (a limit scene moves him):
+    /// traps then read its own position and heading instead of the host's
+    /// player.
+    pub player_scripted: bool,
+    /// The limit hover's spec (DAT_142b59470, `obj_limit_hover_set_spec`):
+    /// walk, run, turn, steering inertia, fast and slow inertia, the speed
+    /// between them, hover height and climb speed.
+    pub hover_spec: [f32; 9],
 }
 
 /// The event path walker the `eh22_path_*` traps drive (DAT_142b59840):
@@ -406,6 +446,8 @@ impl Default for World {
             statics: HashMap::new(),
             static_words: Vec::new(),
             missing: Vec::new(),
+            player_attackers: Vec::new(),
+            player_notify: crate::friend::PlayerNotify::default(),
             trace: None,
             searches: Vec::new(),
             act_log: None,
@@ -418,6 +460,7 @@ impl Default for World {
             control_off: Vec::new(),
             bg_hidden: 0,
             player_proxy: Some(Box::new(Object::bare(PLAYER_OBJECT))),
+            held: Vec::new(),
             attacks: Vec::new(),
             combo_group: 0,
             attack_serial: 0,
@@ -426,6 +469,9 @@ impl Default for World {
             appear_depth: 0,
             lights: Vec::new(),
             vacuums: Vec::new(),
+            flares: None,
+            shots: None,
+            shots_freed: Vec::new(),
             shouts: Vec::new(),
             engine_rng: Lcg::default(),
             last_line_cross: None,
@@ -438,6 +484,9 @@ impl Default for World {
             captures: 0,
             eh22: Eh22::default(),
             battle_targets: Default::default(),
+            limit: None,
+            player_scripted: false,
+            hover_spec: [0.; 9],
         }
     }
 }
@@ -634,6 +683,12 @@ impl World {
         at
     }
 
+    /// The first effect handle not handed out yet: handles from here on were
+    /// asked for after this call.
+    pub fn effect_watermark(&self) -> u32 {
+        EFFECT_HANDLES + (self.next_effect + 1) * 16
+    }
+
     /// A fresh handle for an effect the host will create.
     pub fn next_effect_handle(&mut self) -> u32 {
         self.next_effect += 1;
@@ -693,6 +748,17 @@ impl World {
         for light in self.lights.iter_mut().flatten() {
             light.fade.step(frame_time);
         }
+    }
+
+    /// Put a light in the first free slot; its handle.
+    pub fn add_light(&mut self, light: Light) -> u32 {
+        let slot = self.lights.iter().position(Option::is_none);
+        let slot = slot.unwrap_or_else(|| {
+            self.lights.push(None);
+            self.lights.len() - 1
+        });
+        self.lights[slot] = Some(light);
+        LIGHT_HANDLES + slot as u32 * 16
     }
 
     /// The vacuum slot a handle names.
@@ -837,9 +903,14 @@ impl Ctx<'_> {
                 .world
                 .player_proxy
                 .get_or_insert_with(|| Box::new(Object::bare(PLAYER_OBJECT)));
-            proxy.sys.position = self.env.player_position();
-            proxy.sys.yaw = self.env.player_yaw();
+            if !self.world.player_scripted {
+                proxy.sys.position = self.env.player_position();
+                proxy.sys.yaw = self.env.player_yaw();
+            }
             return Ok(proxy);
+        }
+        if let Some(k) = self.world.held.iter().position(|o| o.id == id) {
+            return Ok(&mut self.world.held[k]);
         }
         self.world
             .objects
@@ -862,6 +933,11 @@ impl Ctx<'_> {
         };
         consider(self.me);
         for o in self.world.objects.iter().flatten() {
+            if o.id != self.me.id {
+                consider(o);
+            }
+        }
+        for o in &self.world.held {
             if o.id != self.me.id {
                 consider(o);
             }
@@ -889,6 +965,11 @@ impl Ctx<'_> {
         };
         consider(self.me);
         for o in self.world.objects.iter().flatten() {
+            if o.id != self.me.id {
+                consider(o);
+            }
+        }
+        for o in &self.world.held {
             if o.id != self.me.id {
                 consider(o);
             }
@@ -1007,7 +1088,14 @@ impl Host for Machine<'_> {
             if offset < 16 {
                 return Some(if offset == 4 { PLAYER_HANDLE } else { 0 });
             }
-            return self.ctx.world.player_proxy.as_ref()?.sys.peek_word(offset);
+            let sys = &self.ctx.world.player_proxy.as_ref()?.sys;
+            if (TARGET_RECORD_OFFSET..TARGET_RECORD_OFFSET + 16).contains(&offset) {
+                return Some(target_record_word(
+                    sys.target,
+                    offset - TARGET_RECORD_OFFSET,
+                ));
+            }
+            return sys.peek_word(offset);
         }
         if let Some((id, offset)) = object_field(address) {
             if offset < 16 {
@@ -1064,6 +1152,22 @@ impl Host for Machine<'_> {
     }
 
     fn poke(&mut self, address: u32, value: u32) -> bool {
+        if let Some(d) = address
+            .checked_sub(TARGET_DUP_HANDLES)
+            .filter(|d| *d < 0x0100_0000)
+        {
+            // A script writing into its copy of a target record: the group
+            // (+4) and the search kind (+0xc).
+            let Some(Some(t)) = self.ctx.world.target_dups.get_mut((d / 16) as usize) else {
+                return false;
+            };
+            match d % 16 {
+                4 => t.group = value as i32,
+                0xc => t.kind = value as i32,
+                _ => {}
+            }
+            return true;
+        }
         if let Some(offset) = address.checked_sub(PLAYER_HANDLE).filter(|o| *o < 0x1000) {
             return self
                 .ctx

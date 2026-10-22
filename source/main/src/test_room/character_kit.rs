@@ -58,6 +58,9 @@ pub(super) struct KitInputs<'a> {
     /// Motions its script starts by id (Limit Form's limits), loaded when
     /// the set holds them.
     pub scripted: Vec<u16>,
+    /// Scripted motions from other files (the party limits' own sets): id,
+    /// the motion and its Keyblade motion.
+    pub external: Vec<(u16, motion::SelectedMotion, Option<motion::SelectedMotion>)>,
 }
 
 /// A Keyblade's attack spheres by collision group: offset, radius.
@@ -112,6 +115,8 @@ pub(super) struct Kit {
     pub attack: HashMap<u8, Vec<(usize, Vec3, f32)>>,
     pub target_radius: f32,
     pub target_shape: Option<object_collision::Entry>,
+    /// Push shapes (object collision kind 4; FUN_1403b4f10(obj, 4)).
+    pub push_shapes: Vec<object_collision::Entry>,
     pub target_lift: f32,
     pub body_lift: f32,
     pub heal_lift: f32,
@@ -177,6 +182,7 @@ pub(super) fn load_kit(
         params,
         pax,
         scripted,
+        external,
     } = k;
     // Bones the object's bound effects follow (element flag 1, bone below
     // 0x4000), kept per frame with the HIT bones.
@@ -309,9 +315,19 @@ pub(super) fn load_kit(
         .collect();
     motions.extend(growth_found.into_iter().flatten());
     ids.extend(&growth_ids);
+    // Motions from other files, after everything read from the set.
+    let external_at = ids.len();
+    let external_ids: Vec<u16> = external.iter().map(|e| e.0).collect();
+    let mut external_weapons = Vec::new();
+    for (id, body, weapon) in external {
+        ids.push(id);
+        external_weapons.push((body.slot, weapon));
+        motions.push(body);
+    }
     // HIT spheres (object collision type 2), for enemy attacks.
     let mut target_radius = 0f32;
     let mut target_shape = None;
+    let mut push_shapes = Vec::new();
     let mut target_lift = 70f32;
     // Bone codes 0x4001 and 0x4009 (FUN_1403b50f0): the first type-1 and
     // type-9 collision entries' centres, here above the object's origin.
@@ -319,6 +335,7 @@ pub(super) fn load_kit(
     let body: Vec<(usize, Vec3, f32, bool)> = match &collision_archive {
         Some(archive) => {
             let shapes = object_collision::read(super::bar_entry_typed(archive, 23)?)?;
+            push_shapes = shapes.iter().filter(|c| c.kind == 4).copied().collect();
             // FUN_1403d7520 reads the attacker's TARGET shape (kind 3) via
             // FUN_1403b5650(obj, 3, -1) / FUN_1403c9c00.
             if let Some(c) = shapes
@@ -405,6 +422,11 @@ pub(super) fn load_kit(
         }
     }
 
+    for (slot, weapon) in external_weapons {
+        if let Some(w) = weapon {
+            weapon_motions[0].insert(slot, w);
+        }
+    }
     // Precompute every frame of every clip; undefined basic-FK frames reject
     // the session instead of substituting a pose.
     let skin = Arc::new(Skin {
@@ -722,6 +744,15 @@ pub(super) fn load_kit(
                     .collect();
                 (m, clip.clone(), root)
             })
+            .chain(external_ids.iter().enumerate().map(|(k, &m)| {
+                let (clip, index) = &clip_list[external_at + k];
+                let root = clip_poses[*index]
+                    .root
+                    .iter()
+                    .map(|r| r.to_array())
+                    .collect();
+                (m, clip.clone(), root)
+            }))
             .collect(),
         growth: growth_ids
             .iter()
@@ -779,6 +810,9 @@ pub(super) fn load_kit(
     for &m in &scripted {
         both.push((Action::Scripted(m), attack_clip(m).1));
     }
+    for (k, &m) in external_ids.iter().enumerate() {
+        both.push((Action::Scripted(m), clip_list[external_at + k].1));
+    }
     for (k, &m) in growth_ids.iter().enumerate() {
         let pose = clip_list[growth_at + k].1;
         both.push((Action::Growth(m), pose));
@@ -808,6 +842,7 @@ pub(super) fn load_kit(
         attack,
         target_radius,
         target_shape,
+        push_shapes,
         target_lift,
         body_lift,
         heal_lift,

@@ -13,6 +13,7 @@ pub mod hud;
 pub mod hud_slots;
 pub mod input;
 pub mod level_up;
+pub mod limit_hud;
 pub mod lock_on;
 pub mod menu_screen;
 pub mod new_game;

@@ -272,6 +272,9 @@ fn motion_is_end(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Resu
 fn motion_id(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of(args[0].value)?;
     let slot = ctx.object(id)?.sys.motion.slot;
+    // A limit motion's +0x180 is its id in the limit's own set
+    // (FUN_1403c63e0 stores it), not the slot it plays in here.
+    let slot = slot.checked_sub(super::limit::MOTIONS).unwrap_or(slot);
     int(args, slot as i32);
     Ok(())
 }
@@ -681,12 +684,15 @@ fn sysobj_is_player(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> R
     Ok(())
 }
 
-/// 1:89 FUN_14042f8d0 -> FUN_1403b9a70: a second movement request vector
-/// (+0xa58 direction, +0xa64 speed) that no translated consumer reads yet.
+/// 1:89 FUN_14042f8d0 -> FUN_1403b9a70: this frame's move request (+0xa58
+/// direction, +0xa64 speed); the movement step adds it (FUN_1403b89a0).
 fn move_request(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let v = read_native(ctx, m, args[1].value)?;
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let sys = &mut ctx.object(id)?.sys;
+    // FUN_1403b9a70 normalises the direction in place (+0xa58).
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let v = if len > 0. { v.map(|x| x / len) } else { v };
     sys.request_direction = [v[0], v[1], v[2]];
     sys.request_speed = args[2].as_float();
     Ok(())
@@ -772,7 +778,8 @@ fn motion_capture(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Res
 /// 0 when none does.
 fn motion_capture_id(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let token = ctx.object(id)?.sys.capture.map_or(0, |c| c.token);
+    let sys = &ctx.object(id)?.sys;
+    let token = sys.capture.map_or(sys.limit_token, |c| c.token);
     int(args, token);
     Ok(())
 }

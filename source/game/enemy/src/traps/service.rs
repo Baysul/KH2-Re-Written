@@ -38,6 +38,14 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 187) => prize_drain_start,
         (1, 188) => prize_drain_end,
         (1, 204) => force_leave_start,
+        (1, 286) => hide_shadow,
+        (1, 287) => show_shadow,
+        (6, 19) => peterpan_prize_drain_start,
+        (6, 20) => peterpan_prize_drain_end,
+        // Battle and summon state.
+        (1, 244) => is_battle,
+        (1, 274) => event_rest_time,
+        (2, 75) => summon_is_tink_exist,
         (1, 205) => force_leave_end,
         (1, 202) => unit_disable,
         (1, 203) => unit_enable,
@@ -112,6 +120,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (6, 30) => card_set_spec,
         (6, 70) => play_se_loop,
         (6, 71) => fadeout_se,
+        (1, 277) => reraise,
         (4, 8) => mission_set_gauge,
         (4, 10) => mission_set_gauge_ratio,
         (4, 14) => mission_activate2d,
@@ -136,7 +145,6 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (6, 59) => xemnas_get_obj,
         (1, 234) => party_get_weapon,
         (6, 58) => act_child_push,
-        (2, 57) => limit_effect_start,
         (1, 169) => effect_unbind,
         (10, 58) => friend_link_magic,
         (10, 35) => friend_get_action_param,
@@ -287,6 +295,9 @@ forward_traps! {
     player_card = "player_card", None, None, None;
     card_set_spec = "card_set_spec", None, None, None;
     fadeout_se = "obj_fadeout_se", None, None, None;
+    // 1:277 FUN_14042e1e0 -> FUN_1403aa8d0: the object (Sora, by Tinker
+    // Bell) stands up again with its sheet's HP; the host revives it.
+    reraise = "obj_reraise", Some(0), None, None;
     mission_set_gauge = "mission_set_gauge", None, None, None;
     mission_set_gauge_ratio = "mission_set_gauge_ratio", None, None, None;
     mission_activate2d = "mission_activate2d", None, None, None;
@@ -341,26 +352,6 @@ fn play_se_loop(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
     forward(ctx, m, args, "obj_play_se_loop", Some(0), None, None)?;
     let handle = ctx.world.next_effect_handle() as i32;
     args[0] = Slot::int(handle);
-    Ok(())
-}
-
-/// 2:57 FUN_140432fb0 -> FUN_1403d9b60: start an effect of the object's
-/// container with priority 30000 (FUN_1402c6b30); the script gets the
-/// effect handle.
-fn limit_effect_start(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let id = ctx.sys_of_ai(m, args[0].value)?;
-    let (effect, argument) = (args[1].as_int(), args[2].as_int());
-    let handle = ctx.world.next_effect_handle();
-    ctx.world.events.push(Event::EffectStart {
-        object: id,
-        effect,
-        arguments: [argument, 0],
-        handle,
-        position: None,
-        bound: true,
-        other: None,
-    });
-    args[0] = Slot::address(handle);
     Ok(())
 }
 
@@ -605,6 +596,59 @@ fn force_leave_start(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Res
 
 fn force_leave_end(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
     set_status(ctx, status::FORCE_LEAVE, false);
+    Ok(())
+}
+
+/// 1:286 and 1:287 (0x1404308e0 / 0x1404308f0): DAT_142a11400 bit 12.
+fn hide_shadow(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
+    set_status(ctx, status::HIDE_SHADOW, true);
+    Ok(())
+}
+
+fn show_shadow(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, _: &mut Args) -> Result<(), Fault> {
+    set_status(ctx, status::HIDE_SHADOW, false);
+    Ok(())
+}
+
+/// 6:19 and 6:20 FUN_14053e660 / FUN_14053e670: DAT_142a11400 bit 11.
+fn peterpan_prize_drain_start(
+    ctx: &mut Ctx<'_>,
+    _: &mut Memory<'_>,
+    _: &mut Args,
+) -> Result<(), Fault> {
+    set_status(ctx, status::PETERPAN_PRIZE_DRAIN, true);
+    Ok(())
+}
+
+fn peterpan_prize_drain_end(
+    ctx: &mut Ctx<'_>,
+    _: &mut Memory<'_>,
+    _: &mut Args,
+) -> Result<(), Fault> {
+    set_status(ctx, status::PETERPAN_PRIZE_DRAIN, false);
+    Ok(())
+}
+
+/// 1:244 FUN_1404308a0: the battle flag (FUN_1403abb20).
+fn is_battle(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    args[0] = Slot::int(ctx.env.battle() as i32);
+    Ok(())
+}
+
+/// 1:274 FUN_140430650: the event's time left (FUN_1403ac190) [U: with no
+/// event running the executable leaves the float register as it was; here 0].
+fn event_rest_time(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    args[0] = Slot::float(ctx.env.event_rest_time());
+    Ok(())
+}
+
+/// 2:75 FUN_1404331e0: Peter Pan is out with Tinker Bell (FUN_1403de320).
+fn summon_is_tink_exist(
+    ctx: &mut Ctx<'_>,
+    _: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    args[0] = Slot::int(ctx.env.summon_with_tink() as i32);
     Ok(())
 }
 

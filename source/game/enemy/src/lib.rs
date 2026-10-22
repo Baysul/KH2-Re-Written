@@ -9,6 +9,8 @@ pub mod act;
 pub mod attack;
 pub mod damage;
 pub mod env;
+pub mod friend;
+pub mod limit_scene;
 pub mod motion;
 pub mod object;
 pub mod route;

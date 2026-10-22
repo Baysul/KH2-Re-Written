@@ -90,9 +90,37 @@ pub trait Env {
     fn map_normal(&self, _polygon: i32) -> Option<Vec3> {
         None
     }
+    /// Whether an object may take a command now (FUN_1403ba070: its command
+    /// lockout and motion windows).
+    fn can_decide_command(&self, _object: u32, _command: u16) -> bool {
+        false
+    }
+    /// The command's flags (+0xc), as FUN_1403ba070 tests them.
+    fn command_flags(&self, _command: u16) -> u32 {
+        0
+    }
+    /// The command's +0x1f: whose windows decide it (FUN_1403b6950).
+    fn command_decider(&self, _command: u16) -> u8 {
+        0
+    }
+    /// The command's +0x22: the motion window value that also takes it.
+    fn command_chain(&self, _command: u16) -> u16 {
+        0
+    }
+    /// Sora's push shapes (his model's object-collision kind 4, FUN_1403b4f10
+    /// with FUN_1403c9c00), each centre relative to his origin in the
+    /// script's +Y-down frame.
+    fn player_push_shapes(&self) -> Vec<crate::traps::flare::Shape> {
+        Vec::new()
+    }
     /// The movement Sora's controller asks for this frame (`player_get_movement`).
     fn player_move_input(&self) -> Vec3 {
         [0.; 3]
+    }
+    /// A PRTY movement record (FUN_1403e9590 index), as FUN_14040a480
+    /// would copy it to +0x128.
+    fn movement_spec(&self, _index: i32) -> Option<player::actor_physics::ObjParams> {
+        None
     }
     /// The pad buttons held and pressed this frame, one bit per button
     /// (`pad_is_button`, `pad_is_trigger`).
@@ -116,8 +144,22 @@ pub trait Env {
     fn camera_vector(&self, _v: [f32; 4]) -> Option<[f32; 4]> {
         None
     }
+    /// A point in the view (FUN_14019ce40's matrix: x right, y down, z
+    /// forward) and the projection's scale (FUN_14019d010, +0x40) in w.
+    fn camera_view(&self, _p: Vec3) -> Option<[f32; 4]> {
+        None
+    }
     /// The direction an effect handle faces.
     fn effect_direction(&self, _handle: u32) -> Option<Vec3> {
+        None
+    }
+    /// The radius of the object's TARGET shape (`obj_target_radius`).
+    fn target_radius(&self, _object: u32) -> Option<f32> {
+        None
+    }
+    /// The object's HIT shapes (object collision kind 2): part id and
+    /// centre, for `obj_near_parts`.
+    fn hit_parts(&self, _object: u32) -> Option<Vec<(u8, Vec3)>> {
         None
     }
     /// The TARGET shapes of an object for the target searcher: (shape id,
@@ -217,6 +259,39 @@ pub trait Env {
     }
     fn area_world(&self) -> i32 {
         0
+    }
+    /// The battle flag (`DAT_142a11404` != 0, FUN_1403abb20).
+    fn battle(&self) -> bool {
+        false
+    }
+    /// Peter Pan is out with Tinker Bell (FUN_1403de320: summon state set,
+    /// summon 0x132, `DAT_1409acdd7`).
+    fn summon_with_tink(&self) -> bool {
+        false
+    }
+    /// The running event's time left (FUN_1403ac190, an event in mode 8).
+    fn event_rest_time(&self) -> f32 {
+        0.
+    }
+    /// The command of the running limit (FUN_1403d89f0), 0 for none.
+    fn limit_command(&self) -> u16 {
+        0
+    }
+    /// Sora's velocity (+0xa38).
+    fn player_velocity(&self) -> Vec3 {
+        [0.; 3]
+    }
+    /// Sora's sheet HP and maximum HP.
+    fn player_hp(&self) -> Option<(i32, i32)> {
+        None
+    }
+    /// Sora's sheet MP and maximum MP (+0x180 / +0x184).
+    fn player_mp(&self) -> Option<(i32, i32)> {
+        None
+    }
+    /// Sora's sheet +0x1b4: the form or summon time left.
+    fn drive_time(&self) -> f32 {
+        0.
     }
     /// A game progress flag (FUN_14039a980).
     fn progress_flag(&self, _flag: u32) -> bool {

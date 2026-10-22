@@ -35,6 +35,8 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         5 => searcher_search,
         8 => searcher_add,
         11 => searcher_search_object,
+        12 => searcher_get_old,
+        21 => searcher_add_target,
         16 => target_clear,
         _ => return None,
     })
@@ -83,9 +85,10 @@ fn searcher_reset(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Res
 }
 
 /// 6:16 FUN_14053e540 -> FUN_1403bda50: an empty target record.
-fn target_clear(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+fn target_clear(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     super::target::set_record(
         ctx,
+        m,
         args[0].value,
         Target {
             id: 0,
@@ -173,9 +176,16 @@ fn searcher_add(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
     remember(ctx, m, s, id, -1)
 }
 
-fn set_pick(ctx: &mut Ctx<'_>, record: u32, id: ObjId, shape: u32) -> Result<(), Fault> {
+fn set_pick(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    record: u32,
+    id: ObjId,
+    shape: u32,
+) -> Result<(), Fault> {
     super::target::set_record(
         ctx,
+        m,
         record,
         Target {
             id: super::target::target_id_of(id),
@@ -204,6 +214,7 @@ fn searcher_search(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Re
     put(ctx, m, s + CURSOR, w & !0xff00)?;
     super::target::set_record(
         ctx,
+        m,
         record,
         Target {
             id: 0,
@@ -263,7 +274,7 @@ fn searcher_search(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Re
     let w = word(ctx, m, s + CURSOR)?;
     put(ctx, m, s + CURSOR, w & !0xff00 | (seen.min(255) << 8))?;
     if let Some((id, shape, _)) = best {
-        set_pick(ctx, record, id, shape)?;
+        set_pick(ctx, m, record, id, shape)?;
         if track {
             remember(ctx, m, s, id, shape as i32)?;
         }
@@ -283,6 +294,7 @@ fn searcher_search_object(
     let origin = read_native(ctx, m, args[2].value)?;
     super::target::set_record(
         ctx,
+        m,
         record,
         Target {
             id: 0,
@@ -299,10 +311,47 @@ fn searcher_search_object(
         }
     }
     if let Some((shape, _)) = best {
-        set_pick(ctx, record, id, shape)?;
+        set_pick(ctx, m, record, id, shape)?;
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests;
+
+/// 6:12 FUN_14053e4f0 -> FUN_1405401c0: the record names the pick `n`
+/// entries before the newest in the history ring (FUN_1403bee60); an
+/// empty entry empties it.
+fn searcher_get_old(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let (s, record, n) = (args[0].value, args[1].value, args[2].as_int());
+    let capacity = word(ctx, m, s + CAPACITY)? as i32;
+    if capacity <= 0 {
+        return Err(Fault::Memory(s));
+    }
+    let cursor = (word(ctx, m, s + CURSOR)? & 0xff) as i32;
+    // The executable's C remainder keeps the sign of the dividend.
+    let k = (cursor - n - 1 + capacity) % capacity;
+    let at = s.wrapping_add(ENTRIES).wrapping_add((8 * k) as u32);
+    let (handle, shape) = (word(ctx, m, at)?, word(ctx, m, at + 4)?);
+    match ctx.sys_of(handle) {
+        Ok(id) if handle != 0 => set_pick(ctx, m, record, id, shape),
+        _ => super::target::set_record(ctx, m, record, Target::default()),
+    }
+}
+
+/// 6:21 FUN_14053e290 -> FUN_140540170: remember the object and shape a
+/// target record names (FUN_140540080 with the record's +0 and +4).
+fn searcher_add_target(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let s = args[0].value;
+    let t = super::target::record_of(ctx, m, args[1].value)?;
+    let id = match t.id {
+        0 => return Ok(()),
+        super::target::PLAYER_TARGET => PLAYER_OBJECT,
+        id => id & !super::target::OBJECT_TARGET,
+    };
+    remember(ctx, m, s, id, t.group)
+}

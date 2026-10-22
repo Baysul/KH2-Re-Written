@@ -4,7 +4,7 @@
 use super::math::{read_native, read_sanitized};
 use crate::script::{Fault, Memory, Slot};
 use crate::sysobj::Vec3;
-use crate::world::{Ctx, Event, TrapFn, object_handle};
+use crate::world::{Ctx, Event, Object, TrapFn, object_handle};
 
 type Args = [Slot; 16];
 
@@ -429,7 +429,13 @@ fn set_land_motion(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Re
 /// held before is stopped. The host runs the thread.
 fn obj_hook(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let other = super::service::object_of(ctx, m, args[2].value);
+    // FUN_14042ca20 passes the second argument only when it names
+    // something (a null word adds none).
+    let other = if args[2].value == 0 {
+        None
+    } else {
+        super::service::object_of(ctx, m, args[2].value)
+    };
     let handle = ctx.world.next_magic_handle();
     let old = ctx.object(id)?.sys.hook.replace(handle);
     if let Some(old) = old {
@@ -457,8 +463,8 @@ fn obj_hook_stop(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resu
 
 /// 1:140 FUN_140430440 -> FUN_1403bde30: the target record names something
 /// that still exists.
-fn target_is_exist(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let alive = super::target::record_exists(ctx, args[0].value);
+fn target_is_exist(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let alive = super::target::record_exists(ctx, m, args[0].value);
     args[0] = Slot::int(alive as i32);
     Ok(())
 }
@@ -522,7 +528,14 @@ unsupported_vector_traps! {}
 fn sysobj_appear(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let entry = args[0].value & 0x0fff_ffff;
     let me = ctx.me.id;
+    // The maker stays in the engine's list while the new object's OBJ_INIT
+    // runs (Chicken Little's fireworks search for him by entry).
+    let maker = std::mem::replace(ctx.me, Object::bare(me));
+    ctx.world.held.push(Box::new(maker));
     let id = ctx.world.appear(ctx.env, me, entry);
+    if let Some(k) = ctx.world.held.iter().rposition(|o| o.id == me) {
+        *ctx.me = *ctx.world.held.remove(k);
+    }
     if id.is_none() {
         ctx.world.events.push(Event::Unsupported("sysobj_appear"));
     }
@@ -636,6 +649,10 @@ fn obj_cmp(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(),
 /// 1:160 FUN_140430470 -> FUN_1403bee60: point a target record at an object.
 fn target_set_obj(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let handle = args[0].value;
+    // A null object empties the record (FUN_1403bee60 with nothing).
+    if ctx.read_u32(m, args[1].value + 4) == Some(0) {
+        return super::target::set_record(ctx, m, handle, crate::sysobj::Target::default());
+    }
     let t = match ctx.sys_ref_ai(m, args[1].value)? {
         crate::world::SysRef::Player => crate::sysobj::Target {
             id: super::target::PLAYER_TARGET,
@@ -648,7 +665,7 @@ fn target_set_obj(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Res
             group: 0,
         },
     };
-    super::target::set_record(ctx, handle, t)
+    super::target::set_record(ctx, m, handle, t)
 }
 
 /// 1:170 FUN_14042dac0: the entry's unit group.
@@ -693,7 +710,7 @@ fn damage_orig_reaction(
 /// position to a point.
 fn target_dist(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let v = read_native(ctx, m, args[1].value)?;
-    let p = super::target::record_point(ctx, args[0].value).unwrap_or([0.; 3]);
+    let p = super::target::record_point(ctx, m, args[0].value).unwrap_or([0.; 3]);
     let d = [p[0] - v[0], p[1] - v[1], p[2] - v[2]];
     args[0] = Slot::float((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt());
     Ok(())
@@ -756,7 +773,6 @@ constant_int_traps! {
     message_is_end = 1, "method_message_is_end";
     bghit_is_hit = 0, "bghit_is_hit";
     bghit_get_kind = 0, "bghit_get_kind";
-    can_decide_command = 0, "obj_can_decide_command";
     add_hp = 0, "obj_add_hp";
 }
 
@@ -1029,3 +1045,65 @@ recorded_traps! {}
 
 #[cfg(test)]
 mod tests;
+
+/// 1:221 FUN_14042bbf0 -> FUN_1403b6950: whether the object may take the
+/// command now (its command lockout and motion windows, FUN_1403ba070),
+/// with a target (an AI object, here the friend the command is for).
+fn can_decide_command(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let command = args[1].as_int() as u16;
+    let other = ctx.sys_of_ai(m, args[2].value).ok();
+    let me = ctx.object(id)?.sys.clone();
+    let them = match other {
+        Some(o) => Some((o, ctx.object(o)?.sys.clone())),
+        None => None,
+    };
+    let ok = decides(
+        ctx.env,
+        command,
+        (id, &me),
+        them.as_ref().map(|(o, s)| (*o, s)),
+    );
+    args[0] = Slot::int(ok as i32);
+    Ok(())
+}
+
+/// FUN_1403b6950: the command's +0x1f names whose windows decide it: 0 the
+/// user's, 1 the target's, 2 both; anything else refuses it.
+pub fn decides(
+    env: &dyn crate::env::Env,
+    command: u16,
+    user: (crate::world::ObjId, &crate::sysobj::Sysobj),
+    target: Option<(crate::world::ObjId, &crate::sysobj::Sysobj)>,
+) -> bool {
+    let takes =
+        |(id, s): (crate::world::ObjId, &crate::sysobj::Sysobj)| object_takes(env, id, s, command);
+    match env.command_decider(command) {
+        0 => takes(user),
+        1 => target.is_some_and(takes),
+        2 => takes(user) && target.is_some_and(takes),
+        _ => false,
+    }
+}
+
+/// FUN_1403ba070 for one object: its motion's own windows first
+/// ([`Sysobj::command_window`]); then for Sora the host's answer (his
+/// kit's command lockout and windows), for another object its free windows
+/// ([`Sysobj::free_window`]). [I] Sora's flag-only terms are left to the
+/// host, which keeps his lockout.
+pub fn object_takes(
+    env: &dyn crate::env::Env,
+    id: crate::world::ObjId,
+    sys: &crate::sysobj::Sysobj,
+    command: u16,
+) -> bool {
+    sys.command_window(command, env.command_chain(command))
+        .unwrap_or_else(|| {
+            let flags = env.command_flags(command);
+            if id == crate::world::PLAYER_OBJECT {
+                env.can_decide_command(id, command)
+            } else {
+                sys.free_window(flags)
+            }
+        })
+}

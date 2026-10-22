@@ -15,6 +15,9 @@ type Args = [Slot; 16];
 pub const SHEET_OFFSET: u32 = 0xc00;
 
 pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
+    if table == 10 && index == 45 {
+        return Some(drive_time);
+    }
     if table != 1 {
         return None;
     }
@@ -49,6 +52,19 @@ fn pool_of(ctx: &mut Ctx<'_>, handle: u32, index: i32) -> Result<Pool, Fault> {
     let sys = &ctx.object(id)?.sys;
     sys.pool(usize::try_from(index).map_err(|_| Fault::Memory(handle))?)
         .ok_or(Fault::Memory(handle))
+}
+
+/// 10:45 FUN_140536f80: the sheet's +0x1b4, the form or summon time left
+/// (Sora's; other sheets keep none here).
+fn drive_time(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = owner(args[0].value)?;
+    let t = if id == PLAYER_OBJECT {
+        ctx.env.drive_time()
+    } else {
+        0.
+    };
+    args[0] = Slot::float(t);
+    Ok(())
 }
 
 /// 1:84 FUN_14042f7d0: the sheet of the AI object's engine object.

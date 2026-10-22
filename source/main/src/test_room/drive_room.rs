@@ -394,6 +394,7 @@ impl FormSources {
                 } else {
                     vec![player::WALL_RECOIL_AIR]
                 },
+                external: Vec::new(),
             },
         )
     }
@@ -1584,12 +1585,17 @@ pub fn party_visibility(
     game: Res<Game>,
     mut roots: Query<(&party_room::PartyRoot, &mut Visibility)>,
 ) {
-    let Some(d) = game.drive.as_ref() else { return };
     for (root, mut v) in &mut roots {
-        let hidden = d
-            .stored
-            .iter()
-            .any(|&(i, frames)| i == root.0 && frames >= PARTY_FADE);
+        // A form's absorbed members, and those a summon sent away
+        // (FUN_1403e6fa0).
+        let hidden = game.drive.as_ref().is_some_and(|d| {
+            d.stored
+                .iter()
+                .any(|&(i, frames)| i == root.0 && frames >= PARTY_FADE)
+        }) || game
+            .summon
+            .as_ref()
+            .is_some_and(|s| s.stored.contains(&root.0));
         let want = if hidden {
             Visibility::Hidden
         } else {

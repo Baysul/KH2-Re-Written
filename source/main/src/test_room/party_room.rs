@@ -168,6 +168,8 @@ pub struct MemberRt {
     pub blade: Option<party_blade::Blade>,
     pub shield: Option<party_blade::Shield>,
     pub bash_keys: Vec<(u64, usize)>,
+    /// A party limit's scene drives the member this tick (party_limit).
+    pub limit: Option<party_members::Scripted>,
 }
 
 /// `FUN_1403d60c0`'s gauge event of a hit: a dead member or a blow-class
@@ -404,6 +406,7 @@ pub fn load(
     name: &'static str,
     character: usize,
     records: &'static [party_members::Record],
+    limit_motions: Vec<(u16, motion::SelectedMotion, Option<motion::SelectedMotion>)>,
 ) -> Result<PartyKind, Box<dyn std::error::Error>> {
     let found = library
         .find(&format!("obj/{name}.mdlx"))
@@ -538,6 +541,22 @@ pub fn load(
                 eprintln!("{name}: motion {} left out: {e}", wanted[i]);
             }
             Err(e) => return Err(e),
+        }
+    }
+    // The party limits' motions (and the weapon's), by their clip ids.
+    for (id, body, own) in &limit_motions {
+        match build_motion(
+            &model,
+            weapon.as_ref(),
+            hand_bone,
+            &hit_shapes,
+            body,
+            own.as_ref(),
+        ) {
+            Ok(data) => {
+                motions.insert(*id, data);
+            }
+            Err(e) => eprintln!("{name}: limit motion {id:#x} left out: {e}"),
         }
     }
     // The member's own effects and collision heights.
@@ -788,7 +807,7 @@ pub fn spell_spark(
 /// One volume of a cast against the enemy's body: the hit record, the
 /// ATKP step row and the damage with the caster's stats.
 #[allow(clippy::too_many_arguments)]
-fn land_volume(
+pub(super) fn land_volume(
     rt: &mut EnemyRuntime,
     index: usize,
     name: &str,
@@ -854,6 +873,7 @@ fn land_volume(
             .hit_by(dir.to_array(), high, &attack, stats, rt.difficulty, false)
     {
         rt.last_attacker = Attacker::Member(index);
+        rt.hits_landed += 1;
         if let Some(&id) = rt.hit_sounds.get(&v.atkp)
             && id >= 0
         {
@@ -1704,7 +1724,10 @@ pub fn tick(game: &mut Game, tick: u64) {
             can_bash: kind.script.is_some(),
         };
         let was = m.follower.attack.is_some();
-        m.follower.tick(kind.records, &scene);
+        match m.limit {
+            Some(s) => m.follower.follow_script(s),
+            None => m.follower.tick(kind.records, &scene),
+        }
         m.motion_voices(sound_queue);
         // FUN_1403f6790 at the item-use trigger: the item leaves Sora's slots
         // and its heal is queued; a hit before the trigger uses nothing.
@@ -2203,6 +2226,7 @@ pub fn tick(game: &mut Game, tick: u64) {
                     .hit_by(dir.to_array(), high, &attack, &stats, rt.difficulty, false)
             {
                 rt.last_attacker = Attacker::Member(index);
+                rt.hits_landed += 1;
                 if let Some(&id) = rt.hit_sounds.get(&atkp)
                     && id >= 0
                 {

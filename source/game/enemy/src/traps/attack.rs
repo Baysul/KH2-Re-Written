@@ -175,14 +175,19 @@ fn strike(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), 
     let Some(slot) = index_of(handle) else {
         return Ok(());
     };
-    if let Some(a) = attack(ctx, handle) {
-        a.flags |= flag::STRUCK;
-    }
+    let Some(a) = attack(ctx, handle) else {
+        return Ok(());
+    };
+    a.flags |= flag::STRUCK;
+    let (param, serial, owner) = ([a.param_id, a.param_extra], a.serial, a.owner);
     ctx.world.events.push(Event::AttackStrike {
         attack: handle,
         slot,
         target,
         arguments: [args[2].as_int(), args[3].as_int()],
+        param,
+        serial,
+        owner,
     });
     Ok(())
 }

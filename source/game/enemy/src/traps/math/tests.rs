@@ -188,3 +188,16 @@ fn strike_raid_rotation_for_forward_z_and_up_y() {
     // The up hint was replaced by cross(forward, side) = (0, 1, 0).
     assert_eq!(&out[4..7], &[0., 1., 0.]);
 }
+
+#[test]
+fn div_multiplies_every_lane_by_the_reciprocal() {
+    let mut world = World::default();
+    let base = crate::script::WORK_SEGMENT;
+    let (r, _) = call(
+        vector_div,
+        &mut world,
+        &[2.0, -4.0, 6.0, 1.0],
+        &[Slot::address(base), Slot::float(4.0)],
+    );
+    assert_eq!(read_static(&world, r.value), [0.5, -1.0, 1.5, 0.25]);
+}
