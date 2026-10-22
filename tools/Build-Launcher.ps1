@@ -1,5 +1,8 @@
 # Build the launcher and give the Windows executable its product filename.
 # Build just the launcher and its two sibling viewers; probes are opt-in.
+# Cargo cannot name a binary with a space, so the `KH2RW` artifact is renamed
+# to `KH2RW Launcher.exe`; no separate `KH2RW.exe` is left beside it. The game
+# runs inside the launcher executable (it restarts itself with a program name).
 param([switch]$Debug, [switch]$LauncherOnly, [switch]$Skate3, [switch]$Timings)
 
 $ErrorActionPreference = 'Stop'
@@ -24,7 +27,7 @@ try {
         Select-Object -Last 1
     if (-not $launcherArtifact) { throw 'Cargo did not report a launcher executable.' }
     $launcherOutputPath = Join-Path (Split-Path $launcherArtifact.executable -Parent) 'KH2RW Launcher.exe'
-    Copy-Item -LiteralPath $launcherArtifact.executable -Destination $launcherOutputPath -Force
+    Move-Item -LiteralPath $launcherArtifact.executable -Destination $launcherOutputPath -Force
     Write-Output $launcherOutputPath
 } finally {
     Pop-Location

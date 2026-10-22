@@ -1083,8 +1083,9 @@ mod tests {
     /// Starts every test of the list from an empty data folder against the
     /// installed game (`KH2_TEST_FOLDER` = the Steam game folder): scans
     /// it, makes the configs, then runs each program of the built
-    /// `KH2RW` (short unattended runs; the event player only loads).
-    /// `cargo build -p main` first; run with `-- --ignored`.
+    /// launcher (short unattended runs; the event player only loads):
+    /// `KH2RW Launcher.exe` from `build-debug.bat`, else Cargo's `KH2RW`
+    /// from `cargo build -p main`. Build first; run with `-- --ignored`.
     #[test]
     #[ignore = "needs the installed game: set KH2_TEST_FOLDER"]
     fn every_test_starts_from_an_empty_data_folder() {
@@ -1094,17 +1095,22 @@ mod tests {
         let f = Fixture::new();
         let data = f.0.join("data");
         let bound = full_scan(&data, Path::new(&folder), &AtomicU64::new(0)).unwrap();
-        let exe = std::env::current_exe()
+        let bin = std::env::current_exe()
             .unwrap()
             .parent()
             .and_then(Path::parent)
             .unwrap()
-            .join(if cfg!(windows) { "KH2RW.exe" } else { "KH2RW" });
-        assert!(
-            exe.is_file(),
-            "build the main binary first: {}",
-            exe.display()
-        );
+            .to_path_buf();
+        let names: &[&str] = if cfg!(windows) {
+            &["KH2RW Launcher.exe", "KH2RW.exe"]
+        } else {
+            &["KH2RW"]
+        };
+        let exe = names
+            .iter()
+            .map(|n| bin.join(n))
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| panic!("build the launcher first in {}", bin.display()));
         for t in TESTS.iter() {
             let mut args = test_args(&data, t.program, &bound).unwrap();
             if t.program == "event" || t.program == "wm" {

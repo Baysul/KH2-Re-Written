@@ -49,7 +49,9 @@ folder and prepares the launch configurations. `source/main/src/test_room.rs` as
 the development room; `source/main/src/area.rs` and `cutscene/` connect state to scenes.
 `source/main/src/bin/` holds the smoke window and research viewers/probes. The default
 `cargo run -p main` program is the source-free smoke window; the player launcher
-is selected with `--bin KH2RW` or built with `build-release.bat`.
+is selected with `--bin KH2RW` or built with `build-release.bat`, which names it
+`KH2RW Launcher.exe`. The launcher starts every test by running its own executable
+again with a program name, so there is no separate game executable.
 
 `source/visual/src/lib.rs` lists the shared presentation modules. The pause menu is in
 `source/visual/src/pause_menu.rs` and `pause_menu/`. The title state and title banner are

@@ -413,7 +413,7 @@ fn start_viewer(v: &install::Viewer, b: &Bound) -> Result<Running, String> {
         .with_file_name(format!("{}.exe", v.program));
     if !exe.is_file() {
         return Err(format!(
-            "{}.exe is not next to KH2RW Launcher.exe or KH2RW.exe. Build all of main (cargo build -p main).",
+            "{}.exe is not next to KH2RW Launcher.exe. Build it with build-release.bat.",
             v.program
         ));
     }

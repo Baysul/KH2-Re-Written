@@ -19,6 +19,9 @@ of every research probe. The `build-debug` scripts use the
 faster development profile; add `-LauncherOnly` when only the launcher changed
 and the viewers are already available. The helper prints the launcher path;
 add `-Timings` to write a Cargo report under `target/cargo-timings/`.
+Cargo cannot give a binary a name with a space, so the helper renames Cargo's
+`KH2RW.exe` to `KH2RW Launcher.exe`; only the launcher is left. The game runs
+inside it: the launcher restarts itself with a program name (`title`, `room`, ...).
 
 Development and test builds keep workspace file/line backtraces but omit full
 type/variable symbols and dependency symbols. Incremental compilation stays on
