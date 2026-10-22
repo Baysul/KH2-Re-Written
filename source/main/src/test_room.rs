@@ -1019,6 +1019,11 @@ struct Game {
     summon_serial: u64,
     /// FUN_1403f3fa0's direction counter (DAT_142ae5d78).
     summon_octant: u32,
+    /// DAT_1409acdd7: Genie's form number (1 Valor, 2 Wisdom, 4 Master,
+    /// 5 Final), kept between summons.
+    summon_form: u8,
+    /// A Genie form command picked from the deck (trigger 11 on Genie).
+    genie_command: Option<u16>,
     /// The top deck's rows while a limit has the menu.
     deck_saved: Option<(Vec<Item>, Vec<Option<usize>>)>,
     /// Decide on a row a limit's command took this tick: its override
@@ -12242,6 +12247,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         summon_dismiss: false,
         summon_serial: 0,
         summon_octant: 0,
+        summon_form: 0,
+        genie_command: None,
         limit_tour,
         party_limits: Arc::new(std::mem::take(&mut loaded.party_limits)),
         party_limit: None,

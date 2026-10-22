@@ -35,7 +35,7 @@ pub fn dismiss(tick: u64) -> bool {
 /// Ticks after a call when Sora attacks, every `ATTACK_EVERY` ticks: after
 /// the summon has come and before the deck swap, then after the swap back
 /// (the last summon, never dismissed, to near its end).
-const ATTACKS: [std::ops::Range<u64>; 2] = [300..600, 1050..1350];
+const ATTACKS: [std::ops::Range<u64>; 2] = [400..600, 1050..1350];
 const LAST_ATTACKS: std::ops::Range<u64> = 1050..2400;
 const ATTACK_EVERY: u64 = 20;
 
@@ -52,11 +52,32 @@ fn attack(tick: u64) -> bool {
             || (last && LAST_ATTACKS.contains(&t)))
 }
 
-/// Left on the second deck around the first Dismiss; Attack between.
+/// The second summon (Genie): after he has come, the second deck's row 2
+/// (his forms) opens and its first form is picked; then the top deck
+/// comes back.
+const GENIE_STEPS: [(u64, u8); 6] = [
+    (200, b'l'),
+    (212, b'v'),
+    (224, b'v'),
+    (236, b'r'),
+    (250, b'd'),
+    (320, b'l'),
+];
+
+fn genie_step(tick: u64) -> Option<u8> {
+    let t = tick.checked_sub(FIRST + STEP)?;
+    GENIE_STEPS.iter().find(|s| s.0 == t).map(|s| s.1)
+}
+
+/// Left on the second deck around the first Dismiss; Genie's form pick;
+/// Attack between.
 pub fn press(tick: u64) -> Buttons {
+    let g = genie_step(tick);
     Buttons {
-        left: tick == FIRST + SHOW_DECK || tick == FIRST + HIDE_DECK,
-        decide: attack(tick),
+        left: tick == FIRST + SHOW_DECK || tick == FIRST + HIDE_DECK || g == Some(b'l'),
+        down: g == Some(b'v'),
+        right: g == Some(b'r'),
+        decide: attack(tick) || g == Some(b'd'),
         ..Buttons::default()
     }
 }
@@ -75,6 +96,8 @@ pub fn captures() -> Vec<u64> {
             s + 1150,
         ]);
     }
+    // Genie's form list open.
+    c.push(FIRST + STEP + 245);
     let last = FIRST + (SUMMONS as u64 - 1) * STEP;
     c.extend([last + 1900, last + 2100]);
     c.sort_unstable();
@@ -104,6 +127,11 @@ mod tests {
                 assert!((s + t - 30..s + t + 30).all(|x| !press(x).decide));
             }
         }
-        assert!(press(FIRST + 300).decide && press(FIRST + 3 * STEP + 2000).decide);
+        assert!(press(FIRST + 400).decide && press(FIRST + 3 * STEP + 2000).decide);
+        // Genie's form pick: Left, Down, Down, Right, decide, Left.
+        let g: Vec<_> = (FIRST + STEP..FIRST + STEP + 400)
+            .filter(|&t| press(t) != Buttons::default())
+            .collect();
+        assert_eq!(g.len(), 6, "{g:?}");
     }
 }

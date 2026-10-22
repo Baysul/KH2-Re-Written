@@ -310,8 +310,9 @@ fn target_last_position(
     Ok(())
 }
 
-/// Genie's forms (0x140727e80): form command, its limit command.
-const GENIE_FORMS: [(u16, u16); 6] = [
+/// Genie's forms (0x140727e80): form command, its limit command. The rows
+/// are the form numbers less one (DAT_1409acdd7 = row + 1).
+pub const GENIE_FORMS: [(u16, u16); 6] = [
     (0x217, 0x21e),
     (0x218, 0x220),
     (0, 0),
@@ -320,12 +321,27 @@ const GENIE_FORMS: [(u16, u16); 6] = [
     (0x25f, 0x260),
 ];
 
-/// 10:9 FUN_1405365e0 -> FUN_1401cf2d0: Genie takes form `cmd`.
-/// [Open] The model parts it shows (FUN_1403cc9b0 / FUN_1403cd810).
+/// 10:9 FUN_1405365e0 -> FUN_1401cf2d0: Genie takes form `cmd`. The six
+/// part calls hide the model (FUN_1403cc9b0 -> FUN_1401a7cf0, which takes
+/// no part) and the matching row's shows it again (FUN_1403cd810); the form
+/// number is the row's plus one (FUN_1403ddfb0, DAT_1409acdd7, which the
+/// next Genie starts in), reported to the host as `genie_form`.
 fn genie_change_form(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = me(ctx, m, args[0].value)?;
     let cmd = args[1].as_int() as u16;
     with_friend(ctx, id, |f| f.genie_form = cmd)?;
+    let row = GENIE_FORMS
+        .iter()
+        .position(|e| e.0 == cmd)
+        .unwrap_or(GENIE_FORMS.len());
+    ctx.object(id)?.sys.hidden = row == GENIE_FORMS.len();
+    ctx.world.events.push(crate::world::Event::Service {
+        name: "genie_form",
+        object: Some(id),
+        other: None,
+        words: [row as u32 + 1, u32::from(cmd), 0, 0, 0, 0, 0, 0],
+        vector: None,
+    });
     Ok(())
 }
 

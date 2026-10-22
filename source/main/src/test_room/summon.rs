@@ -169,6 +169,23 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
             stored.push(i);
         }
     }
+    // FUN_1403de460: Genie takes one of Sora's owned forms (1, 2, 4, 5)
+    // at random (DAT_140783ca0 × 0x10dcd); Peter Pan's is 1.
+    if command == GENIE {
+        let owned = game.drive.as_ref().map_or([false; 7], |d| d.forms.owned);
+        let forms: Vec<u8> = [1u8, 2, 4, 5]
+            .into_iter()
+            .filter(|&f| owned[f as usize])
+            .collect();
+        if !forms.is_empty() {
+            // [I] The generator's state is the process's; the room's starts
+            // at 1 for each summon.
+            let mut rng = ScriptRandom::default();
+            game.summon_form = genie_pick(&mut rng, &forms);
+        }
+    } else if command == PETER_PAN {
+        game.summon_form = 1;
+    }
     let wait = game.summons.as_ref().map_or(0., |s| s.wait);
     game.summon_serial += 1;
     game.summon = Some(Summoned {
@@ -186,6 +203,30 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
         "object":row.object,"cost":cost,"wait":wait,"stored":stored}),
     );
     Ok(())
+}
+
+/// Genie's and Peter Pan's summon commands (FUN_1403de460).
+pub const GENIE: u16 = 0x59;
+pub const PETER_PAN: u16 = 0x132;
+
+/// FUN_1403de460's pick: the 69069 generator, `state / ((n − 1 + 2³²) /
+/// n)`.
+fn genie_pick(rng: &mut ScriptRandom, forms: &[u8]) -> u8 {
+    rng.0 = rng.0.wrapping_mul(0x10dcd);
+    let n = forms.len() as u64;
+    let k = u64::from(rng.0) / (1u64 << 32).div_ceil(n);
+    forms[(k as usize).min(forms.len() - 1)]
+}
+
+/// FUN_1403de220: Genie's form command by form number (0x1405c83a6).
+pub fn genie_form_command(form: u8) -> u16 {
+    match form {
+        1 => 0x217,
+        2 => 0x218,
+        4 => 0x219,
+        5 => 0x21a,
+        _ => 0,
+    }
 }
 
 /// FUN_1403de010: the summon leaves (state 3, act `leave`); the gauge
@@ -344,7 +385,16 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
             a.brain.note_player_attacker(super::enemy_script::ENEMY);
         }
         a.sora_hp = hp;
+        // A form picked from the deck goes to Genie (trigger 11).
+        if let Some(cmd) = game.genie_command.take() {
+            a.brain.command(cmd);
+            game.event(serde_json::json!({"event":"genie_command","tick":tick,"command":cmd}));
+        }
         a.brain.tick(&game.world, game.player.position, &mut a.rng);
+        if let Some(form) = a.brain.genie_form.take() {
+            game.summon_form = form;
+            game.event(serde_json::json!({"event":"genie_form","tick":tick,"form":form}));
+        }
         // FUN_1403c2040: Stitch's MP special fills Sora's MP and ends a
         // charge.
         for _ in 0..std::mem::take(&mut a.brain.mp_refills) {
@@ -506,6 +556,9 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         Friend::new(p, walk, run)
     });
     brain.make_summon(object.object_id, friend);
+    if s.command == GENIE {
+        brain.set_genie_form(genie_form_command(game.summon_form));
+    }
     if std::env::var_os("KH2_SUMMON_TRACE").is_some() {
         brain.trace();
     }
@@ -772,6 +825,24 @@ pub fn present(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn genies_form_is_a_uniform_pick_of_the_owned_ones() {
+        let mut rng = ScriptRandom::default();
+        // 69069 · 1 = 69069: the first quarter of four.
+        assert_eq!(genie_pick(&mut rng, &[1, 2, 4, 5]), 1);
+        let picks: Vec<u8> = (0..400)
+            .map(|_| genie_pick(&mut rng, &[1, 2, 4, 5]))
+            .collect();
+        for f in [1, 2, 4, 5] {
+            assert!(picks.contains(&f), "{f}");
+        }
+        assert_eq!(genie_pick(&mut rng, &[4]), 4);
+        assert_eq!(
+            [1, 2, 3, 4, 5].map(genie_form_command),
+            [0x217, 0x218, 0, 0x219, 0x21a]
+        );
+    }
 
     struct Flat;
     impl World for Flat {

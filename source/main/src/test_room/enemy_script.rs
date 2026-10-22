@@ -218,6 +218,8 @@ pub struct ScriptBrain {
     pub enemy_strikes: Vec<(usize, [i32; 2], u64)>,
     /// Stitch's MP specials not yet carried out (FUN_1403c2040 on Sora).
     pub mp_refills: u32,
+    /// Genie's new form number (FUN_1403ddfb0) for the host to keep.
+    pub genie_form: Option<u8>,
 }
 
 pub(super) fn script_payload(source: &ProbeSource, model: &str) -> Result<Vec<u8>, String> {
@@ -268,6 +270,7 @@ impl ScriptBrain {
             strikes: Vec::new(),
             enemy_strikes: Vec::new(),
             mp_refills: 0,
+            genie_form: None,
         };
         brain.build(position, yaw, stats, sstm, &mut ScriptRandom::default())?;
         Ok(brain)
@@ -443,6 +446,11 @@ impl ScriptBrain {
                     name: "stitch_mp_refill",
                     ..
                 } => self.mp_refills += 1,
+                Event::Service {
+                    name: "genie_form",
+                    words,
+                    ..
+                } => self.genie_form = Some(words[0] as u8),
                 Event::Service { name, .. } => {
                     self.services.insert(name);
                 }
@@ -712,6 +720,39 @@ impl ScriptBrain {
         self.object
             .attack_struck(&mut self.world, &env, slot, target);
         self.record_faults();
+    }
+
+    /// FUN_1403b5fa0 (from FUN_1403a8b10, Sora's decided command): trigger
+    /// 11 of the object's script with Sora, the command and the target
+    /// record [I: no record; 0].
+    pub fn command(&mut self, command: u16) {
+        let env = BrainEnv {
+            room: None,
+            clips: &self.clips,
+            player: self.player,
+            player_yaw: self.player_yaw,
+            facts: self.facts,
+        };
+        self.object.fire(
+            &mut self.world,
+            &env,
+            11,
+            &[
+                enemy::script::Slot::address(enemy::world::PLAYER_HANDLE),
+                enemy::script::Slot::int(i32::from(command)),
+                enemy::script::Slot::address(0),
+            ],
+        );
+        self.drain_events();
+        self.record_faults();
+    }
+
+    /// FUN_1401cf370 (Genie's first update): his form command from the
+    /// form number (FUN_1403de220).
+    pub fn set_genie_form(&mut self, command: u16) {
+        if let Some(f) = self.object.friend.as_deref_mut() {
+            f.genie_form = command;
+        }
     }
 
     /// The owner object of an attack the script placed.

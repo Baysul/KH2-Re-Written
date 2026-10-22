@@ -139,6 +139,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let system = library.read("03system.bin")?;
         let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
         let mut ids = vec![0x48u16, 0x13c];
+        // LIMIT_PROBE_CMDS=hex,hex: more commands to print.
+        if let Ok(list) = std::env::var("LIMIT_PROBE_CMDS") {
+            ids.extend(
+                list.split(',').filter_map(|h| {
+                    u16::from_str_radix(h.trim().trim_start_matches("0x"), 16).ok()
+                }),
+            );
+        }
         if let Some(sumn) = entry(&battle, b"sumn") {
             for row in sumn.get(8..).unwrap_or(&[]).chunks(0x40) {
                 println!("sumn {}", hex(row));

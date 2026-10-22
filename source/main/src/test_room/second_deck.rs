@@ -21,6 +21,13 @@ pub const LIMIT_ROW: usize = 3;
 pub const DISMISS: u16 = 0x13c;
 /// The empty row (message 0x8503, icon 0; FUN_140401d60 gives it 5).
 pub const BLANK: u16 = 0x68;
+/// Row 2 while Genie is out (0x25d, submenu 3: his forms).
+pub const GENIE: u16 = 0x25d;
+/// Menu 3 as FUN_1403f3230 builds it with Genie out.
+pub const GENIE_LIST: usize = 3;
+/// FUN_1403de370's forms (1..5 without Anti) and FUN_1403de240's command
+/// for each (0x1405c83a6).
+const GENIE_FORMS: [(u8, u16); 4] = [(1, 0x217), (2, 0x218), (4, 0x219), (5, 0x21a)];
 /// Menu kinds of the lists.
 pub const SUMMON_LIST: usize = 7;
 pub const PARTY_LIST: usize = 8;
@@ -134,6 +141,10 @@ pub struct Room {
     /// The summon state (DAT_142a24edc: 0 none, 1 appearing, 2 out, 3
     /// leaving).
     pub summon_state: u8,
+    /// The summon out is Genie (DAT_1409acdd5).
+    pub genie: bool,
+    /// Drive forms owned (FUN_1403c4720 of FUN_1403c3ef0(form)), by form.
+    pub forms_owned: [bool; 7],
 }
 
 pub struct SecondDeck {
@@ -173,7 +184,8 @@ pub fn load(battle: &[u8], system: &[u8]) -> Result<SecondDeck, Box<dyn std::err
 impl SecondDeck {
     /// (command, message id) of every label the deck and its lists show.
     pub fn wanted_names(&self) -> Vec<(u16, u32)> {
-        let mut ids = vec![SUMMON, PARTY, LIMIT, DISMISS, BLANK];
+        let mut ids = vec![SUMMON, PARTY, LIMIT, DISMISS, BLANK, GENIE];
+        ids.extend(GENIE_FORMS.iter().map(|f| f.1));
         ids.extend(self.summons.iter().map(|s| s.command));
         ids.extend(MEMBER_COMMANDS.iter().filter(|&&c| c != 0));
         ids.extend(self.limits.iter().map(|l| l.command));
@@ -312,6 +324,17 @@ impl SecondDeck {
         out
     }
 
+    /// Menu 3 with Genie out (FUN_1403f3230): Sora's owned forms but Anti
+    /// (FUN_1403de370), each as Genie's form command aimed at Genie.
+    /// [I] Colour 0 (FUN_1403b0f20 with Genie's record).
+    pub fn genie_list(&self, room: &Room) -> Vec<(u16, usize)> {
+        GENIE_FORMS
+            .iter()
+            .filter(|&&(form, _)| room.forms_owned[form as usize])
+            .map(|&(_, command)| (command, self.with_mask(room, command, 0)))
+            .collect()
+    }
+
     /// FUN_1403b0f20's submenu rule on a row's colour.
     fn list_rule(colour: usize, list: &[(u16, usize)]) -> usize {
         if list.is_empty() {
@@ -325,8 +348,8 @@ impl SecondDeck {
 
     /// Menu 6 (FUN_1403f3860): Attack as on the top deck; Dismiss while a
     /// summon is out, else Summon when the list has an entry (else the
-    /// empty row); Party; Limit. [Open] Genie's Drive row (0x25d, summon
-    /// state 2 with Genie out) is not built.
+    /// empty row); Genie's forms (0x25d) while Genie is out (state 2), else
+    /// Party; Limit.
     pub fn deck(&self, room: &Room, attack: &Item) -> (Vec<Item>, Vec<Option<usize>>) {
         let summons = self.summon_list(room);
         let party = self.party_list(room);
@@ -345,9 +368,16 @@ impl SecondDeck {
             items.push(self.item(SUMMON, colour));
             opens.push(Some(SUMMON_LIST));
         }
-        let colour = Self::list_rule(self.with_mask(room, PARTY, 0), &party);
-        items.push(self.item(PARTY, colour));
-        opens.push(Some(PARTY_LIST));
+        if room.summon_state == super::summon::state::OUT && room.genie {
+            let forms = self.genie_list(room);
+            let colour = Self::list_rule(self.with_mask(room, GENIE, 0), &forms);
+            items.push(self.item(GENIE, colour));
+            opens.push(Some(GENIE_LIST));
+        } else {
+            let colour = Self::list_rule(self.with_mask(room, PARTY, 0), &party);
+            items.push(self.item(PARTY, colour));
+            opens.push(Some(PARTY_LIST));
+        }
         // FUN_1403d88e0: no limit row has command 0x51, so it starts at 0.
         let colour = Self::list_rule(self.with_mask(room, LIMIT, 0), &limits);
         items.push(self.item(LIMIT, colour));
@@ -361,6 +391,7 @@ impl SecondDeck {
             SUMMON_LIST => self.summon_list(room),
             PARTY_LIST => self.party_list(room),
             LIMIT_LIST => self.limit_list(room),
+            GENIE_LIST => self.genie_list(room),
             _ => Vec::new(),
         }
     }
@@ -420,6 +451,11 @@ pub fn room(game: &Game, world: Option<u8>) -> Room {
         sora_bits,
         masked,
         summon_state: super::summon::state_of(game),
+        genie: game
+            .summon
+            .as_ref()
+            .is_some_and(|s| s.command == super::summon::GENIE),
+        forms_owned: game.drive.as_ref().map_or([false; 7], |d| d.forms.owned),
     }
 }
 
@@ -443,7 +479,7 @@ pub fn refresh(game: &Game, menu: &mut visual::field_command_menu::CommandMenu, 
     menu.second_opens = opens;
     if menu.kind == SECOND_DECK
         && let Some(sub) = menu.sub.as_mut()
-        && matches!(sub.kind, SUMMON_LIST | PARTY_LIST | LIMIT_LIST)
+        && matches!(sub.kind, SUMMON_LIST | PARTY_LIST | LIMIT_LIST | GENIE_LIST)
     {
         let list = sd.list(room, sub.kind);
         if list.len() == sub.items.len() {
@@ -485,9 +521,10 @@ pub fn decide(
             let command = sd.list.get(index).copied();
             let limit = sd.list_kind == LIMIT_LIST;
             let summon = sd.list_kind == SUMMON_LIST;
+            let genie = sd.list_kind == GENIE_LIST;
             game.event(
                 serde_json::json!({"event":"second_deck_command","tick":tick,
-                "row":row,"command":command,"built":limit}),
+                "row":row,"command":command,"built":limit || summon || genie}),
             );
             // A party limit starts with the tick's Sora update (party_limit);
             // a summon with the summon tick (summon.rs).
@@ -495,6 +532,9 @@ pub fn decide(
                 game.limit_request = command;
             } else if summon {
                 game.summon_request = command;
+            } else if genie {
+                // FUN_1403a8b10: the command goes to its target, Genie.
+                game.genie_command = command;
             }
             Decision::None
         }
@@ -740,5 +780,25 @@ mod tests {
         room.battle = true;
         room.mp = 50;
         assert!(d.limit_list(&room).iter().all(|e| e.1 == 2));
+    }
+
+    #[test]
+    fn with_genie_out_row_two_lists_his_forms() {
+        let d = deck();
+        let mut room = field();
+        room.summon_state = crate::test_room::summon::state::OUT;
+        room.genie = true;
+        room.forms_owned[1] = true;
+        room.forms_owned[3] = true;
+        room.forms_owned[5] = true;
+        let attack = d.item(BLANK, 0);
+        let (items, opens) = d.deck(&room, &attack);
+        assert_eq!(items.len(), 4);
+        assert_eq!(opens[2], Some(GENIE_LIST));
+        // Anti Form (3) is never offered.
+        assert_eq!(d.genie_list(&room), [(0x217, 0), (0x21a, 0)]);
+        // Another summon keeps the Party row.
+        room.genie = false;
+        assert_eq!(d.deck(&room, &attack).1[2], Some(PARTY_LIST));
     }
 }
