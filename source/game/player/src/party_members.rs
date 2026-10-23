@@ -91,6 +91,30 @@ pub fn ability_of(spell: Spell) -> (u16, usize) {
     }
 }
 
+/// FUN_1401dc060: an item's or ability's place in the frequencies: items
+/// 1..7 (Potion .. Megalixir, 0x1407282d0) at 0..6, a party ability at
+/// 7 + its per-character index (FUN_1401cd330, the table at 0x1407249d0;
+/// only Donald's and Goofy's rows are listed here).
+pub fn frequency_index(id: u16) -> Option<usize> {
+    const ABILITIES: [Spell; 7] = [
+        Spell::Fire,
+        Spell::Blizzard,
+        Spell::Thunder,
+        Spell::Cure,
+        Spell::Tornado,
+        Spell::Bash,
+        Spell::Turbo,
+    ];
+    match id {
+        1..=7 => Some(usize::from(id - 1)),
+        _ => ABILITIES
+            .iter()
+            .map(|&s| ability_of(s))
+            .find(|&(a, _)| a == id)
+            .map(|(_, k)| k),
+    }
+}
+
 /// The Customize frequencies (record +0xf5..): 0 Free (items: Often),
 /// 1 Well-Balanced, 2 Rare (items: Last hope); 3 makes FUN_1401b2880 refuse.
 pub mod frequency {
@@ -107,9 +131,24 @@ pub struct Save {
     /// +0x54: the ability slots; the low 15 bits the ability item, bit 15
     /// set when it is equipped.
     pub abilities: [u16; 80],
-    /// +0x34: the item slots, the first `item_slots` (+0x12) in use.
+    /// +0x34: the item slots, the first `item_slots` (+0x12) in use, and
+    /// +0x44 their auto-reload originals (0 = off), which only Customize
+    /// and Equip write (FUN_1403598e0, FUN_140354dc0).
     pub items: [u16; 8],
+    pub originals: [u16; 8],
     pub item_slots: u8,
+    /// +0: the weapon (0 on a new game: no new-game code writes it).
+    pub weapon: u16,
+    /// +0x14 armour and +0x24 accessories, the first +0x10 / +0x11 in use.
+    pub armor: [u16; 8],
+    pub armor_slots: u8,
+    pub accessories: [u16; 8],
+    pub accessory_slots: u8,
+    /// +8..+0xb: the AP, Strength, Magic and Defense bonuses the status
+    /// build adds to the level row (FUN_1403c1d90).
+    pub bonus: [u8; 4],
+    /// +0xf4: the Customize battle style (0 Technic .. 5 Relentless).
+    pub style: u8,
     /// +0xf5: the frequencies, [0..7] items 1..7, [7 + k] ability k.
     pub frequency: [u8; 31],
 }
@@ -118,7 +157,15 @@ impl Save {
     pub const EMPTY: Save = Save {
         abilities: [0; 80],
         items: [0; 8],
+        originals: [0; 8],
         item_slots: 0,
+        weapon: 0,
+        armor: [0; 8],
+        armor_slots: 0,
+        accessories: [0; 8],
+        accessory_slots: 0,
+        bonus: [0; 4],
+        style: 0,
         frequency: [frequency::FREE; 31],
     };
 
@@ -560,13 +607,28 @@ impl Follower {
 
     /// The goal point: behind the leader at the slot's yaw offset.
     pub fn goal(&self, leader: Vec3, leader_yaw: f32) -> Vec3 {
+        self.goal_at(leader, leader_yaw, FORMATION)
+    }
+
+    fn goal_at(&self, leader: Vec3, leader_yaw: f32, distance: f32) -> Vec3 {
         let offset = SLOT_YAW * 2. * self.slot as f32 - SLOT_YAW;
         let a = leader_yaw + offset;
         [
-            leader[0] - a.sin() * FORMATION,
+            leader[0] - a.sin() * distance,
             leader[1],
-            leader[2] - a.cos() * FORMATION,
+            leader[2] - a.cos() * distance,
         ]
+    }
+
+    /// Party Attack in battle doubles the formation distance
+    /// (FUN_1401b2450 / FUN_1401b4bd0) and the follow thresholds toward the
+    /// leader (FUN_1401b41a0).
+    fn party_attack<W: World>(scene: &Scene<W>) -> f32 {
+        if scene.battle && scene.save.style == crate::party_style::PARTY {
+            2.
+        } else {
+            1.
+        }
     }
 
     /// FUN_1401b2880's range test of one record against the target.
@@ -1177,18 +1239,23 @@ impl Follower {
             return;
         }
         // Movement: toward the target in a fight, else behind the leader.
+        let scale = match scene.target {
+            Some(_) => 1.,
+            None => Self::party_attack(scene),
+        };
         let goal = match scene.target {
             Some(t) => t.position,
-            None => self.goal(scene.leader, scene.leader_yaw),
+            None => self.goal_at(scene.leader, scene.leader_yaw, FORMATION * scale),
         };
         let d = [goal[0] - self.position[0], goal[2] - self.position[2]];
         let dist = d[0].hypot(d[1]);
         let before = self.gait;
+        let (up, down) = (UP.map(|v| v * scale), DOWN.map(|v| v * scale));
         self.gait = match self.gait {
-            Gait::Stand if dist >= UP[0] => Gait::Walk,
-            Gait::Walk if dist >= UP[1] => Gait::Run,
-            Gait::Walk if dist <= DOWN[1] => Gait::Stand,
-            Gait::Run if dist <= DOWN[0] => Gait::Walk,
+            Gait::Stand if dist >= up[0] => Gait::Walk,
+            Gait::Walk if dist >= up[1] => Gait::Run,
+            Gait::Walk if dist <= down[1] => Gait::Stand,
+            Gait::Run if dist <= down[0] => Gait::Walk,
             g => g,
         };
         // In a fight there is no standing at a distance: close in at a run.
@@ -1491,6 +1558,15 @@ mod tests {
     /// Cure equipped.
     fn donald_new_game() -> Save {
         Save::new_game(2, &[0x8001, 0x8003, 0x80a7, 0x80a8], |id| id <= 7)
+    }
+
+    #[test]
+    fn frequencies_are_indexed_by_item_then_by_ability() {
+        assert_eq!(frequency_index(1), Some(0));
+        assert_eq!(frequency_index(7), Some(6));
+        assert_eq!(frequency_index(0xa7), Some(9));
+        assert_eq!(frequency_index(0x1ad), Some(8));
+        assert_eq!(frequency_index(8), None);
     }
 
     #[test]

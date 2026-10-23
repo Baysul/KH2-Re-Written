@@ -173,6 +173,43 @@ fn stat_entry(r: &items::ItemInfo) -> Option<u16> {
     }
 }
 
+/// An item's stat record (FUN_1403e3ef0 → FUN_14041e8f0).
+pub fn stats_of(table: &[items::ItemInfo], stats: &[ItemStats], id: u16) -> Option<ItemStats> {
+    let r = table.iter().find(|r| r.id == id)?;
+    let e = stat_entry(r)?;
+    stats.iter().find(|s| s.id == e).copied()
+}
+
+/// FUN_1403c1d90's gear share: a member's totals from its base and the
+/// stat rows of its weapons, the form weapon, armor and accessories, and
+/// its weapon's ability.
+pub fn gear_totals(
+    table: &[items::ItemInfo],
+    stats: &[ItemStats],
+    base: player::equipment_stats::Totals,
+    e: &items::Equipment,
+    form: Option<u16>,
+) -> (Totals, u16) {
+    let rows: Vec<_> = [e.weapon, e.secondary_weapon]
+        .into_iter()
+        .chain(form)
+        .chain(e.armor.iter().copied())
+        .chain(e.accessories.iter().copied())
+        .filter_map(|id| stats_of(table, stats, id))
+        .map(|s| s.row())
+        .collect();
+    let t = player::equipment_stats::totals(base, rows);
+    let totals = Totals {
+        ap: i32::from(t.ap),
+        strength: i32::from(t.strength),
+        magic: i32::from(t.magic),
+        defense: i32::from(t.defense),
+        resists: [t.resist[1], t.resist[2], t.resist[3], t.resist[4]],
+    };
+    let ability = stats_of(table, stats, e.weapon).map_or(0, |s| s.ability);
+    (totals, ability)
+}
+
 /// FUN_1402fd100: the info rows an item shows (bit k: 0 AP, 1 Str, 2 Mag,
 /// 3 Def, 4–7 resists, 8 ability).
 fn row_mask(kind: u8, s: &ItemStats) -> u32 {
@@ -229,9 +266,7 @@ fn number_text(k: usize, v: i32) -> Vec<u8> {
 
 impl Camp {
     fn item_stats(&self, id: u16) -> Option<ItemStats> {
-        let r = self.data.items.table.iter().find(|r| r.id == id)?;
-        let e = stat_entry(r)?;
-        self.data.equip.stats.iter().find(|s| s.id == e).copied()
+        stats_of(&self.data.items.table, &self.data.equip.stats, id)
     }
 
     fn member(&self) -> usize {
@@ -638,7 +673,6 @@ impl Camp {
     /// FUN_140357e30: empty armor / accessory slots go last; item slots are
     /// grouped by item in table order (FUN_140357f40).
     fn equip_tidy(&mut self) {
-        let table = self.data.items.table.clone();
         let m = self.member();
         let Some(e) = self.data.items.equipment.get_mut(m) else {
             return;
@@ -653,6 +687,16 @@ impl Camp {
                 }
             }
         }
+        self.sort_item_slots(m);
+    }
+
+    /// FUN_140357f40: member `m`'s item slots grouped by item in item-table
+    /// order, a slot in stock before its used-up one, empty slots last.
+    pub(super) fn sort_item_slots(&mut self, m: usize) {
+        let table = &self.data.items.table;
+        let Some(e) = self.data.items.equipment.get_mut(m) else {
+            return;
+        };
         let n = e.items.len();
         let mut slots: Vec<(u16, u16, u32)> = (0..n)
             .map(|j| (e.items[j], e.originals.get(j).copied().unwrap_or(0), 999))
@@ -710,7 +754,7 @@ impl Camp {
         if self.substate == 2 {
             let p = self.pending;
             let tab_busy = match p {
-                Some(State::Items) => self.tab_alive(1),
+                Some(State::Items) | Some(State::Equip) => self.tab_alive(1),
                 Some(State::AbilityList) => {
                     self.tabs.iter().flatten().any(|t| self.sprites.alive(t.id))
                         || self.alive_opt(self.banner)
@@ -739,7 +783,7 @@ impl Camp {
                     self.sprites.kill(s);
                 }
                 self.clear_info();
-                if p != Some(State::Items) {
+                if !matches!(p, Some(State::Items) | Some(State::Equip)) {
                     self.kill_opt(self.banner);
                 }
             }
@@ -784,6 +828,27 @@ impl Camp {
         let memo = (self.equip_ui.list.list.cursor, self.equip_ui.list.scroll);
         if valid {
             match pick {
+                // FUN_140357e30, then the next / previous member.
+                Pick::Next | Pick::Previous => {
+                    self.equip_tidy();
+                    let n = self.data.panels.members.len();
+                    let m = self.member();
+                    let next = if pick == Pick::Next {
+                        (m + 1) % n
+                    } else {
+                        (m + n - 1) % n
+                    };
+                    self.memory.items_row = next;
+                    self.memory.equip = (0, 0);
+                    self.pending_tab_text[1] = Some(self.data.panels.members[next].name.clone());
+                    self.hide_help(seq);
+                    self.close_tab(seq, 1);
+                    self.close_equip(seq);
+                    self.clear_info();
+                    self.picture_close(seq);
+                    self.pending = Some(State::Equip);
+                    self.substate = 2;
+                }
                 Pick::Triangle => {
                     let s = cursor_slot.unwrap();
                     let e = self.data.items.equipment.get(self.member());
@@ -925,8 +990,15 @@ impl Camp {
     /// FUN_14034c770(buf, member+1, filter): owned items of the section's
     /// types (the member's weapon type; Sora: keyblades), file order.
     fn pick_candidates(&self, sec: usize) -> Vec<(u16, u8)> {
+        let character = self
+            .data
+            .items
+            .equipment
+            .get(self.member())
+            .map_or(1, |e| e.character);
+        let weapon = items::weapon_type(character);
         let wanted = |kind: u8| match sec {
-            0 | 1 => kind == 2,
+            0 | 1 => kind == weapon,
             2 => kind == 14,
             3 => kind == 15,
             _ => kind == 0,
@@ -1329,7 +1401,12 @@ impl Camp {
     /// FUN_1402fc760 after an equip: the member's totals and weapon ability
     /// follow the equipment (FUN_1403c1d90).
     fn refresh_totals(&mut self) {
-        let m = self.member();
+        self.refresh_member_totals(self.member());
+    }
+
+    /// The same for member `m` (the camp's opening build of a party
+    /// member's totals, FUN_140354340).
+    pub(super) fn refresh_member_totals(&mut self, m: usize) {
         let Some(base) = self.data.equip.bases.get(m).copied() else {
             return;
         };
@@ -1337,29 +1414,16 @@ impl Camp {
             return;
         };
         let form = self.data.equip.form_weapons.get(m).copied();
-        let ids: Vec<u16> = [e.weapon, e.secondary_weapon]
-            .into_iter()
-            .chain(form)
-            .chain(e.armor.iter().copied())
-            .chain(e.accessories.iter().copied())
-            .collect();
-        let weapon = e.weapon;
-        let rows: Vec<_> = ids
-            .iter()
-            .filter_map(|&id| self.item_stats(id))
-            .map(|s| s.row())
-            .collect();
-        let t = player::equipment_stats::totals(base, rows);
+        let (t, ability) = gear_totals(
+            &self.data.items.table,
+            &self.data.equip.stats,
+            base,
+            e,
+            form,
+        );
         if let Some(slot) = self.data.equip.totals.get_mut(m) {
-            *slot = Totals {
-                ap: i32::from(t.ap),
-                strength: i32::from(t.strength),
-                magic: i32::from(t.magic),
-                defense: i32::from(t.defense),
-                resists: [t.resist[1], t.resist[2], t.resist[3], t.resist[4]],
-            };
+            *slot = t;
         }
-        let ability = self.item_stats(weapon).map_or(0, |s| s.ability);
         let form_abilities: Vec<u16> = self
             .data
             .items
@@ -1371,7 +1435,7 @@ impl Camp {
             .map(|&id| self.item_stats(id).map_or(0, |s| s.ability))
             .collect();
         if let Some(a) = self.data.abilities.members.get_mut(m) {
-            a.ap_max = i32::from(t.ap);
+            a.ap_max = t.ap;
             a.weapon_ability = ability;
             a.form_weapon_abilities = form_abilities;
         }

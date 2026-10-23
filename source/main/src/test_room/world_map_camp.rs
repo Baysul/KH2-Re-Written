@@ -154,6 +154,7 @@ impl WorldMapCamp {
             max_hp: hp,
             mp,
             max_mp: mp,
+            party: Vec::new(),
         };
         camp_data(c, panels, None, &self.settings, &side)
     }

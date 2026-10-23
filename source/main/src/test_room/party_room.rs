@@ -180,6 +180,10 @@ pub struct MemberRt {
     pub bash_keys: Vec<(u64, usize)>,
     /// A party limit's scene drives the member this tick (party_limit).
     pub limit: Option<party_members::Scripted>,
+    /// The battle style's targeting (FUN_1401b8910) and the enemy that hit
+    /// the member last (obj+0xf88), by candidate key.
+    pub targeting: player::party_style::Targeting,
+    pub attacker: Option<u64>,
 }
 
 /// `FUN_1403d60c0`'s gauge event of a hit: a dead member or a blow-class
@@ -673,8 +677,13 @@ pub fn load(
         .map(|r| (r.id, r.kind))
         .collect();
     let new_game = data::battle_tables::new_game_row(plrp, character as u8)?
-        .map(|row| {
-            party_members::Save::new_game(row.item_slots, &row.ids, |id| kinds.get(&id) == Some(&0))
+        .map(|row| party_members::Save {
+            armor_slots: row.armor_slots.min(8),
+            accessory_slots: row.accessory_slots.min(8),
+            bonus: row.bonus,
+            ..party_members::Save::new_game(row.item_slots, &row.ids, |id| {
+                kinds.get(&id) == Some(&0)
+            })
         })
         .unwrap_or(party_members::Save::EMPTY);
     Ok(PartyKind {
@@ -943,32 +952,18 @@ pub struct ClawSample {
     pub only: Option<usize>,
 }
 
-/// The nearest enemy to a member: the Shadow, or a gallery enemy within the
-/// search radius (personality +0x68, 800) when it is nearer.
-fn pick_target(
-    shadow: Option<Target>,
-    shadow_centre: Option<[f32; 3]>,
-    gallery: &[GalleryTarget],
-    from: [f32; 3],
-) -> (Option<Target>, Option<[f32; 3]>) {
-    let dist =
-        |p: Vec3| Vec3::from_array(from).distance(p * Vec3::new(1., 0., 1.) + Vec3::Y * from[1]);
-    let mut best = shadow.map(|t| (dist(Vec3::from_array(t.position)), t, shadow_centre));
-    for g in gallery {
-        let d = dist(g.position);
-        if d > party_members::SEARCH_RADIUS || best.as_ref().is_some_and(|b| b.0 <= d) {
-            continue;
-        }
-        best = Some((
-            d,
-            Target {
-                position: g.position.to_array(),
-                radius: g.radius,
-            },
-            Some(g.centre.to_array()),
-        ));
-    }
-    best.map_or((None, None), |b| (Some(b.1), b.2))
+/// The Shadow's candidate key; a gallery enemy's is its actor id + 1, the
+/// tours' fixed target's [`FIXED_KEY`].
+pub const SHADOW_KEY: u64 = 0;
+pub const FIXED_KEY: u64 = u64::MAX;
+
+/// The enemy whose TARGET point is Sora's selection (within a unit).
+fn key_at(enemies: &[GalleryTarget], at: Option<[f32; 3]>) -> Option<u64> {
+    let at = Vec3::from_array(at?);
+    enemies
+        .iter()
+        .find(|e| e.centre.distance(at) < 1.)
+        .map(|e| e.key)
 }
 
 /// One attack volume of a member this tick, for the gallery enemies: the
@@ -990,9 +985,11 @@ pub struct OutVolume {
     pub pax: Option<Arc<data::object_effect::Pax>>,
 }
 
-/// A gallery enemy a member may fight: where it stands and its TARGET point.
+/// A gallery enemy a member may fight: its key, where it stands and its
+/// TARGET point.
 #[derive(Clone, Copy, Debug)]
 pub struct GalleryTarget {
+    pub key: u64,
     pub position: Vec3,
     pub centre: Vec3,
     pub radius: f32,
@@ -1009,6 +1006,8 @@ pub struct Source<'a> {
     /// The attacker's objentry (0: the room's Shadow), whose effect
     /// container holds the hit spark.
     pub object: u32,
+    /// The attacker's candidate key (the member's last attacker).
+    pub key: u64,
 }
 
 /// The attacker's reaction to a guarded claw (`FUN_140411060`): the ATKP's
@@ -1213,6 +1212,9 @@ fn take_hit<W: player::World>(
         let r = data::battle_tables::step_index(rows, count);
         (r, rows[r].interval)
     });
+    if counted {
+        m.attacker = Some(src.key);
+    }
     if !counted {
         return (
             Taken {
@@ -1554,6 +1556,8 @@ pub fn tick(game: &mut Game, tick: u64) {
         party_struck,
         items,
         party_push,
+        selected_target,
+        target_locked,
         ..
     } = game;
     let struck_last = std::mem::take(party_struck);
@@ -1588,6 +1592,31 @@ pub fn tick(game: &mut Game, tick: u64) {
         .as_ref()
         .filter(|rt| rt.enabled && rt.enemy.targetable())
         .map(|rt| enemy_centre(rt).to_array());
+    // The enemies the members may fight, and Sora's selection among them:
+    // his current target (DAT_140ad6a78) and, while locked, his lock-on
+    // (DAT_140ad6ac8).
+    let enemies: Vec<GalleryTarget> = shadow_target
+        .zip(shadow_centre)
+        .map(|(t, c)| GalleryTarget {
+            key: SHADOW_KEY,
+            position: Vec3::from_array(t.position),
+            centre: Vec3::from_array(c),
+            radius: t.radius,
+        })
+        .into_iter()
+        .chain(gallery_targets.iter().copied())
+        .chain(fixed.iter().copied())
+        .collect();
+    let candidates: Vec<player::party_style::Candidate> = enemies
+        .iter()
+        .map(|e| player::party_style::Candidate {
+            key: e.key,
+            position: e.position.to_array(),
+            radius: e.radius,
+        })
+        .collect();
+    let sora_target = key_at(&enemies, *selected_target);
+    let lock = sora_target.filter(|_| *target_locked);
     let hp: [Option<(i32, i32)>; 3] = {
         let sora = enemy.as_ref().map(|rt| (rt.sora_hp, rt.sora_target.max_hp));
         let mut hp = [sora, None, None];
@@ -1622,13 +1651,30 @@ pub fn tick(game: &mut Game, tick: u64) {
         m.record
             .tick(1., party_hit::motion::is_damage(m.follower.motion()));
         let kind = m.kind.clone();
-        // The nearest enemy: the Shadow or a gallery enemy within reach.
-        let (target, centre) = pick_target(
-            shadow_target,
-            shadow_centre,
-            &[gallery_targets.as_slice(), fixed.as_slice()].concat(),
-            m.follower.position,
-        );
+        // The battle style's target (FUN_1401b8910).
+        let field = player::party_style::Field {
+            me: m.follower.position,
+            sora: player.position,
+            attacker: m.attacker,
+            lock,
+            sora_target,
+            enemies: &candidates,
+        };
+        let was = (m.targeting.target, m.targeting.far);
+        let key = m.targeting.update(m.save.style, battle, &field);
+        if (m.targeting.target, m.targeting.far) != was {
+            log_event(
+                log,
+                serde_json::json!({"event":"party_target","tick":tick,"member":kind.name,
+                "style":m.save.style,"target":m.targeting.target,"far":m.targeting.far}),
+            );
+        }
+        let chosen = key.and_then(|k| enemies.iter().find(|e| e.key == k));
+        let target = chosen.map(|e| Target {
+            position: e.position.to_array(),
+            radius: e.radius,
+        });
+        let centre = chosen.map(|e| e.centre.to_array());
         // The Bash: the engine runs the `blade` act of Goofy's own script, and
         // the member follows what it says.
         let bashing = m
@@ -1754,6 +1800,14 @@ pub fn tick(game: &mut Game, tick: u64) {
         match m.limit {
             Some(s) => m.follower.follow_script(s),
             None => m.follower.tick(kind.records, &scene),
+        }
+        // FUN_1401b41a0: standing at its spot behind Sora clears the leash.
+        if m.targeting.far
+            && target.is_none()
+            && m.follower.gait == party_members::Gait::Stand
+            && m.follower.attack.is_none()
+        {
+            m.targeting.settled();
         }
         // A boss's vacuum pull (boss::requests) joins the member's movement
         // for this tick. [I] Applied after its own step, as one more slide
@@ -2146,6 +2200,7 @@ pub fn tick(game: &mut Game, tick: u64) {
                     difficulty: rt.difficulty,
                     from: Vec3::from_array(rt.enemy.position),
                     object: 0,
+                    key: SHADOW_KEY,
                 };
                 let row = |id: u16| rt.steps.get(&(id, 0)).map(|v| v[0]);
                 receive(

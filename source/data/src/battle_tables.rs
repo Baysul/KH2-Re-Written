@@ -461,6 +461,11 @@ pub fn form_starting_abilities(plrp: &[u8], key: u16) -> io::Result<Vec<(u8, Vec
 /// item-slot count (+0xb) and the 32 ids at +0xc (bit 15 = equipped).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewGameRow {
+    /// Row bytes 5..8: the AP, Strength, Magic and Defense bonuses (record
+    /// +8..+0xb), 9 / 0xa the armour and accessory slots (+0x10 / +0x11).
+    pub bonus: [u8; 4],
+    pub armor_slots: u8,
+    pub accessory_slots: u8,
     pub item_slots: u8,
     pub ids: Vec<u16>,
 }
@@ -476,6 +481,9 @@ pub fn new_game_row(plrp: &[u8], character: u8) -> io::Result<Option<NewGameRow>
             .ok_or_else(|| invalid("PLRP truncated"))?;
         if u16_at(rec, 0)? == 0 && rec[2] == character {
             return Ok(Some(NewGameRow {
+                bonus: [rec[5], rec[6], rec[7], rec[8]],
+                armor_slots: rec[9],
+                accessory_slots: rec[0xa],
                 item_slots: rec[0xb],
                 ids: (0..32)
                     .map(|i| u16_at(rec, 0xc + i * 2))
@@ -521,11 +529,17 @@ mod tests {
             let at = 8 + k * 0x80;
             bytes[at..at + 2].copy_from_slice(&key.to_le_bytes());
             bytes[at + 2] = 2;
+            bytes[at + 9] = 1;
+            bytes[at + 0xa] = 2;
             bytes[at + 0xb] = 2 + k as u8;
             bytes[at + 0xc..at + 0xe].copy_from_slice(&(0x8000 | (7 + k as u16)).to_le_bytes());
         }
         let row = new_game_row(&bytes, 2).unwrap().unwrap();
         assert_eq!((row.item_slots, row.ids[0], row.ids.len()), (3, 0x8008, 32));
+        assert_eq!(
+            (row.armor_slots, row.accessory_slots, row.bonus),
+            (1, 2, [0; 4])
+        );
         assert_eq!(new_game_row(&bytes, 3).unwrap(), None);
     }
 

@@ -30,6 +30,7 @@ impl Tour {
             ap_max: inventory.ap,
             weapon_ability: 0,
             form_weapon_abilities: Vec::new(),
+            frequency: Vec::new(),
         };
         let entries = pause_menu::abilities::entries(table, &member);
         let mut inputs = vec![(40, 2), (100, 0x20), (140, 4), (200, 4)];

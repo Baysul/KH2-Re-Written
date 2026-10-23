@@ -23,6 +23,7 @@ pub mod magic;
 pub mod party_hit;
 pub mod party_members;
 pub mod party_spell;
+pub mod party_style;
 pub mod ptya;
 pub mod reaction_command;
 pub mod shadow;

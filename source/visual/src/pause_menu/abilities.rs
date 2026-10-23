@@ -5,9 +5,10 @@
 //! FUN_140363db0 / FUN_140363510 / FUN_14035f810), and the Equip / Don't
 //! Equip popup (0x11–0x13: FUN_140361a00 / FUN_14035f610). The work area
 //! is built from the member's 80 ability slots (bit 15 = equipped) and its
-//! weapon's ability. Drive forms, Lion, party members' frequencies, the NEW!
-//! marks' producer, the tutorial notice (SELECT) and Equip (SQUARE in the
-//! list) are not built.
+//! weapon's ability; a party member's action abilities carry their use
+//! frequency (icons, the △ cycle and the four-row popup), and L2 / R2 step
+//! through the members (FUN_14035f130). Drive forms, Lion and the NEW!
+//! marks' producer are not built.
 use super::items::{Grid, ItemInfo};
 use super::*;
 
@@ -61,6 +62,9 @@ pub struct MemberAbilities {
     /// The abilities of the Valor, Master and Final Form weapons
     /// (FUN_140361200 lists each owned form's own weapon too), 0 = none.
     pub form_weapon_abilities: Vec<u16>,
+    /// A party member's frequencies (record +0xf5, 31 bytes, indexed by
+    /// FUN_1401dc060); empty for Sora.
+    pub frequency: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -90,7 +94,9 @@ pub struct AbilitiesData {
 }
 
 /// A work-area entry (8 B at +0xc): id, equipped, source slot (None = the
-/// weapon), category 0 Action / 1 Growth / 2 Support / 3 Weapons, AP cost.
+/// weapon), category 0 Action / 1 Growth / 2 Support / 3 Weapons, AP cost,
+/// the record's kind and a party action ability's frequency (+6; None =
+/// 0xff).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub id: u16,
@@ -98,6 +104,22 @@ pub struct Entry {
     pub slot: Option<usize>,
     pub cat: u8,
     pub cost: i32,
+    pub kind: u8,
+    pub freq: Option<u8>,
+}
+
+/// The frequency table (customize table 4, 0x1405bc1f0): icon and value of
+/// Free, Well-Balanced, Rare.
+pub(super) const FREQUENCIES: [(u8, u8); 3] = [(0x1a, 0), (0x1b, 1), (0x1c, 2)];
+
+/// FUN_14035b2c0(4, value): the record with that value.
+pub(super) fn frequency_record(value: u8) -> Option<usize> {
+    FREQUENCIES.iter().position(|r| r.1 == value)
+}
+
+/// `09 icon` of a frequency (empty when no record has the value).
+pub(super) fn frequency_glyph(value: u8) -> Vec<u8> {
+    frequency_record(value).map_or_else(Vec::new, |k| vec![0x09, FREQUENCIES[k].0])
 }
 
 /// The record's kind (+6) → category: 0 Support, 1 Limit / 2 Action →
@@ -123,12 +145,20 @@ pub fn entries(table: &[ItemInfo], m: &MemberAbilities) -> Vec<Entry> {
             continue;
         }
         let param = record(id).map_or(0, |r| r.param);
+        let kind = param as u8;
+        // FUN_140360f40: a party member's action abilities.
+        let freq = (kind == 2)
+            .then(|| player::party_members::frequency_index(id))
+            .flatten()
+            .and_then(|k| m.frequency.get(k).copied());
         out.push(Entry {
             id,
             equipped: v & 0x8000 != 0,
             slot: Some(s),
-            cat: category(param as u8),
+            cat: category(kind),
             cost: (param >> 8) as i32,
+            kind,
+            freq,
         });
     }
     for ability in std::iter::once(m.weapon_ability).chain(m.form_weapon_abilities.iter().copied())
@@ -140,6 +170,8 @@ pub fn entries(table: &[ItemInfo], m: &MemberAbilities) -> Vec<Entry> {
                 slot: None,
                 cat: 3,
                 cost: 0,
+                kind: 0,
+                freq: None,
             });
         }
     }
@@ -194,6 +226,9 @@ pub(super) struct Ui {
     rows: Vec<Id>,
     names: Vec<Id>,
     costs: Vec<Id>,
+    /// The frequency icons the party rows' draw callback shows
+    /// (FUN_140360270), right-aligned at the LightCur point.
+    freqs: Vec<Id>,
     tabs: Vec<Id>,
     frame: Option<Id>,
     bubble: Option<Id>,
@@ -213,6 +248,32 @@ impl Camp {
         let mut out = vec![0x09, icon];
         out.extend(r.name);
         out
+    }
+
+    /// A party member's row (p ≠ 0): its action abilities have frequencies.
+    fn party_member(&self) -> bool {
+        self.data
+            .abilities
+            .members
+            .get(self.ability_ui.member)
+            .is_some_and(|m| !m.frequency.is_empty())
+    }
+
+    /// A party member's action ability (cat 0, kind ≠ 1).
+    fn party_action(&self, e: &Entry) -> bool {
+        self.party_member() && e.cat == 0 && e.kind != 1
+    }
+
+    /// `rec[0xf5 + FUN_1401dc060(id)] = value`.
+    fn write_frequency(&mut self, id: u16, value: u8) {
+        let member = self.ability_ui.member;
+        if let (Some(k), Some(m)) = (
+            player::party_members::frequency_index(id),
+            self.data.abilities.members.get_mut(member),
+        ) && let Some(f) = m.frequency.get_mut(k)
+        {
+            *f = value;
+        }
     }
 
     fn ap_max(&self) -> i32 {
@@ -376,6 +437,11 @@ impl Camp {
             self.sprites.set(seq, l, PREVIEW[e.cat as usize], None);
             let name = self.ability_name(e);
             self.set_text(l, name);
+            if let Some(f) = e.freq {
+                let v = self.ability_ui.texts[k];
+                self.sprites.set(seq, v, WHITE, None);
+                self.set_text(v, frequency_glyph(f));
+            }
         }
         let hide = self.ability_ui.entries.is_empty() || equipped.is_empty();
         let tagged: Vec<Id> = self
@@ -566,6 +632,7 @@ impl Camp {
         self.ability_ui.rows.clear();
         self.ability_ui.names.clear();
         self.ability_ui.costs.clear();
+        self.ability_ui.freqs.clear();
         self.ability_ui.tabs.clear();
         for i in 0..visible {
             let r = self.sprites.create(seq, PRIO_LIST, ART, BLANK, None, None);
@@ -592,9 +659,17 @@ impl Camp {
                 .create(seq, PRIO_LIST_BADGE, ART, BLANK, None, None);
             self.child(b, r);
             self.sprites.get_mut(b).offset = badge_at;
+            let mut ft = self.row_text(Vec::new());
+            ft.align = 1;
+            let f = self
+                .sprites
+                .create(seq, PRIO_LIST, ART, WHITE, None, Some(ft));
+            self.child(f, r);
+            self.sprites.get_mut(f).offset = badge_at;
             self.ability_ui.rows.push(r);
             self.ability_ui.names.push(nm);
             self.ability_ui.costs.push(c);
+            self.ability_ui.freqs.push(f);
         }
         for j in 0..visible {
             let mut t = Text::new(Vec::new(), tab_size);
@@ -689,6 +764,7 @@ impl Camp {
             if let Some(t) = self.sprites.get_mut(nm).text.as_mut() {
                 t.align = 0;
             }
+            self.set_text(self.ability_ui.freqs[i], Vec::new());
         }
         let n = self.ability_ui.entries.len();
         if n == 0 {
@@ -736,6 +812,10 @@ impl Camp {
                 let ct = self.ability_ui.costs[j];
                 self.sprites.set(seq, ct, AP_CELL, None);
                 self.set_text(ct, encode_number(&e.cost.to_string()));
+            }
+            // FUN_140360270 draws it while the ability is equipped.
+            if let Some(f) = e.freq.filter(|_| e.equipped) {
+                self.set_text(self.ability_ui.freqs[j], frequency_glyph(f));
             }
         }
     }
@@ -815,10 +895,14 @@ impl Camp {
 
     /// FUN_140363770 in 0x10: the cursor ability's description.
     fn ability_list_help(&mut self, seq: &Sequence) {
-        let h = self
-            .cursor_entry()
-            .map(|e| self.info(e.id).description)
-            .unwrap_or_default();
+        let e = self.cursor_entry();
+        let mut h = e.map(|e| self.info(e.id).description).unwrap_or_default();
+        // A party action ability: + its frequency's help.
+        if let Some(e) = e.filter(|e| self.party_action(e) && e.equipped)
+            && let Some(k) = e.freq.and_then(frequency_record)
+        {
+            h.extend(self.data.customize.texts.ability_frequency_help[k].clone());
+        }
         self.show_help(seq, h);
     }
 
@@ -985,11 +1069,50 @@ impl Camp {
             match pick {
                 Pick::Triangle => {
                     let e = cursor.0 + cursor.1;
-                    let on = !self.ability_ui.entries[e].equipped;
+                    let entry = self.ability_ui.entries[e];
+                    // FUN_14035ee10: a party action ability cycles Free →
+                    // Well-Balanced → Rare → unequipped.
+                    let on = if self.party_action(&entry) {
+                        let u = if entry.equipped {
+                            entry.freq.and_then(frequency_record).unwrap_or(3) as i32
+                        } else {
+                            -1
+                        };
+                        if u + 1 < 3 {
+                            let value = FREQUENCIES[(u + 1) as usize].1;
+                            self.ability_ui.entries[e].freq = Some(value);
+                            self.write_frequency(entry.id, value);
+                            true
+                        } else {
+                            self.ability_ui.entries[e].freq = None;
+                            false
+                        }
+                    } else {
+                        !entry.equipped
+                    };
                     self.set_equip(e, on);
                     self.ability_skin(seq);
                     self.update_gauge(seq, true);
                     self.ability_list_help(seq);
+                }
+                // FUN_14035f130: the next / previous character row.
+                Pick::Next | Pick::Previous => {
+                    let n = self.data.panels.members.len();
+                    let m = self.ability_ui.member;
+                    let next = if pick == Pick::Next {
+                        (m + 1) % n
+                    } else {
+                        (m + n - 1) % n
+                    };
+                    self.memory.ability_char = next;
+                    self.memory.ability_list = (0, 0);
+                    self.ability_ui.member = next;
+                    self.pending_tab_text[1] = Some(self.data.panels.members[next].name.clone());
+                    self.hide_help(seq);
+                    self.close_tab(seq, 1);
+                    self.close_ability_list(seq, false);
+                    self.pending = Some(State::AbilityList);
+                    self.substate = 2;
                 }
                 Pick::Select => {
                     self.memory.ability_list = cursor;
@@ -1071,15 +1194,21 @@ impl Camp {
             .create(seq, PRIO_POPUP_TEXT, ART, POPUP_AP, None, Some(ct));
         self.child(ap, header);
         self.sprites.get_mut(ap).offset = ap_at;
-        let pitch = seq.groups[POPUP_ROW[c]].ui_padding as f32;
+        // A party action ability: "Don´t Equip" and three "Equip" rows, each
+        // with its frequency drawn by the row callback (FUN_140360270).
+        let party = entry.is_some_and(|e| self.party_action(&e));
+        let count = if party { 4 } else { 2 };
+        let rg = &seq.groups[POPUP_ROW[c]];
+        let pitch = rg.ui_padding as f32;
+        let light = [rg.light_position_x as f32, rg.text_position_y as f32];
         let mut rows = Vec::new();
-        for i in 0..2 {
+        for i in 0..count {
             let r = self
                 .sprites
                 .create(seq, PRIO_LIST, ART, POPUP_ROW[c], None, None);
             self.child(r, panel);
             self.sprites.get_mut(r).offset = [0., pitch * i as f32];
-            let label = self.data.abilities.texts.choices[i].clone();
+            let label = self.data.abilities.texts.choices[i.min(1)].clone();
             let tx = self.sprites.create(
                 seq,
                 PRIO_POPUP_TEXT,
@@ -1089,15 +1218,47 @@ impl Camp {
                 Some(self.row_text(label)),
             );
             self.child(tx, r);
+            if party && i > 0 {
+                let mut ft =
+                    self.row_text(self.data.customize.texts.ability_frequency[i - 1].clone());
+                ft.align = 1;
+                let f = self
+                    .sprites
+                    .create(seq, PRIO_POPUP_TEXT, ART, WHITE, None, Some(ft));
+                self.child(f, r);
+                self.sprites.get_mut(f).offset = light;
+            }
             rows.push(r);
         }
-        self.build_scrollbar(seq, panel, PRIO_HEADER, 2, 2);
-        let cursor = usize::from(entry.is_some_and(|e| e.equipped));
+        self.build_scrollbar(seq, panel, PRIO_HEADER, count, count);
+        // FUN_1403618a0.
+        let cursor = match entry {
+            Some(e) if e.equipped && party => 1 + e.freq.and_then(frequency_record).unwrap_or(0),
+            Some(e) => usize::from(e.equipped),
+            None => 0,
+        };
         self.ability_ui.popup = MenuList::new(rows, cursor);
         // The gauge's preview follows the popup's highlighted choice.
         self.ability_ui.list.list.cursor = self.memory.ability_list.0;
         self.ability_ui.list.scroll = self.memory.ability_list.1;
         self.update_gauge(seq, cursor != 0);
+    }
+
+    /// FUN_140363770 in the popup: "Don´t equip" / "Equip", and for a party
+    /// action ability the chosen frequency's help after it.
+    fn ability_popup_help(&mut self, seq: &Sequence) {
+        let row = self.ability_ui.popup.cursor;
+        let mut h = self.data.abilities.texts.choice_help[row.min(1)].clone();
+        let e = self.memory.ability_list.0 + self.memory.ability_list.1;
+        let party = self
+            .ability_ui
+            .entries
+            .get(e)
+            .is_some_and(|x| self.party_action(x));
+        if party && row > 0 {
+            h.extend(self.data.customize.texts.ability_frequency_help[(row - 1).min(2)].clone());
+        }
+        self.show_help(seq, h);
     }
 
     /// FUN_14035f610.
@@ -1133,8 +1294,7 @@ impl Camp {
             self.sprites.set(seq, p, POPUP_PANEL[c][2], None);
         }
         if self.substate == 0 && self.group_of(self.ability_ui.panel) == Some(POPUP_PANEL[c][2]) {
-            let h = self.data.abilities.texts.choice_help[self.ability_ui.popup.cursor].clone();
-            self.show_help(seq, h);
+            self.ability_popup_help(seq);
             self.substate = 1;
         }
         if let Some(s) = pick_sound(pick, moved, true) {
@@ -1143,15 +1303,21 @@ impl Camp {
         if moved && self.substate == 1 {
             let on = self.ability_ui.popup.cursor != 0;
             self.update_gauge(seq, on);
-            let h = self.data.abilities.texts.choice_help[usize::from(on)].clone();
-            self.show_help(seq, h);
+            self.ability_popup_help(seq);
         }
         match pick {
             Pick::Start => self.exit = true,
             Pick::Cancel | Pick::Row(_) => {
                 if let Pick::Row(r) = pick {
+                    // FUN_14035efd0.
                     let e = self.memory.ability_list.0 + self.memory.ability_list.1;
+                    let entry = self.ability_ui.entries.get(e).copied();
                     self.set_equip(e, r != 0);
+                    if let Some(entry) = entry.filter(|x| r != 0 && self.party_action(x)) {
+                        let value = FREQUENCIES[(r - 1).min(2)].1;
+                        self.ability_ui.entries[e].freq = Some(value);
+                        self.write_frequency(entry.id, value);
+                    }
                 }
                 self.hide_help(seq);
                 self.close_banner(seq);
@@ -1198,6 +1364,7 @@ mod tests {
             ap_max: 5,
             weapon_ability: 0x21e,
             form_weapon_abilities: Vec::new(),
+            frequency: Vec::new(),
         };
         let e = entries(&table, &m);
         let ids: Vec<u16> = e.iter().map(|e| e.id).collect();
@@ -1208,5 +1375,25 @@ mod tests {
         assert_eq!(e[4].slot, None);
         // Guard 2 + Combo Plus 1 (the weapon costs nothing).
         assert_eq!(used(&e), 3);
+        assert!(e.iter().all(|e| e.freq.is_none()));
+    }
+
+    #[test]
+    fn a_party_members_action_abilities_carry_their_frequency() {
+        // Donald's Thunder (action) and a support ability.
+        let table = vec![ability(0xa7, 2, 2), ability(0x19b, 0, 1)];
+        let mut frequency = vec![0; 31];
+        frequency[9] = 2;
+        let m = MemberAbilities {
+            slots: vec![0xa7 | 0x8000, 0x19b | 0x8000],
+            ap_max: 5,
+            frequency,
+            ..MemberAbilities::default()
+        };
+        let e = entries(&table, &m);
+        assert_eq!((e[0].id, e[0].freq), (0xa7, Some(2)));
+        assert_eq!(e[1].freq, None);
+        assert_eq!(frequency_glyph(2), vec![0x09, 0x1c]);
+        assert!(frequency_glyph(3).is_empty());
     }
 }
