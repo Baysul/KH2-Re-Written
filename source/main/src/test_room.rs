@@ -12483,6 +12483,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut enemy_audit = None;
     // Capture ticks replacing the unattended run's own list (research).
     let mut capture_at: Option<Vec<u64>> = None;
+    // `--party-styles D:G` (or D,G): the members' battle styles [tour setup].
+    let mut party_styles: Vec<u8> = Vec::new();
     let mut options = args[3..].iter();
     while let Some(option) = options.next() {
         match option.to_str() {
@@ -12494,6 +12496,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 enemy_audit = Some(options.next().cloned().ok_or("enemy audit output absent")?);
             }
             Some("--log") if log_path.is_none() => log_path = options.next().cloned(),
+            Some("--party-styles") => {
+                party_styles = options
+                    .next()
+                    .and_then(|v| v.to_str())
+                    .ok_or("party styles absent")?
+                    .split([',', ':'])
+                    .map(|s| s.trim().parse::<u8>().map(|v| v.min(5)))
+                    .collect::<Result<_, _>>()?;
+            }
             Some("--frames") if limit.is_none() => {
                 limit = Some(
                     options
@@ -13101,7 +13112,10 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 voices: kind.voices.clone(),
                 voice_at: (u16::MAX, 0),
                 item_fired: false,
-                save: kind.new_game,
+                save: player::party_members::Save {
+                    style: party_styles.get(i).copied().unwrap_or(kind.new_game.style),
+                    ..kind.new_game
+                },
                 event: 0,
                 blade: None,
                 shield: None,
@@ -13111,6 +13125,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 ko_fx: false,
                 cast_motion: 0,
                 reflected: false,
+                targeting: player::party_style::Targeting::default(),
+                attacker: None,
             })
             .collect(),
         items: loaded.items.map(|src| {

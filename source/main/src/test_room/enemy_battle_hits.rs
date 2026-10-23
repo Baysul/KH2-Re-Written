@@ -324,6 +324,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
             && let Some(shape) = battle.pose.targets.first()
         {
             gallery_targets.push(party_room::GalleryTarget {
+                key: actor.id + 1,
                 position: Vec3::from_array(battle.brain.position()),
                 centre: shape.centre,
                 radius: 40.,
@@ -886,6 +887,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 difficulty: rt.difficulty,
                 from: at,
                 object: battle.assets.object_id,
+                key: actor.id + 1,
             };
             let assets = &battle.assets;
             for (i, m) in party.iter_mut().enumerate() {

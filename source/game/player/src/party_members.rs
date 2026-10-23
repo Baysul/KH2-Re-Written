@@ -607,13 +607,28 @@ impl Follower {
 
     /// The goal point: behind the leader at the slot's yaw offset.
     pub fn goal(&self, leader: Vec3, leader_yaw: f32) -> Vec3 {
+        self.goal_at(leader, leader_yaw, FORMATION)
+    }
+
+    fn goal_at(&self, leader: Vec3, leader_yaw: f32, distance: f32) -> Vec3 {
         let offset = SLOT_YAW * 2. * self.slot as f32 - SLOT_YAW;
         let a = leader_yaw + offset;
         [
-            leader[0] - a.sin() * FORMATION,
+            leader[0] - a.sin() * distance,
             leader[1],
-            leader[2] - a.cos() * FORMATION,
+            leader[2] - a.cos() * distance,
         ]
+    }
+
+    /// Party Attack in battle doubles the formation distance
+    /// (FUN_1401b2450 / FUN_1401b4bd0) and the follow thresholds toward the
+    /// leader (FUN_1401b41a0).
+    fn party_attack<W: World>(scene: &Scene<W>) -> f32 {
+        if scene.battle && scene.save.style == crate::party_style::PARTY {
+            2.
+        } else {
+            1.
+        }
     }
 
     /// FUN_1401b2880's range test of one record against the target.
@@ -1224,18 +1239,23 @@ impl Follower {
             return;
         }
         // Movement: toward the target in a fight, else behind the leader.
+        let scale = match scene.target {
+            Some(_) => 1.,
+            None => Self::party_attack(scene),
+        };
         let goal = match scene.target {
             Some(t) => t.position,
-            None => self.goal(scene.leader, scene.leader_yaw),
+            None => self.goal_at(scene.leader, scene.leader_yaw, FORMATION * scale),
         };
         let d = [goal[0] - self.position[0], goal[2] - self.position[2]];
         let dist = d[0].hypot(d[1]);
         let before = self.gait;
+        let (up, down) = (UP.map(|v| v * scale), DOWN.map(|v| v * scale));
         self.gait = match self.gait {
-            Gait::Stand if dist >= UP[0] => Gait::Walk,
-            Gait::Walk if dist >= UP[1] => Gait::Run,
-            Gait::Walk if dist <= DOWN[1] => Gait::Stand,
-            Gait::Run if dist <= DOWN[0] => Gait::Walk,
+            Gait::Stand if dist >= up[0] => Gait::Walk,
+            Gait::Walk if dist >= up[1] => Gait::Run,
+            Gait::Walk if dist <= down[1] => Gait::Stand,
+            Gait::Run if dist <= down[0] => Gait::Walk,
             g => g,
         };
         // In a fight there is no standing at a distance: close in at a run.
