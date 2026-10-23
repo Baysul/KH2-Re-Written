@@ -1725,14 +1725,6 @@
           ]
         },
         {
-          "id": "NATIVE-T213-01",
-          "label": "World map cursor actions, the ship blend, dash and warp path - translation, equivalence unproved",
-          "status": "PARTIAL",
-          "evidence": [
-            "docs/tasks/T212-world-map-cursor-lock-and-fades.md"
-          ]
-        },
-        {
           "id": "NATIVE-T212-02",
           "label": "World map manual lock, lock-on camera and target switch - translation, equivalence unproved",
           "status": "PARTIAL",
