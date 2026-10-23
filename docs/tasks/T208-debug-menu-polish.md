@@ -45,7 +45,8 @@ Private evidence: `%LOCALAPPDATA%/KH2FinalRewrite/research/debugmenu-polish-2026
   rows read "Shadow No. 1" and the Warp row "Start here next launch: TT01" (the menu font has no
   parentheses, which drew as spaces); a stale "G refills" comment now says F6.
 - The enemy tour captures the new pages after its earlier ones (Sora, Enemies, Warp, Help, the
-  end of Help, Items, the preview's Enemy tab, an Items search).
+  end of Help, Items, the preview's Enemy tab, an Items search, Drive Form, Growth Abilities,
+  the Heartless list).
 
 ## Checks
 
@@ -58,7 +59,9 @@ Private evidence: `%LOCALAPPDATA%/KH2FinalRewrite/research/debugmenu-polish-2026
 - fmt, clippy (warnings denied), workspace tests, workspace build, release build with
   `skate3` and the 180-frame smoke run: see the PR.
 - `--enemy-tour` against the installed build (`test-room-arena-07`, `source-manifest-02`):
-  verdict pass, 22 captures. The first run showed grey, low-contrast text (colours at 1.0
+  verdict pass, 22 captures (`tour-03`, with the added pages: pass, 25). A run in a Twilight
+  Town room (`test-room-tt`, `tour-04`) shows the Warp tab with its world list; its enemy-tour
+  verdict fails because loading the room clears the summoned enemies, as before this change. The first run showed grey, low-contrast text (colours at 1.0
   instead of the game's 0x80 scale), the cursor bar on a heading and a darkened band that
   stopped at the canvas edges; `tour-02` is after the fixes and reads cleanly on every page.
 

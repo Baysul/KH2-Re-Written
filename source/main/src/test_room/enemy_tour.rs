@@ -6,7 +6,7 @@ use super::*;
 /// are captured at that same tick, one per capture after `FIRST_PAGE_CAPTURE`.
 pub const CAPTURES: &[u64] = &[
     50, 90, 130, 170, 210, 250, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280,
-    280, 280, 280,
+    280, 280, 280, 280, 280, 280,
 ];
 pub const END: u64 = 280;
 pub const FIRST_PAGE_CAPTURE: usize = 6;

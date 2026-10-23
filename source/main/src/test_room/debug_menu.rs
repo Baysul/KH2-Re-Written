@@ -587,7 +587,8 @@ impl DebugMenu {
 
     /// Opens the menu's own page number `n` for the unattended tour: the
     /// Sora, Enemies, Warp and Help tabs, the end of Help, Items, the
-    /// preview's Enemy tab and an Items search.
+    /// preview's Enemy tab, an Items search, Drive Form, Growth Abilities
+    /// and the Heartless list.
     pub fn show_tour_page(&mut self, n: usize) {
         self.open = true;
         let (page, cursor, search) = match n {
@@ -598,7 +599,10 @@ impl DebugMenu {
             4 => (Page::Home(HomeTab::Help), usize::MAX, ""),
             5 => (Page::Items, 3, ""),
             6 => (Page::Preview(PreviewTab::Enemy), 0, ""),
-            _ => (Page::Items, 0, "potion"),
+            7 => (Page::Items, 0, "potion"),
+            8 => (Page::Forms, 0, ""),
+            9 => (Page::Growth, 0, ""),
+            _ => (Page::Roster(enemy_catalog::Category::Heartless), 0, ""),
         };
         self.go_to(page, cursor);
         self.search = search.into();
