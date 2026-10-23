@@ -1594,21 +1594,26 @@ impl Sysobj {
         self.motion.flags.word & motion::flag::NO_CONTROL != 0
     }
 
-    /// FUN_1403b9090's leave-ground branch for the ground mode: an object
-    /// off the floor that is not rising while FUN_1403ba1e0 holds (range
-    /// 0x1e or +0x120 bit 23, without range 3) gets script event 0xe and
-    /// its class's leave handler. Every class wrapper ends in FUN_1403b7850:
-    /// the mode's slot 4 with height 0 (FUN_140409b00 -> FUN_1403cbc30: no
-    /// vertical speed, no fall motion, motion 5 on landing; mode 1). The
-    /// summon class (FUN_1403d6430) first changes to motion 4 over 16
-    /// frames unless +0x194 bit 4. [I] The collision-enabled test
-    /// (FUN_1403ba940) is taken as true; "on the floor" is within one unit
-    /// of the floor under the object; event 0xe is not sent.
+    /// FUN_1403b9090's leave-ground branch: an object in a grounded mode
+    /// (mode flag bits 0 and 1 clear) with no gravity range (`+0x18c &
+    /// 0x1000020`) and no hold range (bit 6) that has no floor contact
+    /// (`+0x744` bit 0, the collision query's flag) leaves the ground unless
+    /// `+0x120` bit 23 holds: script event 0xd, the mode's slot 5 (a no-op
+    /// for the ground mode) and its class's leave handler (vt+0x50). Every
+    /// class wrapper ends in FUN_1403b7850: the mode's slot 4 with height 0
+    /// (FUN_140409b00 -> FUN_1403cbc30: no vertical speed, no fall motion,
+    /// motion 5 on landing; mode 1). The summon class (FUN_1403d6430) first
+    /// changes to motion 4 over 16 frames unless +0x194 bit 4. (The other
+    /// branch, with FUN_1403ba1e0, is the landing.) [I] The collision-enabled
+    /// test (FUN_1403ba940) is taken as true; "on the floor" is within one
+    /// unit of the floor under the object; event 0xd is not sent.
     fn leave_ground(&mut self, clips: &dyn Clips, env: &dyn Env) {
         let w = self.motion.flags.word;
-        let held = (w & motion::flag::GRAVITY_FROZEN_2 != 0 || self.flags >> 23 & 1 != 0)
-            && w & motion::flag::GRAVITY_FROZEN == 0;
-        if !held || self.wished[1] > 0. {
+        let grounded_mode = self.mode_flags() & 3 == 0;
+        let ranged = w
+            & (motion::flag::GRAVITY_FROZEN | motion::flag::GRAVITY_FROZEN_2 | motion::flag::HOLD)
+            != 0;
+        if !grounded_mode || ranged || self.flags >> 23 & 1 != 0 {
             return;
         }
         let [x, y, z] = self.position;
