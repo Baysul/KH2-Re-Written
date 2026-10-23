@@ -105,6 +105,60 @@ pub fn list_pen(mode: u8) -> u8 {
     }
 }
 
+/// FUN_1401534b0: the style of a world's command layout (its file name,
+/// `<world><n>command.2dd`), which FUN_140153ee0 keeps (DAT_1409babd0)
+/// for the reaction-style labels. `alt` is the layout DAT_14079cf00 +0x274
+/// other than 0 and 7 ([I] the room's).
+pub fn layout_style(name: &str, alt: bool) -> u8 {
+    let file = name.rsplit('/').next().unwrap_or(name);
+    let code = file.strip_suffix("command.2dd").unwrap_or(file);
+    match code {
+        "bb0" => {
+            if alt {
+                10
+            } else {
+                4
+            }
+        }
+        "tt6" => {
+            if alt {
+                0xb
+            } else {
+                3
+            }
+        }
+        "he1" | "lm0" | "wi0" | "lk0" | "hb2" | "nm0" => 1,
+        "he0" => 2,
+        "wm0" | "hb0" | "hb1" => 3,
+        "dc0" | "po0" | "tr0" | "tt0" | "tt2" | "tt3" | "tt4" | "tt5" => 4,
+        "ca0" => 5,
+        "mu0" => 6,
+        "nm1" | "eh0" | "dc1" => 7,
+        "al0" => 8,
+        "eh1" | "tt1" => 9,
+        _ => 0,
+    }
+}
+
+/// FUN_14015aab0's first pen move (x = 0xffXX) for list decks of kinds 5
+/// and 10 (FUN_14015df90): with the world command menus (save config bit
+/// 6 clear, FUN_1402e5380) by the layout's style, else 0xe3 ([I] the
+/// layout +0x274 other than 0 and 7; 0xe7 otherwise).
+pub fn world_pen(style: Option<u8>) -> u8 {
+    match style {
+        None | Some(9 | 0xb) => 0xe3,
+        Some(1) => 0xee,
+        Some(3) => 0xe8,
+        Some(4) => 0xeb,
+        Some(5) => 0xea,
+        Some(6) => 0xec,
+        Some(7) => 0xed,
+        Some(8) => 0xe6,
+        Some(10) => 0xe5,
+        Some(_) => 0xe7,
+    }
+}
+
 /// FUN_14015aba0: a list row's label with its button glyph in front: the
 /// pen to (x, 28) (`pen`, [`list_pen`]), `09 glyph`, the pen to (2, 28),
 /// then the message.
@@ -224,6 +278,9 @@ pub struct CommandMenu {
     /// The list deck's sheet mode (PLAYER_COMMAND +0xab0): 3 for a party
     /// limit's `comd`, 5 for Chicken Little's.
     pub list_mode: u8,
+    /// The world command layout's style ([`layout_style`]); `None` with the
+    /// classic menu (save config bit 6).
+    pub layout_style: Option<u8>,
     last_list: bool,
 }
 
@@ -290,6 +347,7 @@ impl CommandMenu {
             sub: None,
             list: None,
             list_mode: 3,
+            layout_style: None,
             last_list: false,
         }
     }
@@ -808,6 +866,11 @@ impl CommandMenu {
             let group = LIST_ROW.get(s).copied().unwrap_or(0);
             let colour = LIST_TEXT[item.colour.min(8)];
             let label = match LIST_GLYPH.get(s).copied().flatten() {
+                // Chicken Little's deck (kind 5) takes FUN_14015aab0's
+                // world pen, a limit's `comd` (kind 0xE) FUN_14015aba0's.
+                Some(g) if self.list_mode == 5 => {
+                    glyph_label(world_pen(self.layout_style), g, &item.label)
+                }
                 Some(g) => glyph_label(list_pen(self.list_mode), g, &item.label),
                 None => item.label.clone(),
             };
@@ -1048,6 +1111,17 @@ pub fn label_quads(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_world_layout_names_its_reaction_pen() {
+        assert_eq!(layout_style("field2d/us/he1command.2dd", true), 1);
+        assert_eq!(layout_style("field2d/us/tt6command.2dd", true), 0xb);
+        assert_eq!(layout_style("field2d/us/tt6command.2dd", false), 3);
+        assert_eq!(layout_style("field2d/us/zz0command.2dd", true), 0);
+        assert_eq!(world_pen(Some(1)), 0xee);
+        assert_eq!(world_pen(Some(0)), 0xe7);
+        assert_eq!(world_pen(None), 0xe3);
+    }
     use super::*;
 
     /// A menu with no sequence behind it (input only).
@@ -1078,6 +1152,7 @@ mod tests {
             sub: None,
             list: None,
             list_mode: 3,
+            layout_style: None,
             last_list: false,
         }
     }

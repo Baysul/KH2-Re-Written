@@ -29,6 +29,10 @@ fn install(game: &mut Game, m: &mut MenuState, name: String, sheet: Result<Sheet
             );
         }
     }
+    // FUN_140153ee0 -> FUN_1401534b0: the world menus (config bit 6 clear,
+    // FUN_1402e5380) keep the layout's style for the reaction-style labels.
+    m.menu.layout_style = (game.config_flags >> 6 & 1 == 0)
+        .then(|| visual::field_command_menu::layout_style(&name, true));
     m.layout = Some(name);
 }
 
