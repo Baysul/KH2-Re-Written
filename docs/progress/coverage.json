@@ -1595,6 +1595,38 @@
           "evidence": [
             "docs/tasks/T206-boss-framework-sephiroth.md"
           ]
+        },
+        {
+          "id": "NATIVE-T208-01",
+          "label": "Reaction command search over the held command, record 1, partner, shapes, attacks and auto offers - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T208-reaction-command-manager.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T208-02",
+          "label": "Reaction slot, target marker and Triangle press - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T208-reaction-command-manager.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T208-03",
+          "label": "Reaction slot drawing, prompt and burst on the command menu - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T208-reaction-command-manager.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T208-04",
+          "label": "Attack-borne reaction commands - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T208-reaction-command-manager.md"
+          ]
         }
       ]
     },
