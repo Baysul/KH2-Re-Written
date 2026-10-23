@@ -247,6 +247,11 @@ pub trait Env {
     fn no_leave(&self) -> bool {
         false
     }
+    /// Sora cannot be damaged now (his vt+0xb8, FUN_1403d65a0): an
+    /// invulnerable motion range or timer.
+    fn player_invulnerable(&self) -> bool {
+        false
+    }
     /// `DAT_142a11400` bit 7: every enemy leaves.
     fn force_leave(&self) -> bool {
         false

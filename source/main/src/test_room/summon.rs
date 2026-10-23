@@ -438,7 +438,7 @@ fn capture_clip(row: usize, slot: i32) -> Option<u16> {
 /// (entries "0010"), 1 for the first weapon ("0011"), each in four variants
 /// chosen as a set's are (FUN_1403c7c50's table) [I: in battle with the
 /// Keyblade out]. The body's slot is made unique as the limits' are.
-fn capture_parts(
+pub(super) fn capture_parts(
     anb: &[u8],
     clip: u16,
 ) -> Option<(
@@ -705,6 +705,8 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
             )),
             flight_spec: a.flight_spec,
             enemy_radius: super::party_limit::room_enemy_radius(game).unwrap_or(0.),
+            player_star: false,
+            player_centre: super::SORA_OBJ[2],
         };
         let enemy = super::party_limit::room_enemy(game);
         a.brain.set_enemy(enemy);
@@ -1027,6 +1029,11 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         stats,
         sstm,
         clips.clone(),
+        super::enemy_script::ScriptSetup {
+            object_type: object.object_type,
+            entry_id: object.object_id,
+            ..Default::default()
+        },
     )?;
     let friend = Personality::of_character(object.character).map(|p| {
         let (walk, run) = prty_speeds(&mut library, object.neo_moveset).unwrap_or((2., 8.));
@@ -1064,19 +1071,7 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         brain.trace();
     }
     brain.player_yaw = game.player.yaw;
-    brain.set_spawner(Box::new(Spawner {
-        source: source.clone(),
-        models: objects
-            .iter()
-            .map(|o| {
-                (
-                    o.object_id,
-                    String::from_utf8_lossy(&o.model_name).into_owned(),
-                )
-            })
-            .collect(),
-        scripts: Default::default(),
-    }));
+    brain.set_spawner(Box::new(Spawner::new(source.clone(), &objects)));
     brain.fx.drawn = true;
     brain.start_act(if s.appear {
         b"appear".as_slice()
@@ -1147,10 +1142,36 @@ fn prty_words(library: &mut data::path_lookup::Library, index: i32) -> Option<[u
 /// The host side of the summon's `sysobj_appear` (FUN_1403df930): the
 /// entry's model script, a bare object otherwise. [Open] The made objects'
 /// models are not drawn.
-struct Spawner {
+/// The host side of `sysobj_appear` (FUN_1403df930): the object entry's
+/// model script, and its class from the entry's type byte.
+pub(super) struct Spawner {
     source: Arc<data::probe_source::ProbeSource>,
-    models: std::collections::HashMap<u32, String>,
+    models: std::collections::HashMap<u32, (String, u8)>,
     scripts: std::collections::HashMap<u32, Option<Vec<u8>>>,
+}
+
+impl Spawner {
+    pub(super) fn new(
+        source: Arc<data::probe_source::ProbeSource>,
+        objects: &[objentry::ObjectEntry],
+    ) -> Self {
+        Spawner {
+            source,
+            models: objects
+                .iter()
+                .map(|o| {
+                    (
+                        o.object_id,
+                        (
+                            String::from_utf8_lossy(&o.model_name).into_owned(),
+                            o.object_type,
+                        ),
+                    )
+                })
+                .collect(),
+            scripts: Default::default(),
+        }
+    }
 }
 
 impl enemy::world::Spawner for Spawner {
@@ -1160,13 +1181,16 @@ impl enemy::world::Spawner for Spawner {
             .scripts
             .entry(entry)
             .or_insert_with(|| {
-                let model = self.models.get(&entry)?;
+                let (model, _) = self.models.get(&entry)?;
                 super::enemy_script::script_payload(&self.source, model).ok()
             })
             .clone();
         let mut sys = enemy::sysobj::Sysobj::bare();
         sys.appear_way = 2;
         sys.model = entry;
+        if let Some(&(_, kind)) = self.models.get(&entry) {
+            sys.set_class(kind);
+        }
         Some(enemy::world::Appeared { payload, sys })
     }
 }

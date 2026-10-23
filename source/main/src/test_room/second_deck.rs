@@ -580,6 +580,7 @@ mod tests {
                     chain: 0,
                     form_mask: 0,
                     group: 0,
+                    reaction: Default::default(),
                 },
             )
         };

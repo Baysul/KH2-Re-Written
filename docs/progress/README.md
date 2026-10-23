@@ -4,8 +4,8 @@ Baseline: Steam app 2552430 build 15194255 candidate - supported profile unquali
 
 | Measure | Accepted / tracked | Percentage |
 |---|---:|---:|
-| Complete functions decompiled and checked | 0 / 186 (inventory incomplete) | Unmeasured |
-| Required behavior scenarios verified 1:1 | 0 / 7 (inventory incomplete) | Unmeasured |
+| Complete functions decompiled and checked | 0 / 198 (inventory incomplete) | Unmeasured |
+| Required behavior scenarios verified 1:1 | 0 / 8 (inventory incomplete) | Unmeasured |
 | Final roadmap gates accepted | 0 / 32 | 0.00% |
 
 A PASS counts one reviewed unit. All other statuses count zero. Unknown required units stay in the denominator; an incomplete inventory suppresses the overall percentage. Functions and behavior scenarios have separate denominators and are never averaged into a whole-game score.
@@ -237,6 +237,18 @@ A PASS counts one reviewed unit. All other statuses count zero. Unknown required
 | NATIVE-T125-97 | Enemy combat and targeting candidate 97 - complete function unqualified | PARTIAL | [record](../../docs/tasks/T125-enemy-ai-and-combat.md) |
 | NATIVE-T125-98 | Enemy combat and targeting candidate 98 - complete function unqualified | PARTIAL | [record](../../docs/tasks/T125-enemy-ai-and-combat.md) |
 | NATIVE-T125-99 | Enemy combat and targeting candidate 99 - complete function unqualified | PARTIAL | [record](../../docs/tasks/T125-enemy-ai-and-combat.md) |
+| NATIVE-T206-01 | Boss class, revenge gauge and enemy hit order - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
+| NATIVE-T206-02 | Enemy kill veto and one-damage rule - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
+| NATIVE-T206-03 | Reaction override table by state pattern - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
+| NATIVE-T206-04 | Battle sheet binding from an ENMP row - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
+| NATIVE-T206-05 | Reaction-command enable test of an object's collision groups - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
+| NATIVE-T206-06 | Reaction-command search and press for the leader - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
+| NATIVE-T206-07 | Script side threads and hooks - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
+| NATIVE-T206-08 | Attack-reached callback to the owner's script - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
+| NATIVE-T206-09 | Vacuum pull on an object - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
+| NATIVE-T206-10 | Script lights as the scene tint - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
+| NATIVE-T206-11 | Mission boss-clear sequence and its overlays - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
+| NATIVE-T206-12 | Per-tick movement request reset - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
 
 Accepted share of the tracked subset: 0.00%. This is not a whole-game percentage.
 
@@ -251,6 +263,7 @@ Accepted share of the tracked subset: 0.00%. This is not a whole-game percentage
 | OBS-T124-01 | Enemy action queue and script scheduling - reference comparison required | NOT RUN | [record](../../docs/tasks/T124-enemy-action-arguments-and-scheduler.md) |
 | OBS-T125-01 | Multiple actor combat and damage - reference comparison required | NOT RUN | [record](../../docs/tasks/T125-enemy-ai-and-combat.md) |
 | OBS-T125-02 | Lock-on, Scan and camera - reference comparison required | NOT RUN | [record](../../docs/tasks/T125-enemy-ai-and-combat.md) |
+| OBS-T206-01 | Sephiroth boss fight - attacks, Block, grab, damage and defeat - reference comparison required | NOT RUN | [record](../../docs/tasks/T206-boss-framework-sephiroth.md) |
 
 Accepted share of the tracked subset: 0.00%. This is not a whole-game percentage.
 

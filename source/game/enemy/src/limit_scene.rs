@@ -504,8 +504,10 @@ impl Scene {
             self.world.objects[k] = Some(o);
         }
         self.world.follow_attachments(env, None);
-        // The magic list's task runs between the objects' and the limit's.
-        self.world.tick_magic(env, Some(&mut self.program));
+        // The magic task (FUN_1403c55f0, priority 0x5014) steps the side
+        // threads of the program between the objects' update and the
+        // limit's (0x5078): a summon's shots in its own limit.
+        self.program.tick_threads(&mut self.world, env);
         run_thread(&mut self.world, env, &mut self.program, &mut self.scene);
         self.adopt(env);
         self.world.tick_attacks(env);

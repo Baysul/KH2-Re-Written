@@ -24,6 +24,7 @@ pub mod party_hit;
 pub mod party_members;
 pub mod party_spell;
 pub mod ptya;
+pub mod reaction_command;
 pub mod shadow;
 pub mod soldier;
 pub mod targeting;
@@ -580,6 +581,10 @@ pub struct Player {
     pub queued: Vec<(u16, f32)>,
     /// A scripted motion started in the air keeps the airborne physics.
     scripted_air: bool,
+    /// An outside pull on the next tick's movement (a vacuum, FUN_1403f9130
+    /// summed into the movement by FUN_1403b89a0 before collision); taken
+    /// once.
+    pub push: [f32; 3],
 }
 
 /// A blow in flight: mode 4's velocity with the SSTM brakes it runs on, and
@@ -721,6 +726,7 @@ impl Player {
             shoot: false,
             queued: Vec::new(),
             scripted_air: false,
+            push: [0.; 3],
         }
     }
 
@@ -1044,6 +1050,20 @@ impl Player {
         self.frame = 0;
         self.blend = 0.;
         self.combo = ptya::Combo::default();
+    }
+
+    /// FUN_1403ba9a0's motion part: a "no gravity" range holds (obj+0x18c
+    /// & 0x1000020). [I] Range 24 (bit 6) is in the same list here.
+    pub fn no_control(&self, clips: &Clips) -> bool {
+        Clip::within(&self.clip(clips).no_gravity, self.frame)
+    }
+
+    /// An obj_motion_capture (FUN_1403c6cc0) took Sora over: the captor's
+    /// motion `motion` (a scripted clip of his kit) starts with this blend
+    /// and replaces what was queued.
+    pub fn capture_motion(&mut self, motion: u16, blend: f32, clips: &Clips) -> bool {
+        self.queued.clear();
+        self.start_motion_id(motion, blend, clips)
     }
 
     /// An ANB range 27 is active (obj+0x18c bit 22): no damage.
@@ -1949,6 +1969,9 @@ impl Player {
                 None => self.knock = None,
             }
         }
+        let push = std::mem::take(&mut self.push);
+        disp[0] += push[0];
+        disp[2] += push[2];
         let airborne = self.in_air();
         if airborne || disp[0] != 0. || disp[2] != 0. {
             let body = Body {

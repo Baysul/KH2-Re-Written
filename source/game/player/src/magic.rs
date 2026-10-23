@@ -158,6 +158,14 @@ impl Mp {
         self.add(delta)
     }
 
+    /// FUN_1403c20a0 (`obj_start_mpdrive`): MP drops to 0 and a charge of
+    /// `length` starts at once.
+    pub fn start_charge(&mut self, length: f32) {
+        self.total = length;
+        self.remaining = length;
+        self.cur = 0;
+    }
+
     /// FUN_1403c0890: gains shorten a running charge by gain × 12 and
     /// refill MP when it ends; otherwise MP clamps to [0, max].
     pub fn add(&mut self, d: i32) -> i32 {

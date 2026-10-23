@@ -185,35 +185,31 @@ fn magic_program() -> Vec<u8> {
 }
 
 #[test]
-fn a_magic_thread_runs_on_the_list_with_its_argument_until_it_ends() {
+fn a_magic_thread_runs_beside_the_script_with_its_argument_until_it_ends() {
     let mut world = World::default();
     let mut obj = Object::spawn(&mut world, &NullEnv, 0, &magic_program(), Sysobj::bare()).unwrap();
-    assert_eq!(
-        world.magic.len(),
-        1,
-        "on the magic list, not under OBJ_INIT"
-    );
+    assert_eq!(obj.threads.len(), 1, "a side thread, not under OBJ_INIT");
     assert_eq!(
         work_word(&obj, 8),
-        world.magic[0].handle,
+        obj.threads[0].handle,
         "the script keeps the holder"
     );
-    assert_eq!(work_word(&obj, 0), 0, "nothing runs before the list's task");
-    world.tick_magic(&NullEnv, Some(&mut obj));
+    assert_eq!(work_word(&obj, 0), 0, "nothing runs before the task");
+    obj.tick_threads(&mut world, &NullEnv);
     assert_eq!(work_word(&obj, 0), 0x77);
     assert_eq!(work_word(&obj, 4), 1);
-    assert_eq!(world.magic.len(), 1, "halted, kept");
-    world.tick_magic(&NullEnv, Some(&mut obj));
+    assert_eq!(obj.threads.len(), 1, "halted, kept");
+    obj.tick_threads(&mut world, &NullEnv);
     assert_eq!(work_word(&obj, 4), 2);
-    assert!(world.magic.is_empty(), "ended, freed");
+    assert!(obj.threads.is_empty(), "ended, freed");
 }
 
 #[test]
-fn the_magic_list_waits_while_status_bit_5_holds_it() {
+fn the_magic_task_waits_while_status_bit_5_holds_it() {
     let mut world = World::default();
     let mut obj = Object::spawn(&mut world, &NullEnv, 0, &magic_program(), Sysobj::bare()).unwrap();
-    world.status |= crate::world::status::MAGIC_HOLD;
-    world.tick_magic(&NullEnv, Some(&mut obj));
+    world.status |= 1 << 5;
+    obj.tick_threads(&mut world, &NullEnv);
     assert_eq!(work_word(&obj, 0), 0);
-    assert_eq!(world.magic.len(), 1);
+    assert_eq!(obj.threads.len(), 1);
 }

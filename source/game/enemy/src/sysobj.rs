@@ -351,8 +351,22 @@ pub struct Sysobj {
     pub pattern_b: u32,
     /// +0x4dc: the team (`obj_set_team`).
     pub team: i32,
-    /// +0xd4c: the karma limit (`enemy_set_karma_limit`).
-    pub karma_limit: i32,
+    /// +0xd48: the revenge ("karma") gauge of an enemy-class object
+    /// (FUN_1403db840 starts it at 0): each hit adds its ATKP RevengeDamage
+    /// (FUN_1403dbb90), it falls by the frame time while the act manager is
+    /// active (FUN_1403dbbf0), and frame event 0x1c starts `revenge` once it
+    /// reaches the limit.
+    pub revenge: f32,
+    /// +0xd4c: the gauge's limit, 100.0 at creation; `enemy_set_karma_limit`
+    /// stores the script's float (FUN_140431e30).
+    pub karma_limit: f32,
+    /// The damage record's original reaction (+0x27): the ATKP reaction
+    /// before the `patn` override. [`Sysobj::damage_reaction`] is the one
+    /// played (+0x26).
+    pub damage_orig_reaction: u32,
+    /// The battle sheet's attacker side (+0x188 strength, +0x198/+0x19c the
+    /// clamps), when `btlobj_set_sheet` bound one (FUN_1403c2240).
+    pub attacker: Option<combat::AttackerStats>,
     /// +0x5a8: the collision shape masks `obj_disable_collision` and
     /// `obj_reset_collision` edit (word `n` of shapes 32n..).
     pub collision: Vec<u32>,
@@ -481,6 +495,10 @@ pub struct Sysobj {
     pub hook: Option<u32>,
     /// The hook table of the motion set in use (+0x160; `obj_motion_hook`).
     pub motion_hook: Option<i32>,
+    /// +0x4e0, +0x540, +0x5a0: the reaction-command enables (see
+    /// [`crate::reaction`]); the script's group bits (+0x5a8) are
+    /// [`Sysobj::collision`].
+    pub reaction_groups: crate::reaction::Groups,
     /// +0xa78: how far the map pushed the object out of itself
     /// (`obj_get_bg_press`), in the script frame.
     pub bg_press: [f32; 4],
@@ -586,6 +604,17 @@ pub mod class_flag {
     /// +0x6c8 bit 10: preferred by target search kind 5 (its distance counts
     /// 10000 shorter).
     pub const PRIORITY_TARGET: u32 = 1 << 10;
+    /// The boss class (YS::BOSS, objentry type 3) sets the same bit
+    /// (FUN_1403f8da0: `+0x6c8 |= 0x400`); `sysobj_is_boss` reads it.
+    pub const BOSS: u32 = PRIORITY_TARGET;
+    /// +0x6c8 bit 1: a battle object (FUN_1403d2da0); the per-tick reset of
+    /// the pattern words (FUN_14040e5c0) and the range events 0x24/0x25 act
+    /// only on these.
+    pub const BATTLE: u32 = 1 << 1;
+    /// +0x6c8 bit 7: the controlled leader (Sora).
+    pub const LEADER: u32 = 1 << 7;
+    /// +0x6c8 bit 14: a party member (FUN_1403c2db0).
+    pub const PARTY: u32 = 1 << 14;
     /// +0x6c8 bit 3: the object follows routes (a townsperson); read by
     /// FUN_14054e130 when it builds a route.
     pub const ROUTINE: u32 = 1 << 3;
@@ -677,7 +706,10 @@ impl Sysobj {
             pattern_a: 0,
             pattern_b: 0,
             team: 0,
-            karma_limit: 0,
+            revenge: 0.,
+            karma_limit: 100.,
+            damage_orig_reaction: 0,
+            attacker: None,
             collision: Vec::new(),
             entry_id: 0,
             entry_part: 0,
@@ -705,7 +737,7 @@ impl Sysobj {
             act_paused: false,
             raw_words: std::collections::BTreeMap::new(),
             state_flags: 0,
-            class_flags: class_flag::ENEMY,
+            class_flags: class_flag::ENEMY | class_flag::BATTLE,
             scissoring: false,
             stealth_color: [0; 3],
             medal: 0,
@@ -729,6 +761,7 @@ impl Sysobj {
             unit: None,
             rtn: Default::default(),
             bg_press: [0.; 4],
+            reaction_groups: Default::default(),
             head_look: HeadLook::default(),
             capture: None,
             limit_token: 0,
@@ -854,6 +887,51 @@ impl Sysobj {
         (10..=39).contains(&s) || (140..=150).contains(&s)
     }
 
+    /// The object class an objentry's type byte (+4) builds
+    /// (FUN_1403df930): type 3 BOSS (FUN_1403f8da0) and 0xc L_BOSS add the
+    /// boss bit and the pattern bits {2, 10, 15} (`+0xd10 |= 0x8404`); type 4
+    /// ZAKO and 0x15 L_ZAKO the ordinary-enemy bit 11. [U] The f32 2000.0
+    /// the boss constructor stores at +0x8e0 has no reader found.
+    pub fn set_class(&mut self, objentry_type: u8) {
+        match objentry_type {
+            3 | 0xc => {
+                self.class_flags = self.class_flags & !class_flag::ZAKO | class_flag::BOSS;
+                self.pattern_mask |= 0x8404;
+            }
+            4 | 0x15 => self.class_flags |= class_flag::ZAKO,
+            _ => {}
+        }
+    }
+
+    /// The active state pattern (`(+0xd14 | +0xd10) & ~+0xd18`): the
+    /// constructor's and script's bits plus the current motion's range 0x24
+    /// bits, without its range 0x25 bits.
+    pub fn active_patterns(&self) -> u32 {
+        (self.pattern_a | self.pattern_mask) & !self.pattern_b
+    }
+
+    /// FUN_1403d3570 (BTLOBJ vt+0xb8, "cannot be damaged"): +0x120 bit 8,
+    /// motion range 0x1b (+0x18c bit 22), a stop request with bit 2, or the
+    /// +0x120 bits that hide an object from searches. [U] The pause and
+    /// mission-lock terms (FUN_140152940, FUN_1403a57f0) are the host's.
+    pub fn invulnerable(&self) -> bool {
+        self.flags & 0x100 != 0
+            || self.motion.flags.word & 0x40_0000 != 0
+            || self.stop_requests.iter().any(|r| r & 4 != 0)
+            || self.flags & 0x1008_0000 != 0
+    }
+
+    /// FUN_1403ca250 (`act_active`) for the revenge decay: the act table
+    /// exists, the manager is not locked, motion range 0x15 (+0x18c bit 18)
+    /// is off, and no damage motion holds an act below priority 300.
+    pub fn revenge_decays(&self, acts: &crate::act::Manager) -> bool {
+        acts.has_table
+            && !acts.locked()
+            && self.motion.flags.word & 0x4_0000 == 0
+            && !self.act_paused
+            && !(acts.priority < 300 && self.hit_stunned())
+    }
+
     /// FUN_1403b9f70 (`obj_turn_dir`): turn toward the direction's heading by
     /// at most `2 * rate` radians. Returns true while the heading differs.
     pub fn turn_dir(&mut self, direction: Vec3, rate: f32) -> bool {
@@ -962,6 +1040,13 @@ impl Sysobj {
     fn dispatch_ranges(&mut self, clips: &dyn Clips) {
         let slot = self.motion.slot;
         self.motion.flags.reset();
+        // FUN_14040e5c0: a battle object's pattern words +0xd14/+0xd18 and
+        // its per-motion reaction-command enables are rebuilt every tick.
+        if self.class_flags & class_flag::BATTLE != 0 {
+            self.pattern_a = 0;
+            self.pattern_b = 0;
+        }
+        self.reaction_groups.clear_motion();
         let clock =
             motion::native_clock(self.motion.tick, clips.length(slot), clips.loop_start(slot));
         let Some(events) = clips.events(slot) else {
@@ -1695,6 +1780,11 @@ impl Sysobj {
         }
         self.collision[w] &= !(1 << (index & 31));
         self.collision[w + 1] &= !(1 << (index & 31));
+    }
+
+    /// The script's collision-group words (+0x5a8: {enable, disable}).
+    pub fn script_group_bits(&self) -> [u32; 2] {
+        [0, 1].map(|k| self.collision.get(k).copied().unwrap_or(0))
     }
 
     /// Pool `index` of the battle sheet (0 is the object's HP).

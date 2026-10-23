@@ -432,12 +432,23 @@ fn damage_is_reaction(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) ->
     Ok(())
 }
 
-/// 2:9 FUN_140431a70 -> FUN_140411350: bind the battle parameter sheet.
-/// [U] The host builds the stats from ENMP/LVPM when it creates the object;
-/// the sheet number is kept.
+/// 2:9 FUN_140431a70 -> FUN_140411350: bind the battle parameter sheet of
+/// ENMP row `args[1]` (FUN_1403c0280 -> FUN_1403c2240): the pools start
+/// full, their floors at 0. Without a [`crate::world::SheetSource`] only
+/// the number is kept.
 fn set_sheet(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    ctx.object(id)?.sys.sheet = args[1].as_int();
+    let n = args[1].as_int();
+    let sheet = ctx.world.sheets.as_ref().and_then(|s| s.sheet(n));
+    let sys = &mut ctx.object(id)?.sys;
+    sys.sheet = n;
+    if let Some(sheet) = sheet {
+        sys.stats = sheet.stats;
+        sys.hp = sheet.stats.max_hp;
+        sys.min_hp = 0;
+        sys.extra_pools = sheet.pools;
+        sys.attacker = Some(sheet.attacker);
+    }
     Ok(())
 }
 

@@ -28,6 +28,15 @@ pub struct Entry {
     pub height: i16,
 }
 
+/// The table's default group mask (u32 at +4): the groups whose shapes are
+/// on unless a motion or script switches them (FUN_1403ba550's last test).
+pub fn default_groups(bytes: &[u8]) -> io::Result<u32> {
+    bytes
+        .get(4..8)
+        .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "object collision header"))
+}
+
 pub fn read(bytes: &[u8]) -> io::Result<Vec<Entry>> {
     let invalid = |m| io::Error::new(io::ErrorKind::InvalidData, m);
     let count = bytes

@@ -40,6 +40,22 @@ pub struct Object {
     pub pending: Vec<Callback>,
     /// The kn::Friend controller of a summon (FUN_1401b06e0).
     pub friend: Option<Box<crate::friend::Friend>>,
+    /// Detached threads of this object's program (see [`SideThread`]).
+    pub threads: Vec<SideThread>,
+}
+
+/// A detached thread of an object's own program that shares its work
+/// area: `magic_start_thread` (FUN_1403c5ec0 links it into the list the
+/// task FUN_1403c5520/FUN_1403c55f0 steps once per frame) or `obj_hook`
+/// (FUN_1403d76d0 stores it in the hooked object's +0xd48, whose update
+/// FUN_1403d7280 steps it). A thread whose code returns is unlinked.
+pub struct SideThread {
+    /// The handle the trap returned.
+    pub handle: u32,
+    pub thread: Thread,
+    /// The object it is hooked to (`obj_hook`), which holds the handle in
+    /// its [`crate::sysobj::Sysobj::hook`]; `None` for a magic thread.
+    pub hooked: Option<ObjId>,
 }
 
 impl Object {
@@ -51,6 +67,7 @@ impl Object {
             acts: act::Manager::default(),
             pending: Vec::new(),
             friend: None,
+            threads: Vec::new(),
             script: ScriptSpace {
                 instance: Instance::placeholder(),
                 stack_bytes: 0,
@@ -206,8 +223,34 @@ pub enum Event {
         id: i32,
         arg: i32,
     },
+    /// FUN_1403aabe0: an event signal posted to the mission and map scripts
+    /// (trigger 10 with `code` and `argument`) and the area's signal table.
+    /// Code 4 is a boss's death with its entry id (FUN_1403f8c60).
+    Signal {
+        code: i32,
+        argument: i32,
+    },
     /// A service the executable provides that this build does not translate yet.
     Unsupported(&'static str),
+}
+
+/// A battle sheet (`btlobj_set_sheet`, FUN_140411350 -> FUN_1403c0280 ->
+/// FUN_1403c2240): an ENMP row's HP pools and damage terms at the battle's
+/// level.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sheet {
+    pub stats: player::combat::TargetStats,
+    /// Pools 1.. (pool 0 is `stats.max_hp`).
+    pub pools: Vec<crate::sysobj::Pool>,
+    pub attacker: player::combat::AttackerStats,
+}
+
+/// The host side of `btlobj_set_sheet`: it holds the ENMP and LVPM tables
+/// and the area's battle level this crate does not.
+pub trait SheetSource: Send + Sync {
+    /// The sheet of ENMP row `id` (the executable falls back to row 69 when
+    /// the id is absent, FUN_1403ebf30).
+    fn sheet(&self, id: i32) -> Option<Sheet>;
 }
 
 /// A shout waiting for the frame's shout job (`act_shout`).
@@ -239,6 +282,27 @@ pub struct Light {
     pub fog: [f32; 4],
 }
 
+/// FUN_1403f7040's tint: each kind-0 light with flag bit 1 scales the
+/// scene colour (0x80 = 1.0) toward its own by its fade, channel by
+/// channel (`c * (byte((own - 0x80) * fade) + 0x80) >> 7`); the result goes
+/// to FUN_1401626f0, which multiplies the map's light and fog colours and
+/// the map effects by it. [U] A faded-out light is freed there
+/// (FUN_1403f7580); here it only stops tinting.
+pub fn scene_tint(lights: &[Option<Light>]) -> [u8; 3] {
+    let mut c = [0x80u32; 3];
+    for l in lights.iter().flatten() {
+        let on = l.flags.first().is_some_and(|w| w & 2 != 0);
+        if l.kind != 0 || !on || l.fade.value == 0. {
+            continue;
+        }
+        for (ch, &own) in c.iter_mut().zip(&l.color) {
+            let own = ((f32::from(own) - 128.) * l.fade.value) as i32 as u8;
+            *ch = ((*ch & 0xff) * u32::from(own.wrapping_add(0x80))) >> 7;
+        }
+    }
+    c.map(|v| (v & 0xff) as u8)
+}
+
 /// Light handles are 16 bytes apart from here.
 pub const LIGHT_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0800_0000;
 
@@ -265,6 +329,58 @@ pub struct Vacuum {
 /// Vacuum handles are 16 bytes apart from here.
 pub const VACUUM_HANDLES: u32 = script::EXTERN_SEGMENT + 0x0900_0000;
 
+/// FUN_1403f9130 (summed into an object's movement by FUN_1403b89a0): the
+/// pull of every vacuum on an object at `position` of objentry type
+/// `object_type` (0 for the leader) and weight `weight`, for one tick of
+/// `frame_time`. A vacuum whose flags name the type, or that is out of its
+/// effective range (0: everywhere), skips it; the strength is the weight
+/// over 100 times +0x18 clamped to [+0x1c, +0x20], scaled by the distance
+/// past +0x28 times +0x2c clamped to [-1, 1]; +0x24 adds a sideways swirl.
+/// [I] The swirl turns the direction a quarter turn about Y (FUN_1403b7680
+/// with DAT_140623ab0); no installed fight checked uses it.
+pub fn vacuum_pull(
+    vacuums: &[Option<Vacuum>],
+    position: [f32; 3],
+    object_type: u32,
+    weight: f32,
+    frame_time: f32,
+) -> [f32; 3] {
+    let mut acc = [0f32; 3];
+    for v in vacuums.iter().flatten() {
+        if object_type < 32 && v.flags & 1 << object_type != 0 {
+            continue;
+        }
+        let d = [v.position[0] - position[0], 0., v.position[2] - position[2]];
+        let len = d[0].hypot(d[2]);
+        if v.effective_range != 0. && len >= v.effective_range {
+            continue;
+        }
+        let e = if len > 0. {
+            [d[0] / len, 0., d[2] / len]
+        } else {
+            [0.; 3]
+        };
+        let [s, lo, hi] = v.at_18;
+        let raw = weight / 100. * s;
+        let k1 = if lo <= raw {
+            if raw <= hi { raw } else { hi }
+        } else {
+            lo
+        };
+        let k2 = ((len - v.at_28) * v.at_2c).clamp(-1., 1.);
+        for k in 0..3 {
+            acc[k] += e[k] * k1 * k2;
+        }
+        if v.at_24 != 0. {
+            let side = [e[2], 0., -e[0]];
+            for k in 0..3 {
+                acc[k] += side[k] * v.at_24;
+            }
+        }
+    }
+    acc.map(|c| c * frame_time)
+}
+
 /// Bits of the executable's global status word (DAT_142a11400) that scripts
 /// set and read.
 pub mod status {
@@ -278,8 +394,6 @@ pub mod status {
     pub const PETERPAN_PRIZE_DRAIN: u32 = 1 << 11;
     /// `status_hide_shadow` / `status_show_shadow`.
     pub const HIDE_SHADOW: u32 = 1 << 12;
-    /// FUN_1403c55f0 runs no magic thread while it is set.
-    pub const MAGIC_HOLD: u32 = 1 << 5;
 }
 
 /// An object search a script made (kept while `World::trace` is on).
@@ -418,24 +532,13 @@ pub struct World {
     /// walk, run, turn, steering inertia, fast and slow inertia, the speed
     /// between them, hover height and climb speed.
     pub hover_spec: [f32; 9],
-    /// The magic list (DAT_142a23a70 / DAT_142a23a78), oldest first.
-    pub magic: Vec<MagicThread>,
+    /// The `patn` table of 00battle.bin (DAT_142ae59d0): reaction overrides
+    /// by state pattern bit (see [`crate::damage::patn_override`]).
+    pub patn: Vec<[u8; 32]>,
+    /// How `btlobj_set_sheet` builds a sheet (none: the number is kept and
+    /// the stats stay as the host made them).
+    pub sheets: Option<Box<dyn SheetSource>>,
 }
-
-/// A thread `magic_start_thread` started (FUN_1403c5ec0 -> FUN_1403e1970):
-/// a thread of the calling program with the caller's owner (the running
-/// thread's +0x58 / +0x60), kept on the magic list by its 16-byte holder
-/// (FUN_1403c4e90) instead of under the thread that started it.
-#[derive(Clone, Debug)]
-pub struct MagicThread {
-    /// The holder's handle, which the script gets back.
-    pub handle: u32,
-    pub owner: ObjId,
-    pub thread: Thread,
-}
-
-/// The frame slot of magic threads (the object's own threads use 0..=14).
-pub const MAGIC_SLOT: u32 = 15;
 
 /// The event path walker the `eh22_path_*` traps drive (DAT_142b59840):
 /// where it is on the event's list of points, where it goes next, and
@@ -508,7 +611,8 @@ impl Default for World {
             limit: None,
             player_scripted: false,
             hover_spec: [0.; 9],
-            magic: Vec::new(),
+            patn: Vec::new(),
+            sheets: None,
         }
     }
 }
@@ -703,53 +807,6 @@ impl World {
         }
     }
 
-    /// FUN_1403c55f0, the magic list's task (priority 0x5014, after the
-    /// objects' 0x4e20 and before the limit's 0x5078): unless status bit 5
-    /// holds the list, each thread runs as a root thread of its owner's
-    /// program (FUN_1403e1c80 with no parent), and one that has ended with
-    /// no child left leaves the list and is freed (FUN_1403c5030). The next
-    /// holder is read before a thread runs, so threads the last one starts
-    /// wait for the next frame. `external` is an owner the host holds
-    /// outside the object list. [I] A thread whose owner is no longer
-    /// there is dropped.
-    pub fn tick_magic(&mut self, env: &dyn Env, mut external: Option<&mut Object>) {
-        if self.status & status::MAGIC_HOLD != 0 {
-            return;
-        }
-        let mut i = 0;
-        while i < self.magic.len() {
-            let last = i + 1 == self.magic.len();
-            let owner = self.magic[i].owner;
-            let mut thread = std::mem::replace(
-                &mut self.magic[i].thread,
-                Thread::with_sizes(0, 0, 0, 0, &[]),
-            );
-            let ran = match external.as_deref_mut() {
-                Some(o) if o.id == owner => {
-                    run_thread(self, env, o, &mut thread);
-                    true
-                }
-                _ => match self.objects.get_mut(owner as usize).and_then(Option::take) {
-                    Some(mut o) => {
-                        run_thread(self, env, &mut o, &mut thread);
-                        self.objects[owner as usize] = Some(o);
-                        true
-                    }
-                    None => false,
-                },
-            };
-            if ran && !thread.finished() {
-                self.magic[i].thread = thread;
-                i += 1;
-            } else {
-                self.magic.remove(i);
-            }
-            if last {
-                break;
-            }
-        }
-    }
-
     /// FUN_1403c6cc0: `victim` plays slot `motion` of `captor`'s motion set
     /// for as long as the captor's clip lasts (a looping clip on); returns
     /// the token `obj_motion_capture_id` reads back. The caller holds
@@ -897,6 +954,19 @@ impl World {
         for light in self.lights.iter_mut().flatten() {
             light.fade.step(frame_time);
         }
+    }
+
+    /// Put an attack object in the first free slot; the slot.
+    pub fn add_attack(&mut self, a: crate::attack::Attack) -> usize {
+        let i = match self.attacks.iter().position(Option::is_none) {
+            Some(i) => i,
+            None => {
+                self.attacks.push(None);
+                self.attacks.len() - 1
+            }
+        };
+        self.attacks[i] = Some(a);
+        i
     }
 
     /// Put a light in the first free slot; its handle.
@@ -1055,6 +1125,11 @@ impl Ctx<'_> {
             if !self.world.player_scripted {
                 proxy.sys.position = self.env.player_position();
                 proxy.sys.yaw = self.env.player_yaw();
+            }
+            // Sora's sheet as scripts read it (`sheet_hp`, `sheet_hp_rate`).
+            if let Some((hp, max)) = self.env.player_hp() {
+                proxy.sys.hp = hp;
+                proxy.sys.stats.max_hp = max;
             }
             return Ok(proxy);
         }
@@ -1387,4 +1462,59 @@ pub fn run_thread(world: &mut World, env: &dyn Env, obj: &mut Object, thread: &m
         obj.script.faults.push((thread.pc, f));
     }
     exit
+}
+
+#[cfg(test)]
+mod vacuum_tests {
+    use super::*;
+
+    fn sephiroths(at: [f32; 4]) -> Vacuum {
+        Vacuum {
+            position: at,
+            flags: 1 << 3,
+            effective_range: 2000.,
+            at_18: [6.; 3],
+            at_24: 0.,
+            at_28: 250.,
+            at_2c: 0.01,
+        }
+    }
+
+    #[test]
+    fn the_pull_is_full_past_350_none_at_250_and_pushes_inside_it() {
+        let v = [Some(sephiroths([0., 0., 1000., 1.]))];
+        // Weight 100: k1 = 6 clamped to [6, 6].
+        let far = vacuum_pull(&v, [0., 0., 0.], 0, 100., 1.);
+        assert!((far[2] - 6.).abs() < 1e-4 && far[0] == 0.);
+        let edge = vacuum_pull(&v, [0., 0., 750.], 0, 100., 1.);
+        assert!(edge[2].abs() < 1e-4);
+        let inside = vacuum_pull(&v, [0., 0., 900.], 0, 100., 1.);
+        assert!((inside[2] + 6.).abs() < 1e-4, "pushed away at 100");
+        // Out of range, or of an ignored type: nothing.
+        assert_eq!(vacuum_pull(&v, [0., 0., -1500.], 0, 100., 1.), [0.; 3]);
+        assert_eq!(vacuum_pull(&v, [0., 0., 0.], 3, 100., 1.), [0.; 3]);
+    }
+}
+
+#[cfg(test)]
+mod light_tests {
+    use super::*;
+
+    #[test]
+    fn a_grey_light_darkens_the_scene_as_it_fades_in() {
+        let mut l = Light {
+            kind: 0,
+            fade: crate::sysobj::Fade::default(),
+            flags: vec![2],
+            color: [48, 48, 48, 0x80],
+            fog: [0.; 4],
+        };
+        l.fade.value = 1.;
+        assert_eq!(scene_tint(&[Some(l.clone())]), [48; 3]);
+        l.fade.value = 0.5;
+        assert_eq!(scene_tint(&[Some(l.clone())]), [88; 3]);
+        // Without flag bit 1 it does nothing.
+        l.flags = vec![1];
+        assert_eq!(scene_tint(&[Some(l)]), [0x80; 3]);
+    }
 }

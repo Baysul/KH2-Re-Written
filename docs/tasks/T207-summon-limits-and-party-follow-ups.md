@@ -1,4 +1,4 @@
-# T206 — Summons, summon limits and party follow-ups
+# T207 — Summons, summon limits and party follow-ups
 
 Owner Claude, 2026-10-23, requested by burba in the project chat ("finish all summons, limits,
 and party stuff until its 1:1 using ghidra"), handed over by the project's coordinator session.
@@ -98,9 +98,10 @@ listings in the private `kh2-command-deck/bdx`; unattended runs in the private
 
 ## What the rewrite does
 
-- `enemy::world::MagicThread`, `World::magic`, `World::tick_magic` (the 0x5014 task), trap 2:20
-  creating the thread; the script brain runs the list after its objects, the limit scene before
-  its program thread.
+- Trap 2:20 and its threads are T206's side threads (`Object::threads`, `Object::tick_threads`,
+  merged from main in place of this task's own magic list); outside a limit the object's update
+  steps them, and a summon's limit scene steps its program's between the objects and its program
+  thread (the 0x5014 task's place).
 - The script brain tracks its effect handles (`BrainFx`): `effect_is_active` / `effect_pos`
   answer from the room's effect update (as the limit host's), and the summon host plays every
   effect call from the PAX of the object whose script made it (`obj/<model>.a.us`), bound to the
@@ -133,6 +134,7 @@ listings in the private `kh2-command-deck/bdx`; unattended runs in the private
 | Smoke `cargo run -p main --locked -- --frames 180` | PASS |
 | Release `build-release-skate3.bat` (private target dir) | PASS; it leaves `KH2RW Launcher.exe` and the two viewers |
 | Unattended `--summon-tour` on `KH2RW Launcher.exe` (private `runs/s7`) | exit 0, no faults; 4 summons, 4 appear events, 5 limit starts, 64 follow-ups, 93 summon hits (1261 ×33, 988 ×25, 1444 ×15, 883 ×13, 1210 ×4, 1225, 1573, 1574) |
+| After merging main (T206's side threads in place of this task's magic list), unattended `--summon-tour` (private `runs/s8`) | exit 0, no faults; the same hits as `runs/s7` (Chicken Little's 15 shots, Stitch 13 + 4, Genie 25, Peter Pan 21) |
 | Unattended `--party-limit-tour` on `KH2RW Launcher.exe` (private `runs/l1`) | exit 0; the five party limits start, take 27 follow-ups and end; no missing traps and no faults |
 | Unattended `--summon-tour` (private `runs/s1`) | exit 0, no faults; Chicken Little's 15 shot follow-ups start 15 magic threads (2:20), each creates its attack and effect and strikes the Shadow (ATKP 1444 ×15); every summon effect resolves in its PAX (54 starts, none missing, no unsupported program) |
 | Unattended `--summon-tour` (private `runs/s2`) | exit 0, no faults; Chicken Little rides with Sora through his limit and makes the `surprise` rise and fall after it |
@@ -142,8 +144,8 @@ listings in the private `kh2-command-deck/bdx`; unattended runs in the private
 
 ## Uncertainty
 
-- [I] A magic thread whose owner object is gone is dropped (the executable keeps running it on a
-  dangling owner). Threads use frame slot 15.
+- [I] Magic threads live on their owner object (T206's design), so they end with it (the
+  executable's list could keep running one on a dangling owner).
 - [I] Effects bound to a summon take its root (its bones are not sampled for effects), lifted by
   Sora's body heights; an effect another made object starts is placed where that object stands.
 - [I] Sora's turn in Chicken Little's limit reads the view matrix words as the camera's forward on

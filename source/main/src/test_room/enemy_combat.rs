@@ -19,6 +19,59 @@ pub struct EnemyBinding {
     pub prize_id: Option<u16>,
 }
 
+/// The sheets `btlobj_set_sheet` binds (FUN_1403c0280 -> FUN_1403c2240):
+/// an ENMP row (row 69 when the id is absent) at its own level, or at the
+/// battle's level when the row's is 0.
+#[derive(Clone, Debug)]
+pub struct EnmpSheets {
+    pub enmp: std::sync::Arc<Vec<u8>>,
+    pub lvpm: std::sync::Arc<Vec<u8>>,
+    pub battle_level: u16,
+}
+
+impl enemy::world::SheetSource for EnmpSheets {
+    fn sheet(&self, id: i32) -> Option<enemy::world::Sheet> {
+        let e = battle_tables::enemy_or_fallback(&self.enmp, u16::try_from(id).ok()?).ok()?;
+        let level = if e.level == 0 {
+            self.battle_level
+        } else {
+            e.level
+        };
+        let row = battle_tables::enemy_level(&self.lvpm, level).ok()?;
+        // The sheet initializer reads the low byte of each weakness field.
+        let stats = combat::TargetStats::enemy(
+            e.hp_percent,
+            e.damage_cap,
+            e.damage_min,
+            e.weakness.map(|w| w & 0xff),
+            row.hp,
+            row.defense,
+        );
+        let pools = e.pools[1..]
+            .iter()
+            .map(|&p| {
+                let max = (i32::from(p) * i32::from(row.hp) + 99) / 100;
+                enemy::sysobj::Pool {
+                    hp: max,
+                    max,
+                    min: 0,
+                }
+            })
+            .collect();
+        Some(enemy::world::Sheet {
+            stats,
+            pools,
+            attacker: combat::AttackerStats {
+                strength: i32::from(row.strength),
+                magic: i32::from(row.strength),
+                max: i32::from(row.max_strength),
+                min: i32::from(row.min_strength),
+                ..Default::default()
+            },
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct HitShape {
     pub ordinal: usize,
@@ -47,6 +100,9 @@ pub struct WorldShape {
 }
 
 pub struct ShapePose {
+    /// REACTION shapes (kind 5, or 14 for a clashed attack's command) with
+    /// their kind and argument (the command id for kind 5).
+    pub reactions: Vec<(WorldShape, u8, i16)>,
     pub camera: Vec<WorldShape>,
     /// Live kind-18 camera-collision spheres (see `camera_spheres`).
     pub spheres: Vec<WorldShape>,
@@ -91,6 +147,16 @@ pub struct EnemyCombat {
     pub exp: (u16, u16),
     pub prize: Option<battle_tables::Prize>,
     atkp: Vec<u8>,
+    /// The objentry type byte (+4): 3 is the boss class.
+    pub object_type: u8,
+    /// The collision table's REACTION shapes (kind, argument) and its
+    /// default group mask.
+    pub reactions: Vec<(HitShape, u8, i16)>,
+    pub default_groups: u32,
+    /// What the object's script binds with `btlobj_set_sheet`.
+    pub sheets: EnmpSheets,
+    /// 00battle.bin `patn` (the reaction overrides by state pattern).
+    pub patn: Vec<[u8; 32]>,
 }
 
 fn payload<'a>(bytes: &'a [u8], name: &[u8; 4]) -> Result<&'a [u8]> {
@@ -169,8 +235,11 @@ impl EnemyCombat {
         if collision_entries.len() != 1 {
             return Err("combat collision entry absent or ambiguous".into());
         }
-        let collision = object_collision::read(entry_payload(&archive, collision_entries[0])?)
-            .map_err(|e| e.to_string())?;
+        let collision_bytes = entry_payload(&archive, collision_entries[0])?;
+        let collision = object_collision::read(collision_bytes).map_err(|e| e.to_string())?;
+        let default_groups =
+            object_collision::default_groups(collision_bytes).map_err(|e| e.to_string())?;
+        let reactions = reaction_shapes(&collision, kind.model.skinning.bones.len());
         let (body, targets, attacks) =
             collision_shapes(&collision, kind.model.skinning.bones.len())?;
         let camera_entries = collision
@@ -280,6 +349,13 @@ impl EnemyCombat {
             )
         };
         let atkp = payload(&battle, b"atkp")?.to_vec();
+        let sheets = EnmpSheets {
+            enmp: std::sync::Arc::new(payload(&battle, b"enmp")?.to_vec()),
+            lvpm: std::sync::Arc::new(payload(&battle, b"lvpm")?.to_vec()),
+            battle_level,
+        };
+        let patn = battle_tables::reaction_patterns(payload(&battle, b"patn")?)
+            .map_err(|e| e.to_string())?;
         source.verify_session().map_err(|e| e.to_string())?;
         Ok(Self {
             camera,
@@ -305,6 +381,11 @@ impl EnemyCombat {
             exp: (enemy.exp, row.exp),
             prize,
             atkp,
+            object_type: object.object_type,
+            reactions,
+            default_groups,
+            sheets,
+            patn,
         })
     }
 
@@ -428,7 +509,19 @@ impl EnemyCombat {
                 })
                 .collect()
         };
+        let reactions = self
+            .reactions
+            .iter()
+            .map(|(s, kind, argument)| {
+                Ok((
+                    transform(std::slice::from_ref(s))?.remove(0),
+                    *kind,
+                    *argument,
+                ))
+            })
+            .collect::<Result<_>>()?;
         Ok(ShapePose {
+            reactions,
             camera: transform(&self.camera)?,
             spheres: transform(&self.spheres)?,
             body: transform(&self.body)?,
@@ -440,6 +533,39 @@ impl EnemyCombat {
                 .collect::<Result<_>>()?,
         })
     }
+}
+
+/// The REACTION shapes (kinds 5 and 14, FUN_1403b6250 with mask 0x4020)
+/// on a bone of the skeleton or the actor's origin. [U] Other attachments
+/// (0x4001..) are left out.
+fn reaction_shapes(entries: &[object_collision::Entry], bones: usize) -> Vec<(HitShape, u8, i16)> {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(e.kind, object_collision::REACTION | 14)
+                && (e.bone == 0x4000 || (0..bones as i16).contains(&e.bone))
+                && e.radius > 0
+        })
+        .map(|(ordinal, e)| {
+            (
+                HitShape {
+                    ordinal,
+                    group: e.group,
+                    bone: e.bone as usize,
+                    offset: Vec3::from_array(e.position.map(f32::from)),
+                    position_height: e.position_height as f32,
+                    radius: e.radius as f32,
+                    height: e.height as f32,
+                    shape: e.shape,
+                    parts: e.parts,
+                    high: false,
+                },
+                e.kind,
+                e.argument,
+            )
+        })
+        .collect()
 }
 
 /// The kind-18 entries that are live without script help: FUN_1403c9c00
@@ -670,6 +796,15 @@ mod tests {
             exp: (0, 0),
             prize: None,
             atkp: Vec::new(),
+            object_type: 4,
+            reactions: Vec::new(),
+            default_groups: 1,
+            sheets: EnmpSheets {
+                enmp: Default::default(),
+                lvpm: Default::default(),
+                battle_level: 1,
+            },
+            patn: Vec::new(),
         };
         let matrices = [Mat4::from_translation(Vec3::new(10., 20., 30.))];
         let pose = data

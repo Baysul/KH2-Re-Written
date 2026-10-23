@@ -4,7 +4,7 @@
 use super::math::{read_native, read_sanitized};
 use crate::script::{Fault, Memory, Slot, Thread};
 use crate::sysobj::Vec3;
-use crate::world::{Ctx, Event, MAGIC_SLOT, MagicThread, Object, TrapFn, object_handle};
+use crate::world::{Ctx, Event, Object, SideThread, TrapFn, object_handle};
 
 type Args = [Slot; 16];
 
@@ -35,6 +35,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 93) => sysobj_party,
         (1, 129) => obj_blow,
         (1, 155) => add_hp,
+        (1, 353) => start_mpdrive,
         (1, 166) => target_attack,
         (1, 167) => act_start_pri,
         (1, 191) => lockon_target,
@@ -59,6 +60,9 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (1, 21) => effect_start,
         (1, 22) => effect_start_pos,
         (1, 52) => enable_collision,
+        (1, 49) => enable_reaction_command,
+        (1, 50) => disable_reaction_command,
+        (1, 51) => reset_reaction_command,
         (1, 88) => obj_target_pos,
         (1, 130) => obj_cmp,
         (1, 149) => effect_start_bind_other,
@@ -207,34 +211,40 @@ fn get_entry_id(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
     Ok(())
 }
 
-/// 2:76 FUN_140431e30: +0xd4c.
+/// 2:76 FUN_140431e30: a raw 32-bit store of the script's float into
+/// +0xd4c.
 fn set_karma_limit(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    ctx.object(id)?.sys.karma_limit = args[1].as_int();
+    ctx.object(id)?.sys.karma_limit = f32::from_bits(args[1].value);
     Ok(())
 }
 
-/// 2:20 FUN_140432cd0 -> FUN_1403c5ec0: a new thread of the running program
-/// (DAT_142a25048, the thread being run or its root) at word `args[0]` with
-/// one argument, `args[1]` (FUN_1403e1970, count 1), put on the magic list
-/// (FUN_1403c4e90); the script gets the holder.
+/// 2:20 FUN_140432cd0 -> FUN_1403c5ec0(DAT_142a25048, entry, args + 8, 1):
+/// a detached thread of the running program at word `args[0]` with one
+/// argument (the second slot), sharing its work area; the magic task
+/// steps it every frame until its code returns.
 fn magic_start_thread(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let handle = ctx.world.next_magic_handle();
-    let s = &ctx.me.script;
+    let me = &mut *ctx.me;
     let thread = Thread::with_sizes(
-        s.stack_bytes,
-        s.temp_bytes,
-        MAGIC_SLOT,
+        me.script.stack_bytes,
+        me.script.temp_bytes,
+        side_slot(handle),
         args[0].as_int(),
         &[args[1]],
     );
-    ctx.world.magic.push(MagicThread {
+    me.threads.push(SideThread {
         handle,
-        owner: ctx.me.id,
         thread,
+        hooked: None,
     });
     args[0] = Slot::address(handle);
     Ok(())
+}
+
+/// The frame slot of a side thread: the twelve the child threads use.
+fn side_slot(handle: u32) -> u32 {
+    3 + (handle / 16) % 12
 }
 
 /// 2:21 FUN_140432d70 -> FUN_1403f6df0: the zeroed block shared under a key.
@@ -442,13 +452,34 @@ fn obj_hook(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<()
     if let Some(old) = old {
         ctx.world.events.push(Event::MagicStop { handle: old });
     }
-    ctx.world.events.push(Event::MagicStart {
-        object: id,
-        id: args[1].as_int(),
-        arguments: [0; 4],
+    if ctx.world.limit.is_some() {
+        // A limit scene runs its participants' action threads itself.
+        ctx.world.events.push(Event::MagicStart {
+            object: id,
+            id: args[1].as_int(),
+            arguments: [0; 4],
+            handle,
+            hook: true,
+            other,
+        });
+        return Ok(());
+    }
+    let mut thread_args = vec![Slot::address(object_handle(id))];
+    if let Some(o) = other {
+        thread_args.push(Slot::address(object_handle(o)));
+    }
+    let me = &mut *ctx.me;
+    let thread = Thread::with_sizes(
+        me.script.stack_bytes,
+        me.script.temp_bytes,
+        side_slot(handle),
+        args[1].as_int(),
+        &thread_args,
+    );
+    me.threads.push(SideThread {
         handle,
-        hook: true,
-        other,
+        thread,
+        hooked: Some(id),
     });
     Ok(())
 }
@@ -552,6 +583,46 @@ fn set_rot(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(),
     let sys = &mut ctx.object(id)?.sys;
     sys.yaw = yaw;
     sys.wish_yaw = None;
+    Ok(())
+}
+
+/// 1:49 FUN_14042ecf0 -> FUN_14040a590: the script enables command
+/// `args[1]` for collision group `args[2]` (-1 any) of the object (+0x540).
+fn enable_reaction_command(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let (command, group) = (args[1].as_int(), args[2].as_int());
+    let g = &mut ctx.object(id)?.sys.reaction_groups;
+    crate::reaction::set(&mut g.script, command, group, true);
+    Ok(())
+}
+
+/// 1:50 FUN_14042ed30 -> FUN_14040a500: the script disables it.
+fn disable_reaction_command(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let (command, group) = (args[1].as_int(), args[2].as_int());
+    let g = &mut ctx.object(id)?.sys.reaction_groups;
+    crate::reaction::set(&mut g.script, command, group, false);
+    Ok(())
+}
+
+/// 1:51 FUN_14042ed70 -> FUN_14040a6e0: the script's entry is dropped.
+fn reset_reaction_command(
+    ctx: &mut Ctx<'_>,
+    m: &mut Memory<'_>,
+    args: &mut Args,
+) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let (command, group) = (args[1].as_int(), args[2].as_int());
+    let g = &mut ctx.object(id)?.sys.reaction_groups;
+    crate::reaction::reset(&mut g.script, command, group);
     Ok(())
 }
 
@@ -677,10 +748,15 @@ fn unit_group(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<
     Ok(())
 }
 
-/// 1:225 FUN_14042bcb0: a virtual query on the object's class (star
-/// membership). [U] Always 0.
-fn is_star(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    args[0] = Slot::int(0);
+/// 1:225 FUN_14042bcb0: vt+0xb8 of a player-type object, "cannot be
+/// damaged" (FUN_1403a8ec0 -> FUN_1403d65a0 for Sora: his invulnerable
+/// ranges and timers, which the host knows); 0 for any other object.
+fn is_star(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let star = match ctx.sys_ref_ai(m, args[0].value) {
+        Ok(crate::world::SysRef::Player) => ctx.env.player_invulnerable(),
+        _ => false,
+    };
+    args[0] = Slot::int(star as i32);
     Ok(())
 }
 
@@ -702,7 +778,7 @@ fn damage_orig_reaction(
     args: &mut Args,
 ) -> Result<(), Fault> {
     let id = crate::world::object_field(args[0].value).map_or(0, |(id, _)| id);
-    let r = ctx.object(id)?.sys.damage_reaction;
+    let r = ctx.object(id)?.sys.damage_orig_reaction;
     args[0] = Slot::int(r as i32);
     Ok(())
 }
@@ -774,7 +850,62 @@ constant_int_traps! {
     message_is_end = 1, "method_message_is_end";
     bghit_is_hit = 0, "bghit_is_hit";
     bghit_get_kind = 0, "bghit_get_kind";
-    add_hp = 0, "obj_add_hp";
+}
+
+/// 1:155 FUN_14042dc60: the object's HP change (vt+0xe8: FUN_1403d2eb0, or
+/// Sora's FUN_1403a85f0) by `args[1]` on pool `args[2]` (`args[3]` the heal
+/// voice flag); the new HP comes back. Sora's change is the host's: it is
+/// handed on and the clamped value returned.
+fn add_hp(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let (delta, pool) = (args[1].as_int(), args[2].as_int());
+    let index = usize::try_from(pool).unwrap_or(usize::MAX);
+    let hp = match ctx.sys_ref_ai(m, args[0].value)? {
+        crate::world::SysRef::Player => {
+            let (hp, max) = ctx.env.player_hp().unwrap_or((0, 0));
+            let mut words = [0u32; 8];
+            words[..3].copy_from_slice(&[args[1].value, args[2].value, args[3].value]);
+            ctx.world.events.push(Event::Service {
+                name: "obj_add_hp",
+                object: Some(crate::world::PLAYER_OBJECT),
+                other: None,
+                words,
+                vector: None,
+            });
+            (hp + delta).clamp(0, max)
+        }
+        crate::world::SysRef::Object(id) if id == ctx.me.id => {
+            let Ctx { world, me, env } = ctx;
+            me.change_hp_queued(world, *env, delta, index);
+            me.sys.pool(index).map_or(0, |p| p.hp)
+        }
+        crate::world::SysRef::Object(id) => {
+            // [U] Another object's death hook is not run from here.
+            let sys = &mut ctx.object(id)?.sys;
+            let p = sys.pool(index).unwrap_or_default();
+            sys.set_pool_hp(index, p.hp.saturating_add(delta));
+            sys.pool(index).map_or(0, |p| p.hp)
+        }
+    };
+    args[0] = Slot::int(hp);
+    Ok(())
+}
+
+/// 1:353 FUN_14042dd70 -> FUN_1403d4a20 -> FUN_1403c20a0: the object's MP
+/// drops to 0 and an MP charge of `args[1]` times its PRTY +0x1c starts
+/// (sheet +0x180 = 0, +0x1bc = +0x1c0 = the length). Only Sora has MP;
+/// the host carries it out.
+fn start_mpdrive(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let object = super::service::object_of(ctx, m, args[0].value);
+    let mut words = [0u32; 8];
+    words[0] = args[1].value;
+    ctx.world.events.push(Event::Service {
+        name: "obj_start_mpdrive",
+        object,
+        other: None,
+        words,
+        vector: None,
+    });
+    Ok(())
 }
 
 unsupported_vector_traps! {
@@ -871,30 +1002,28 @@ fn damage_get_hitback(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> R
     Ok(())
 }
 
-/// 2:91 FUN_1404321d0: the reaction class of the damage record.
-fn damage_reaction_type(
-    ctx: &mut Ctx<'_>,
-    _: &mut Memory<'_>,
-    args: &mut Args,
-) -> Result<(), Fault> {
-    let id = crate::world::object_field(args[0].value).map_or(0, |(id, _)| id);
-    let r = ctx.object(id)?.sys.damage_reaction;
+/// 2:91 FUN_1404321d0: the class of a reaction number (FUN_1403ce980 on
+/// the argument itself).
+fn damage_reaction_type(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let r = args[0].as_int();
     args[0] = Slot::int(player::combat::reaction_class(r as u8) as i32);
     Ok(())
 }
 
-/// 2:92 FUN_1404321f0: the hit was the finishing one.
+/// 2:92 FUN_1404321f0 -> FUN_1403cedc0: the record's original reaction is
+/// one of the finishing ones (6, 7, 10, 11).
 fn damage_is_finish(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = crate::world::object_field(args[0].value).map_or(0, |(id, _)| id);
-    let dead = ctx.object(id)?.sys.hp <= 0;
-    args[0] = Slot::int(dead as i32);
+    let r = ctx.object(id)?.sys.damage_orig_reaction;
+    args[0] = Slot::int(matches!(r, 6 | 7 | 10 | 11) as i32);
     Ok(())
 }
 
-/// 2:6 FUN_140431d50 -> FUN_1403d4880: a damage reaction is playing.
+/// 2:6 FUN_140431d50 -> FUN_1403d4880: a damage motion (slots 10..39)
+/// plays.
 fn is_damage_motion(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let playing = ctx.object(id)?.sys.reaction != crate::sysobj::Reaction::None;
+    let playing = (10..=39).contains(&ctx.object(id)?.sys.motion.slot);
     args[0] = Slot::int(playing as i32);
     Ok(())
 }
