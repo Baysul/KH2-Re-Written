@@ -1755,6 +1755,22 @@
           "evidence": [
             "docs/tasks/T212-world-map-cursor-lock-and-fades.md"
           ]
+        },
+        {
+          "id": "NATIVE-T214-01",
+          "label": "World map pause menu and journal hosting - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T214-world-map-pause-menu-journal-play-time.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T214-02",
+          "label": "World map per-world play time on the info panel - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T214-world-map-pause-menu-journal-play-time.md"
+          ]
         }
       ]
     },

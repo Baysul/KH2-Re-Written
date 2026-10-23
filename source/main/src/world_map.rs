@@ -83,8 +83,10 @@ const SYMBOL_OPEN: u16 = 0xa1;
 /// visit, as the field tests use [test-room choice].
 const DEFAULT_STORY: (u32, u32) = (0x800, 0x895);
 /// Unattended runs: a fixed input script and the ticks captured.
-const AUTOPLAY_CAPTURES: [u64; 12] = [40, 130, 190, 270, 350, 430, 560, 700, 790, 815, 860, 960];
-const AUTOPLAY_END: u64 = 1000;
+const AUTOPLAY_CAPTURES: [u64; 14] = [
+    40, 130, 190, 270, 333, 360, 430, 560, 700, 790, 815, 860, 960, 1000,
+];
+const AUTOPLAY_END: u64 = 1060;
 const WARM_UP_FRAMES: u32 = 90;
 /// The map camera's near plane.
 const MAP_NEAR: f32 = 5.;
@@ -298,7 +300,21 @@ struct WorldMap {
     /// knock-slide the contact gave (obj+0xd24).
     wall: (u16, f32),
     knock: Option<actor_physics::Knock>,
+    /// The camp or journal holds the screen (the map is not stepped), the
+    /// landing grid asked for the journal, and the input devices last used
+    /// (keyboard, pad glyph) for the menus' prompts.
+    camp_up: bool,
+    journal_request: bool,
+    devices: (bool, Option<u8>),
+    /// Each world's play time (save +0x244c + 4 × world, ticks): the
+    /// world map's own (15) counts while it runs (FUN_1401574e0).
+    world_times: [u32; 19],
 }
+
+/// The camp (pause) menu and the journal the world map hosts, from the
+/// field configuration (`--field`).
+#[derive(Resource, Default)]
+struct CampHost(Option<crate::test_room::world_map_camp::WorldMapCamp>);
 
 /// An object effect start or stop for the effects tick.
 enum FxRequest {
@@ -745,7 +761,11 @@ fn setup_ui(
     mut ui: ResMut<UiRes>,
     mut frame: ResMut<Ui2dFrame>,
     mut images: ResMut<Assets<Image>>,
+    mut camp: ResMut<CampHost>,
 ) {
+    if let Some(c) = camp.0.as_mut() {
+        c.upload(&mut frame, &mut images);
+    }
     let ui = &mut *ui;
     for k in 0..ui.ui.layout.image_sizes.len() {
         if let Some(t) = ui.ui.layout.replacements.get_mut(k).and_then(Option::take) {
@@ -841,7 +861,8 @@ fn read_stick(
     if wm.autoplay.is_some() {
         return;
     }
-    let (data, _, _) = input::read_devices(&keys, &mouse, 0., &pads);
+    let (data, keyboard, glyph) = input::read_devices(&keys, &mouse, 0., &pads);
+    wm.devices = (keyboard, glyph);
     wm.stick = controller::analog(data.left);
     wm.right = controller::analog(data.right);
     wm.raw = controller::raw(&data);
@@ -859,6 +880,10 @@ fn autoplay_input(tick: u64, decide: bool) -> ([f32; 3], u16) {
         | press(150, button::RIGHT)
         | press(210, button::R1)
         | press(290, button::L1)
+        // In the grid, Triangle opens the journal and the back button
+        // closes it again.
+        | press(320, button::TRIANGLE)
+        | press(340, button::CIRCLE)
         | press(
             370,
             if decide {
@@ -876,10 +901,14 @@ fn autoplay_input(tick: u64, decide: bool) -> ([f32; 3], u16) {
         _ => [0., 0., 0.],
     };
     // After the flight (the menu is closed by then).
+    // Then START opens the camp, the cursor moves and START closes it.
     let late = press(780, button::R1)
         | press(800, button::CIRCLE)
         | press(880, button::R1)
-        | press(900, button::CIRCLE);
+        | press(900, button::CIRCLE)
+        | press(965, button::START)
+        | press(985, button::DOWN)
+        | press(1010, button::START);
     (stick, if tick >= 440 { late } else { buttons })
 }
 
@@ -991,6 +1020,9 @@ fn landing_tick(wm: &mut WorldMap, ui: &UiRes) -> bool {
             mode_changed = changes
                 .iter()
                 .any(|c| matches!(c, landing::Change::Scene { .. }));
+            if changes.contains(&landing::Change::Journal) {
+                wm.journal_request = true;
+            }
             menu.apply(layout, state, &changes);
             if !sounds.is_empty() || !changes.is_empty() {
                 wm.log
@@ -1162,15 +1194,16 @@ fn landing_tick(wm: &mut WorldMap, ui: &UiRes) -> bool {
         (Some(w), Some(info)) if info.world == w && !info.closing() => {}
         (Some(w), _) => {
             if let Some(p) = ui.ui.worlds.get(&w) {
-                // The world's play time (save +0x244c) is not kept by this
-                // program: 0.
+                // The world's play time (FUN_140157430: save +0x244c + 4 ×
+                // world in ticks, as hours, minutes and seconds).
+                let t = wm.world_times.get(w as usize).copied().unwrap_or(0) / 60;
                 wm.info = Some(Info::new(
                     seq,
                     w,
                     p.name.clone(),
                     p.visits,
                     p.battle_level,
-                    [0; 3],
+                    [t / 3600, t % 3600 / 60, t % 60],
                 ));
             }
         }
@@ -1473,6 +1506,11 @@ fn tick(mut wm: ResMut<WorldMap>, ui: Res<UiRes>) {
     }
     let flicks = raw & !wm.last_raw & STICK_FLICKS;
     wm.last_raw = raw;
+    // The camp or journal holds the map: the field is not stepped (the pad
+    // above still follows the buttons, so none reads as new afterwards).
+    if wm.camp_up {
+        return;
+    }
     wm.fade.update(1.);
     // FUN_1401563f0: the jump goes once the fade is opaque.
     if wm.leaving.is_some() && wm.fade.state == visual::fade::State::Held {
@@ -1480,6 +1518,7 @@ fn tick(mut wm: ResMut<WorldMap>, ui: Res<UiRes>) {
     }
     // FUN_1401574e0: the total play time counts every frame (to 999:59:59).
     wm.play_time = (wm.play_time + 1).min(0xcdf_e5c4);
+    wm.world_times[WORLD_MAP_WORLD] = (wm.world_times[WORLD_MAP_WORLD] + 1).min(0xcdf_e5c4);
     let eventing = wm.landing.is_none() && event_tick(&mut wm, &ui);
     let held = eventing || landing_tick(&mut wm, &ui) || wm.riding || wm.leaving.is_some();
     let ci = wm.cursor;
@@ -1962,6 +2001,51 @@ fn project(pose: &Pose, point: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// The world map's game world (DAT_140717008 while it runs).
+const WORLD_MAP_WORLD: usize = 15;
+
+/// The camp chain for one tick (the camp task FUN_14031d3c0): the landing
+/// grid's journal request, then START opening the camp while the map is
+/// free (FUN_1401572b0 waits for no load and an idle fade).
+fn camp_tick(
+    mut wm: ResMut<WorldMap>,
+    mut host: ResMut<CampHost>,
+    mut frame: ResMut<Ui2dFrame>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(camp) = host.0.as_mut() else {
+        return;
+    };
+    if wm.frames < WARM_UP_FRAMES {
+        return;
+    }
+    let mut sounds = Vec::new();
+    if std::mem::take(&mut wm.journal_request) {
+        sounds.extend(camp.open_journal());
+    }
+    let can_open = wm.landing.is_none()
+        && wm.event.is_none()
+        && wm.event_queue.is_empty()
+        && wm.leaving.is_none()
+        && !wm.riding
+        && wm.fade.state == visual::fade::State::Idle;
+    let raw = if wm.leaving.is_some() { 0 } else { wm.raw };
+    let (stick, devices, play_time) = (wm.stick, wm.devices, wm.play_time);
+    sounds.extend(camp.tick(
+        raw,
+        stick,
+        devices,
+        can_open,
+        play_time,
+        &mut frame,
+        &mut images,
+    ));
+    wm.camp_up = camp.menu_up();
+    wm.sounds.extend(sounds);
+    let log = std::mem::take(&mut camp.log);
+    wm.log.extend(log);
+}
+
 /// Plays this tick's sound requests and starts the field BGM once decoded.
 fn play_audio(mut wm: ResMut<WorldMap>, mut audio: ResMut<AudioRes>) {
     let audio = &mut *audio;
@@ -2031,7 +2115,12 @@ fn play_audio(mut wm: ResMut<WorldMap>, mut audio: ResMut<AudioRes>) {
 /// This frame's 2D draws: the lock-on reticle (priority 4000), the
 /// cursor's deck, the info panels, the total play time and the landing
 /// menu, the message window and the fade.
-fn draw_ui(mut wm: ResMut<WorldMap>, ui: Res<UiRes>, mut frame: ResMut<Ui2dFrame>) {
+fn draw_ui(
+    mut wm: ResMut<WorldMap>,
+    ui: Res<UiRes>,
+    mut frame: ResMut<Ui2dFrame>,
+    mut camp: ResMut<CampHost>,
+) {
     let layout = &ui.ui.layout.layout;
     let seq = &layout.sequences[world_map_menu::SEQUENCE];
     let font = Font {
@@ -2089,6 +2178,10 @@ fn draw_ui(mut wm: ResMut<WorldMap>, ui: Res<UiRes>, mut frame: ResMut<Ui2dFrame
                 frame.draws.push((sheet, quads));
             }
         }
+    }
+    // The camp, its curtain and the journal over the map.
+    if let Some(c) = camp.0.as_mut() {
+        c.draw(&mut frame);
     }
     // dk::Fade on top (black blends, white adds).
     if wm.fade.state != visual::fade::State::Idle {
@@ -2691,7 +2784,7 @@ fn parse_story(spec: &str) -> Result<(u32, u32)> {
 
 fn run(args: Vec<PathBuf>) -> Result<AppExit> {
     if args.len() < 2 {
-        return Err("usage: kh2fm wm <Steam-root> <manifest> [--from <world code>] [--story <first>:<last>]... [--touch <world point>,...] [--seen <world-event bit>,...] [--slot <n>:<state>]... [--at <x>,<z>] [--event <id>]... [--field <test-room config>] [--play-time <h>:<m>] [--load-only] [--autoplay <new-capture-dir> [--decide]]".into());
+        return Err("usage: kh2fm wm <Steam-root> <manifest> [--from <world code>] [--story <first>:<last>]... [--touch <world point>,...] [--seen <world-event bit>,...] [--slot <n>:<state>]... [--at <x>,<z>] [--event <id>]... [--field <test-room config>] [--play-time <h>:<m>] [--world-time <world>:<h>:<m>]... [--load-only] [--autoplay <new-capture-dir> [--decide]]".into());
     }
     let mut from = "tt".to_owned();
     let mut story = Vec::new();
@@ -2705,6 +2798,7 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit> {
     let mut field: Option<PathBuf> = None;
     let mut seen: Vec<u32> = Vec::new();
     let mut play_time: u32 = 0;
+    let mut world_times = [0u32; 19];
     let mut options = args[2..].iter();
     while let Some(option) = options.next() {
         let mut value = || -> Result<String> {
@@ -2764,6 +2858,19 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit> {
                 let (h, m) = v.split_once(':').ok_or("--play-time wants <h>:<m>")?;
                 let (h, m): (u32, u32) = (h.trim().parse()?, m.trim().parse()?);
                 play_time = (h * 3600 + m * 60) * 60;
+            }
+            // A world's own play time (save +0x244c + 4 × world) as
+            // <world>:<hours>:<minutes>.
+            Some("--world-time") => {
+                let v = value()?;
+                let mut it = v.split(':').map(|x| x.trim().parse::<u32>());
+                let (Some(Ok(w)), Some(Ok(h)), Some(Ok(m))) = (it.next(), it.next(), it.next())
+                else {
+                    return Err("--world-time wants <world>:<h>:<m>".into());
+                };
+                if let Some(t) = world_times.get_mut(w as usize) {
+                    *t = (h * 3600 + m * 60) * 60;
+                }
             }
             Some("--touch") => {
                 for p in value()?.split(',') {
@@ -3066,6 +3173,10 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit> {
         leaving: None,
         wall: (0xffff, 0.),
         knock: None,
+        camp_up: false,
+        journal_request: false,
+        devices: (true, None),
+        world_times,
     };
     // The jump that opened the map was mode 1 (FUN_140154e20 → FUN_140152990
     // with flags | 1): the area fades in from black over n = 15
@@ -3314,7 +3425,28 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit> {
             None
         }
     };
+    // The camp and journal from the field configuration (the launcher's
+    // `--field`); without one START does nothing here.
+    let camp = match &wm.field {
+        Some(h) => match crate::test_room::world_map_camp::load(
+            Arc::clone(&source),
+            &h.arena,
+            wm.autoplay.is_some(),
+        ) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("Camp menu unavailable on the world map: {e}");
+                None
+            }
+        },
+        None => None,
+    };
+    println!(
+        "{}",
+        serde_json::json!({"event":"camp_prepared","camp":camp.is_some()})
+    );
     let mut app = App::new();
+    app.insert_resource(CampHost(camp));
     app.insert_resource(wm)
         .insert_resource(AudioRes {
             output,
@@ -3358,7 +3490,7 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit> {
         .add_systems(Startup, (setup, setup_ui))
         .add_systems(
             FixedUpdate,
-            (read_stick, tick, effects_tick, play_audio).chain(),
+            (read_stick, tick, camp_tick, effects_tick, play_audio).chain(),
         )
         .add_systems(
             Update,
