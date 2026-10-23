@@ -292,6 +292,11 @@ struct WorldMap {
     /// A decided landing waits for its fade to black (FUN_140156520 mode 1,
     /// FUN_1401563f0) before the jump.
     leaving: Option<world_state::Target>,
+    /// FUN_1403a92c0's map-attribute contact: the last wall polygon taken
+    /// (+0x37c, 0xffff none), the ticks it stays latched (+0x37d) and the
+    /// knock-slide the contact gave (obj+0xd24).
+    wall: (u16, f32),
+    knock: Option<actor_physics::Knock>,
 }
 
 /// An object effect start or stop for the effects tick.
@@ -1120,11 +1125,14 @@ fn landing_tick(wm: &mut WorldMap, ui: &UiRes) -> bool {
             }
         }
     }
-    // FUN_140394810: the route info follows the reacting (or chosen) route
-    // object (FUN_140399db0 / FUN_140399cd0).
+    // FUN_140394810: the panels follow the object of the land or route
+    // reaction, else the locked target (holder state 2): the route info
+    // (FUN_140399db0 / FUN_140399cd0) for a route object, the world's for
+    // a symbol.
+    let focus = wm.reaction.or(wm.lock.map(|c| c.object));
     let route = match &wm.landing {
         Some((state, _, _)) => state.route,
-        None => wm.reaction.and_then(|r| actor_route(&wm.actors[r])),
+        None => focus.and_then(|r| actor_route(&wm.actors[r])),
     };
     match (route, wm.route_info.as_mut()) {
         (Some(r), Some(info)) if info.route == r && !info.closing() => {}
@@ -1142,12 +1150,12 @@ fn landing_tick(wm: &mut WorldMap, ui: &UiRes) -> bool {
             wm.route_info = None;
         }
     }
-    // FUN_140396a00 / FUN_1403966c0: the info panel follows the reacting
-    // (or landing) symbol's world.
+    // FUN_140396a00 / FUN_1403966c0: the info panel follows that (or the
+    // landing) symbol's world.
     let shown = match &wm.landing {
         Some((state, _, _)) if state.route.is_none() => Some(state.world),
         Some(_) => None,
-        None => wm.reaction.and_then(|r| actor_world(&wm.actors[r])),
+        None => focus.and_then(|r| actor_world(&wm.actors[r])),
     };
     match (shown, wm.info.as_mut()) {
         (Some(w), Some(info)) if info.world == w && !info.closing() => {}
@@ -1428,7 +1436,17 @@ fn tick(mut wm: ResMut<WorldMap>, ui: Res<UiRes>) {
             };
             ([0.; 3], advance)
         } else {
-            autoplay_input(wm.tick - wm.event_ticks, wm.autoplay_decide)
+            let (mut stick, buttons) = autoplay_input(wm.tick - wm.event_ticks, wm.autoplay_decide);
+            // [Tour aid] KH2RW_WM_FLY=<x>,<y>: after the menu, fly this way
+            // instead of the scripted flight.
+            if let Some((x, y)) = std::env::var("KH2RW_WM_FLY").ok().and_then(|v| {
+                let (x, y) = v.split_once(',')?;
+                Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+            }) && wm.tick - wm.event_ticks >= 440
+            {
+                stick = [x, y, x.hypot(y).min(1.)];
+            }
+            (stick, buttons)
         };
         if wm.event.is_some() || !wm.event_queue.is_empty() {
             wm.event_ticks = wm.tick;
@@ -1526,11 +1544,22 @@ fn tick(mut wm: ResMut<WorldMap>, ui: Res<UiRes>) {
             warped = Some((path.step(), path.done()));
         }
     }
-    let d = if warped.is_some() {
+    let mut d = if warped.is_some() {
         [0.; 3]
     } else {
         wm.sampler.displacement()
     };
+    // FUN_1403d4570: a knock-slide adds its own displacement.
+    if let Some(k) = wm.knock.as_mut() {
+        match k.step() {
+            Some(s) if warped.is_none() => {
+                d[0] += s[0];
+                d[2] += s[2];
+            }
+            Some(_) => {}
+            None => wm.knock = None,
+        }
+    }
     let solved = wm.collision.as_ref().map(|c| {
         collision::solve(
             c,
@@ -1546,6 +1575,37 @@ fn tick(mut wm: ResMut<WorldMap>, ui: Res<UiRes>) {
     // The floor under the cursor (obj+0x780, the polygon's material).
     if let (Some(c), Some(s)) = (wm.collision.as_ref(), solved.as_ref()) {
         wm.floor = collision::floor_info(c, s).ground;
+    }
+    // FUN_1403a92c0: a wall with attribute bit 11 (+0x732 from the solve's
+    // contact) stops the cursor and knocks it back along the wall's normal
+    // at strength 1000 (vtable +0x130 → FUN_140394cc0 → FUN_1403d4960) once
+    // per new polygon; the map's element of category bit 0 would play
+    // there (FUN_1402c6730(map, 1)), and wm00 has none. The contact stays
+    // latched 30 ticks after the cursor leaves the wall.
+    let touch = solved.as_ref().and_then(|s| s.touch_11);
+    match touch {
+        None => {
+            if 0. < wm.wall.1 {
+                wm.wall.1 -= 1.;
+                if wm.wall.1 <= 0. {
+                    wm.wall.0 = 0xffff;
+                }
+            }
+        }
+        Some((poly, _)) => {
+            if poly != wm.wall.0 {
+                wm.wall.0 = poly;
+                wm.velocity = [0.; 2];
+                let normal = wm.collision.as_ref().and_then(|c| c.polygon_normal(poly));
+                if let Some(n) = normal {
+                    wm.knock = actor_physics::Knock::new(n, 1000., 0.);
+                }
+                let tick = wm.tick;
+                wm.log.push(serde_json::json!({"event":"wall","tick":tick,
+                    "polygon":poly,"normal":normal}));
+            }
+            wm.wall.1 = 30.;
+        }
     }
     match warped {
         Some((at, done)) => {
@@ -2994,6 +3054,8 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit> {
         total: None,
         play_time,
         leaving: None,
+        wall: (0xffff, 0.),
+        knock: None,
     };
     // The jump that opened the map was mode 1 (FUN_140154e20 → FUN_140152990
     // with flags | 1): the area fades in from black over n = 15
@@ -3082,7 +3144,7 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit> {
     println!(
         "{}",
         serde_json::json!({"event":"effects_prepared","new_worlds":wm.new_worlds,
-            "map_pax":wm.map_pax.as_ref().map(|p| p.elements.iter().map(|e| (e.id, e.group, e.effect_number, e.sound)).collect::<Vec<_>>()),
+            "map_pax":wm.map_pax.as_ref().map(|p| p.elements.iter().map(|e| (e.id, e.group, e.effect_number, e.sound, e.category)).collect::<Vec<_>>()),
             "triggers":wm.actors.iter().map(|a| a.triggers.iter().map(|(m, l)| (*m, l.iter().map(|t| (t.0, t.1, t.2.clone())).collect::<Vec<_>>())).collect::<Vec<_>>()).collect::<Vec<_>>(),
             "objects":wm.actors.iter().map(|a| a.pax.as_ref().map(|p| (p.name.clone(), p.elements.iter().map(|e| (e.id, e.effect_number, e.flags, e.sound)).collect::<Vec<_>>()))).collect::<Vec<_>>()})
     );
@@ -3269,7 +3331,7 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit> {
         .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Kingdom Hearts II Re:Written (world map; rewrite) | WASD/stick fly, F land, Enter/Space/arrows/R/LShift menu, Esc exits"
+                title: "Kingdom Hearts II Re:Written (world map; rewrite) | WASD/stick fly, F land, R lock on, Space dash/warp, Enter/Space/arrows/R/LShift menu, Esc exits"
                     .into(),
                 resolution: (1280, 720).into(),
                 ..default()
