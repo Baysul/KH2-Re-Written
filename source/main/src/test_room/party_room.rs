@@ -673,8 +673,13 @@ pub fn load(
         .map(|r| (r.id, r.kind))
         .collect();
     let new_game = data::battle_tables::new_game_row(plrp, character as u8)?
-        .map(|row| {
-            party_members::Save::new_game(row.item_slots, &row.ids, |id| kinds.get(&id) == Some(&0))
+        .map(|row| party_members::Save {
+            armor_slots: row.armor_slots.min(8),
+            accessory_slots: row.accessory_slots.min(8),
+            bonus: row.bonus,
+            ..party_members::Save::new_game(row.item_slots, &row.ids, |id| {
+                kinds.get(&id) == Some(&0)
+            })
         })
         .unwrap_or(party_members::Save::EMPTY);
     Ok(PartyKind {
