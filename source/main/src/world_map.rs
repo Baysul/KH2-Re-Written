@@ -2041,8 +2041,8 @@ fn camp_tick(
         &mut images,
     ));
     wm.camp_up = camp.menu_up();
-    wm.sounds.extend(sounds.into_iter().map(|n| n as u32));
-    let log: Vec<_> = camp.log.drain(..).collect();
+    wm.sounds.extend(sounds);
+    let log = std::mem::take(&mut camp.log);
     wm.log.extend(log);
 }
 

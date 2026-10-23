@@ -167,7 +167,8 @@ impl WorldMapCamp {
         };
         let data = journal_data(&self.c, j, WORLD_MAP_KIND, WORLD_MAP_WORLD, false);
         let (opened, sounds) = Journal::open(&j.book.layout, data);
-        self.log.push(serde_json::json!({"event":"journal_open","tick":self.tick,
+        self.log
+            .push(serde_json::json!({"event":"journal_open","tick":self.tick,
             "kind":WORLD_MAP_KIND,"state":opened.state,"from":"landing"}));
         self.c.journal = Some(opened);
         // The landing's Triangle is still down: the journal starts from it
@@ -262,7 +263,8 @@ impl WorldMapCamp {
                 if let (Some(kind), Some(j)) = (kind, &c.journal_source) {
                     let data = journal_data(c, j, kind, WORLD_MAP_WORLD, false);
                     let (opened, s) = Journal::open(&j.book.layout, data);
-                    self.log.push(serde_json::json!({"event":"journal_open","tick":tick,
+                    self.log
+                        .push(serde_json::json!({"event":"journal_open","tick":tick,
                         "kind":kind,"state":opened.state,"from":"camp"}));
                     c.journal = Some(opened);
                     sounds.extend(s);
