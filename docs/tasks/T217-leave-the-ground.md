@@ -21,7 +21,8 @@ FUN_1403b9090, after the frame's move, has two branches:
 - **Leave the ground.** An object in a grounded mode (mode flag bits 0 and 1 clear; the ground
   mode's object at 0x140750950 has flags 0x180) with no gravity range (`+0x18c & 0x1000020`,
   ranges 3 and 0x1e) and no hold range (bit 6), whose collision query reports no floor contact
-  (`+0x744` bit 0), and without `+0x120` bit 23: the act manager's event 1, script event 0xd, the
+  (`+0x744` bit 0), and without range 0x1d (`+0x18c` bit 23): it clears `+0x120` bit 26 (a
+  handler sets it to cancel the rest; the fall, FUN_1403b7850, sets it again), then the act manager's event 1, script event 0xd, the
   mode's slot +0x28 (empty for the ground mode) and the class's vt+0x50, which falls (FUN_1403b7850:
   the mode's slot +0x20, FUN_140409b00 -> FUN_1403cbc30 and mode 1).
 - **Land.** Otherwise (an air mode, or a gravity / hold range), when not rising, FUN_1403ba1e0
@@ -47,6 +48,10 @@ nothing else brings him down.
    movement integrator FUN_1403b89a0 and its terms, and FUN_1403b9090's branches.
 2. Corrected `Sysobj::leave_ground`; rewrote its unit test to the executable's rule.
 3. Compared unattended tours against `main`'s release build, tick by tick.
+4. On review of the decompile, the bit-23 guard was moved to the range word (`+0x18c`, range
+   0x1d) from the script flag word, and the clear of `+0x120` bit 26 added (`out/g1`; the fall,
+   FUN_1403b7850 in `out/g2`, sets it again). The tours were run again on that build after the
+   merge with `main` (`cmp3/*2`, `g2`).
 
 ## Checks
 
@@ -69,19 +74,34 @@ nothing else brings him down.
   - `--summon-tour`: Chicken Little's `surprise` keeps its rise while its range holds and falls
     after it (at tick 270 he is still in `surprise` at y 141 where `main` already fell); his shots
     hit 40 times against 33.
+- After step 4 and the merge, against the first runs (`cmp3/*1` vs `*2`): party-limit tour
+  identical; summon tour identical but for the exit tick (7600 / 7601); Limit Form tour identical
+  from tick 179 (the form change came 3 ticks earlier, and `main`'s T216 now runs the three
+  effect programs that were unsupported).
+- Found in `g2` (HP 2000 from tick 300): `trap_bg_get_random_pos` sent Heartless Angel to scene
+  (1177, −481), under raised map geometry. The root motion's rise met it, and the crate's default
+  `Env::movement` (floors up to 200 units above the object count) put him on top of it at y 658.
+  On `main` he then hovered at 788. Here he falls back onto that surface, and the Split Flash act
+  waits there to the end of the run. Neither the 200-unit snap nor the enemy `line_hit` (vertical
+  segments only, so the trap's line-of-sight test always passes) is the executable's. The map
+  solver the room already uses for Sora (FUN_14016fec0, the `collision` crate) is the fix; it is
+  the next task.
 
 ## Uncertainty
 
 - Nothing was compared with the original game. In particular the moment Sephiroth comes down, and
   that Split Flash's motion plays while he falls and is cut by the landing, follow from the order
   of the act update and the physics step as translated, not from a capture.
-- "No floor contact" is the room's floor test within one unit; the executable's collision query
-  (FUN_140170c10) is not translated. The collision-enabled test (FUN_1403ba940), event 0xd, the act
+- "No floor contact" is the room's floor test within one unit. The executable's collision query
+  (FUN_14016fec0 / FUN_140170c10) is translated in the `collision` crate, but only Sora goes
+  through it; enemies do not yet. The collision-enabled test (FUN_1403ba940), event 0xd, the act
   manager's event 1 and the velocity the leave branch keeps are not carried out.
 
 ## Verdict and next task
 
 PARTIAL. The leave-ground rule follows the executable; nothing is claimed 1:1 by observation.
 
-Next: the land branch for grounded objects under a range (land with the class's vt+0x58), the
-collision query FUN_140170c10, and a side-by-side capture against the installed game.
+Next (T218): enemies move through the map solver (their collision body, `+0x744` bit 0 from the
+solver), and the enemy `line_hit` becomes the segment ray (`bghit_check_line`). Then the land
+branch for grounded objects under a range (the class's vt+0x58), and a side-by-side capture
+against the installed game.

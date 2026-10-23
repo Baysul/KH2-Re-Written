@@ -207,13 +207,21 @@ fn a_grounded_object_left_in_the_air_falls_once_no_range_holds_it() {
     s.motion.flags.word |= motion::flag::GRAVITY_FROZEN_2;
     s.end_tick(&Flat);
     assert!(!s.is_jump(), "held by the range");
+    // Range 0x1d (`+0x18c` bit 23) stops it leaving; the script flag word's
+    // bit 23 (`+0x120`) does not.
+    s.motion.flags.word = 0x80_0000;
+    s.end_tick(&Flat);
+    assert!(!s.is_jump(), "held by range 0x1d");
+    s.flags |= 1 << 23;
     // Without a range, off the floor: it leaves the ground (the summon class
-    // first takes motion 4) and falls to the floor.
+    // first takes motion 4) and falls to the floor; the fall (FUN_1403b7850)
+    // sets `+0x120` bit 26.
     s.motion.flags.word = 0;
     s.end_tick(&Flat);
     assert!(s.is_jump(), "off the floor in the ground mode: a fall");
     assert_eq!(s.motion.slot, 4);
     assert_eq!(s.jump_motions, JumpMotions::default());
+    assert_ne!(s.flags & 0x400_0000, 0);
     for _ in 0..200 {
         s.end_tick(&Flat);
     }
