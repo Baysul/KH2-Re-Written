@@ -1667,6 +1667,14 @@
           "evidence": [
             "docs/tasks/T209-sephiroth-follow-ups.md"
           ]
+        },
+        {
+          "id": "NATIVE-T210-01",
+          "label": "Script vectors, offsets and headings in the engine frame - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T210-script-frame.md"
+          ]
         }
       ]
     },

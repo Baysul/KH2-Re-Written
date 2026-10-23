@@ -4,7 +4,7 @@
 //! handlers: an object argument is an AI reference whose word at +4 is the
 //! engine object.
 
-use super::math::{native, read_native};
+use super::math::{native, native_local, read_sanitized};
 use crate::script::{Fault, Memory, Slot};
 use crate::world::{Ctx, ObjId, TrapFn, object_handle};
 
@@ -54,7 +54,7 @@ fn obj_thread_start(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> R
 fn apply_bone_matrix(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = object_arg(ctx, m, args[0])?;
     let bone = args[1].as_int();
-    let local = read_native(ctx, m, args[2].value)?;
+    let local = native_local(read_sanitized(ctx, m, args[2].value)?);
     let (own, yaw) = {
         let sys = &ctx.object(id)?.sys;
         (sys.position, sys.yaw)

@@ -177,4 +177,5 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T207](T207-summon-limits-and-party-follow-ups.md) | Summon limits, script effects, appear event and party follow-ups | PARTIAL. |
 | [T208](T208-debug-menu-polish.md) | Debug menu: KH2-style panel, tabs, Help, motion and sounds | PARTIAL. Layout, labels, Help and the tour pass; live input, motion and sounds NOT RUN. |
 | [T209](T209-sephiroth-follow-ups.md) | Sephiroth follow-ups: late attacks, clear overlays, voice and physics fixes | PARTIAL. Heartless Angel, Meteor and the grab run; nothing is compared with the original game. |
+| [T210](T210-script-frame.md) | Script vectors in the engine's frame (the mirrored script world) | PARTIAL. Constants, turns, offsets and headings cross in the engine's frame; nothing compared with the original game. |
 | [T141](T141-ik-and-animation-parity.md) | IK aim chains, pole vectors and joint-space motion blends | PROGRESS. Master Form matches the PS2 routine; 87% of installed motions within 0.1. |

@@ -41,13 +41,54 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
     })
 }
 
-/// The executable's vectors have +Y pointing down (scripts name (0, 1, 0)
-/// `down`, test for landing with `wished.y > 0`, and probe the ground in the
-/// +Y direction); the engine here keeps +Y up. Vectors that cross the script
-/// boundary as positions, directions or displacements are flipped there.
+/// Script vectors are in the executable's world frame: +Y down (scripts
+/// name (0, 1, 0) `down`, test for landing with `wished.y > 0`, and probe the
+/// ground in the +Y direction). The objects here live in the room's scene
+/// frame, the engine's turned half a turn about X: (x, -y, -z), as the map is
+/// converted. Positions, directions and displacements that cross the script
+/// boundary are turned there (the turn is its own inverse). Flipping y alone
+/// would leave the script's world mirrored front to back: its constant
+/// points (Sephiroth's Meteor spot, his arena centre) and fixed turns would
+/// land on the wrong side.
 pub(crate) fn native(mut v: Vec4) -> Vec4 {
     v[1] = -v[1];
+    v[2] = -v[2];
     v
+}
+
+/// A model-local offset (bone or object space) across the script boundary.
+/// The scene's headings are `pi - ` the engine's (`native_yaw`), so an
+/// object's own axes turn as (-x, -y, z): forward stays +Z, up stays up.
+pub(crate) fn native_local(mut v: Vec4) -> Vec4 {
+    v[0] = -v[0];
+    v[1] = -v[1];
+    v
+}
+
+/// An object's own position or direction across the script boundary: an
+/// object in camera space (FUN_1403cbfc0, Stitch in his limit) holds view
+/// coordinates, not world ones, so only Y is turned down. [I] The view
+/// frame's handling here is the room's (`summon::stitch_screen`).
+pub(crate) fn native_own(camera_space: bool, v: Vec4) -> Vec4 {
+    if camera_space {
+        [v[0], -v[1], v[2], v[3]]
+    } else {
+        native(v)
+    }
+}
+
+/// [`native_yaw`] for an object's own heading; a heading in camera space
+/// stays as it is.
+pub(crate) fn native_own_yaw(camera_space: bool, a: f32) -> f32 {
+    if camera_space { a } else { native_yaw(a) }
+}
+
+/// A heading about Y across the script boundary: the engine's `psi` (facing
+/// (sin psi, 0, cos psi) in its frame) is the scene's `pi - psi`, and back.
+pub(crate) fn native_yaw(a: f32) -> f32 {
+    let pi = std::f32::consts::PI;
+    let tau = std::f32::consts::TAU;
+    (pi - a + pi).rem_euclid(tau) - pi
 }
 
 /// [`read_sanitized`] for a position, direction or displacement: the script's

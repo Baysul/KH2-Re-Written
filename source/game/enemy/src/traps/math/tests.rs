@@ -201,3 +201,41 @@ fn div_multiplies_every_lane_by_the_reciprocal() {
     );
     assert_eq!(read_static(&world, r.value), [0.5, -1.0, 1.5, 0.25]);
 }
+
+#[test]
+fn an_engine_constant_lands_where_the_engine_puts_it() {
+    // Sephiroth's Meteor spot, engine (-750, -600, 2250): 600 up, and on the
+    // scene's -Z side, as the map is turned.
+    assert_eq!(native([-750., -600., 2250., 1.]), [-750., 600., -2250., 1.]);
+    // The turn is its own inverse.
+    let v = [1., 2., 3., 4.];
+    assert_eq!(native(native(v)), v);
+    assert_eq!(native_local(native_local(v)), v);
+}
+
+#[test]
+fn an_engine_offset_under_an_engine_heading_lands_as_the_scene_places_it() {
+    // Engine: p + R(psi) l, with R(psi) taking +Z to (sin psi, 0, cos psi).
+    // Scene: native(p) + RotY(native_yaw(psi)) native_local(l).
+    let rot = |a: f32, v: [f32; 3]| {
+        let (s, c) = a.sin_cos();
+        [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c]
+    };
+    let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|k| (a[k] - b[k]).abs() < 1e-3);
+    let p = [10., -20., 30.];
+    for &psi in &[0.0f32, 0.7, -2.1, 3.0] {
+        for l in [[0., 0., 100.], [50., -10., 0.], [3., 4., -5.]] {
+            let r = rot(psi, l);
+            let engine = native([p[0] + r[0], p[1] + r[1], p[2] + r[2], 1.]);
+            let pb = native([p[0], p[1], p[2], 1.]);
+            let lb = native_local([l[0], l[1], l[2], 0.]);
+            let rb = rot(native_yaw(psi), [lb[0], lb[1], lb[2]]);
+            let scene = [pb[0] + rb[0], pb[1] + rb[1], pb[2] + rb[2]];
+            assert!(
+                close([engine[0], engine[1], engine[2]], scene),
+                "psi {psi} l {l:?}"
+            );
+        }
+        assert!((native_yaw(native_yaw(psi)) - psi).abs() < 1e-5);
+    }
+}

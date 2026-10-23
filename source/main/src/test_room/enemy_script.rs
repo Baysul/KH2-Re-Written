@@ -252,14 +252,15 @@ impl Env for BrainEnv<'_> {
     }
     /// FUN_1403b50f0 for Sora: 0x4000 his origin, 0x4001 the centre of his
     /// first enabled OBJ shape, both with his rotation, in the script's
-    /// +Y-down frame. [U] His skeleton's own bones are not handed over.
+    /// (engine) frame: the scene's (x, -y, -z) and the engine heading
+    /// pi - yaw. [U] His skeleton's own bones are not handed over.
     fn bone_matrix(&self, object: u32, bone: u32) -> Option<[f32; 16]> {
         let lift = match (object, bone) {
             (PLAYER_OBJECT, 0x4000) => 0.,
             (PLAYER_OBJECT, 0x4001) => self.facts.player_centre,
             _ => return None,
         };
-        let (s, c) = self.player_yaw.sin_cos();
+        let (s, c) = (std::f32::consts::PI - self.player_yaw).sin_cos();
         let p = self.player;
         Some([
             c,
@@ -276,7 +277,7 @@ impl Env for BrainEnv<'_> {
             0.,
             p[0],
             -(p[1] + lift),
-            p[2],
+            -p[2],
             1.,
         ])
     }
@@ -390,7 +391,7 @@ pub struct ScriptBrain {
     pub strikes: Vec<usize>,
     /// Attack slots the script's objects applied to the enemy's stand-in
     /// directly (Chicken Little's fireworks), with their ATKP ids and serials.
-    pub enemy_strikes: Vec<(usize, [i32; 2], u64)>,
+    pub enemy_strikes: Vec<(usize, [i32; 2], u64, Option<Vec3>)>,
     /// Stitch's MP specials not yet carried out (FUN_1403c2040 on Sora).
     pub mp_refills: u32,
     /// Genie's new form number (FUN_1403ddfb0) for the host to keep.
@@ -662,7 +663,7 @@ impl ScriptBrain {
     }
 
     /// The attacks the script's objects applied to the enemy directly.
-    pub fn take_enemy_strikes(&mut self) -> Vec<(usize, [i32; 2], u64)> {
+    pub fn take_enemy_strikes(&mut self) -> Vec<(usize, [i32; 2], u64, Option<Vec3>)> {
         std::mem::take(&mut self.enemy_strikes)
     }
 
@@ -912,8 +913,8 @@ impl ScriptBrain {
                     let Some(&(key, _)) = self.fx.handles.get(&handle) else {
                         continue;
                     };
-                    // Script frame (Y down) to the room's.
-                    let v = vector.map(|v| [v[0], -v[1], v[2]]);
+                    // The script's (engine) frame to the room's: (x, -y, -z).
+                    let v = vector.map(|v| [v[0], -v[1], -v[2]]);
                     let fx = match (trap, v) {
                         (38, Some(v)) => player::magic::Fx::Pos(key, v),
                         (41, Some(v)) => player::magic::Fx::Dir(key, v),
@@ -999,8 +1000,9 @@ impl ScriptBrain {
                     target: Some(ENEMY),
                     param,
                     serial,
+                    from,
                     ..
-                } => self.enemy_strikes.push((slot, param, serial)),
+                } => self.enemy_strikes.push((slot, param, serial, from)),
                 // Only a limit scene runs the action threads `obj_hook`
                 // binds to objects.
                 Event::MagicStart { .. } => {

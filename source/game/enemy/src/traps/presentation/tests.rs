@@ -114,7 +114,7 @@ fn the_host_answers_the_camera_the_bones_and_the_gauge() {
     let lanes: Vec<f32> = (0..4)
         .map(|k| f32::from_bits(world.static_read(eye.value + 4 * k).unwrap()))
         .collect();
-    assert_eq!(lanes, vec![1.0, -2.0, 3.0, 1.0]);
+    assert_eq!(lanes, vec![1.0, -2.0, -3.0, 1.0]);
     // The null host has no camera: the zero vector with w 1.
     let none = run_with(&NullEnv, &mut world, &mut f, camera_at, &[]);
     assert_eq!(

@@ -4,7 +4,7 @@ Baseline: Steam app 2552430 build 15194255 candidate - supported profile unquali
 
 | Measure | Accepted / tracked | Percentage |
 |---|---:|---:|
-| Complete functions decompiled and checked | 0 / 207 (inventory incomplete) | Unmeasured |
+| Complete functions decompiled and checked | 0 / 208 (inventory incomplete) | Unmeasured |
 | Required behavior scenarios verified 1:1 | 0 / 9 (inventory incomplete) | Unmeasured |
 | Final roadmap gates accepted | 0 / 32 | 0.00% |
 
@@ -258,6 +258,7 @@ A PASS counts one reviewed unit. All other statuses count zero. Unknown required
 | NATIVE-T209-07 | Hook-thread fall of the leader after a capture - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T209-sephiroth-follow-ups.md) |
 | NATIVE-T209-08 | Landing hand-over to idle and blow landing - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T209-sephiroth-follow-ups.md) |
 | NATIVE-T209-09 | Hits on objects a script made - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T209-sephiroth-follow-ups.md) |
+| NATIVE-T210-01 | Script vectors, offsets and headings in the engine frame - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T210-script-frame.md) |
 
 Accepted share of the tracked subset: 0.00%. This is not a whole-game percentage.
 

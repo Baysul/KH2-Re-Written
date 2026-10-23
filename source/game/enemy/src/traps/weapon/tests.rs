@@ -118,10 +118,10 @@ fn the_bone_point_falls_back_to_the_object_and_nothing_is_a_summon() {
     args[2] = Slot::address(local);
     run(&mut world, &mut goofy, (1, 83), &mut args).unwrap();
     // The null host has no bone data: the object's own place comes back
-    // (the script's vectors point +Y down).
+    // (the script's vectors are the engine's: (x, -y, -z) of the scene).
     let cell = args[0].value;
     let read = |k: u32| f32::from_bits(world.static_read(cell + 4 * k).unwrap());
-    assert_eq!([read(0), read(1), read(2), read(3)], [10., -20., 30., 1.]);
+    assert_eq!([read(0), read(1), read(2), read(3)], [10., -20., -30., 1.]);
     // `sysobj_is_summon` takes the object again.
     args[0] = Slot::address(me);
     run(&mut world, &mut goofy, (10, 31), &mut args).unwrap();

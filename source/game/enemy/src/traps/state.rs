@@ -1,7 +1,7 @@
 //! Small state traps: setters and getters on fields of the engine object that
 //! scripts use directly, and the services recorded as unsupported.
 
-use super::math::{read_native, read_sanitized};
+use super::math::{native, native_own, native_own_yaw, read_native, read_sanitized};
 use crate::script::{Fault, Memory, Slot, Thread};
 use crate::sysobj::Vec3;
 use crate::world::{Ctx, Event, Object, SideThread, TrapFn, object_handle};
@@ -319,9 +319,11 @@ fn touch_zone(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<
 
 /// 1:148 FUN_14042b800 -> FUN_1403b64d0: place the object (w = 1).
 fn set_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let v = read_native(ctx, m, args[1].value)?;
+    let v = read_sanitized(ctx, m, args[1].value)?;
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    ctx.object(id)?.sys.position = [v[0], v[1], v[2]];
+    let sys = &mut ctx.object(id)?.sys;
+    let v = native_own(sys.camera_space, v);
+    sys.position = [v[0], v[1], v[2]];
     Ok(())
 }
 
@@ -579,8 +581,8 @@ fn sysobj_appear(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Resu
 /// follows it, so no turn is pending.
 fn set_rot(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let yaw = args[1].as_float();
     let sys = &mut ctx.object(id)?.sys;
+    let yaw = native_own_yaw(sys.camera_space, args[1].as_float());
     sys.yaw = yaw;
     sys.wish_yaw = None;
     Ok(())
@@ -696,7 +698,7 @@ fn obj_target_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Res
     let t = ctx.object(id)?.sys.target;
     let p = super::target::target_point(ctx, t).unwrap_or([0.; 3]);
     let cell = ctx.world.static_cell(1, 88, 0);
-    for (k, lane) in [p[0], -p[1], p[2], 1.0].iter().enumerate() {
+    for (k, lane) in native([p[0], p[1], p[2], 1.0]).iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);
@@ -814,7 +816,7 @@ fn bghit_check_line(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> R
 fn bghit_cross_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let at = ctx.world.last_line_cross.unwrap_or([0.; 3]);
     let cell = ctx.world.static_cell(6, 54, 0);
-    for (k, lane) in [at[0], -at[1], at[2], 1.0].iter().enumerate() {
+    for (k, lane) in native([at[0], at[1], at[2], 1.0]).iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);
@@ -967,7 +969,7 @@ fn act_start_pri(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resu
 fn jump_direct(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let v = read_sanitized(ctx, m, args[1].value)?;
-    ctx.object(id)?.sys.jump_now([v[0], 0., v[2]], v[1], v[3]);
+    ctx.object(id)?.sys.jump_now([v[0], 0., -v[2]], v[1], v[3]);
     Ok(())
 }
 
@@ -1078,9 +1080,10 @@ fn bg_show(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(),
 /// 1:153 FUN_14042b880 -> FUN_1403b6100: place the object where it will not
 /// be interpolated from.
 fn reset_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let v = read_native(ctx, m, args[1].value)?;
+    let v = read_sanitized(ctx, m, args[1].value)?;
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let sys = &mut ctx.object(id)?.sys;
+    let v = native_own(sys.camera_space, v);
     sys.position = [v[0], v[1], v[2]];
     sys.knock = None;
     Ok(())
@@ -1098,7 +1101,7 @@ fn bg_ground_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resu
     let to = [p[0], p[1] - reach, p[2]];
     let hit = ctx.env.line_hit(from, to);
     let at = hit.unwrap_or(from);
-    for (k, lane) in [at[0], -at[1], at[2], 1.0].iter().enumerate() {
+    for (k, lane) in native([at[0], at[1], at[2], 1.0]).iter().enumerate() {
         ctx.write_f32(m, out + 4 * k as u32, *lane);
     }
     args[0] = Slot::int(hit.is_some() as i32);
@@ -1117,7 +1120,8 @@ fn obj_hop(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(),
     let (slot, blend, auto) = (args[4].as_int(), args[5].as_float(), args[6].as_int());
     let env = ctx.env;
     let obj = ctx.object(id)?;
-    obj.sys.arm_hop(v, time, inertia);
+    // The heading turns into the scene; y is the apex height, w the speed.
+    obj.sys.arm_hop([v[0], v[1], -v[2], v[3]], time, inertia);
     obj.sys
         .motion_start(slot.max(0) as usize, blend, env.clips(obj.sys.model));
     if auto != 0 {
@@ -1136,7 +1140,7 @@ fn obj_hop_direct(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Res
     let v = read_sanitized(ctx, m, args[1].value)?;
     let (time, inertia) = (args[2].as_float(), args[3].as_float());
     let sys = &mut ctx.object(id)?.sys;
-    sys.arm_hop(v, time, inertia);
+    sys.arm_hop([v[0], v[1], -v[2], v[3]], time, inertia);
     if let Some(crate::sysobj::PendingHop { hop }) = sys.pending_hop.take() {
         sys.pending_mode = 0;
         sys.enter_hop(hop);
