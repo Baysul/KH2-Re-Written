@@ -86,6 +86,56 @@ fn a_hop_starts_at_the_take_off_event_and_rises_with_the_executables_integration
 }
 
 #[test]
+fn a_landing_queues_idle_behind_the_land_motion() {
+    let mut s = Sysobj::bare();
+    s.arm_hop([0., 100., 0., 0.], 20., 0.9);
+    s.take_off(&Flat);
+    for _ in 0..400 {
+        s.end_tick(&Flat);
+        if !s.is_jump() {
+            break;
+        }
+    }
+    assert!(!s.is_jump());
+    // FUN_1403cb940 -> FUN_1403c8310(motion 0): the land motion hands over
+    // to idle when it ends, so its no-control range does not stay on.
+    assert_eq!(s.motion_queue, [(0, 0.)]);
+}
+
+/// A floor at zero found only from at or above it.
+struct FloorFromAbove;
+
+impl Env for FloorFromAbove {
+    fn floor(&self, _: f32, _: f32, top: f32) -> Option<f32> {
+        (top >= 0.).then_some(0.)
+    }
+    fn clips(&self, _: u32) -> &dyn Clips {
+        &Thirty
+    }
+    fn player_position(&self) -> Vec3 {
+        [0.; 3]
+    }
+    fn target_position(&self, _: u32) -> Option<Vec3> {
+        None
+    }
+}
+
+#[test]
+fn a_blow_that_starts_just_under_the_floor_lands_on_it() {
+    let mut s = Sysobj::bare();
+    s.position = [0., -0.25, 0.];
+    s.blow_now([0., 0., 50.]);
+    for _ in 0..400 {
+        s.end_tick(&FloorFromAbove);
+        if s.blow.is_none() {
+            break;
+        }
+    }
+    assert!(s.blow.is_none(), "it lands");
+    assert!(close(s.position[1], 0.), "y {}", s.position[1]);
+}
+
+#[test]
 fn a_hop_is_capped_by_the_spec_fall_speed() {
     let mut s = Sysobj::bare();
     // A script writes the spec's maximum fall speed (+0x138) as it does for

@@ -178,16 +178,35 @@ impl Blur {
         self.sheets[self.shown]
     }
 
+    /// Resizes the previous picture's quads (`ZOOM` for `SeqBlur`, 1 for
+    /// the Drive afterimage).
+    pub fn set_zoom(&self, zoom: [f32; 2], meshes: &mut Assets<Mesh>) {
+        for handle in &self.prev_meshes {
+            if let Some(mut mesh) = meshes.get_mut(handle) {
+                let [hx, hy] = [0.5 * zoom[0], 0.5 * zoom[1]];
+                mesh.insert_attribute(
+                    Mesh::ATTRIBUTE_POSITION,
+                    vec![[-hx, hy, 0.], [hx, hy, 0.], [-hx, -hy, 0.], [hx, -hy, 0.]],
+                );
+            }
+        }
+    }
+
     /// One feedback step outside an event: the last picture becomes the
-    /// history and the other camera draws the scene with the history over
-    /// it at `weight` (0 = the plain scene). `None` stops both cameras.
+    /// history (only when `advance`: an event's `SeqBlur` takes a new one
+    /// once per event frame) and the other camera draws the scene with the
+    /// history over it at `weight` (0 = the plain scene). `None` stops both
+    /// cameras.
     pub fn feed(
         &mut self,
         weight: Option<f32>,
+        advance: bool,
         cameras: &mut Query<&mut Camera>,
         meshes: &mut Assets<Mesh>,
     ) {
-        self.history = self.shown;
+        if advance {
+            self.history = self.shown;
+        }
         let out = 1 - self.history;
         for (i, entity) in self.cameras.into_iter().enumerate() {
             if let Ok(mut camera) = cameras.get_mut(entity) {

@@ -319,6 +319,9 @@ pub struct Sysobj {
     pub request_speed: f32,
     /// `trap_sysobj_motion_push`: motions queued behind the playing one.
     pub motion_queue: Vec<(usize, f32)>,
+    /// A made object's HIT spheres (model-space offset, radius), which the
+    /// host's spawner reads from its model's collision table.
+    pub hit_shapes: Vec<(Vec3, f32)>,
     /// +0xd10: enabled attack/behaviour patterns.
     pub pattern_mask: u32,
     /// Pool 0's HP floor (sheet +8) and the pools above it (host-provided).
@@ -689,6 +692,7 @@ impl Sysobj {
             request_direction: [0.; 3],
             request_speed: 0.,
             motion_queue: Vec::new(),
+            hit_shapes: Vec::new(),
             pattern_mask: 0,
             min_hp: 0,
             extra_pools: Vec::new(),
@@ -1360,8 +1364,9 @@ impl Sysobj {
         }
     }
 
-    /// FUN_1403cb940 (mode slot 6): touching down plays the land motion and
-    /// returns to the ground mode.
+    /// FUN_1403cb940 (mode slot 6): touching down plays the land motion with
+    /// idle queued behind it (FUN_1403c8310(motion 0)) and returns to the
+    /// ground mode.
     fn land(&mut self, clips: &dyn Clips) {
         self.airborne = false;
         self.sampler = actor_physics::Sampler::default();
@@ -1369,10 +1374,17 @@ impl Sysobj {
         let land = self.jump_motions.land;
         if land >= 0 {
             let slot = land as usize;
-            if land != 5 {
+            let played = if land != 5 {
                 self.motion_change(slot, 0., clips);
+                true
             } else if clips.length(slot) != 0 {
                 self.motion_start(slot, 0., clips);
+                true
+            } else {
+                false
+            };
+            if played {
+                self.motion_queue.push((0, 0.));
             }
         }
     }
@@ -1484,11 +1496,14 @@ impl Sysobj {
                 let d = self.sampler.displacement();
                 let from = self.position;
                 self.position = env.movement(from, d);
+                // The floor is looked for from above the step's start, as
+                // the hop's landing does: a blow that starts on the floor
+                // and drops at once still lands on it.
                 if d[1] <= 0.
-                    && env
-                        .floor(self.position[0], self.position[2], from[1])
-                        .is_some_and(|y| self.position[1] <= y)
+                    && let Some(y) = env.floor(self.position[0], self.position[2], from[1] + 30.)
+                    && self.position[1] <= y
                 {
+                    self.position[1] = y;
                     self.blow = None;
                     self.airborne = false;
                     self.reaction = Reaction::BlowLand;
@@ -1842,6 +1857,11 @@ impl Sysobj {
     /// and flyjump have it; the steering modes do not).
     pub fn is_jump(&self) -> bool {
         self.jump.is_some() || self.hop.is_some() || self.fly.is_some()
+    }
+
+    /// A fall (`start_fall`, e.g. `obj_fly_to_jump`) is running.
+    pub fn falling(&self) -> bool {
+        self.jump.is_some()
     }
 }
 

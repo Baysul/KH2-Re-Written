@@ -148,11 +148,28 @@ pub fn requests(game: &mut Game, actors: &mut [enemy_gallery::GalleryActor]) {
         let presentations = std::mem::take(&mut a.presentations);
         let hp = std::mem::take(&mut a.sora_hp);
         let mpdrive = std::mem::take(&mut a.sora_mpdrive);
+        let falls = std::mem::take(&mut a.sora_falls);
         // FUN_1403aabe0's signals go to the mission's trigger 10.
         game.mission_signals.append(&mut a.signals);
         play_on_sora(game, object, &captures, &pushed);
         for delta in hp {
             sora_hp_change(game, delta);
+        }
+        // `obj_fly_to_jump` on Sora (FUN_1403b8150): he leaves the held
+        // flight into a fall from where he is (the flight's velocity is
+        // zero), with the fall / land motions the thread set. His own fall
+        // and land are motions 4 and 5; other pairs are not his.
+        for (fall, land) in falls {
+            let tick = game.tick;
+            let played = (fall, land) == (4, 5) && {
+                let Game { player, clips, .. } = game;
+                player.play_motion(4, 0., clips)
+            };
+            if played {
+                game.action_started = tick;
+            }
+            game.event(serde_json::json!({"event":"boss_sora_fall","tick":tick,
+                "fall":fall,"land":land,"played":played}));
         }
         for f in mpdrive {
             // FUN_1403d4a20: `f` times Sora's PRTY +0x1c.
@@ -186,9 +203,10 @@ pub fn requests(game: &mut Game, actors: &mut [enemy_gallery::GalleryActor]) {
                 "name":name,"object":object,"target":target,"word":words[0]}));
         }
     }
-    // The vacuums pull Sora (type 0, the leader) on his next move. [U] Party
-    // members are not pulled here.
+    // The vacuums pull Sora (type 0, the leader) and the party members (by
+    // their objentry type and weight) on their next move.
     let mut pull = [0f32; 3];
+    let mut party = vec![[0f32; 3]; game.party.len()];
     for actor in actors.iter() {
         if let Some(enemy_battle::Brain::Script(a)) = actor.battle.as_ref().map(|b| &b.brain) {
             let p = enemy::world::vacuum_pull(
@@ -201,9 +219,22 @@ pub fn requests(game: &mut Game, actors: &mut [enemy_gallery::GalleryActor]) {
             for k in 0..3 {
                 pull[k] += p[k];
             }
+            for (m, out) in game.party.iter().zip(party.iter_mut()) {
+                let p = enemy::world::vacuum_pull(
+                    a.vacuums(),
+                    m.follower.position,
+                    u32::from(m.kind.object_type),
+                    m.kind.weight,
+                    1.,
+                );
+                for k in 0..3 {
+                    out[k] += p[k];
+                }
+            }
         }
     }
     game.player.push = pull;
+    game.party_push = party;
     // The lights' scene tint (FUN_1403f7040), over every actor's pool.
     let mut tint = [0x80u32; 3];
     for actor in actors.iter() {
@@ -218,9 +249,11 @@ pub fn requests(game: &mut Game, actors: &mut [enemy_gallery::GalleryActor]) {
     game.screen_fade.update(1.0);
 }
 
-/// FUN_1401626f0's map part: the map chunks' colour is the scene tint
-/// (0x80 = 1.0). [U] The fog colour and the map effects it also scales are
-/// left as they are.
+/// FUN_1401626f0: the map chunks' colour is the scene tint (0x80 = 1.0) and
+/// the fog colour is the area record's times the tint (bytes, `>> 7`).
+/// [U] The map effects' colour (its loop over the effect groups), its calls
+/// FUN_1401714d0 / FUN_14016f2b0, and a tinted neutral fog turning fog on
+/// are not carried out.
 pub fn map_tint(
     game: Res<Game>,
     parts: Query<&MeshMaterial3d<FogMaterial>, With<RoomPart>>,
@@ -242,6 +275,18 @@ pub fn map_tint(
             let textured = m.base.base_color_texture.is_some();
             if textured {
                 m.base.base_color = Color::srgba(r, g, b, alpha);
+            }
+        }
+    }
+    if let Some(fog) = visual::area_fog::tinted_colour(game.scene_tint) {
+        let ids: Vec<_> = materials
+            .iter()
+            .filter(|(_, m)| m.extension.colour.w > 0. && m.extension.colour != fog)
+            .map(|(id, _)| id)
+            .collect();
+        for id in ids {
+            if let Some(mut m) = materials.get_mut(id) {
+                m.extension.colour = fog;
             }
         }
     }
@@ -337,53 +382,83 @@ pub struct Mission {
     pub state: u8,
 }
 
-/// An overlay event (camera type 2) as the clear runs it: its end frame,
-/// game-speed commands (opcode 0x20: frame, speed) and fades; the frame it
-/// is at, advanced by the game speed.
+/// An overlay event (camera type 2) as the clear runs it: its timeline
+/// (end frame, camera cuts, fades), game-speed commands (opcode 0x20:
+/// frame, speed) and `SeqBlur` switches; the event frame it is at and the
+/// base its camera is placed on.
 pub struct Overlay {
-    end: f32,
+    timeline: ::event::timeline::Timeline,
     speeds: Vec<(f32, f32)>,
-    fades: Vec<::event::timeline::Fade>,
+    blur: Vec<(i32, u8)>,
+    /// `SeqCameraCollision` (opcode 0x46, FUN_1402d34a0): the camera is
+    /// kept out of the map.
+    collision: bool,
     frame: Option<f32>,
+    /// FUN_140406a90's base: the anchor's scene yaw, taken once as the
+    /// overlay starts (states 3 / 4 copy the object's matrix), and its
+    /// position, followed every frame (states 7 / 8).
+    anchor: Option<(f32, Vec3)>,
+}
+
+/// A running overlay's camera in the scene frame, for `camera_control`.
+#[derive(Clone, Copy, Debug)]
+pub struct OverlayView {
+    pub eye: Vec3,
+    pub target: Vec3,
+    pub roll: f32,
+    pub fov: f32,
+    /// Opcode 0x46: kept out of the map's camera collision.
+    pub collision: bool,
+}
+
+/// What an overlay's base follows (FUN_140406bc0's state).
+#[derive(Clone, Copy)]
+enum Anchor {
+    /// States 3 then 7: the object FUN_1403a35c0 named (0x236, Sora): its
+    /// matrix, then its position (FUN_1403b5b40).
+    Sora,
+    /// States 4 then 8: the dead boss (DAT_142ae7d30) matrix, then the
+    /// position of his death effect (DAT_142ae7d38, FUN_1402be970).
+    DeadBoss,
 }
 
 impl Overlay {
     fn read(bytes: &[u8]) -> Option<Self> {
         let commands = data::event_script::read(bytes).ok()?;
-        let mut o = Overlay {
-            end: 0.,
-            speeds: Vec::new(),
-            fades: Vec::new(),
-            frame: None,
-        };
+        let mut speeds = Vec::new();
+        let collision = commands
+            .iter()
+            .any(|c| matches!(c, data::event_script::Command::Other { opcode: 0x46, .. }));
         for c in &commands {
-            match c {
-                data::event_script::Command::EndFrame { frame, .. } => o.end = f32::from(*frame),
-                data::event_script::Command::Fade {
-                    frame,
-                    duration,
-                    kind,
-                } => o.fades.push(::event::timeline::Fade {
-                    frame: i32::from(*frame),
-                    duration: i32::from(*duration),
-                    kind: *kind,
-                }),
-                // GameSpeed: u16 frame, u16, f32 speed (DAT_140717424).
-                data::event_script::Command::Other {
-                    opcode: 0x20,
-                    payload,
-                } if payload.len() >= 8 => o.speeds.push((
+            // GameSpeed: u16 frame, u16, f32 speed (DAT_140717424).
+            if let data::event_script::Command::Other {
+                opcode: 0x20,
+                payload,
+            } = c
+                && payload.len() >= 8
+            {
+                speeds.push((
                     f32::from(u16::from_le_bytes([payload[0], payload[1]])),
                     f32::from_le_bytes(payload[4..8].try_into().ok()?),
-                )),
-                _ => {}
+                ));
             }
         }
-        Some(o)
+        Some(Overlay {
+            timeline: ::event::timeline::Timeline::new(&commands),
+            speeds,
+            blur: crate::cutscene::blur::Blur::switches(&commands),
+            collision,
+            frame: None,
+            anchor: None,
+        })
+    }
+
+    fn end(&self) -> f32 {
+        self.timeline.end_frame as f32
     }
 
     fn running(&self) -> bool {
-        self.frame.is_some_and(|f| f < self.end)
+        self.frame.is_some_and(|f| f < self.end())
     }
 
     /// The speed the latest passed command set, if any.
@@ -394,6 +469,42 @@ impl Overlay {
             .filter(|(at, _)| *at <= f)
             .max_by(|a, b| a.0.total_cmp(&b.0))
             .map(|s| s.1)
+    }
+
+    /// The `SeqBlur` weight (previous picture over the scene) at its frame.
+    fn blur(&self) -> Option<f32> {
+        let f = self.frame.filter(|_| self.running())?;
+        let a = self
+            .blur
+            .iter()
+            .rev()
+            .find(|(at, _)| *at as f32 <= f)
+            .map_or(0, |s| s.1);
+        (a != 0).then_some(f32::from(a) / 128.)
+    }
+
+    /// The overlay's camera in the scene (FUN_1402d37b0): the event camera
+    /// at its frame (FUN_1402d3d40, which negates y and z: in the room's
+    /// scene frame the channels read as they are) times the base matrix
+    /// (FUN_14013f900 with DAT_140b64f90): the anchor's engine yaw (pi -
+    /// scene yaw) turns it and its position moves it. [I] The roll is
+    /// negated for the room's right-handed view.
+    fn camera(&self) -> Option<OverlayView> {
+        let f = self.frame.filter(|_| self.running())?;
+        let (yaw, at) = self.anchor?;
+        let cut = self.timeline.cut_at(f)?;
+        let data = self.timeline.camera(cut.camera)?;
+        let seconds =
+            (f - cut.start as f32).min((cut.end - cut.start) as f32) / crate::cutscene::EVENT_FPS;
+        let v = ::event::event_camera::view(data, seconds);
+        let turn = Quat::from_rotation_y(yaw - std::f32::consts::PI);
+        Some(OverlayView {
+            eye: at + turn * Vec3::from_array(v.eye),
+            target: at + turn * Vec3::from_array(v.target),
+            roll: -v.roll.to_radians(),
+            fov: v.fov.to_radians(),
+            collision: self.collision,
+        })
     }
 }
 
@@ -449,7 +560,9 @@ impl Mission {
                 continue;
             };
             for layer in 0..3 {
-                if let Some(c) = crate::cutscene::screen::layer_colour(&o.fades, layer, 0, f) {
+                if let Some(c) =
+                    crate::cutscene::screen::layer_colour(&o.timeline.fades, layer, 0, f)
+                {
                     let v = if c.white { 1. } else { 0. };
                     out = Some([v, v, v, c.alpha]);
                 }
@@ -505,19 +618,62 @@ pub fn mission_tick(
             dead_boss(&mut game);
         }
     }
-    // FUN_1403a35c0's states 3 and 4, with each overlay's frame advanced by
-    // the game speed (frame time).
+    // FUN_1403a35c0's states 3 and 4. Each overlay's frame advances at the
+    // event rate (30 per second, half a frame per tick) times the game
+    // speed (frame time).
     let speed = game.game_speed;
+    let step = crate::cutscene::EVENT_FPS / crate::cutscene::TICK_HZ as f32 * speed;
+    let sora = (game.player.yaw, Vec3::from_array(game.player.position));
+    let boss = gallery
+        .actors
+        .iter()
+        .find(|a| {
+            a.battle.as_ref().is_some_and(|b| {
+                matches!(b.brain, enemy_battle::Brain::Script(_)) && b.brain.hp() <= 0
+            })
+        })
+        .and_then(|a| {
+            let b = a.battle.as_ref()?;
+            // [I] The death effect rides bone 161, the bone of his TARGET
+            // shape; its centre stands in for the effect's position.
+            let at = b.pose.targets.first().map(|s| s.centre)?;
+            Some((a.yaw, at))
+        });
     let mut done = false;
+    let mut camera = None;
+    let mut blur = None;
     if let Some(m) = game.mission.as_mut() {
-        for o in [&mut m.boss_event, &mut m.clear_event]
-            .into_iter()
-            .flatten()
-        {
+        for (o, anchor) in [
+            (&mut m.boss_event, Anchor::DeadBoss),
+            (&mut m.clear_event, Anchor::Sora),
+        ] {
+            let Some(o) = o.as_mut() else {
+                continue;
+            };
+            let end = o.end();
             if let Some(f) = o.frame.as_mut()
-                && *f < o.end
+                && *f < end
             {
-                *f += speed;
+                *f += step;
+                let (yaw, at) = match anchor {
+                    Anchor::Sora => Some(sora),
+                    Anchor::DeadBoss => boss,
+                }
+                .map_or((None, None), |(y, p)| (Some(y), Some(p)));
+                // The matrix is taken once; the position follows.
+                o.anchor = match (o.anchor, yaw, at) {
+                    (Some((y, _)), _, Some(p)) => Some((y, p)),
+                    (None, Some(y), Some(p)) => Some((y, p)),
+                    (old, ..) => old,
+                };
+            }
+            // The later overlay's camera and blur win (the clear one draws
+            // over the boss one's last frames).
+            if let Some(c) = o.camera() {
+                camera = Some(c);
+            }
+            if let Some(w) = o.blur() {
+                blur = Some((w, o.frame.unwrap_or(0.).floor() as i32));
             }
         }
         if m.state == 3 {
@@ -527,7 +683,7 @@ pub fn mission_tick(
                 .boss_event
                 .as_ref()
                 .filter(|o| o.running())
-                .map_or(0., |o| o.end - o.frame.unwrap_or(0.));
+                .map_or(0., |o| o.end() - o.frame.unwrap_or(0.));
             if left <= 4. {
                 if let Some(o) = m.clear_event.as_mut() {
                     o.frame = Some(0.);
@@ -551,6 +707,21 @@ pub fn mission_tick(
             .next_back();
         game.game_speed = speeds.unwrap_or(1.);
     }
+    if let Some(view) = camera
+        && tick.is_multiple_of(15)
+    {
+        let frames: Vec<_> = game
+            .mission
+            .iter()
+            .flat_map(|m| [m.boss_event.as_ref(), m.clear_event.as_ref()])
+            .map(|o| o.and_then(|o| o.frame.zip(o.anchor)))
+            .collect();
+        game.event(serde_json::json!({"event":"overlay_camera","tick":tick,
+            "eye":view.eye.to_array(),"target":view.target.to_array(),"roll":view.roll,
+            "fov":view.fov,"blur":blur.map(|b| b.0),"overlays":format!("{frames:?}")}));
+    }
+    game.overlay_camera = camera;
+    game.overlay_blur = blur;
     if done {
         game.mission_cleared = true;
         game.event(serde_json::json!({"event":"mission_clear","tick":tick}));
@@ -566,8 +737,7 @@ pub fn mission_tick(
 /// FUN_1404334d0 (`trap_mission_dead_boss`): the bonus, the clear sound, the
 /// won state (DAT_142a11400 bit 1: commands locked, Sora unhurt) and the boss
 /// overlay ("re_deadboss-0a"). [U] The HUD reset, the pause definitions and
-/// the overlays' cameras, radial blur and their opcodes 0x41/0x46/0x51 are
-/// not carried out.
+/// the overlays' opcodes 0x41/0x46/0x51 are not carried out.
 fn dead_boss(game: &mut Game) {
     let Some(m) = game.mission.as_mut() else {
         return;

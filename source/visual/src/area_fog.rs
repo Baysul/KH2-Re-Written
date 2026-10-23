@@ -44,6 +44,15 @@ fn current() -> Option<FogParams> {
     *CURRENT.lock().unwrap()
 }
 
+/// The area's fog colour scaled by a scene tint (0x80 = 1.0) as
+/// FUN_1401626f0 rescales the current fog from the area's record, as the
+/// shader's colour; `None` without fog.
+pub fn tinted_colour(tint: [u8; 3]) -> Option<Vec4> {
+    let p = current()?;
+    let c = |k: usize| ((u32::from(p.colour[k]) * u32::from(tint[k])) >> 7).min(255) as f32 / 255.;
+    Some(Vec4::new(c(0), c(1), c(2), 1.))
+}
+
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 pub struct FogExt {
     /// (-1/(far-near), far/(far-near), min/255, max/255); enabled flag in w

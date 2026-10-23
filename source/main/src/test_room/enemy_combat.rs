@@ -157,6 +157,9 @@ pub struct EnemyCombat {
     pub sheets: EnmpSheets,
     /// 00battle.bin `patn` (the reaction overrides by state pattern).
     pub patn: Vec<[u8; 32]>,
+    /// The radius of the first OBJ shape (collision kind 1), the body circle
+    /// a script object keeps out of the walls; 0 without one.
+    pub wall_radius: f32,
 }
 
 fn payload<'a>(bytes: &'a [u8], name: &[u8; 4]) -> Result<&'a [u8]> {
@@ -239,6 +242,10 @@ impl EnemyCombat {
         let collision = object_collision::read(collision_bytes).map_err(|e| e.to_string())?;
         let default_groups =
             object_collision::default_groups(collision_bytes).map_err(|e| e.to_string())?;
+        let wall_radius = collision
+            .iter()
+            .find(|e| e.kind == 1)
+            .map_or(0., |e| f32::from(e.radius));
         let reactions = reaction_shapes(&collision, kind.model.skinning.bones.len());
         let (body, targets, attacks) =
             collision_shapes(&collision, kind.model.skinning.bones.len())?;
@@ -386,6 +393,7 @@ impl EnemyCombat {
             default_groups,
             sheets,
             patn,
+            wall_radius,
         })
     }
 
@@ -799,6 +807,7 @@ mod tests {
             object_type: 4,
             reactions: Vec::new(),
             default_groups: 1,
+            wall_radius: 0.,
             sheets: EnmpSheets {
                 enmp: Default::default(),
                 lvpm: Default::default(),
