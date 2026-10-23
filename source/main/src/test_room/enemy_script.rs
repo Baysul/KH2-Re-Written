@@ -678,6 +678,11 @@ impl ScriptBrain {
         self.world.player_proxy.as_deref().map(|p| &p.sys)
     }
 
+    /// The motion the script has Sora capture now (outside a limit too).
+    pub fn player_capture(&self) -> Option<enemy::sysobj::Capture> {
+        self.world.player_proxy.as_deref()?.sys.capture
+    }
+
     /// FUN_1403b6420 on Sora's stand-in during the limit: his heading.
     pub fn turn_limit_player(&mut self, yaw: f32) {
         if self.limit.is_some()
@@ -804,11 +809,10 @@ impl ScriptBrain {
                     self.services.insert(name);
                 }
                 Event::Sound { id, position, .. } => self.sounds.push((id, position)),
-                // Sora plays what a running limit captures for him (the
-                // summon host reads his stand-in's capture); another
-                // victim's is not drawn.
-                Event::MotionCapture { victim, .. }
-                    if victim == PLAYER_OBJECT && self.limit.is_some() => {}
+                // Sora plays what a summon's limit or `appear` event captures
+                // for him (the summon host reads his stand-in's capture);
+                // another victim's is not drawn.
+                Event::MotionCapture { victim, .. } if victim == PLAYER_OBJECT => {}
                 Event::MotionCapture { .. } => {
                     self.unsupported.insert("obj_motion_capture");
                 }

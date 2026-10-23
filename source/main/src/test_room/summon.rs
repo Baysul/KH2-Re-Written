@@ -12,8 +12,12 @@
 //! `leave` (FUN_1403de080); when the object has removed itself the party
 //! comes back (FUN_140400440).
 //!
-//! [I] The first-time `appear` event (summon effect setting Full / Auto,
-//! FUN_1402e4fa0) is not played: the room takes the setting Off path.
+//! The Summon Effects option (FUN_1402e4fa0: save +0x41a4 bits 9..10; 1
+//! every time, 2 the first time each summon comes) chooses the summon's
+//! act `appear` at Sora's place after SSTM +0x84 frames; otherwise
+//! `appear_skip` after +0x88 at the placement. [Open] FUN_1403de610 hides
+//! HUD layers 7..10 (FUN_14017b440) while DAT_142a11478 holds during
+//! `appear`; the room's HUD stays.
 use super::{
     Game, SceneRoot,
     enemy_battle::{Clips, build_clips},
@@ -45,6 +49,8 @@ const LEVEL: u8 = 0;
 /// DAT_142a24edc.
 pub mod state {
     pub const NONE: u8 = 0;
+    /// The `appear` event is running (FUN_1403de610).
+    pub const APPEARING: u8 = 1;
     pub const OUT: u8 = 2;
     pub const LEAVING: u8 = 3;
 }
@@ -52,8 +58,10 @@ pub mod state {
 /// The summons' tables: the `sumn` rows and the SSTM wait.
 pub struct Source {
     pub rows: Vec<SummonRow>,
-    /// SSTM +0x88: the frames FUN_1403de610 waits before the summon comes.
+    /// SSTM +0x88: the frames FUN_1403de610 waits before the summon comes;
+    /// +0x84 before its `appear` event.
     pub wait: f32,
+    pub appear_wait: f32,
     pub sstm: actor_physics::Sstm,
 }
 
@@ -61,9 +69,11 @@ impl Source {
     /// `record` is 03system `pref` / `sstm`'s record.
     pub fn new(rows: Vec<SummonRow>, record: &[u8]) -> Option<Self> {
         let wait = f32::from_le_bytes(record.get(0x88..0x8c)?.try_into().ok()?);
+        let appear_wait = f32::from_le_bytes(record.get(0x84..0x88)?.try_into().ok()?);
         Some(Source {
             rows,
             wait,
+            appear_wait,
             sstm: actor_physics::Sstm::read(record)?,
         })
     }
@@ -147,6 +157,8 @@ pub struct Summoned {
     row: SummonRow,
     /// FUN_1403de610's countdown before the summon comes.
     wait: f32,
+    /// The summon comes with its `appear` event.
+    appear: bool,
     /// Sora is held (player +0x120 bits 0x104) until the summon is out.
     pub holds_sora: bool,
     pub actor: Option<Actor>,
@@ -205,13 +217,34 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
     } else if command == PETER_PAN {
         game.summon_form = 1;
     }
-    let wait = game.summons.as_ref().map_or(0., |s| s.wait);
+    // FUN_1403de610: the Summon Effects option (FUN_1402e4fa0); 2 plays the
+    // event once per summon (DAT_142a24ed8, keyed by DAT_1409acdd5, read as
+    // the summon's `sumn` row [I]).
+    let index = game
+        .summons
+        .as_ref()
+        .and_then(|s| s.rows.iter().position(|r| r.command == command))
+        .unwrap_or(0) as u32;
+    let seen = game.summons_seen & 1 << index != 0;
+    let appear = match game.config_flags >> 9 & 3 {
+        1 => true,
+        2 => !seen,
+        _ => false,
+    };
+    if appear {
+        game.summons_seen |= 1 << index;
+    }
+    let wait = game
+        .summons
+        .as_ref()
+        .map_or(0., |s| if appear { s.appear_wait } else { s.wait });
     game.summon_serial += 1;
     game.summon = Some(Summoned {
         state: state::OUT,
         command,
         row,
         wait,
+        appear,
         holds_sora: true,
         actor: None,
         stored: stored.clone(),
@@ -339,10 +372,11 @@ fn sora_sys(game: &Game) -> enemy::sysobj::Sysobj {
 }
 
 /// While the summon's limit runs Sora stands and turns where it has him
-/// (the scripted stand-in); his own update does not run. He plays what the
-/// summon's script captures for him (`obj_motion_capture`, FUN_1403c6cc0:
-/// a motion of the summon's own set), else stands. Returns false when no
-/// summon limit runs.
+/// (the scripted stand-in); his own update does not run. During the
+/// `appear` event he is held where he stands (FUN_1403de610 releases
+/// +0x120 bits 0x105 after it). He plays what the summon's script captures
+/// for him (`obj_motion_capture`, FUN_1403c6cc0: a motion of the summon's
+/// own set), else stands. Returns false when neither runs.
 pub fn sora_in_limit(game: &mut Game) -> bool {
     let Some(s) = game.summon.as_ref() else {
         return false;
@@ -350,14 +384,21 @@ pub fn sora_in_limit(game: &mut Game) -> bool {
     let Some(a) = s.actor.as_ref() else {
         return false;
     };
-    let Some(p) = a.brain.limit_player() else {
-        return false;
+    let held = (
+        game.player.position,
+        game.player.yaw,
+        a.brain.player_capture(),
+    );
+    let p = match a.brain.limit_player() {
+        Some(p) => (p.position, p.yaw, p.capture),
+        None if s.state == state::APPEARING => held,
+        None => return false,
     };
     let row = game
         .summons
         .as_ref()
         .and_then(|t| t.rows.iter().position(|r| r.object == s.row.object));
-    let captured = p.capture.and_then(|c| {
+    let captured = p.2.and_then(|c| {
         // A slot Sora's kit does not hold (not of his skeleton) is not
         // played.
         let clip =
@@ -365,7 +406,7 @@ pub fn sora_in_limit(game: &mut Game) -> bool {
         let length = enemy::env::Clips::length(&*a.clips, c.motion as usize);
         Some((clip, length.saturating_sub(c.remaining)))
     });
-    let (position, yaw) = (p.position, p.yaw);
+    let (position, yaw) = (p.0, p.1);
     game.player.position = position;
     game.player.yaw = yaw;
     match captured {
@@ -618,10 +659,15 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
                 Ok(actor) => {
                     s.actor = Some(actor);
                     s.holds_sora = false;
-                    // FUN_1403c2740: summon mode; Sora's appear motion.
+                    // FUN_1403c2740: summon mode; Sora's appear motion when
+                    // the event is skipped.
                     game.player.drive.enter_summon(LEVEL);
-                    game.player.play_motion(APPEAR_MOTION, 0., &game.clips);
-                    game.player.queue_motion(0, 0.);
+                    if s.appear {
+                        s.state = state::APPEARING;
+                    } else {
+                        game.player.play_motion(APPEAR_MOTION, 0., &game.clips);
+                        game.player.queue_motion(0, 0.);
+                    }
                     let at = s.actor.as_ref().map(|a| a.position().to_array());
                     game.event(serde_json::json!({"event":"summon_appear","tick":tick,
                         "command":s.command,"at":at}));
@@ -702,6 +748,12 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
             .collect();
         a.brain.tick(&game.world, game.player.position, &mut a.rng);
         play_effects(game, a);
+        // [I] The event lasts while the summon's act is `appear`
+        // (FUN_1403de610 waits on DAT_142a11478).
+        if s.state == state::APPEARING && a.brain.description() != "appear" {
+            s.state = state::OUT;
+            game.event(serde_json::json!({"event":"summon_appear_end","tick":tick}));
+        }
         if let Some(form) = a.brain.genie_form.take() {
             game.summon_form = form;
             game.event(serde_json::json!({"event":"genie_form","tick":tick,"form":form}));
@@ -952,12 +1004,18 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         .map(|s| s.sstm)
         .ok_or("summon tables absent")?;
     let mut rng = ScriptRandom::default();
-    let at = placement(
-        &game.world,
-        game.player.position,
-        &mut rng,
-        &mut game.summon_octant,
-    );
+    // The `appear` event starts the summon at Sora's position
+    // (FUN_1403b5b40); the skip places it (FUN_1403f3fa0).
+    let at = if s.appear {
+        game.player.position
+    } else {
+        placement(
+            &game.world,
+            game.player.position,
+            &mut rng,
+            &mut game.summon_octant,
+        )
+    };
     let yaw = (game.player.position[0] - at[0]).atan2(game.player.position[2] - at[2]);
     // [I] A summon takes no damage in this room; its HP is nominal.
     let stats = combat::TargetStats::enemy(100, 10000, 0, [100; 7], 100, 1);
@@ -1020,7 +1078,11 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         scripts: Default::default(),
     }));
     brain.fx.drawn = true;
-    brain.start_act(b"appear_skip");
+    brain.start_act(if s.appear {
+        b"appear".as_slice()
+    } else {
+        b"appear_skip".as_slice()
+    });
     let models = objects
         .iter()
         .map(|o| {

@@ -1019,6 +1019,11 @@ struct Game {
     summon_serial: u64,
     /// FUN_1403f3fa0's direction counter (DAT_142ae5d78).
     summon_octant: u32,
+    /// The save's config bits (+0x41a4) as the camp's Config last left
+    /// them, and the summons whose `appear` event has played
+    /// (DAT_142a24ed8).
+    config_flags: u32,
+    summons_seen: u32,
     /// DAT_1409acdd7: Genie's form number (1 Valor, 2 Wisdom, 4 Master,
     /// 5 Final), kept between summons.
     summon_form: u8,
@@ -11153,6 +11158,7 @@ fn camp_tick(
             settings.save_if_changed();
             c.memory = menu.memory;
             c.config_flags = menu.data.config_flags;
+            game.config_flags = c.config_flags;
             c.stock = menu.data.items.counts.clone();
             c.seen = menu.data.items.seen.clone();
             c.shortcuts = menu.data.customize.shortcuts;
@@ -12381,6 +12387,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         summon_dismiss: false,
         summon_serial: 0,
         summon_octant: 0,
+        // The camp's new-game config (FUN_1402e4fc0).
+        config_flags: 0x40b,
+        summons_seen: 0,
         summon_form: 0,
         genie_command: None,
         summon_stick: [0.; 3],
