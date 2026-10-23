@@ -1,6 +1,6 @@
-# T221 — The map hit record of `bghit_check_line` and its getters
+# T222 — The map hit record of `bghit_check_line` and its getters
 
-Owner Claude, 2026-10-23 (T220 is the camp pages, #132), requested by burba in the project chat ("keep making this until
+Owner Claude, 2026-10-23 (T220 is the camp pages, #132; T221 the party battle styles, #134), requested by burba in the project chat ("keep making this until
 there's nothing left to do", then "keep going"), from T219's finding. Gate: enemy AI (P19/P20
 work; nothing here is inferred as a gate pass). Prerequisites: T219 (the collision-class line
 query). Build identity: branch `feature/bghit-record` cut from T219's branch at `acff63a`, merged
