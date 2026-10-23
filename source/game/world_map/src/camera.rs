@@ -120,6 +120,67 @@ impl ObjCamera {
     }
 }
 
+/// worldmap::LockOnCamera (camera slot 1): created by FUN_1405635d0 when the
+/// cursor locks on, updated by FUN_1405636c0 while its target holds. Its
+/// object (0x78 bytes) has no field of view: the engine's stays.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LockOnCamera {
+    from: Pose,
+    elapsed: f32,
+    /// +0x54 = 30.0.
+    length: f32,
+    /// +0x4c bit 0, clear at creation: the first update blends from the
+    /// camera in use.
+    current: bool,
+}
+
+impl Default for LockOnCamera {
+    fn default() -> Self {
+        Self {
+            from: Pose {
+                eye: [0.; 3],
+                target: [0.; 3],
+                fov: 0.,
+            },
+            elapsed: 0.,
+            length: crate::cursor::lock_camera::BLEND_TICKS,
+            current: false,
+        }
+    }
+}
+
+impl LockOnCamera {
+    /// FUN_14038ebb0: a higher camera slot is in use.
+    pub fn suspend(&mut self) {
+        self.current = false;
+    }
+
+    /// FUN_1405636c0 then FUN_14038ebc0: `cursor` the cursor's position,
+    /// `target` the held target's centre, `now` the engine camera.
+    pub fn update(&mut self, cursor: V3, target: V3, now: Pose) -> Pose {
+        let (eye, look) = crate::cursor::lock_camera::goal(cursor, target);
+        if !self.current {
+            self.from = now;
+            self.elapsed = 0.;
+        }
+        let mut out = Pose {
+            eye,
+            target: look,
+            fov: now.fov,
+        };
+        if self.elapsed < self.length {
+            self.elapsed += 1.;
+            if self.elapsed < self.length {
+                let s = (self.elapsed / self.length * std::f32::consts::FRAC_PI_2).sin();
+                out.eye = mix(eye, self.from.eye, s);
+                out.target = mix(look, self.from.target, s);
+            }
+        }
+        self.current = true;
+        out
+    }
+}
+
 /// worldmap::CloseUpCamera offsets per landing menu mode (0x140748718 /
 /// 728 / 738): screen x and y and a distance scale. The two-row menu uses
 /// the first, the grid the second, the episode list the third.
