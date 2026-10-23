@@ -282,3 +282,34 @@ fn limit_hover_slows_without_a_request_and_climbs_to_its_height() {
         s.velocity
     );
 }
+
+#[test]
+fn a_gravity_range_holds_a_jump_at_its_height_then_it_falls_from_there() {
+    let mut s = Sysobj::bare();
+    s.jump_now([0., 0., 1.], 60., 0.);
+    for _ in 0..8 {
+        s.end_tick(&Flat);
+    }
+    // Range 3 (gravity frozen) from here on.
+    s.motion.flags.word |= motion::flag::GRAVITY_FROZEN;
+    s.end_tick(&Flat);
+    let held = s.position[1];
+    assert!(held > 10., "risen to {held}");
+    for _ in 0..60 {
+        s.end_tick(&Flat);
+    }
+    assert!(close(s.position[1], held), "held at {}", s.position[1]);
+    s.motion.flags.word &= !motion::flag::GRAVITY_FROZEN;
+    for _ in 0..4 {
+        s.end_tick(&Flat);
+    }
+    let first = s.position[1];
+    assert!(first < held && held - first < 5., "a soft fall: {first}");
+    for _ in 0..200 {
+        s.end_tick(&Flat);
+        if !s.is_jump() {
+            break;
+        }
+    }
+    assert!(!s.is_jump() && close(s.position[1], 0.));
+}

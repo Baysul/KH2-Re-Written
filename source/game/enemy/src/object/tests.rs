@@ -213,3 +213,45 @@ fn the_magic_task_waits_while_status_bit_5_holds_it() {
     assert_eq!(work_word(&obj, 0), 0);
     assert_eq!(obj.threads.len(), 1);
 }
+
+/// Its target stands at (100, 0, 0) or, `near`, 30 units away.
+struct TargetAt {
+    near: bool,
+}
+
+impl crate::env::Env for TargetAt {
+    fn floor(&self, _: f32, _: f32, _: f32) -> Option<f32> {
+        Some(0.)
+    }
+    fn clips(&self, model: u32) -> &dyn crate::env::Clips {
+        static NULL: NullEnv = NullEnv;
+        NULL.clips(model)
+    }
+    fn player_position(&self) -> crate::sysobj::Vec3 {
+        [0.; 3]
+    }
+    fn target_position(&self, _: u32) -> Option<crate::sysobj::Vec3> {
+        Some(if self.near {
+            [30., 0., 0.]
+        } else {
+            [100., 0., 0.]
+        })
+    }
+}
+
+#[test]
+fn range_28_turns_sora_toward_his_target_by_its_degrees_beyond_50_units() {
+    let turn = |near: bool| {
+        let mut world = World::default();
+        let mut sora = Object::bare(PLAYER_OBJECT);
+        sora.sys.effects.push(Effect::Other {
+            range: true,
+            kind: 28,
+            params: vec![15],
+        });
+        sora.carry_out_motion_effects(&mut world, &TargetAt { near });
+        sora.sys.yaw
+    };
+    assert!((turn(false) - 15f32.to_radians()).abs() < 1e-5);
+    assert_eq!(turn(true), 0.);
+}

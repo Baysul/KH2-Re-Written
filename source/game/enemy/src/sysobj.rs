@@ -406,6 +406,9 @@ pub struct Sysobj {
     pub steer_moving: bool,
     /// A plain jump (FUN_1403cbb00): the arc and its horizontal velocity.
     pub(crate) jump: Option<(actor_physics::Arc, [f32; 2])>,
+    /// The jump's last tick was held by a gravity range, and its vertical
+    /// step (FUN_1403b4780's re-seed when the range ends).
+    jump_float: (bool, f32),
     /// Physics mode 9 (hop), and the hop armed for the next take-off.
     pub(crate) hop: Option<Hop>,
     pub(crate) pending_hop: Option<PendingHop>,
@@ -732,6 +735,7 @@ impl Sysobj {
             steer: None,
             steer_moving: false,
             jump: None,
+            jump_float: (false, 0.),
             hop: None,
             pending_hop: None,
             blow: None,
@@ -1396,6 +1400,14 @@ impl Sysobj {
         clips: &dyn Clips,
         env: &dyn Env,
     ) {
+        // A gravity range (range 3, `+0x18c` bit 5) holds the height while
+        // the curve's time runs on (FUN_1403cb500); when it ends the arc is
+        // re-seeded as a fall from the height at the last step's vertical
+        // speed (FUN_1403b4780).
+        let floating = self.gravity_frozen();
+        if self.jump_float.0 && !floating {
+            arc = actor_physics::Arc::fall(self.position[1], self.jump_float.1);
+        }
         if self.sampler.due(0.) {
             let dt = actor_physics::PHYSICS_STEP;
             // Without a move request the take-off velocity decays (FUN_1403b7ad0).
@@ -1406,11 +1418,12 @@ impl Sysobj {
                 actor_physics::AIR_INERTIA,
                 actor_physics::AIR_DRAG,
             );
-            let dy = arc.step(self.position[1], self.sstm.fall_max, false, dt);
+            let dy = arc.step(self.position[1], self.sstm.fall_max, floating, dt);
             self.sampler.store([velocity[0] * dt, dy, velocity[1] * dt]);
         }
         self.jump = Some((arc, velocity));
         let d = self.sampler.displacement();
+        self.jump_float = (floating, d[1]);
         self.apply_movement(d, env);
         // FUN_1403cb680 (mode slot 7): the fall motion starts five ticks before
         // the apex, once.
