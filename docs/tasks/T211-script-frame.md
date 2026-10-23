@@ -10,7 +10,7 @@ only read.
 
 Private evidence (never in Git): `%LOCALAPPDATA%/KH2FinalRewrite/research/sephiroth-01/`
 (`n_hb630.lst.txt`: his script's constants W16 and W32) and the runs `kh2-boss-out/m1`,
-`u0`..`u3`, `l0`..`l2` (logs and captures). No Ghidra MCP was used; no new decompiles were
+`u0`..`u3`, `l0`..`l2` and `cmp/` (logs and captures). No Ghidra MCP was used; no new decompiles were
 needed.
 
 ## What was wrong
@@ -24,8 +24,7 @@ so most fights looked right; what a script takes from the engine itself did not:
 - constants: Sephiroth's Meteor spot (engine -750, -600, 2250) landed at scene z +2250, off his
   arena's floor, instead of -2250; his arena centre W32 and the warp points drawn around it were
   mirrored;
-- fixed turns: a party limit's sweep (ATKP 665) went the mirrored way round (it now sweeps from
-  +x to -x);
+- fixed turns: a party limit's sweep (ATKP 665) went the mirrored way round;
 - headings a script reads or writes (`obj_set_rot`, `obj_dir`'s w);
 - model-local offsets (`obj_apply_bone_matrix`), which mirrored in x.
 
@@ -73,14 +72,17 @@ summon and party-limit tours, hb01 programs 75 for Sephiroth).
   workspace build: PASS. Release helper: see the pull request.
 - Sephiroth (`m1`, HP 850): Meteor goes to scene (-750, 600, -2250), the engine's spot; his warps
   land on the floor; the fight runs to the end of the tour.
-- `--party-limit-tour` (`l2` against `main`'s `l0`): identical tick by tick except the ATKP 665
-  sweep, now mirrored to the engine's side (from +x to -x); 225 hits against 226; five limits,
-  27 follow-ups, exit 0.
-- `--summon-tour` (`u3` against `main`'s `u0`): identical until Stitch's limit at tick 4133; his
-  shot hits the Shadow's back (the view's origin is behind Sora, the Shadow faces away), it takes
-  the back reaction (motion 13 instead of 11) and the rest of that volley misses it (summon hits
-  78 against 93: 883 ×1 and 1210 ×1 instead of ×13 and ×4). Every other summon, appear event and
-  limit follow-up matches; exit 0, no faults.
+- After merging `main` with Limit Form's limits (PR #122), release builds of `main` and this
+  branch side by side (private `cmp/`):
+  - `--limit-form-tour` (`f0`/`f1`): identical tick by tick (the four limits, their hits and
+    the form's level-up); exit 0.
+  - `--party-limit-tour` (`p0`/`p1`): identical except the ATKP 665 sweep, which goes round the
+    other way (its attack points mirrored in x); 237 hits here, 235 on `main`; exit 0.
+  - `--summon-tour` (`s0`/`s1`): identical until Stitch's limit at tick 4133; his shot hits the
+    Shadow's back (the view's origin is behind Sora, the Shadow faces away), it takes the back
+    reaction (motion 13 instead of 11) and the rest of that volley misses it (summon hits 78
+    against 93: 883 ×1 and 1210 ×1 instead of ×13 and ×4). Every other summon, appear event and
+    limit follow-up matches; exit 0, no faults.
 
 ## Uncertainty
 
