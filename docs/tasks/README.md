@@ -172,4 +172,5 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T203](T203-party-limit-scenes.md) | Party limits run from the second deck | PARTIAL. |
 | [T204](T204-summons.md) | Summons come, last their time and leave from the second deck | PARTIAL. |
 | [T205](T205-one-launcher-executable.md) | One launcher executable | PASS for the build output: the helper leaves one launcher executable and the game runs inside it. |
+| [T206](T206-summon-limits-and-party-follow-ups.md) | Summon limits, script effects, appear event and party follow-ups | PARTIAL. |
 | [T141](T141-ik-and-animation-parity.md) | IK aim chains, pole vectors and joint-space motion blends | PROGRESS. Master Form matches the PS2 routine; 87% of installed motions within 0.1. |
