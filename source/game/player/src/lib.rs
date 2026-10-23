@@ -2665,6 +2665,47 @@ impl TriangleWorld {
         self.floors.iter().chain(&self.walls)
     }
 
+    /// The first point where a triangle crosses the segment `from`..`to`
+    /// (both faces count).
+    pub fn segment_hit(&self, from: Vec3, to: Vec3) -> Option<Vec3> {
+        let sub = |a: Vec3, b: Vec3| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let cross = |a: Vec3, b: Vec3| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let dot = |a: Vec3, b: Vec3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let d = sub(to, from);
+        let mut best: Option<f32> = None;
+        for t in self.triangles() {
+            // Möller–Trumbore.
+            let (e1, e2) = (sub(t[1], t[0]), sub(t[2], t[0]));
+            let p = cross(d, e2);
+            let det = dot(e1, p);
+            if det.abs() < 1e-9 {
+                continue;
+            }
+            let inv = 1. / det;
+            let s = sub(from, t[0]);
+            let u = dot(s, p) * inv;
+            if !(0. ..=1.).contains(&u) {
+                continue;
+            }
+            let q = cross(s, e1);
+            let v = dot(d, q) * inv;
+            if v < 0. || u + v > 1. {
+                continue;
+            }
+            let k = dot(e2, q) * inv;
+            if (0. ..=1.).contains(&k) && best.is_none_or(|b| k < b) {
+                best = Some(k);
+            }
+        }
+        best.map(|k| [from[0] + d[0] * k, from[1] + d[1] * k, from[2] + d[2] * k])
+    }
+
     /// Triangles whose upward normal component is at least `min_floor_y`
     /// (after normalizing) are floors when `stand` is set; steeper ones are
     /// walls when `collide` is set. Winding is ignored because the selected

@@ -381,7 +381,8 @@ struct RoomEnv<'a> {
     player_yaw: f32,
     /// His TARGET radius plus the Shadow's (FUN_1403d7520).
     enemy_reach: Option<f32>,
-    /// The room targets the Shadow (locked or not; the attacks' hop target).
+    /// The room's target holder (its port of FUN_1403dcd70 / FUN_1403dd650)
+    /// holds the Shadow, locked or not: Sora's +0xdc8 record.
     selected: bool,
     /// Sora is locked on to the Shadow (his lock-on record, obj+0xdc8).
     locked: bool,
@@ -410,6 +411,9 @@ struct RoomEnv<'a> {
 impl Env for RoomEnv<'_> {
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         self.world.floor(x, z, top)
+    }
+    fn line_hit(&self, from: V3, to: V3) -> Option<V3> {
+        self.world.line_hit(from, to)
     }
     fn movement(&self, from: V3, wished: V3) -> V3 {
         // Off the floor (a hop, a fall) the body is not held to it.
@@ -557,6 +561,26 @@ pub struct Running {
     hits_seen: u32,
     /// The serial of the motion Sora last started in the scene.
     motion_serial: u64,
+    /// The thrown Keyblade's axes (room frame, columns) from the last
+    /// `obj_set_xyzrot` on it.
+    weapon_axes: Option<[[f32; 3]; 3]>,
+}
+
+/// An object's axes from `obj_set_xyzrot`'s angles (the script frame, the
+/// rows `euler_xyz` reads: row-vector Rx·Ry·Rz), turned into the room's
+/// frame (C·R·C with C = diag(1, -1, -1)) as columns.
+fn axes_of(angles: [f32; 3]) -> [[f32; 3]; 3] {
+    let ([sa, sb, sc], [ca, cb, cc]) = (angles.map(f32::sin), angles.map(f32::cos));
+    let rows = [
+        [cb * cc, cb * sc, -sb],
+        [sa * sb * cc - ca * sc, sa * sb * sc + ca * cc, sa * cb],
+        [ca * sb * cc + sa * sc, ca * sb * sc - sa * cc, ca * cb],
+    ];
+    [
+        [rows[0][0], -rows[0][1], -rows[0][2]],
+        [-rows[1][0], rows[1][1], rows[1][2]],
+        [-rows[2][0], rows[2][1], rows[2][2]],
+    ]
 }
 
 /// The character's clip view for a limit: its idle and the limit's motions.
@@ -659,12 +683,15 @@ impl Running {
 
     /// Where Sora's Keyblade flies while a Limit Form limit has let it go
     /// (its object detached from his hand).
-    pub fn thrown_weapon(&self) -> Option<V3> {
+    pub fn thrown_weapon(&self) -> Option<(V3, Option<[[f32; 3]; 3]>)> {
         if !player::limit_form::LIMITS.contains(&self.command) {
             return None;
         }
         let o = self.scene.object(WEAPONS)?;
-        o.sys.attached.is_none().then_some(o.sys.position)
+        o.sys
+            .attached
+            .is_none()
+            .then_some((o.sys.position, self.weapon_axes))
     }
 
     /// The shot pool's points to draw (Trinity Limit's shots).
@@ -873,6 +900,7 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
         faded,
         offers: [None; 8],
         motion_serial: 0,
+        weapon_axes: None,
         targets: [None; 8],
         effects: HashMap::new(),
         command,
@@ -1086,6 +1114,15 @@ pub fn tick(
                 serial,
                 owner,
             }),
+            // The thrown Keyblade's turn (8:2 after 6:68's angles): the
+            // vector came through the position conversion; its raw angles
+            // are taken back.
+            Event::Service {
+                name: "obj_set_xyzrot",
+                object: Some(WEAPONS),
+                vector: Some(v),
+                ..
+            } => run.weapon_axes = Some(axes_of([v[0], -v[1], -v[2]])),
             Event::Service { name, words, .. } if name != "player_set_exec_rc" => {
                 game.event(
                     serde_json::json!({"event":"party_limit_service","tick":tick,

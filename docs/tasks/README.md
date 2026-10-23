@@ -184,4 +184,5 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T214](T214-world-map-pause-menu-journal-play-time.md) | World map: the pause menu, the journal, per-world play time and the Gummi hand-off | PROGRESS. Run against the install; nothing is compared with the original game. |
 | [T215](T215-party-ability-gating-and-items.md) | Party ability gating, own item slots and Sora's party items | PARTIAL. Gating and items run from the new-game record; the camp cannot edit it yet. |
 | [T216](T216-lens-flare-and-world-matrix-programs.md) | Lens-flare and world-matrix effect programs; Sora's Keyblade in summon limits | PARTIAL. The effects run and the Keyblade is placed; nothing is compared with the original game. |
+| [T217](T217-limit-form-follow-ups-and-counter-tour.md) | Limit Form follow-ups: shots and the map, Strike Raid's spin, the hop target, Zantetsu Counter | PARTIAL. Settled from the executable; nothing is compared with the original game. |
 | [T141](T141-ik-and-animation-parity.md) | IK aim chains, pole vectors and joint-space motion blends | PROGRESS. Master Form matches the PS2 routine; 87% of installed motions within 0.1. |
