@@ -1,4 +1,4 @@
-# T212 — Party ability gating, own item slots and Sora's party items
+# T213 — Party ability gating, own item slots and Sora's party items
 
 Owner Claude, 2026-10-23, requested by burba in the project chat ("keep working on it until
 there's nothing left to do", "keep going"), handed over by the project's coordinator session;
