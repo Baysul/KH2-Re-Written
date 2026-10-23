@@ -1693,11 +1693,11 @@
           ]
         },
         {
-          "id": "NATIVE-T220-01",
+          "id": "NATIVE-T221-01",
           "label": "Map hit record of the script line check and its normal, hit, crossing and surface getters - translation, equivalence unproved",
           "status": "PARTIAL",
           "evidence": [
-            "docs/tasks/T220-map-hit-record.md"
+            "docs/tasks/T221-map-hit-record.md"
           ]
         },
         {
