@@ -90,7 +90,7 @@ fn chicken_littles_aim_point_goes_in_and_out_in_the_scripts_frame() {
         lookup(10, 59).unwrap(),
         &[Slot::address(ai), Slot::address(v)],
     );
-    assert_eq!(me.friend.as_ref().unwrap().aim, [1., 2., 3.]);
+    assert_eq!(me.friend.as_ref().unwrap().aim, [1., 2., -3.]);
     let r = call(
         &mut world,
         &mut me,

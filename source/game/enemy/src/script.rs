@@ -314,8 +314,12 @@ impl Thread {
         t.eval.extend_from_slice(args);
         t
     }
+    /// [I] Wraps as the release build does once instance ids grow large
+    /// (a debug build would stop on the overflow).
     pub fn frame_base(&self, inst: &Instance) -> u32 {
-        FRAME_SEGMENT + (inst.id << 20) + (self.slot << 16)
+        FRAME_SEGMENT
+            .wrapping_add(inst.id.wrapping_shl(20))
+            .wrapping_add(self.slot.wrapping_shl(16))
     }
     fn frame_set_tag(&mut self, tag_at: u32, value: u32, tag: u32) {
         let o = self.fp as usize;

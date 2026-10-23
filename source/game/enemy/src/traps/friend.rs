@@ -2,7 +2,7 @@
 //! owner of the script's AI object (the friend); the personality traps
 //! act on the [`Friend`](crate::friend::Friend) it carries.
 
-use super::math::read_sanitized;
+use super::math::{native, read_sanitized};
 use crate::friend::{self, flag};
 use crate::script::{Fault, Memory, Slot};
 use crate::sysobj::class_flag;
@@ -114,7 +114,7 @@ fn set_flag(
 
 fn vector(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, index: u16, v: [f32; 3], args: &mut Args) {
     let cell = ctx.world.static_cell(10, index, 0);
-    for (k, lane) in [v[0], -v[1], v[2], 1.].iter().enumerate() {
+    for (k, lane) in native([v[0], v[1], v[2], 1.]).iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);
@@ -262,7 +262,7 @@ fn obj_limit_peterpan_idle(
 /// (DAT_142b59480 / 84).
 fn obj_limit_hover(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let v = read_sanitized(ctx, m, args[1].value)?;
+    let v = native(read_sanitized(ctx, m, args[1].value)?);
     ctx.world.hover_spec[4] = args[2].as_float();
     ctx.world.hover_spec[5] = args[3].as_float();
     let spec = ctx.world.hover_spec;
@@ -474,7 +474,8 @@ fn chickenlittle_set_shoot_target(
 ) -> Result<(), Fault> {
     let id = me(ctx, m, args[0].value)?;
     let v = read_sanitized(ctx, m, args[1].value)?;
-    with_friend(ctx, id, |f| f.aim = [v[0], -v[1], v[2]])?;
+    let v = native(v);
+    with_friend(ctx, id, |f| f.aim = [v[0], v[1], v[2]])?;
     Ok(())
 }
 

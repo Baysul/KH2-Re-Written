@@ -198,6 +198,9 @@ pub enum Event {
         param: [i32; 2],
         serial: u64,
         owner: Option<ObjId>,
+        /// Where the strike comes from when its maker names a point (a
+        /// Stitch shot's view origin, FUN_1401b8250), for its direction.
+        from: Option<[f32; 3]>,
     },
     /// `obj_dead`: the object finished dying and is removed.
     ObjectDead {
