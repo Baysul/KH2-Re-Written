@@ -1669,6 +1669,14 @@
           ]
         },
         {
+          "id": "NATIVE-T213-01",
+          "label": "Script vectors, offsets and headings in the engine frame - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T213-script-frame.md"
+          ]
+        },
+        {
           "id": "NATIVE-T211-01",
           "label": "Reaction command search over the held command, record 1, partner, shapes, attacks and auto offers - translation, equivalence unproved",
           "status": "PARTIAL",
@@ -1714,14 +1722,6 @@
           "status": "PARTIAL",
           "evidence": [
             "docs/tasks/T211-reaction-command-manager.md"
-          ]
-        },
-        {
-          "id": "NATIVE-T212-01",
-          "label": "World map cursor actions, the ship blend, dash and warp path - translation, equivalence unproved",
-          "status": "PARTIAL",
-          "evidence": [
-            "docs/tasks/T212-world-map-cursor-lock-and-fades.md"
           ]
         },
         {

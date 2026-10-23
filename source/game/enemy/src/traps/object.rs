@@ -6,7 +6,7 @@
 //! Each function cites the executable function it translates. Engine services
 //! the executable reaches that are not translated yet are marked [U].
 
-use super::math::{read_native, read_sanitized, wrap_angle};
+use super::math::{native, native_own, native_own_yaw, read_native, read_sanitized, wrap_angle};
 use crate::act::Entry;
 use crate::script::{Fault, Memory, Slot};
 use crate::sysobj::{JumpMotions, PendingFly};
@@ -137,7 +137,9 @@ fn sysobj_player(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result
 fn wish_dir(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let v = read_sanitized(ctx, m, args[1].value)?;
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    ctx.object(id)?.sys.wish_yaw = Some(v[0].atan2(v[2]));
+    let sys = &mut ctx.object(id)?.sys;
+    let v = native_own(sys.camera_space, v);
+    sys.wish_yaw = Some(v[0].atan2(v[2]));
     Ok(())
 }
 
@@ -349,7 +351,8 @@ fn jump(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fa
     let (slot, blend, auto) = (args[2].as_int(), args[3].as_float(), args[4].as_int());
     let env = ctx.env;
     let obj = ctx.object(id)?;
-    obj.sys.launch_jump([v[0], 0., v[2]], v[1], v[3]);
+    // The heading turns into the scene; y is the apex height, w the speed.
+    obj.sys.launch_jump([v[0], 0., -v[2]], v[1], v[3]);
     obj.sys
         .motion_start(slot.max(0) as usize, blend, env.clips(obj.sys.model));
     if auto != 0 {
@@ -402,14 +405,16 @@ fn is_air(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), 
 fn get_moved(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let v = ctx.object(id)?.sys.moved;
-    own_vector(ctx, m, 62, [v[0], -v[1], v[2]], args)
+    let v = native([v[0], v[1], v[2], 0.]);
+    own_vector(ctx, m, 62, [v[0], v[1], v[2]], args)
 }
 
 /// 1:64 FUN_14042f160: a copy of +0xa28.
 fn get_wish_movement(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let v = ctx.object(id)?.sys.wished;
-    own_vector(ctx, m, 64, [v[0], -v[1], v[2]], args)
+    let v = native([v[0], v[1], v[2], 0.]);
+    own_vector(ctx, m, 64, [v[0], v[1], v[2]], args)
 }
 
 /// 1:65 FUN_14042f220: flag 0x4000000 asks the engine to start a fall.
@@ -497,6 +502,7 @@ fn set_dir(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(),
     let v = read_sanitized(ctx, m, args[1].value)?;
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let sys = &mut ctx.object(id)?.sys;
+    let v = native_own(sys.camera_space, v);
     sys.yaw = wrap_angle(v[0].atan2(v[2]));
     sys.wish_yaw = Some(sys.yaw);
     Ok(())
@@ -507,7 +513,9 @@ fn turn_dir(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<()
     let v = read_sanitized(ctx, m, args[1].value)?;
     let rate = args[2].as_float();
     let id = ctx.sys_of_ai(m, args[0].value)?;
-    let turning = ctx.object(id)?.sys.turn_dir([v[0], v[1], v[2]], rate);
+    let sys = &mut ctx.object(id)?.sys;
+    let v = native_own(sys.camera_space, v);
+    let turning = sys.turn_dir([v[0], v[1], v[2]], rate);
     int(args, turning as i32);
     Ok(())
 }
@@ -609,16 +617,19 @@ fn show(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fa
 
 /// 1:147 FUN_14042b7b0: the position.
 fn position(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let p = match ctx.sys_ref_ai(m, args[0].value)? {
-        SysRef::Player => ctx.env.player_position(),
-        SysRef::Object(id) => ctx.object(id)?.sys.position,
+    let (p, camera) = match ctx.sys_ref_ai(m, args[0].value)? {
+        SysRef::Player => (ctx.env.player_position(), false),
+        SysRef::Object(id) => {
+            let sys = &ctx.object(id)?.sys;
+            (sys.position, sys.camera_space)
+        }
     };
     let w = ctx
         .world
         .static_lookup(1, 0, 1)
         .and_then(|c| ctx.world.static_read(c + 12));
     let w = w.map_or(1.0, f32::from_bits);
-    shared_vector(ctx, m, [p[0], -p[1], p[2], w], args)
+    shared_vector(ctx, m, native_own(camera, [p[0], p[1], p[2], w]), args)
 }
 
 /// 1:168 FUN_14042cf50: `obj_flyjump`, a jump that waits for the motion's
@@ -630,7 +641,7 @@ fn fly_jump(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<()
     let env = ctx.env;
     let obj = ctx.object(id)?;
     obj.sys.pending_fly = Some(PendingFly {
-        direction: [v[0], 0., v[2]],
+        direction: [v[0], 0., -v[2]],
         height: v[1],
         speed: v[3],
     });
@@ -661,17 +672,18 @@ fn status_force_leave(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) ->
 
 /// 1:201 FUN_14042ba00 -> FUN_1403b56e0: the facing vector (w = heading).
 fn direction(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let (v, yaw) = match ctx.sys_ref_ai(m, args[0].value)? {
+    let (v, yaw, camera) = match ctx.sys_ref_ai(m, args[0].value)? {
         SysRef::Player => {
             let yaw = ctx.env.player_yaw();
-            ([yaw.sin(), 0., yaw.cos()], yaw)
+            ([yaw.sin(), 0., yaw.cos()], yaw, false)
         }
         SysRef::Object(id) => {
             let sys = &ctx.object(id)?.sys;
-            (sys.forward(), sys.yaw)
+            (sys.forward(), sys.yaw, sys.camera_space)
         }
     };
-    shared_vector(ctx, m, [v[0], 0., v[2], yaw], args)
+    let v = native_own(camera, [v[0], 0., v[2], 0.]);
+    shared_vector(ctx, m, [v[0], 0., v[2], native_own_yaw(camera, yaw)], args)
 }
 
 /// 1:301 FUN_140431730.
@@ -845,11 +857,15 @@ fn is_exist(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<()
 /// 1:98 FUN_14042fae0: the position with w = the step height (FUN_1403b87e0).
 /// [U] Taken to be the current height, its value when nothing is probed.
 fn step_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let p = match ctx.sys_ref_ai(m, args[0].value)? {
-        SysRef::Player => ctx.env.player_position(),
-        SysRef::Object(id) => ctx.object(id)?.sys.position,
+    let (p, camera) = match ctx.sys_ref_ai(m, args[0].value)? {
+        SysRef::Player => (ctx.env.player_position(), false),
+        SysRef::Object(id) => {
+            let sys = &ctx.object(id)?.sys;
+            (sys.position, sys.camera_space)
+        }
     };
-    shared_vector(ctx, m, [p[0], -p[1], p[2], -p[1]], args)
+    let v = native_own(camera, [p[0], p[1], p[2], 0.]);
+    shared_vector(ctx, m, [v[0], v[1], v[2], -p[1]], args)
 }
 
 /// 1:150 FUN_14042d1e0: attack range `n` (1-based, `+0x2ac` bits).

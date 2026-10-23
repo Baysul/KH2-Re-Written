@@ -799,7 +799,7 @@ pub fn shot(world: &mut World, me: &mut Object, f: &mut Friend, env: &dyn Env, n
         .and_then(|x| x.as_deref())
         .map(|x| x.sys.position);
     for _ in 0..shots {
-        let _from = [
+        let from = [
             origin[0] + (f.rand01() - 0.5) * 2. * SHOT_SPREAD,
             origin[1] + (f.rand01() - 0.5) * 2. * SHOT_SPREAD,
             origin[2],
@@ -826,6 +826,7 @@ pub fn shot(world: &mut World, me: &mut Object, f: &mut Friend, env: &dyn Env, n
             param,
             serial,
             owner,
+            from: Some(from),
         });
         world.attacks[slot] = None;
         // The strike's spark: effect 2 of his container at the target.
@@ -1152,6 +1153,7 @@ fn strikes(world: &mut World, me: &Object, f: &mut Friend) {
             param,
             serial,
             owner,
+            from: None,
         });
     }
 }

@@ -1059,8 +1059,8 @@ pub fn tick(
                 let Some(&(key, _)) = run.effects.get(&handle) else {
                     continue;
                 };
-                // Script frame (Y down) to the room's.
-                let v = vector.map(|v| [v[0], -v[1], v[2]]);
+                // The script's (engine) frame to the room's: (x, -y, -z).
+                let v = vector.map(|v| [v[0], -v[1], -v[2]]);
                 let fx = match (trap, v) {
                     (38, Some(v)) => player::magic::Fx::Pos(key, v),
                     (41, Some(v)) => player::magic::Fx::Dir(key, v),

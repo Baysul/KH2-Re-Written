@@ -404,7 +404,7 @@ mod tests {
             phase: Phase::Fly,
         });
         let p = points(&world)[0];
-        assert_eq!(p.position, [1., -2., 3.]);
+        assert_eq!(p.position, [1., -2., -3.]);
         assert_eq!((p.group, p.alpha, p.frame), (7, 0x80, 0xff));
         set_frame(&mut world, base, 3);
         assert_eq!(points(&world)[0].frame, 3);

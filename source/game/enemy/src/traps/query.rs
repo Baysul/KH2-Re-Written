@@ -2,7 +2,7 @@
 //! (state queries, small setters), translated from the executable (Steam
 //! build 15194255). Each names the trap wrapper and the routine it calls.
 
-use super::math::read_native;
+use super::math::{native, read_native};
 use crate::script::{Fault, Memory, Slot};
 use crate::sysobj::{JumpMotions, Target, class_flag, state_flag};
 use crate::world::{Ctx, Event, ObjId, PLAYER_OBJECT, TrapFn};
@@ -99,7 +99,7 @@ fn return_vec(
     v: [f32; 4],
 ) {
     let cell = ctx.world.static_cell(key.0, key.1, 0);
-    for (k, lane) in [v[0], -v[1], v[2], v[3]].iter().enumerate() {
+    for (k, lane) in native(v).iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);

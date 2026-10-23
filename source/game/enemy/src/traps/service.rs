@@ -12,7 +12,7 @@
 //! value from the other subsystem the value comes from the host's
 //! [`Env`](crate::env::Env) (0 when it has none).
 
-use super::math::{read_native, read_sanitized};
+use super::math::{native, read_native};
 use crate::script::{Fault, Memory, Slot};
 use crate::sysobj::class_flag;
 use crate::world::{
@@ -459,7 +459,7 @@ fn vacuum<'a>(ctx: &'a mut Ctx<'_>, handle: u32) -> Result<&'a mut Vacuum, Fault
 /// 2:77 FUN_140433200 -> FUN_1403f8f20: a vacuum at the point, with the
 /// argument in its three strength values, range 0, +0x28 = 100, +0x2c = 0.01.
 fn vacuum_create(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let at = read_sanitized(ctx, m, args[0].value)?;
+    let at = read_native(ctx, m, args[0].value)?;
     let strength = args[1].as_float();
     let slot = ctx.world.vacuums.iter().position(Option::is_none);
     let slot = slot.unwrap_or_else(|| {
@@ -500,7 +500,7 @@ fn vacuum_set_position(
     m: &mut Memory<'_>,
     args: &mut Args,
 ) -> Result<(), Fault> {
-    let at = read_sanitized(ctx, m, args[1].value)?;
+    let at = read_native(ctx, m, args[1].value)?;
     vacuum(ctx, args[0].value)?.position = at;
     Ok(())
 }
@@ -559,7 +559,7 @@ fn bg_cross_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
     let hit = ctx.env.line_hit([a[0], a[1], a[2]], [b[0], b[1], b[2]]);
     ctx.world.last_line_cross = hit;
     if let Some(at) = hit {
-        for (k, lane) in [at[0], -at[1], at[2]].iter().enumerate() {
+        for (k, lane) in native([at[0], at[1], at[2], 1.0])[..3].iter().enumerate() {
             ctx.write_f32(m, out + 4 * k as u32, *lane);
         }
     }
@@ -738,7 +738,7 @@ fn host_vector(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result
     let input = read_native(ctx, m, args[0].value).unwrap_or([0.; 4]);
     let v = ctx.env.camera_vector(input).unwrap_or([0., 0., 0., 1.]);
     let cell = ctx.world.static_cell(1, 316, 0);
-    for (k, lane) in [v[0], -v[1], v[2], v[3]].iter().enumerate() {
+    for (k, lane) in native(v).iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);
@@ -753,7 +753,7 @@ fn effect_dir(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<
         .effect_direction(args[0].value)
         .map_or([0., 0., 0., 1.], |d| [d[0], d[1], d[2], 1.]);
     let cell = ctx.world.static_cell(0, 54, 0);
-    for (k, lane) in [v[0], -v[1], v[2], v[3]].iter().enumerate() {
+    for (k, lane) in native(v).iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);
