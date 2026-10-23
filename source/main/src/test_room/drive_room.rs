@@ -1199,12 +1199,28 @@ pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
         if super::limit_form_tour::place(tick) {
             game.player.mp.cur = game.player.mp.max;
             game.player.mp_charging = false;
+            // [Tour setup] The form's time topped up too: the counter
+            // window's fight drains it.
+            game.player.drive.time = game.player.drive.max_time;
             // [Tour setup] In front of the Shadow, facing it.
             if let Some(rt) = game.enemy.as_ref() {
                 let e = rt.enemy.position;
                 game.player.position = [e[0], e[1], e[2] + super::limit_form_tour::STAND_OFF];
                 game.player.yaw = std::f32::consts::PI;
             }
+        }
+        // [Tour setup] The Shadow fights in the counter window only, Sora
+        // close in front of it as it opens.
+        let window = super::limit_form_tour::COUNTER;
+        if tick == window.start || tick == window.end {
+            game.cheats.enemy_frozen = tick == window.end;
+        }
+        if tick == window.start
+            && let Some(rt) = game.enemy.as_ref()
+        {
+            let e = rt.enemy.position;
+            game.player.position = [e[0], e[1], e[2] + super::limit_form_tour::CLOSE];
+            game.player.yaw = std::f32::consts::PI;
         }
         if let Some(cmd) = super::limit_form_tour::limit(tick) {
             d.limit_request = Some(cmd);
@@ -1697,8 +1713,8 @@ pub fn limit_tick(game: &mut Game) {
 
 /// Strike Raid's thrown Keyblade: while the `limitform` program has let it
 /// go (`obj_detach`, then `obj_set_pos` each frame of its `fly` thread) it
-/// is drawn where the scene holds its object, blade along its travel.
-/// [I] The program's `obj_set_xyzrot` angles are not applied.
+/// is drawn where the scene holds its object, turned as the program's
+/// `obj_set_xyzrot` (from 6:68's angles) turns it: rolling about its travel.
 type HandQuery<'w, 's> = Query<
     'w,
     's,
@@ -1712,11 +1728,11 @@ pub fn thrown_keyblade(
     mut hands: HandQuery,
     mut last: Local<Option<(Vec3, Vec3)>>,
 ) {
-    let Some(at) = game
+    let Some((at, axes)) = game
         .party_limit
         .as_ref()
         .and_then(|r| r.thrown_weapon())
-        .map(Vec3::from_array)
+        .map(|(p, axes)| (Vec3::from_array(p), axes))
     else {
         *last = None;
         return;
@@ -1730,9 +1746,18 @@ pub fn thrown_keyblade(
         None => Vec3::new(game.player.yaw.sin(), 0., game.player.yaw.cos()),
     };
     *last = Some((at, dir));
+    // The program's own turn when it set one, else along the travel.
+    let rotation = match axes {
+        Some([x, y, z]) => Quat::from_mat3(&Mat3::from_cols(
+            Vec3::from_array(x),
+            Vec3::from_array(y),
+            Vec3::from_array(z),
+        )),
+        None => Quat::from_rotation_arc(Vec3::NEG_X, dir),
+    };
     let world = Transform {
         translation: at,
-        rotation: Quat::from_rotation_arc(Vec3::NEG_X, dir),
+        rotation,
         scale: Vec3::ONE,
     };
     *t = Transform::from_matrix(root.to_matrix().inverse() * world.to_matrix());

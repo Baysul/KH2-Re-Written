@@ -864,6 +864,14 @@ fn engine(v: [f32; 3]) -> [f32; 3] {
 }
 
 impl MapWorld {
+    /// The first point where the map crosses the segment (scene
+    /// coordinates in and out), Sora's collision class.
+    pub fn line_hit(&self, from: [f32; 3], to: [f32; 3]) -> Option<[f32; 3]> {
+        self.world
+            .ray(engine(from), engine(to), SORA_BODY.class)
+            .map(|(p, _)| engine(p))
+    }
+
     /// Switches a background group's collision meshes (FUN_140162a00 /
     /// FUN_1401629b0 → FUN_1401715a0 / FUN_140174440).
     pub fn set_group(&mut self, group: u8, on: bool) {
