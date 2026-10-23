@@ -206,6 +206,31 @@ impl Camp {
         moved
     }
 
+    /// The party list rebuilt in the new order (FUN_1402fc800): each
+    /// member's pages move with its name; the Status rows keep their bits
+    /// (party slots).
+    fn swap_members(&mut self, a: usize, b: usize) {
+        fn swap<T>(v: &mut [T], a: usize, b: usize) {
+            if a < v.len() && b < v.len() {
+                v.swap(a, b);
+            }
+        }
+        let d = &mut self.data;
+        swap(&mut d.panels.members, a, b);
+        swap(&mut d.items.equipment, a, b);
+        swap(&mut d.abilities.members, a, b);
+        swap(&mut d.equip.totals, a, b);
+        swap(&mut d.equip.bases, a, b);
+        swap(&mut d.equip.form_weapons, a, b);
+        swap(&mut d.customize.styles, a, b);
+        let bit = |m: usize| if m == 0 { 0 } else { 6 + m as u8 };
+        let at = |m: usize| d.status.iter().position(|e| e.bit == bit(m));
+        if let (Some(pa), Some(pb)) = (at(a), at(b)) {
+            swap(&mut d.status, pa, pb);
+            (d.status[pa].bit, d.status[pb].bit) = (bit(a), bit(b));
+        }
+    }
+
     /// FUN_14031f9a0: the second pick; deciding swaps the two members.
     pub(super) fn party_swap(&mut self, seq: &Sequence, pad: &Pad, sounds: &mut Vec<u32>) -> bool {
         let (pick, moved) = self.party_ui.swap.input(pad);
@@ -226,7 +251,7 @@ impl Camp {
             Pick::Cancel => self.substate = 2,
             Pick::Row(b) => {
                 let a = self.party_ui.cards.cursor;
-                self.data.panels.members.swap(a, b);
+                self.swap_members(a, b);
                 let (na, nb) = (self.party_ui.names[a], self.party_ui.names[b]);
                 let ta = self.sprites.get(na).text.as_ref().map(|t| t.bytes.clone());
                 let tb = self.sprites.get(nb).text.as_ref().map(|t| t.bytes.clone());

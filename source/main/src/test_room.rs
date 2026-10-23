@@ -95,6 +95,7 @@ mod limit_tour;
 mod magic_room;
 mod magic_tour;
 mod party_blade;
+mod party_camp_tour;
 mod party_hit_tour;
 mod party_items_tour;
 mod party_limit;
@@ -1097,6 +1098,8 @@ struct Game {
     limit_form_tour: bool,
     /// The unattended `--party-items-tour` (party_items_tour.rs).
     party_items_tour: bool,
+    /// The unattended `--party-camp-tour` (party_camp_tour.rs).
+    party_camp_tour: bool,
     /// The unattended `--summon-tour` (summon_tour.rs).
     summon_tour: bool,
     /// The deck swap (left, logical 0x10000) and open (right, 0x10000000)
@@ -2242,6 +2245,8 @@ struct CampSource {
     customize: pause_menu::customize::CustomizeTexts,
     equip_texts: pause_menu::equip::EquipTexts,
     equip_stats: Vec<pause_menu::equip::ItemStats>,
+    /// Donald and Goofy: names, Status help and level-1 rows.
+    party: Vec<PartyCampSource>,
     /// The font image's icon plane (0x09 icons).
     icons: SystemFont,
     /// 03system.bin `ipic`: the item pictures' sequence.
@@ -2251,6 +2256,32 @@ struct CampSource {
     notice_page: Vec<u8>,
     notice_callouts: Vec<(String, Vec<pause_menu::notice::Callout>)>,
 }
+
+/// A party member's camp texts and level row: character id, name (table
+/// 0x1405c8f60: 0x8520 Donald, 0x8521 Goofy), the Status help 0xc5ae with
+/// the name, and the level-1 `lvup` row (party-camp spec §2.4).
+struct PartyCampSource {
+    character: u8,
+    name: Vec<u8>,
+    help: Vec<u8>,
+    level: data::battle_tables::PlayerLevel,
+}
+
+/// A party member as the camp opens: character id, HP, MP and its
+/// character record.
+#[derive(Clone)]
+struct CampMember {
+    character: u8,
+    hp: i32,
+    max_hp: i32,
+    mp: i32,
+    max_mp: i32,
+    save: player::party_members::Save,
+}
+
+/// The Status rows a party member shows (FUN_140352350 for bits 7..9:
+/// mask 0x1fc3f).
+const PARTY_STATS: u32 = 0x1fc3f;
 
 /// Items screen messages (camp-05 §9).
 const ITEM_MESSAGES: [u32; 19] = [
@@ -2308,10 +2339,13 @@ const EQUIP_MESSAGES: [u32; 22] = [
 
 /// Customize messages (camp-07 §1.3 / §7): help, category labels,
 /// shortcut headings, remove help, MP Charge and Auto-Reload choices and
-/// help, the Auto-Reload warning.
-const CUSTOMIZE_MESSAGES: [u32; 19] = [
-    0xbb89, 0xbb8a, 0x847d, 0x8481, 0x8482, 0x847d, 0x847e, 0x847f, 0x8480, 0x9df7, 0x9df9, 0x9df8,
-    0x9dfb, 0x9dfa, 0x9dfd, 0x9dfc, 0x9dff, 0x9dfe, 0x846a,
+/// help, the Auto-Reload warning, the battle styles and their help, the
+/// ability and item frequencies and their help.
+const CUSTOMIZE_MESSAGES: [u32; 43] = [
+    0xbb89, 0xbb8a, 0x847d, 0x8481, 0x8482, 0x8483, 0x8484, 0x847d, 0x847e, 0x847f, 0x8480, 0x9df7,
+    0x9df9, 0x9df8, 0x9dfb, 0x9dfa, 0x9dfd, 0x9dfc, 0x9dff, 0x9dfe, 0x846a, 0x8486, 0x8487, 0x8488,
+    0x8489, 0x848a, 0x848b, 0x9e55, 0x9e56, 0x9e57, 0x9e58, 0x9e59, 0x9e5a, 0x9e4e, 0x9e4f, 0x9e50,
+    0x9e5b, 0x9e5c, 0x9e5d, 0x9e51, 0x9e52, 0x9e5e, 0x9e5f,
 ];
 
 /// Abilities screen messages (camp-06 §7).
@@ -2854,7 +2888,7 @@ fn load_camp_source(
     let mut take = || cust.next().unwrap_or_default();
     let customize = pause_menu::customize::CustomizeTexts {
         help: [take(), take()],
-        labels: [take(), take(), take()],
+        labels: [take(), take(), take(), take(), take()],
         shortcut_headings: [take(), take(), take(), take()],
         remove_help: take(),
         mp_choices: [take(), take()],
@@ -2862,7 +2896,37 @@ fn load_camp_source(
         reload_choices: [take(), take()],
         reload_help: [take(), take()],
         reload_warning: take(),
+        styles: std::array::from_fn(|_| take()),
+        style_help: std::array::from_fn(|_| take()),
+        ability_frequency: std::array::from_fn(|_| take()),
+        ability_frequency_help: std::array::from_fn(|_| take()),
+        item_frequency: std::array::from_fn(|_| take()),
+        item_frequency_help: std::array::from_fn(|_| take()),
     };
+    // Donald and Goofy (party-camp spec §1.1, §2.4).
+    let names = msg(&[0x8520, 0x8521])?;
+    let party_sources = [2u8, 3]
+        .into_iter()
+        .zip(names)
+        .map(|(character, name)| {
+            let mut help = Vec::new();
+            for &b in &status_help {
+                if b == 0x0d {
+                    help.extend_from_slice(&name);
+                } else {
+                    help.push(b);
+                }
+            }
+            data::battle_tables::player_level(lvup, usize::from(character), 1).map(|level| {
+                PartyCampSource {
+                    character,
+                    name,
+                    help,
+                    level,
+                }
+            })
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
     let mut eq = msg(&EQUIP_MESSAGES[..21])?.into_iter();
     let mut take = || eq.next().unwrap_or_default();
     // 0x845f Master and 0x8461 Final label the other two form weapons.
@@ -2936,6 +3000,7 @@ fn load_camp_source(
         customize,
         equip_texts,
         equip_stats,
+        party: party_sources,
         picture_sequence: bar_entry(system, b"ipic")
             .ok()
             .map(data::sprite_sequence::read)
@@ -10788,6 +10853,15 @@ fn finish(
             "air_combo":game.player.abilities.air_combo,"finishers":game.player.abilities.finishers});
         game.event(verdict);
     }
+    if autoplay_done && game.exit_code.is_none() && game.party_camp_tour {
+        let pass = game
+            .party
+            .iter()
+            .find(|m| m.kind.character == 2)
+            .is_some_and(|m| party_camp_tour::donald_passes(&m.save));
+        game.autoplay_failed |= !pass;
+        game.event(serde_json::json!({"event":"party_camp_verdict","pass":pass}));
+    }
     let window_closed = closed.read().count() > 0;
     if keys.just_pressed(KeyCode::Escape)
         || window_closed
@@ -11242,17 +11316,41 @@ fn camp_tick(
         ),
         _ => (1, 1, 0, 1),
     };
+    // The party list (FUN_1402fc360): Sora, then the members in party
+    // order — also one a Drive form holds out of the field [I: the camp's
+    // MENU_FRIEND objects stand for them].
+    let party: Vec<CampMember> = game
+        .party
+        .iter()
+        .map(|m| CampMember {
+            character: m.kind.character,
+            hp: m.hp,
+            max_hp: m.max_hp,
+            mp: m.mp.cur,
+            max_mp: m.mp.max,
+            save: m.save,
+        })
+        .collect();
     let panels = pause_menu::Panels {
         munny: 0,
         time_frames: tick as u32,
-        members: vec![pause_menu::Member {
+        members: std::iter::once(pause_menu::Member {
             name: c.source.name.clone(),
             level: 1,
             hp,
             max_hp,
             mp,
             max_mp,
-        }],
+        })
+        .chain(party.iter().map(|m| pause_menu::Member {
+            name: party_source(c, m.character).map_or_else(Vec::new, |s| s.name.clone()),
+            level: 1,
+            hp: m.hp,
+            max_hp: m.max_hp,
+            mp: m.mp,
+            max_mp: m.max_mp,
+        }))
+        .collect(),
         labels: c.source.labels.clone(),
     };
     let panels_again = panels.clone();
@@ -11295,6 +11393,7 @@ fn camp_tick(
         max_hp,
         mp,
         max_mp,
+        party,
     };
     // The menu chain (menu mode 10, FUN_14031aac0): the camp; deciding a
     // journal brings the curtain down over the camp's close; the journal
@@ -11405,6 +11504,46 @@ fn camp_tick(
                     m.levels[t] = c.stock.get(item).copied().unwrap_or(0);
                 }
                 m.dont_charge = c.no_charge;
+            }
+            // The party members' records and HP / MP, by character (a Party
+            // swap reorders the camp's pages; the room's party order is
+            // not written back).
+            for rt in game.party.iter_mut() {
+                let Some(m) = menu
+                    .data
+                    .items
+                    .equipment
+                    .iter()
+                    .skip(1)
+                    .position(|e| e.character == rt.kind.character)
+                    .map(|p| p + 1)
+                else {
+                    continue;
+                };
+                if let Some(e) = menu.data.items.equipment.get(m) {
+                    write_member(
+                        &mut rt.save,
+                        e,
+                        menu.data.abilities.members.get(m),
+                        menu.data.customize.styles.get(m).copied(),
+                    );
+                }
+                if let Some(p) = menu.data.panels.members.get(m) {
+                    rt.hp = p.hp;
+                    let delta = p.mp - rt.mp.cur;
+                    if delta != 0 {
+                        rt.mp.add(delta);
+                    }
+                }
+            }
+            if !game.party.is_empty() {
+                let records: Vec<_> = game.party.iter().map(|m| serde_json::json!({
+                    "character": m.kind.character, "style": m.save.style,
+                    "frequency": m.save.frequency.to_vec(), "items": m.save.items.to_vec(),
+                    "originals": m.save.originals.to_vec(),
+                    "abilities": m.save.abilities.iter().filter(|&&v| v != 0).copied().collect::<Vec<_>>(),
+                    "weapon": m.save.weapon, "hp": m.hp, "mp": m.mp.cur})).collect();
+                game.event(serde_json::json!({"event":"camp_party","tick":tick,"members":records}));
             }
             // Items used in the camp change the room's HP / MP.
             if let Some(sora) = menu.data.panels.members.first() {
@@ -11517,6 +11656,7 @@ fn camp_tick(
                 data.items.equipment.clone_from(&o.items.equipment);
                 data.customize.shortcuts = o.customize.shortcuts;
                 data.customize.no_charge = o.customize.no_charge;
+                data.customize.styles.clone_from(&o.customize.styles);
                 data.abilities.members.clone_from(&o.abilities.members);
                 data.notice.flags.clone_from(&o.notice.flags);
                 for (m, was) in data.panels.members.iter_mut().zip(&o.panels.members) {
@@ -11547,7 +11687,7 @@ fn camp_tick(
 
 /// What the field (or the world map) lends the camp: the equipment's
 /// totals, the owned forms with their Keyblades and abilities, the form
-/// weapon and Sora's HP and MP.
+/// weapon, Sora's HP and MP and the party members.
 struct CampSide {
     gear: player::equipment_stats::Totals,
     form_slots: Vec<(u8, u16)>,
@@ -11557,6 +11697,130 @@ struct CampSide {
     max_hp: i32,
     mp: i32,
     max_mp: i32,
+    party: Vec<CampMember>,
+}
+
+fn party_source(c: &CampRes, character: u8) -> Option<&PartyCampSource> {
+    c.source.party.iter().find(|s| s.character == character)
+}
+
+/// A party member's camp pages: its equipment (Equip, Items, Customize),
+/// abilities with frequencies, level base, totals and Status row (bit
+/// `bit`) — FUN_140354340 and FUN_1403c1d90 for a member record.
+fn member_pages(
+    c: &CampRes,
+    m: &CampMember,
+    bit: u8,
+) -> (
+    pause_menu::items::Equipment,
+    pause_menu::abilities::MemberAbilities,
+    player::equipment_stats::Totals,
+    pause_menu::equip::Totals,
+    pause_menu::StatusEntry,
+) {
+    let s = &m.save;
+    let source = party_source(c, m.character);
+    let take = |v: &[u16; 8], n: u8| v[..usize::from(n.min(8))].to_vec();
+    let equipment = pause_menu::items::Equipment {
+        character: m.character,
+        weapon: s.weapon,
+        armor: take(&s.armor, s.armor_slots),
+        accessories: take(&s.accessories, s.accessory_slots),
+        items: take(&s.items, s.item_slots),
+        originals: take(&s.originals, s.item_slots),
+        ..Default::default()
+    };
+    let level = source.map(|p| p.level);
+    let [ap, strength, magic, defense] = s.bonus.map(u16::from);
+    let base = player::equipment_stats::Totals::start(
+        level.map_or(0, |l| u16::from(l.strength)) + strength,
+        level.map_or(0, |l| u16::from(l.magic)) + magic,
+        level.map_or(0, |l| u16::from(l.defense)) + defense,
+        level.map_or(0, |l| u16::from(l.ap)) + ap,
+    );
+    let (totals, weapon_ability) = pause_menu::equip::gear_totals(
+        &c.source.items.table,
+        &c.source.equip_stats,
+        base,
+        &equipment,
+        None,
+    );
+    let abilities = pause_menu::abilities::MemberAbilities {
+        slots: s.abilities.to_vec(),
+        ap_max: totals.ap,
+        weapon_ability,
+        form_weapon_abilities: Vec::new(),
+        frequency: s.frequency.to_vec(),
+    };
+    let used = pause_menu::abilities::used(&pause_menu::abilities::entries(
+        &c.source.items.table,
+        &abilities,
+    ));
+    // The shared EXP pool is 0 in the room (as Sora's row shows).
+    let value = |b: usize| -> String {
+        match b {
+            0 => "1".into(),
+            1 => "0".into(),
+            2 => format!("{}", level.map_or(0, |l| l.exp)),
+            3 => format!("{}/{}", m.hp, m.max_hp),
+            4 => format!("{}/{}", m.mp, m.max_mp),
+            5 => format!("{used}/{}", totals.ap),
+            10 => format!("{}", totals.strength),
+            11 => format!("{}", totals.magic),
+            12 => format!("{}", totals.defense),
+            13..=16 => format!("{}%", 100 - i32::from(totals.resists[b - 13])),
+            _ => String::new(),
+        }
+    };
+    let mut stats = vec![None; 20];
+    for (b, label, help, style) in &c.source.stats {
+        if PARTY_STATS >> b & 1 != 0 {
+            stats[*b] = Some(pause_menu::Stat {
+                label: label.clone(),
+                help: help.clone(),
+                style: *style,
+                value: pause_menu::encode_number(&value(*b)),
+            });
+        }
+    }
+    let status = pause_menu::StatusEntry {
+        bit,
+        label: source.map_or_else(Vec::new, |p| p.name.clone()),
+        help: source.map_or_else(Vec::new, |p| p.help.clone()),
+        stats,
+    };
+    (equipment, abilities, base, totals, status)
+}
+
+/// The camp's changes to a party member's record: equipment, item slots and
+/// auto-reload, abilities, frequencies, battle style, HP and MP.
+fn write_member(
+    save: &mut player::party_members::Save,
+    e: &pause_menu::items::Equipment,
+    a: Option<&pause_menu::abilities::MemberAbilities>,
+    style: Option<u8>,
+) {
+    let put = |dst: &mut [u16; 8], src: &[u16]| {
+        for (k, d) in dst.iter_mut().enumerate() {
+            *d = src.get(k).copied().unwrap_or(0);
+        }
+    };
+    save.weapon = e.weapon;
+    put(&mut save.armor, &e.armor);
+    put(&mut save.accessories, &e.accessories);
+    put(&mut save.items, &e.items);
+    put(&mut save.originals, &e.originals);
+    if let Some(a) = a {
+        for (d, &s) in save.abilities.iter_mut().zip(&a.slots) {
+            *d = s;
+        }
+        for (d, &f) in save.frequency.iter_mut().zip(&a.frequency) {
+            *d = f;
+        }
+    }
+    if let Some(s) = style {
+        save.style = s;
+    }
 }
 
 /// The camp's data when it opens (FUN_140354340 and the pages' sources):
@@ -11578,6 +11842,7 @@ fn camp_data(
         max_hp,
         mp,
         max_mp,
+        party,
     } = side;
     let (gear, hp, max_hp, mp, max_mp) = (*gear, *hp, *max_hp, *mp, *max_mp);
     // The battle's item slots and stock are the live ones.
@@ -11607,6 +11872,7 @@ fn camp_data(
         ap_max: n.ap,
         weapon_ability: c.source.weapon_ability,
         form_weapon_abilities: form_abilities.clone(),
+        frequency: Vec::new(),
     };
     let ap_used = pause_menu::abilities::used(&pause_menu::abilities::entries(
         &c.source.items.table,
@@ -11636,57 +11902,81 @@ fn camp_data(
             value: pause_menu::encode_number(&value(*bit)),
         });
     }
+    // The party members after Sora (status bits 7.., party order).
+    let pages: Vec<_> = party
+        .iter()
+        .enumerate()
+        .map(|(k, m)| member_pages(c, m, 7 + k as u8))
+        .collect();
+    let mut status = vec![pause_menu::StatusEntry {
+        bit: 0,
+        label: c.source.name.clone(),
+        help: c.source.help.clone(),
+        stats,
+    }];
+    let mut equipments = vec![equipment];
+    let mut ability_members = vec![sora_abilities.clone()];
+    let sora_totals = pause_menu::equip::Totals {
+        ap: n.ap,
+        strength: n.strength,
+        magic: n.magic,
+        defense: n.defense,
+        resists: [
+            gear.resist[1],
+            gear.resist[2],
+            gear.resist[3],
+            gear.resist[4],
+        ],
+    };
+    let mut totals = vec![sora_totals];
+    let mut bases = vec![player::equipment_stats::Totals::start(
+        c.source.numbers.strength as u16,
+        c.source.numbers.magic as u16,
+        c.source.numbers.defense as u16,
+        c.source.numbers.ap as u16,
+    )];
+    let mut form_weapons = vec![form_weapon.unwrap_or(0)];
+    let mut styles = vec![0];
+    for ((e, a, base, t, s), m) in pages.into_iter().zip(party) {
+        equipments.push(e);
+        ability_members.push(a);
+        bases.push(base);
+        totals.push(t);
+        form_weapons.push(0);
+        status.push(s);
+        styles.push(m.save.style);
+    }
     pause_menu::Data {
         entries: c.source.entries.clone(),
         panels,
-        status: vec![pause_menu::StatusEntry {
-            bit: 0,
-            label: c.source.name.clone(),
-            help: c.source.help.clone(),
-            stats,
-        }],
+        status,
         banner: c.source.banner.clone(),
         config: c.source.config.clone(),
         config_flags: c.config_flags,
         game_mode: c.game_mode,
         items: pause_menu::items::ItemsData {
             counts,
-            equipment: vec![equipment],
+            equipment: equipments,
             seen: c.seen.clone(),
             new_items,
             ..c.source.items.clone()
         },
         abilities: pause_menu::abilities::AbilitiesData {
-            members: vec![sora_abilities.clone()],
+            members: ability_members,
             texts: c.source.abilities.clone(),
         },
         party_help: c.source.party_help.clone(),
         equip: pause_menu::equip::EquipData {
             stats: c.source.equip_stats.clone(),
-            totals: vec![pause_menu::equip::Totals {
-                ap: n.ap,
-                strength: n.strength,
-                magic: n.magic,
-                defense: n.defense,
-                resists: [
-                    gear.resist[1],
-                    gear.resist[2],
-                    gear.resist[3],
-                    gear.resist[4],
-                ],
-            }],
-            bases: vec![player::equipment_stats::Totals::start(
-                c.source.numbers.strength as u16,
-                c.source.numbers.magic as u16,
-                c.source.numbers.defense as u16,
-                c.source.numbers.ap as u16,
-            )],
-            form_weapons: vec![form_weapon.unwrap_or(0)],
+            totals,
+            bases,
+            form_weapons,
             texts: c.source.equip_texts.clone(),
         },
         customize: pause_menu::customize::CustomizeData {
             shortcuts: c.shortcuts,
             no_charge: c.no_charge,
+            styles,
             texts: c.source.customize.clone(),
         },
         picture_sequence: c.source.picture_sequence.clone(),
@@ -12188,6 +12478,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut limit_tour = false;
     let mut limit_form_tour = false;
     let mut party_items_tour = false;
+    let mut party_camp_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
     // Capture ticks replacing the unattended run's own list (research).
@@ -12385,6 +12676,17 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .ok_or("party items tour capture directory absent")?,
                 );
             }
+            // The party's camp pages.
+            Some("--party-camp-tour") if autoplay.is_none() => {
+                ability_tour = true;
+                party_camp_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("party camp tour capture directory absent")?,
+                );
+            }
             Some("--journal-tour") if autoplay.is_none() => {
                 ability_tour = true;
                 journal_tour = true;
@@ -12566,6 +12868,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             .ok_or("ability tour requires camp assets")?;
         Some(if journal_tour {
             journal_tour::tour(&loaded.abilities.inventory)
+        } else if party_camp_tour {
+            party_camp_tour::tour(loaded.abilities.inventory.slots.clone())
         } else if badge_tour {
             prize_room::badge_tour(&loaded.abilities.inventory)
         } else if gear_tour {
@@ -12865,6 +13169,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         limit_tour,
         limit_form_tour,
         party_items_tour,
+        party_camp_tour,
         party_limits: Arc::new(std::mem::take(&mut loaded.party_limits)),
         party_limit: None,
         limit_request: None,
