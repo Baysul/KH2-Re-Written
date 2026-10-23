@@ -483,7 +483,7 @@ impl Object {
     /// A summon's kn::Friend update (FUN_1401b15f0): the think, then what
     /// it asked for: a script label (FUN_1403caa90) or a command for the
     /// host (FUN_1401b7d90).
-    fn tick_friend(&mut self, world: &mut World, env: &dyn Env) {
+    pub fn tick_friend(&mut self, world: &mut World, env: &dyn Env) {
         if self.friend.is_none() || self.sys.gone {
             return;
         }

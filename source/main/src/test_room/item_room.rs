@@ -7,6 +7,9 @@ use std::collections::BTreeMap;
 
 /// The wait between the use trigger and the heal (`DAT_140623bcc`).
 const HEAL_DELAY: f32 = 30.;
+/// Effect keys of the item elements Sora's party items start on the
+/// members.
+const ITEM_FX: u64 = 1 << 55;
 
 /// One consumable's 03system record fields.
 #[derive(Clone, Copy, Debug)]
@@ -165,6 +168,8 @@ pub fn tick(game: &mut Game, tick: u64) {
         log,
         drive,
         fx_queue,
+        fx_calls,
+        party,
         ..
     } = game;
     let system = drive.as_ref().and_then(|d| d.src.system_pax.clone());
@@ -236,11 +241,47 @@ pub fn tick(game: &mut Game, tick: u64) {
         if heal_mp > 0 {
             player.mp.add(heal_mp);
         }
-        let record = serde_json::json!({"event":"item_heal","tick":tick,"item":id,
-            "hp":heal_hp,"mp":heal_mp,"sora_hp":e.sora_hp,"mp_now":player.mp.cur});
-        if let Some(file) = log.as_mut() {
-            let _ = serde_json::to_writer(&mut *file, &record);
-            let _ = std::io::Write::write_all(file, b"\n");
+        let mut records = vec![
+            serde_json::json!({"event":"item_heal","tick":tick,"item":id,
+            "hp":heal_hp,"mp":heal_mp,"sora_hp":e.sora_hp,"mp_now":player.mp.cur}),
+        ];
+        // FUN_1403c4ab0: 5..7 and 0x83 heal every member of the party too
+        // (no range), each by its own maxima with the user's Item Boost,
+        // and start the item's element on each.
+        if matches!(id, 5..=7 | 0x83) {
+            for (k, m) in party.iter_mut().enumerate() {
+                let (hp, mp) = (share(m.max_hp), share(m.mp.max));
+                let (heal_hp, heal_mp) = match id {
+                    5 => (hp, 0),
+                    6 => (0, mp),
+                    7 => (hp, mp),
+                    _ => (m.max_hp, mp),
+                };
+                let was_down = super::party_room::heal_member(m, heal_hp);
+                if heal_mp > 0 {
+                    m.mp.add(heal_mp);
+                }
+                records.push(
+                    serde_json::json!({"event":"item_heal","tick":tick,"item":id,
+                    "member":m.kind.name,"hp":heal_hp,"mp":heal_mp,"member_hp":m.hp,
+                    "mp_now":m.mp.cur,"was_down":was_down}),
+                );
+                fx_calls.push(super::spell_fx::Call {
+                    pax: system.clone(),
+                    fx: player::magic::Fx::Start {
+                        key: ITEM_FX | (k as u64 + 1) << 32 | tick,
+                        id: info.effect,
+                        bound: Some(player::magic::Anchor::Party(k + 1)),
+                        at: None,
+                    },
+                });
+            }
+        }
+        for record in records {
+            if let Some(file) = log.as_mut() {
+                let _ = serde_json::to_writer(&mut *file, &record);
+                let _ = std::io::Write::write_all(file, b"\n");
+            }
         }
     }
     // The battle state drops once the enemy cannot be hit.

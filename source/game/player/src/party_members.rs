@@ -455,9 +455,13 @@ impl Follower {
 
     /// FUN_1401b2880's range test of one record against the target.
     pub fn eligible(&self, r: &Record, t: &Target) -> bool {
-        // Cure's record reads 0-0 as a range, which the original's check
-        // would turn into "touching the enemy"; the cast waits on the
-        // heal target instead [U: the record's flags were not decoded].
+        // FUN_1401b2880 tests the range only for an action entry whose
+        // flag byte has bit 1. In Donald's table (static constructor
+        // FUN_140009d40, entries from 0x1407250a0) Fire, Blizzard and
+        // Thunder have flags 2; Cure (record 60, runner FUN_1401cc1a0) has
+        // 0x10 and the item entries 0x18 / 0x28, so their records' range
+        // (Cure's reads 0-0) is never read: the cast waits on the heal
+        // target alone.
         if r.spell == Some(Spell::Cure) || r.item.is_some() {
             return true;
         }

@@ -307,7 +307,26 @@ pub struct Friend {
     /// +0x28 bit 0: Chicken Little's limit mode (FUN_1401cb6c0 sets it,
     /// FUN_1401cb180 clears it).
     pub limit: bool,
+    /// +0xfa0: the reaction-command callback `friend_call` (7:26,
+    /// FUN_1401b2870) runs; only Stitch's limit sets one (FUN_1401c7bf0).
+    pub call: Option<Call>,
+    /// The personality's target list (FUN_1401b4ac0: count +0x18, 32
+    /// objects from +0x20), which FUN_1401cd8e0 clears.
+    pub targets: Vec<ObjId>,
 }
+
+/// A `friend_call` callback (+0xfa0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Call {
+    /// FUN_1401c7bf0: Stitch's limit commands.
+    StitchCommand,
+}
+
+/// Stitch's limit deck: FUN_1401c9d60 -> FUN_1403db140(obj, 4), whose rows
+/// FUN_1404060e0 takes from 0x1405cc470 (command, selector): 0x20e Square,
+/// 0x20d Cross (two rows). [I] The other table (0x1405cc468) as for
+/// [`CHICKEN_LITTLE_DECK`].
+pub const STITCH_DECK: [(u16, u16); 2] = [(0x20e, 3), (0x20d, 4)];
 
 /// Chicken Little's limit deck: FUN_1401cb6c0 -> FUN_1403db140(obj, 5)
 /// gives Sora's command menu his own `comd` sheet in mode 5, whose rows
@@ -358,6 +377,8 @@ impl Friend {
             stitch: (personality == Personality::Stitch)
                 .then(|| Box::new(stitch::Stitch::default())),
             limit: false,
+            call: None,
+            targets: Vec::new(),
         }
     }
 }

@@ -452,6 +452,14 @@ pub struct Sysobj {
     pub limit_flight: Option<LimitFlight>,
     /// Physics mode 0x2a (Genie's limit hover, `obj_limit_hover`).
     pub limit_hover: Option<LimitHover>,
+    /// Physics mode 0x3e (object 0x140750d08) or 0x3c (0x140750ce8), both
+    /// of word 0x900: FUN_1401cb6c0 puts Sora in 0x3e for Chicken Little's
+    /// limit, FUN_1401c9d60 in 0x3c for Stitch's. Their entry, exit and
+    /// step slots are empty (FUN_140409ab0 / ac0 / b30 / b40, FUN_140536250
+    /// / 240), so the object does not move; 0x3e's motion slot is the ground
+    /// idle picker (FUN_140422520), 0x3c's is empty (FUN_1403cb670); their
+    /// fall and landing slots change to mode 0x3f / mode 1.
+    pub limit_stand: Option<u8>,
     /// Physics mode 3 with a camera-space matrix (FUN_1403b4da0(obj, 3),
     /// FUN_1403cbfc0: +0x124 bit 6, +0x8c8 bit 12): the object does not
     /// move by itself; its host places it from the camera (Stitch).
@@ -508,6 +516,12 @@ pub struct Capture {
     pub token: i32,
     /// Ticks the borrowed motion has left (the length of the captor's clip).
     pub remaining: u32,
+    /// The clip's length and loop start: a looping clip starts over at its
+    /// loop start instead of ending.
+    pub length: u32,
+    pub loop_start: Option<u32>,
+    /// FUN_1403c7140: the captured motion queued to follow this one.
+    pub next: Option<(crate::world::ObjId, i32, u32, Option<u32>)>,
 }
 
 /// +0x5d0: the head look (FUN_1403e5650 / FUN_1403e4f70) the head tracking
@@ -739,6 +753,7 @@ impl Sysobj {
             camera_space: false,
             limit_flight: None,
             limit_hover: None,
+            limit_stand: None,
             model_hidden: false,
             texture_animation: false,
             tex_fade: Fade::default(),
@@ -765,6 +780,9 @@ impl Sysobj {
         if self.camera_space {
             // Mode 3's +0xc.
             0x100
+        } else if self.limit_stand.is_some() {
+            // Mode 0x3e's and 0x3c's +0xc.
+            0x900
         } else if self.limit_flight.is_some() {
             // Mode 0x34's +0xc.
             0x10a
@@ -1102,7 +1120,7 @@ impl Sysobj {
         self.tex_fade.step(1.0);
         // A carried object does not move by itself (physics mode 3); the
         // world places it on its holder. Nor does one in camera space.
-        if self.attached.is_some() || self.camera_space {
+        if self.attached.is_some() || self.camera_space || self.limit_stand.is_some() {
             return;
         }
         if let Some(f) = self.limit_flight {
@@ -1241,6 +1259,7 @@ impl Sysobj {
         if let Some(h) = self.limit_hover.take() {
             self.turn_rate = h.turn;
         }
+        self.limit_stand = None;
         self.jump = None;
         self.hop = None;
         self.fly = None;
@@ -1594,6 +1613,15 @@ impl Sysobj {
             inertia: spec.word10,
             turn,
         });
+    }
+
+    /// FUN_1403b4da0(obj, 0x3e or 0x3c): the current mode's exit, then the
+    /// mode, which has no entry of its own.
+    pub fn to_limit_stand(&mut self, mode: u8) {
+        self.leave_air_modes();
+        self.camera_space = false;
+        self.limit_stand = Some(mode);
+        self.sampler.reset();
     }
 
     /// `obj_limit_hover` (FUN_14053d680): a velocity of `v`'s direction

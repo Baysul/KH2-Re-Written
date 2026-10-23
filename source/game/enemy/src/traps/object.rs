@@ -749,27 +749,23 @@ fn motion_capture(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Res
     let captor = ctx.sys_of_ai(m, args[0].value)?;
     let victim = ctx.sys_of_ai(m, args[1].value)?;
     let (motion, blend) = (args[2].as_int(), args[3].as_float());
-    ctx.world.captures += 1;
-    let token = ctx.world.captures;
     let model = ctx.object(captor)?.sys.model;
-    let remaining = usize::try_from(motion)
-        .map(|slot| ctx.env.clips(model).length(slot))
-        .unwrap_or(0);
-    let sys = &mut ctx.object(victim)?.sys;
-    sys.capture = Some(crate::sysobj::Capture {
-        captor,
-        motion,
-        token,
-        remaining,
-    });
-    sys.motion.flags.word &= !crate::motion::flag::ENDED;
-    sys.motion.flags.word |= 1 << 14;
-    ctx.world.events.push(Event::MotionCapture {
-        captor,
-        victim,
-        motion,
-        blend,
-    });
+    let env = ctx.env;
+    let mut sys = std::mem::replace(&mut ctx.object(victim)?.sys, crate::sysobj::Sysobj::bare());
+    let token = ctx
+        .world
+        .capture_motion(env, (captor, model), &mut sys, motion);
+    ctx.object(victim)?.sys = sys;
+    // The event names the victim the script gave.
+    if let Some(Event::MotionCapture {
+        victim: v,
+        blend: b,
+        ..
+    }) = ctx.world.events.last_mut()
+    {
+        *v = victim;
+        *b = blend;
+    }
     int(args, token);
     Ok(())
 }

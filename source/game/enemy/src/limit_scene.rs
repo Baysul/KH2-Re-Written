@@ -461,8 +461,15 @@ impl Scene {
             } else if let Some(slot) = self.actions.iter_mut().find(|(a, _)| *a == id) {
                 slot.1 = thread;
             }
+            self.program.tick_main(&mut self.world, env);
+        } else {
+            // FUN_1401b15f0: FUN_1403d7280 holds the think and the acts only
+            // while a hooked thread runs; without one the friend's update
+            // runs as outside the limit (Stitch's limit commands are
+            // actions of his table).
+            self.program.tick_friend(&mut self.world, env);
+            self.program.tick_script(&mut self.world, env);
         }
-        self.program.tick_main(&mut self.world, env);
         self.program.sys.end_tick(env);
         if let Some(l) = self.world.limit.as_mut() {
             l.settle(&mut self.program.sys);
@@ -497,6 +504,10 @@ impl Scene {
             self.world.objects[k] = Some(o);
         }
         self.world.follow_attachments(env, None);
+        // The magic task (FUN_1403c55f0, priority 0x5014) steps the side
+        // threads of the program between the objects' update and the
+        // limit's (0x5078): a summon's shots in its own limit.
+        self.program.tick_threads(&mut self.world, env);
         run_thread(&mut self.world, env, &mut self.program, &mut self.scene);
         self.adopt(env);
         self.world.tick_attacks(env);
