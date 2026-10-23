@@ -105,6 +105,7 @@ pub(crate) fn has_update(kind: u32) -> bool {
 
 pub(crate) fn has_draw(kind: u32) -> bool {
     crate::extra::draws(kind)
+        || crate::lens::draws(kind)
         || matches!(
             kind,
             DRAW_SHAPE_X
@@ -244,9 +245,11 @@ pub(crate) fn create(p: &Program, part: &mut Part, ctx: &mut Ctx) {
             let o = use_val(ctx, p, 1);
             part.zero(o, 12);
         }
-        crate::extra::SNO_SCALE_ALL | crate::extra::DRAW_MDL_TS | crate::extra::VERTEX_AP_AT => {
-            crate::extra::create(p, part, ctx)
-        }
+        crate::extra::SNO_SCALE_ALL
+        | crate::extra::DRAW_MDL_TS
+        | crate::extra::VERTEX_AP_AT
+        | crate::extra::MATRIX_WORLD_XYZ => crate::extra::create(p, part, ctx),
+        k if crate::lens::handles(k) => crate::lens::create(p, part, ctx),
         // FUN_1404c6b90 / FUN_1404c6ed0: the position and the axis lengths.
         DRAW_MATRIX_WORLD_FRONT | DRAW_MATRIX_WORLD_WOOD => world_create(p, part, ctx),
         // FUN_1404c0a70 / FUN_1404c0cd0 / FUN_1404c0eb0: no first key yet.
@@ -284,6 +287,7 @@ pub(crate) fn restart(p: &Program, part: &mut Part, ctx: &mut Ctx) {
         crate::ribbon::KIND => crate::ribbon::restart(p, part, ctx),
         crate::tail::KIND => crate::tail::restart(p, part, ctx),
         crate::thunder::KIND => crate::thunder::restart(p, part, ctx),
+        k if crate::lens::handles(k) => crate::lens::restart(p, part, ctx),
         models::VT_MIME
         | models::DRAW_MDL_TS3
         | models::VERTEX_AP_LC
@@ -373,6 +377,7 @@ pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx)
         ANG_MOVE_LOOP => loop_move_i32(p, cursor, part, ctx),
         SCL_MOVE_LOOP | crate::extra::MOVE_LOOP => loop_move_f32(p, cursor, part, ctx),
         k if crate::extra::handles(k) => crate::extra::update(p, cursor, part, ctx),
+        k if crate::lens::handles(k) => crate::lens::update(p, cursor, part, ctx),
         MATRIX_NO_ROT => matrix_no_rot(p, part, ctx),
         DRAW_MATRIX_WORLD => draw_matrix_world(p, part, ctx),
         DRAW_MATRIX_WORLD_FRONT => draw_matrix_world_front(p, part, ctx),
@@ -459,6 +464,7 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
         crate::shipoly::KIND => crate::shipoly::draw(p, cursor, part, ctx),
         crate::thunder::KIND => crate::thunder::draw(p, cursor, part, ctx),
         k if crate::extra::draws(k) => crate::extra::draw(p, cursor, part, ctx),
+        k if crate::lens::draws(k) => crate::lens::draw(p, cursor, part, ctx),
         models::VT_MIME
         | models::DRAW_MDL3
         | models::DRAW_MDL_TS3

@@ -27,6 +27,8 @@ pub(crate) const SNO_SCALE_ALL: u32 = 237;
 pub(crate) const DRAW_MDL: u32 = 131;
 pub(crate) const DRAW_MDL_TS: u32 = 133;
 pub(crate) const DRAW_MATRIX_NO_ROT: u32 = 114;
+/// pppRyjMatrixWorldXYZ (update FUN_1404c52e0, create FUN_1404c5460).
+pub(crate) const MATRIX_WORLD_XYZ: u32 = 99;
 /// pppKeMdlDtt (145) and pppKeShpDtt (160): redraws of the model or shape
 /// textured from the frame buffer (a heat-haze refraction). The frame-buffer
 /// pass has no draw form here, so they are neither stepped nor drawn.
@@ -70,7 +72,58 @@ pub(crate) fn handles(kind: u32) -> bool {
             | DRAW_MATRIX_NO_ROT
             | VERTEX_ATTEND
             | VERTEX_AP_AT
+            | MATRIX_WORLD_XYZ
     )
+}
+
+/// The instance's own placement (`DAT_142b0f000` angles, `DAT_142b0eff0`
+/// position): the world's axes without their lengths, at the origin.
+/// [I] Taken from the instance matrix: the exe turns the angles through the
+/// sine table (`FUN_1404be820` after `· 32768 / π`).
+fn placement(ctx: &Ctx) -> Mat {
+    let mut m = ctx.world;
+    for (c, s) in ctx.scales.iter().enumerate() {
+        if *s != 0. {
+            m[c] = math::scale(m[c], 1. / s);
+        }
+    }
+    m[3] = [ctx.origin[0], ctx.origin[1], ctx.origin[2], 1.];
+    m
+}
+
+/// The inverse of a rotation-and-translation matrix (`FUN_14013f3a0` for
+/// such a matrix).
+fn rigid_inverse(m: &Mat) -> Mat {
+    let mut r = math::IDENTITY;
+    for (i, col) in r.iter_mut().take(3).enumerate() {
+        *col = [m[0][i], m[1][i], m[2][i], 0.];
+    }
+    let t = math::apply(&r, [m[3][0], m[3][1], m[3][2], 0.]);
+    r[3] = [-t[0], -t[1], -t[2], 1.];
+    r
+}
+
+/// FUN_1404c52e0 (pppRyjMatrixWorldXYZ): cur = Rxyz(u1 angles) at the u0
+/// position, then cur = inverse(the instance's placement now) · cur · (its
+/// placement at creation, u3), its axes scaled by u2: the part keeps to the
+/// world as the instance moves.
+fn matrix_world_xyz(p: &Program, part: &mut Part, ctx: &Ctx) {
+    let (u0, u1, u2, u3) = (
+        use_val(ctx, p, 0),
+        use_val(ctx, p, 1),
+        use_val(ctx, p, 2),
+        use_val(ctx, p, 3),
+    );
+    let mut cur = math::rot_xyz([part.i32(u1), part.i32(u1 + 4), part.i32(u1 + 8)]);
+    cur[3] = [part.f32(u0), part.f32(u0 + 4), part.f32(u0 + 8), cur[3][3]];
+    let created = crate::programs::read_matrix(part, u3);
+    let cur = math::mul(&rigid_inverse(&placement(ctx)), &math::mul(&cur, &created));
+    let mut cur = cur;
+    for (c, col) in cur.iter_mut().take(3).enumerate() {
+        let s = part.f32(u2 + 4 * c);
+        *col = [col[0] * s, col[1] * s, col[2] * s, col[3]];
+    }
+    part.cur = cur;
 }
 
 /// FUN_1404c35e0 / the up draws: u, or (u + u) · 0.5 when `average`.
@@ -382,6 +435,7 @@ fn matrix_with(p: &Program, part: &mut Part, ctx: &Ctx, rotation: fn([i32; 3]) -
 
 pub(crate) fn update(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
     match p.kind {
+        MATRIX_WORLD_XYZ => matrix_world_xyz(p, part, ctx),
         RAND_UP_FLOAT => rand_float_family(p, cursor, part, ctx, 1, 0xc, false),
         RAND_DOWN_FLOAT => rand_float_family(p, cursor, part, ctx, 1, 0xc, true),
         RAND_UP_FV => rand_float_family(p, cursor, part, ctx, 3, 0x14, false),
@@ -446,6 +500,11 @@ pub(crate) fn draw(p: &Program, cursor: usize, part: &mut Part, ctx: &mut Ctx) {
 /// The create / restart hook of [`SNO_SCALE_ALL`]: 0x3c bytes cleared.
 pub(crate) fn create(p: &Program, part: &mut Part, ctx: &Ctx) {
     match p.kind {
+        // FUN_1404c5460: u3 takes the instance's placement at creation.
+        MATRIX_WORLD_XYZ => {
+            let u3 = use_val(ctx, p, 3);
+            crate::programs::write_matrix(part, u3, &placement(ctx));
+        }
         SNO_SCALE_ALL => {
             let o = use_val(ctx, p, 0);
             part.zero(o, 0x3c);
@@ -575,5 +634,23 @@ mod tests {
         assert!(close(&rot_zyx(a), &zyx));
         // The orders differ, so a wrong table entry would show.
         assert!(!close(&rot_xzy(a), &rot_zyx(a)));
+    }
+}
+
+#[cfg(test)]
+mod world_xyz_tests {
+    use super::*;
+
+    #[test]
+    fn the_rigid_inverse_undoes_a_turn_and_a_move() {
+        let mut m = math::rot_xyz([0x1000, 0x2000, 0x3000]);
+        m[3] = [10., -20., 30., 1.];
+        let back = math::mul(&rigid_inverse(&m), &m);
+        for (c, col) in back.iter().enumerate() {
+            for (r, v) in col.iter().enumerate() {
+                let want = if c == r { 1. } else { 0. };
+                assert!((v - want).abs() < 1e-4, "{c},{r}: {v}");
+            }
+        }
     }
 }

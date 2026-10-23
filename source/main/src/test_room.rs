@@ -10556,6 +10556,12 @@ fn present(
             shown_joints.clear();
         }
     }
+    // Stitch's limit re-attaches the Keyblades at bone code 0x4000 (Sora's
+    // own frame, FUN_1401c9d60 -> FUN_1403b50f0, no hand bone and no flip):
+    // the captured weapon pose is drawn in his root's space.
+    if summon::sora_camera_pose(&game).is_some() {
+        hand = Transform::IDENTITY;
+    }
     game.display_joints = shown_joints;
     game.display_hand = hand;
     if let Ok((mut transform, mut visibility)) = hands.single_mut() {
