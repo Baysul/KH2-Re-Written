@@ -245,6 +245,22 @@ pub struct ScriptAttack {
     pub radius: f32,
     /// Sora's team (1) is in the attack's team mask.
     pub hits_sora: bool,
+    /// A reaction command the attack carries (`attack_set_rc`,
+    /// FUN_140437b70: +0x11c the command, +0x120 / +0x124 the sphere's
+    /// radius and height, +0x128 the offset from its position).
+    pub rc: Option<ScriptRc>,
+}
+
+/// An attack-borne reaction command (FUN_140407b40's view of an attack).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScriptRc {
+    pub command: u16,
+    pub radius: f32,
+    pub height: f32,
+    pub offset: Vec3,
+    /// +0x118: the object the command belongs to (the attack's owner, or
+    /// `attack_set_rc_owner`'s object) is the script's own.
+    pub own: bool,
 }
 
 /// An effect a script started: element `id` of the enemy's own container.
@@ -286,6 +302,13 @@ pub fn script_attacks(world: &EnemyWorld) -> Vec<ScriptAttack> {
                 previous: Some(v(a.previous)),
                 radius: a.current_radius(),
                 hits_sora: a.can_hit_team(SORA_TEAM),
+                rc: (a.rc[0] > 0).then(|| ScriptRc {
+                    command: a.rc[0] as u16,
+                    radius: a.rc[1] as f32,
+                    height: a.rc[2] as f32,
+                    offset: v(a.reaction_offset),
+                    own: a.rc_owner.is_none_or(|o| Some(o) == a.owner),
+                }),
             })
         })
         .collect()

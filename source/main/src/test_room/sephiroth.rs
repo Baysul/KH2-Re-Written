@@ -21,7 +21,8 @@ enum Stage {
 const OUTRO_DELAY: u64 = 240;
 
 /// The unattended tour (`--sephiroth-tour`): its length in ticks
-/// (`KH2RW_SEPH_TOUR_END` overrides) and its captures.
+/// (`KH2RW_SEPH_TOUR_END` overrides) and its captures (`KH2RW_SEPH_TOUR_CAPS`
+/// adds ticks).
 pub fn tour_end() -> u64 {
     std::env::var("KH2RW_SEPH_TOUR_END")
         .ok()
@@ -36,6 +37,12 @@ pub fn tour_captures() -> Vec<u64> {
         .chain((600..end).step_by(600))
         .collect();
     c.push(end);
+    // More capture ticks (`KH2RW_SEPH_TOUR_CAPS`, comma-separated).
+    if let Ok(v) = std::env::var("KH2RW_SEPH_TOUR_CAPS") {
+        c.extend(v.split(',').filter_map(|t| t.trim().parse::<u64>().ok()));
+        c.sort_unstable();
+        c.dedup();
+    }
     c
 }
 

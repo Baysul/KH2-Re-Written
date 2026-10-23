@@ -320,6 +320,14 @@ fn sora_sys(game: &Game) -> enemy::sysobj::Sysobj {
 /// summon's script captures for him (`obj_motion_capture`, FUN_1403c6cc0:
 /// a motion of the summon's own set), else stands. Returns false when no
 /// summon limit runs.
+/// A summon's limit scene drives Sora now.
+pub fn in_limit_scene(game: &Game) -> bool {
+    game.summon
+        .as_ref()
+        .and_then(|s| s.actor.as_ref())
+        .is_some_and(|a| a.brain.limit_player().is_some())
+}
+
 pub fn sora_in_limit(game: &mut Game) -> bool {
     let Some(s) = game.summon.as_ref() else {
         return false;
@@ -1042,6 +1050,7 @@ fn land_attacks(game: &mut Game, a: &mut Actor, tick: u64) {
                 previous: None,
                 radius: 1.,
                 hits_sora: false,
+                rc: None,
             },
         );
     let volumes: Vec<_> = a

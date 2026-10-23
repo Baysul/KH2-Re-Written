@@ -913,9 +913,6 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
     // Scripts consume one shared stream. Summoning a new actor must not
     // restart that stream or give every actor an identical private seed.
     let mut rng = std::mem::take(&mut rt.rng);
-    // The command manager's tick (FUN_1403b2340) runs before the objects:
-    // the reaction search over last tick's poses, then Triangle.
-    super::reaction_command::tick(&mut game, &mut gallery.actors, tick);
     for actor in &mut gallery.actors {
         let Some(battle) = actor.battle.as_mut() else {
             continue;

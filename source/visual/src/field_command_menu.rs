@@ -74,10 +74,21 @@ fn sub_groups(kind: usize) -> Option<[usize; 4]> {
 /// Level step: each submenu level sits 16 units right of the one below.
 const LEVEL_STEP: f32 = 16.;
 
-/// Reaction-command slot (0x140718358 normal group 2) at (0x1c, 0x179)
-/// less a row pitch per item, like the panel [inferred: above the rows];
-/// a failed angle gate shows it at RGB x0.6 (0x1405b1c50 mode 5).
-const REACTION_GROUP: usize = 2;
+/// The reaction slot's groups (0x140718358, both rows equal): shown 2, mode
+/// 7 (the partner's) 5, record flag bit 3 set 3; empty 0 (the fade-out),
+/// empty with the taken command's text 1; the ReactionDecideSprite burst 4.
+const REACTION_SHOWN: usize = 2;
+const REACTION_PARTNER: usize = 5;
+const REACTION_FLAG3: usize = 3;
+const REACTION_EMPTY: usize = 0;
+const REACTION_EMPTY_TEXT: usize = 1;
+const REACTION_BURST: usize = 4;
+/// FUN_14015d670: the slot sits at (0x24, 0x179 - 22n).
+const REACTION_X: f32 = 36.;
+/// 0x1405b1c50: the slot's RGB multiplier by the candidate's mode.
+const REACTION_RGB: [f32; 10] = [1., 1., 1., 1., 0.6, 0.6, 0.6, 1., 1., 0.95];
+/// FUN_1402ebe70(0x1000): the Triangle prompt's glyph.
+pub const TRIANGLE_GLYPH: u8 = 0xdf;
 /// The list path's groups in deck mode 0xE (0x140718330 + 0x14): the
 /// header, then the row by selector (0 none, 1..4).
 const LIST_HEADER: usize = 8;
@@ -121,7 +132,6 @@ const LIST_TEXT: [u32; 9] = [
     0x80e6e6e6,
 ];
 const REACTION_Y: f32 = 377.;
-const REACTION_DIM: f32 = 0.6;
 /// Row/cursor text colours by colour index (0x140717d78, 0x140717da0).
 const ROW_TEXT: [u32; 9] = [
     0x80b4b4b4, 0x80646464, 0x800079b7, 0x80646464, 0x80646464, 0x80646464, 0x80646464, 0x80e6e6e6,
@@ -158,19 +168,44 @@ struct Slot {
     text: Option<Vec<u8>>,
     text_colour: u32,
     disabled: bool,
-    dimmed: bool,
+    /// The colour multiplier (the reaction slot's by mode, 1 elsewhere).
+    rgb: f32,
     context: [f32; 2],
     resolved: [f32; 2],
     /// The record's flag bit 0 when the slot was last filled (+0x140).
     flag: bool,
 }
 
-/// The reaction command offered above the menu (e.g. Talk).
-#[derive(Clone, Debug, PartialEq)]
+/// The reaction command the manager's slot shows (mgr+0xb40: the command,
+/// its mode and flags) with its message.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Reaction {
+    pub command: u16,
     pub label: Vec<u8>,
-    /// The candidate failed its angle gate (display mode 5).
-    pub dimmed: bool,
+    /// The candidate's display mode (0x1405b1c50, 0x140717da0).
+    pub mode: u8,
+    /// The record's flag bit 3 (group 3).
+    pub flag3: bool,
+    /// The candidate's flag bit 1: the art restarts.
+    pub restart: bool,
+}
+
+/// COMMAND_DRAW's reaction fields: +0x188 the command drawn last, +0x18c its
+/// group, +0x194 the slot was shown, +0x196 the burst requested
+/// (FUN_14015d660), +0x198 the taken command's text.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ReactionDraw {
+    command: u16,
+    group: Option<usize>,
+    visible: bool,
+    burst: bool,
+    text: Option<Vec<u8>>,
+}
+
+/// A ReactionDecideSprite (vtable 0x1405b1bc8): the burst at the slot.
+struct Burst {
+    player: Player,
+    base: [f32; 2],
 }
 
 /// An opened submenu (level 1): its rows and cursor with the kind's art.
@@ -191,6 +226,12 @@ pub struct CommandMenu {
     /// The top deck's rows (menu 0).
     pub items: Vec<Item>,
     pub reaction: Option<Reaction>,
+    /// The pen byte in front of the reaction's prompt (FUN_140153850, see
+    /// [`reaction_pen`]) and the prompt's glyph.
+    pub reaction_pen: u8,
+    pub reaction_glyph: u8,
+    reaction_draw: ReactionDraw,
+    bursts: Vec<Burst>,
     pub cursor: usize,
     last_cursor: Option<usize>,
     last_count: usize,
@@ -275,6 +316,10 @@ impl CommandMenu {
             counter: 0,
             items,
             reaction: None,
+            reaction_pen: 0xea,
+            reaction_glyph: TRIANGLE_GLYPH,
+            reaction_draw: ReactionDraw::default(),
+            bursts: Vec::new(),
             cursor: 0,
             last_cursor: None,
             last_count: 0,
@@ -490,7 +535,7 @@ impl CommandMenu {
                 text: None,
                 text_colour: colour,
                 disabled: false,
-                dimmed: false,
+                rgb: 1.,
                 context: [0.; 2],
                 resolved: [0.; 2],
                 flag: false,
@@ -506,10 +551,89 @@ impl CommandMenu {
         s.base = base;
         s.parent = None;
         s.disabled = false;
-        s.dimmed = false;
+        s.rgb = 1.;
         s.text_colour = colour;
         self.counter += 1;
         i
+    }
+
+    /// FUN_14015d660: the command was taken; the next draw starts the burst.
+    pub fn burst(&mut self) {
+        self.reaction_draw.burst = true;
+    }
+
+    /// FUN_14015d670: the reaction slot at (0x24, 0x179 - 22n). A shown
+    /// command uses group 2 (5 for the partner's mode 7, 3 for a record with
+    /// flag bit 3), its prompt and message, the cursor text colour and the
+    /// RGB multiplier of its mode; a new command or group restarts the art.
+    /// With none, group 0 fades the slot out once (group 1 keeps the taken
+    /// command's text) and hides it at the end. A requested burst starts a
+    /// ReactionDecideSprite on group 4 at the slot.
+    fn draw_reaction(&mut self, seq: &Sequence, n: usize) {
+        let base = [REACTION_X, REACTION_Y - PITCH * n as f32];
+        let shown = self.reaction.clone().filter(|r| r.command != 0);
+        let command = shown.as_ref().map_or(0, |r| r.command);
+        let mut force = true;
+        if self.reaction_draw.command == command {
+            force = shown.as_ref().is_some_and(|r| r.restart);
+        }
+        let group;
+        match shown {
+            None => {
+                group = if self.reaction_draw.text.is_some() {
+                    REACTION_EMPTY_TEXT
+                } else {
+                    REACTION_EMPTY
+                };
+                let text = self.reaction_draw.text.clone();
+                let i = self.slot(seq, group, force, base, None, 0x80e6e6e6);
+                self.slots[i].text = text;
+                // FUN_1401672f0: the art hides itself when it ends.
+                let ended = self.slots[i].player.finished();
+                self.slots[i].disabled = if force || self.reaction_draw.visible && !ended {
+                    false
+                } else {
+                    self.reaction_draw.visible = false;
+                    true
+                };
+            }
+            Some(r) => {
+                self.reaction_draw.visible = true;
+                group = if r.mode == 7 {
+                    REACTION_PARTNER
+                } else if r.flag3 {
+                    REACTION_FLAG3
+                } else {
+                    REACTION_SHOWN
+                };
+                if Some(group) != self.reaction_draw.group {
+                    force = true;
+                }
+                let text = glyph_label(self.reaction_pen, self.reaction_glyph, &r.label);
+                let mode = usize::from(r.mode);
+                let colour = CURSOR_TEXT[mode.min(CURSOR_TEXT.len() - 1)];
+                let i = self.slot(seq, group, force, base, None, colour);
+                self.slots[i].text = Some(text.clone());
+                self.slots[i].rgb = REACTION_RGB[mode.min(REACTION_RGB.len() - 1)];
+                self.reaction_draw.text = self.reaction_draw.burst.then_some(text);
+            }
+        }
+        self.reaction_draw.group = Some(group);
+        self.reaction_draw.command = command;
+        if std::mem::take(&mut self.reaction_draw.burst) {
+            self.bursts.push(Burst {
+                player: Player::new(seq, REACTION_BURST),
+                base,
+            });
+        }
+    }
+
+    /// The bursts play once and delete themselves at their end.
+    fn step_bursts(&mut self, seq: &Sequence) {
+        self.bursts.retain_mut(|b| {
+            b.player.update(seq, 1.);
+            !b.player.finished()
+        });
     }
 
     /// The submenu level's build (FUN_14015b6d0 with L = 1): the kind's
@@ -542,7 +666,7 @@ impl CommandMenu {
                     text: None,
                     text_colour: colour,
                     disabled: false,
-                    dimmed: false,
+                    rgb: 1.,
                     context: [0.; 2],
                     resolved: [0.; 2],
                     flag: false,
@@ -751,17 +875,7 @@ impl CommandMenu {
                 }
             }
         }
-        if let Some(r) = self.reaction.clone() {
-            let i = self.slot(
-                seq,
-                REACTION_GROUP,
-                false,
-                [x, REACTION_Y - PITCH * n as f32],
-                Some(r.label),
-                ROW_TEXT[0],
-            );
-            self.slots[i].dimmed = r.dimmed;
-        }
+        self.draw_reaction(seq, n);
         self.last_cursor = Some(cur);
         self.last_count = n;
         if let Some(sub) = self.sub.as_mut() {
@@ -780,6 +894,7 @@ impl CommandMenu {
                 s.player.update(seq, 1.);
             }
         }
+        self.step_bursts(seq);
     }
 
     /// The list path (FUN_14015df90 in deck mode 0xE): the header at
@@ -814,22 +929,13 @@ impl CommandMenu {
             self.slot(seq, group, false, [x, y], Some(label), colour);
             y += PITCH;
         }
-        if let Some(r) = self.reaction.clone() {
-            let i = self.slot(
-                seq,
-                REACTION_GROUP,
-                false,
-                [x, REACTION_Y - PITCH * n as f32],
-                Some(r.label),
-                ROW_TEXT[0],
-            );
-            self.slots[i].dimmed = r.dimmed;
-        }
+        self.draw_reaction(seq, n);
         self.last_count = n;
         self.slots.truncate(self.counter);
         for s in &mut self.slots {
             s.player.update(seq, 1.);
         }
+        self.step_bursts(seq);
     }
 
     /// Draws the root, then each slot: sprite, then its label in the system
@@ -854,7 +960,38 @@ impl CommandMenu {
         if let Some(sub) = self.sub.as_mut() {
             draw_slots(&mut sub.slots, seq, font, sheets, &mut out);
         }
+        // The ReactionDecideSprites come after the slots (created later at
+        // the same priority, 0x14b7).
+        for b in &self.bursts {
+            out.push(Draw::Quads {
+                quads: seq.quads(&b.player, [X_ORIGIN + b.base[0], b.base[1]], &m),
+                z: 0,
+                sheet,
+            });
+        }
         out
+    }
+}
+
+/// FUN_140153850: the pen byte in front of the reaction prompt, by the
+/// command layout's file name (`deck` is the layout's sheet mode,
+/// DAT_14079cf00 +0x274; a list-mode deck, menu kind 0xe, always gives
+/// 0xea).
+pub fn reaction_pen(file: &str, deck: u8, list: bool) -> u8 {
+    if list {
+        return 0xea;
+    }
+    let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+    let world = name.strip_suffix("command.2dd").unwrap_or("");
+    match world {
+        "bb0" | "he1" | "dc0" | "mu0" => 0xec,
+        "lm0" => 0xed,
+        "lk0" | "tt0" | "ca0" => 0xeb,
+        "nm1" => 0xea,
+        "eh0" | "dc1" => 0xe6,
+        "al0" if deck == 0 || deck == 7 => 0xe3,
+        "al0" => 0xe6,
+        _ => 0xea,
     }
 }
 
@@ -883,9 +1020,7 @@ fn draw_slots(
             continue;
         }
         let mut m = m;
-        if s.dimmed {
-            m.color = [REACTION_DIM, REACTION_DIM, REACTION_DIM, 1.];
-        }
+        m.color = [s.rgb, s.rgb, s.rgb, 1.];
         out.push(Draw::Quads {
             quads: seq.quads(&s.player, [X_ORIGIN + base[0], base[1]], &m),
             z: 0,
@@ -1063,6 +1198,10 @@ mod tests {
             counter: 0,
             items,
             reaction: None,
+            reaction_pen: 0xea,
+            reaction_glyph: TRIANGLE_GLYPH,
+            reaction_draw: ReactionDraw::default(),
+            bursts: Vec::new(),
             cursor: 0,
             last_cursor: None,
             last_count: 0,
@@ -1088,6 +1227,18 @@ mod tests {
             icon,
             colour,
         }
+    }
+
+    #[test]
+    fn the_reaction_prompt_pen_follows_the_world_layout() {
+        assert_eq!(reaction_pen("field2d/us/tt0command.2dd", 0, false), 0xeb);
+        assert_eq!(reaction_pen("tt6command.2dd", 0, false), 0xea);
+        assert_eq!(reaction_pen("bb0command.2dd", 0, false), 0xec);
+        assert_eq!(reaction_pen("lm0command.2dd", 0, false), 0xed);
+        assert_eq!(reaction_pen("al0command.2dd", 0, false), 0xe3);
+        assert_eq!(reaction_pen("al0command.2dd", 3, false), 0xe6);
+        assert_eq!(reaction_pen("eh0command.2dd", 0, false), 0xe6);
+        assert_eq!(reaction_pen("lk0command.2dd", 0, true), 0xea);
     }
 
     #[test]
