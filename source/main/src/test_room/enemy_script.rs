@@ -391,6 +391,8 @@ pub struct ScriptBrain {
     pub player_yaw: f32,
     /// The game state the host passes in before each tick.
     pub facts: HostFacts,
+    /// The object's OBJ radius for the wall test (EnemyCombat::wall_radius).
+    pub wall_radius: f32,
     /// Faults the interpreter or a missing trap reported, for the host log.
     pub fault: Option<String>,
     /// Effects the script started since the host last took them.
@@ -434,6 +436,10 @@ pub struct ScriptBrain {
     /// into (slot, blend), and the motions it queued behind them.
     pub sora_captures: Vec<(i32, f32)>,
     pub sora_pushed: Vec<(usize, f32)>,
+    /// Falls a hook thread started on Sora (`obj_fly_to_jump`), with the
+    /// fall and land motions it named; whether his stand-in was falling.
+    pub sora_falls: Vec<(i32, i32)>,
+    proxy_falling: bool,
     /// HP changes (`obj_add_hp`: delta) and MP charges
     /// (`obj_start_mpdrive`: the factor) the script made on Sora.
     pub sora_hp: Vec<i32>,
@@ -461,6 +467,47 @@ pub(super) fn script_payload(source: &ProbeSource, model: &str) -> Result<Vec<u8
         .ok_or_else(|| "object script outside the archive".into())
 }
 
+/// The HIT spheres (kind 2, group 0) of a model's collision table (BAR
+/// type 23): model-space offset raised by the entry's height offset, and
+/// radius. [I] Bone-bound entries are taken at the model origin: the made
+/// objects that use them (B_EX360) have no skeleton loaded here.
+pub(super) fn hit_spheres(source: &ProbeSource, model: &str) -> Vec<([f32; 3], f32)> {
+    let read = || -> Option<Vec<([f32; 3], f32)>> {
+        let mut library = Library::open(source).ok()?;
+        let bytes = library.read(&format!("obj/{model}.mdlx")).ok()?;
+        let table = bar::read_bar(&bytes).ok()?;
+        let entry = table
+            .entries
+            .iter()
+            .find(|e| e.entry_type == 23 && e.offset >= 0 && e.size != 0)?;
+        let start = entry.offset as usize;
+        let collision =
+            data::object_collision::read(bytes.get(start..start + entry.size as usize)?).ok()?;
+        Some(
+            collision
+                .iter()
+                .filter(|e| e.kind == data::object_collision::HIT && e.group == 0)
+                .map(|e| {
+                    let [x, y, z] = e.position.map(f32::from);
+                    (
+                        [x, y + f32::from(e.position_height), z],
+                        f32::from(e.radius),
+                    )
+                })
+                .collect(),
+        )
+    };
+    read().unwrap_or_default()
+}
+
+/// An object a script made that Sora's attacks can hit: its id and its HIT
+/// spheres in the scene.
+#[derive(Clone, Debug)]
+pub struct MadeTarget {
+    pub id: u32,
+    pub spheres: Vec<(bevy::math::Vec3, f32)>,
+}
+
 impl ScriptBrain {
     #[allow(clippy::too_many_arguments)]
     pub fn load(
@@ -484,6 +531,7 @@ impl ScriptBrain {
             player: position,
             player_yaw: 0.,
             facts: HostFacts::default(),
+            wall_radius: 0.,
             fault: None,
             effects: Vec::new(),
             voices: Vec::new(),
@@ -504,6 +552,8 @@ impl ScriptBrain {
             signals: Vec::new(),
             sora_captures: Vec::new(),
             sora_pushed: Vec::new(),
+            sora_falls: Vec::new(),
+            proxy_falling: false,
             sora_hp: Vec::new(),
             sora_mpdrive: Vec::new(),
             presentations: Vec::new(),
@@ -596,6 +646,7 @@ impl ScriptBrain {
             return;
         }
         self.object.tick(&mut self.world, &env);
+        Self::keep_out_of_walls(&mut self.object, self.wall_radius, room);
         Self::tick_made(&mut self.world, &mut self.object, &env);
         self.world.tick_attacks(&env);
         self.hit_the_map(room);
@@ -701,6 +752,21 @@ impl ScriptBrain {
                 a.hit_position = [pushed[0] - dx / len * r, y, pushed[1] - dz / len * r, 1.];
             }
         }
+    }
+
+    /// The object's body against the map after its move: its OBJ circle is
+    /// pushed out of the room's walls over its body's height. [I] The exe's
+    /// own background test of an object's move (FUN_1403b89a0) is not
+    /// translated; without this a blow or a warp could carry the object off
+    /// the map, where no floor catches it. Objects it made keep their own
+    /// moves.
+    fn keep_out_of_walls(object: &mut Object, r: f32, room: &RoomWorld) {
+        if r <= 0. || object.sys.gone {
+            return;
+        }
+        let [x, y, z] = object.sys.position;
+        let [px, pz] = room.resolve_walls([x, z], r, y, y + 2. * r);
+        object.sys.position = [px, y, pz];
     }
 
     /// The objects the script made (and the enemy's stand-in). The host's
@@ -1161,6 +1227,12 @@ impl ScriptBrain {
         }
         if let Some(p) = self.world.player_proxy.as_mut() {
             self.sora_pushed.append(&mut p.sys.motion_queue);
+            let falling = p.sys.falling();
+            if falling && !self.proxy_falling {
+                let m = p.sys.jump_motions;
+                self.sora_falls.push((m.fall, m.land));
+            }
+            self.proxy_falling = falling;
         }
     }
 
@@ -1189,7 +1261,12 @@ impl ScriptBrain {
             "revenge":s.revenge,"karma_limit":s.karma_limit,
             "patterns":format!("{:#x}", s.active_patterns()),"sheet":s.sheet,
             "max_hp":s.stats.max_hp,"class":format!("{:#x}", s.class_flags),
-            "dead":s.state_flags & enemy::sysobj::state_flag::DEAD_MARKED != 0})
+            "dead":s.state_flags & enemy::sysobj::state_flag::DEAD_MARKED != 0,
+            "airborne":s.airborne,"air_blocked":s.air_blocked(),"jumping":s.is_jump(),
+            "motion_flags":format!("{:#x}", s.motion.flags.word),"flags":format!("{:#x}", s.flags),
+            "y":s.position[1],"wall_radius":self.wall_radius,
+            "made":self.world.objects.iter().flatten().filter(|o| !o.sys.gone)
+                .map(|o| (o.id, o.sys.model, o.sys.hit_shapes.len())).collect::<Vec<_>>()})
     }
     pub fn hp(&self) -> i32 {
         self.object.sys.hp
@@ -1276,6 +1353,73 @@ impl ScriptBrain {
         );
         self.drain_events();
         self.take_player_queue();
+        self.record_faults();
+        damage
+    }
+
+    /// The objects the script made that have HIT spheres, placed in the
+    /// scene by their position and heading.
+    pub fn made_targets(&self) -> Vec<MadeTarget> {
+        self.world
+            .objects
+            .iter()
+            .flatten()
+            .filter(|o| !o.sys.gone && !o.sys.left && !o.sys.hit_shapes.is_empty())
+            .map(|o| {
+                let at = bevy::math::Vec3::from_array(o.sys.position);
+                let turn = bevy::math::Quat::from_rotation_y(o.sys.yaw);
+                MadeTarget {
+                    id: o.id,
+                    spheres: o
+                        .sys
+                        .hit_shapes
+                        .iter()
+                        .map(|&(offset, r)| (at + turn * bevy::math::Vec3::from_array(offset), r))
+                        .collect(),
+                }
+            })
+            .collect()
+    }
+
+    /// A retired attack id leaves the made objects' records too.
+    pub fn clear_made_seen(&mut self, id: u8) {
+        for o in self.world.objects.iter_mut().flatten() {
+            o.sys.record.clear_seen(id);
+        }
+    }
+
+    /// A made object's hit record (its attack mask).
+    pub fn made_record_mut(&mut self, id: u32) -> Option<&mut combat::HitRecord> {
+        self.world
+            .objects
+            .get_mut(id as usize)?
+            .as_mut()
+            .map(|o| &mut o.sys.record)
+    }
+
+    /// A hit on an object the script made (FUN_140410d60 on it): its
+    /// OBJ_DAMAGE runs (B_EX360 marks its unit argument 1, which Shadow
+    /// Flare's thread reads as the orb struck back).
+    pub fn hit_made(&mut self, id: u32, hit: &enemy::damage::Hit<'_>) -> Option<i32> {
+        let env = BrainEnv {
+            room: None,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
+            player: self.player,
+            player_yaw: self.player_yaw,
+            facts: self.facts,
+            commands: &self.commands,
+            fx: &self.fx,
+        };
+        let slot = self.world.objects.get_mut(id as usize)?;
+        let mut object = slot.take()?;
+        let damage = object.take_hit(&mut self.world, &env, hit);
+        if let Some(slot) = self.world.objects.get_mut(id as usize) {
+            *slot = Some(object);
+        }
+        self.drain_events();
         self.record_faults();
         damage
     }

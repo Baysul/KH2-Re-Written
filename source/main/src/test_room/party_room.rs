@@ -121,6 +121,10 @@ pub struct PartyKind {
     /// motions it plays.
     pub script: Option<Vec<u8>>,
     pub blade_clips: Arc<party_blade::BladeClips>,
+    /// The objentry type and weight (+0x4, +0x5d bits), which a vacuum
+    /// reads (FUN_1403f9130).
+    pub object_type: u8,
+    pub weight: f32,
 }
 
 /// A member in the room.
@@ -603,11 +607,11 @@ pub fn load(
         .unwrap_or(0) as i32;
     // PRTY word 6 (the KO timer) of the object's record, and the SSTM rates.
     let pref = bar_entry(system, b"pref")?;
-    let prty_index = objects
+    let entry = objects
         .iter()
         .find(|o| o.model_name == name.as_bytes())
-        .map(|o| o.neo_moveset as i16 as i32)
         .ok_or("party object entry absent")?;
+    let prty_index = entry.neo_moveset as i16 as i32;
     let prty = party_records::read_prty(bar_entry(pref, b"prty")?)?;
     let offset =
         actor_physics::prty_offset(&prty.offsets, prty_index).ok_or("PRTY record absent")?;
@@ -680,6 +684,8 @@ pub fn load(
         voices: None,
         script,
         blade_clips,
+        object_type: entry.object_type,
+        weight: entry.weight(),
     })
 }
 
@@ -1523,6 +1529,7 @@ pub fn tick(game: &mut Game, tick: u64) {
         party_items,
         party_struck,
         items,
+        party_push,
         ..
     } = game;
     let struck_last = std::mem::take(party_struck);
@@ -1727,6 +1734,16 @@ pub fn tick(game: &mut Game, tick: u64) {
         match m.limit {
             Some(s) => m.follower.follow_script(s),
             None => m.follower.tick(kind.records, &scene),
+        }
+        // A boss's vacuum pull (boss::requests) joins the member's movement
+        // for this tick. [I] Applied after its own step, as one more slide
+        // against the walls.
+        if let Some(&pull) = party_push.get(index)
+            && (pull[0] != 0. || pull[2] != 0.)
+            && m.follower.down.is_none()
+        {
+            let moved = world.collide(m.follower.position, [pull[0], 0., pull[2]], false, &body);
+            m.follower.position = moved.position;
         }
         m.motion_voices(sound_queue);
         // FUN_1403f6790 at the item-use trigger: the item leaves Sora's slots

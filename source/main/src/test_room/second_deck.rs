@@ -443,7 +443,7 @@ pub fn room(game: &Game, world: Option<u8>) -> Room {
         battle: battle(game),
         mp: game.player.mp.cur,
         charging: game.player.mp_charging,
-        limit_running: game.drive.as_ref().is_some_and(|d| d.limit.is_some()),
+        limit_running: game.drive.as_ref().is_some_and(|d| d.limit_running),
         drive_level: game.player.drive.level,
         in_form: game.drive.as_ref().is_some_and(|d| d.active),
         world,

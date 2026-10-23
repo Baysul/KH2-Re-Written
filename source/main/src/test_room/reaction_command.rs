@@ -594,7 +594,9 @@ fn inputs(
         // slot (FUN_140408520, below).
         anti: false,
         class: 1,
-        limit: drive.is_some_and(|d| d.limit.is_some()),
+        // +0x6cb bit 0 with +0xe14: a limit runs (Limit Form's limits run
+        // as limit scenes too, T210).
+        limit: game.party_limit.is_some(),
         won: game.battle_won,
         leader: true,
         hold: state.hold,
@@ -618,8 +620,8 @@ fn inputs(
                 (t.centre.distance(Vec3::from_array(at)) < 1.).then_some(a.id as u32)
             })
         });
-    // The manager's record 1: whichever of a party limit, a summon or a
-    // Limit Form limit offered last tick.
+    // The manager's record 1: whichever of a limit scene (a party limit or,
+    // since T210, a Limit Form limit) or a summon offered last tick.
     let offered = game
         .party_limit
         .as_ref()
@@ -635,8 +637,7 @@ fn inputs(
                     },
                 )
             })
-        })
-        .or_else(|| drive.and_then(|d| d.offer).map(|c| (c, sora_target)));
+        });
     rc::Inputs {
         sora,
         sora_target,
@@ -734,7 +735,15 @@ fn tour_press(game: &Game, shown: Option<rc::Candidate>, tick: u64) -> bool {
     let Some(c) = shown else { return false };
     match c.source {
         rc::Source::Offered if game.party_limit.is_some() => {
-            game.deck_tour && deck_tour::reaction(tick)
+            // The autoplay taps a Limit Form limit's follow-up every 10
+            // ticks (T210).
+            let form = game.autoplay.is_some()
+                && tick.is_multiple_of(10)
+                && game
+                    .party_limit
+                    .as_ref()
+                    .is_some_and(|r| player::limit_form::LIMITS.contains(&r.command));
+            form || game.deck_tour && deck_tour::reaction(tick)
                 || game.limit_tour && limit_tour::reaction(tick)
         }
         rc::Source::Offered if c.target.owner == SUMMON => {

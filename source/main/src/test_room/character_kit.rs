@@ -125,6 +125,9 @@ pub(super) struct Kit {
     pub pax: Option<data::object_effect::Pax>,
     /// Weapon slots with a motion set (0 leaves the Keyblade unattached).
     pub weapon_motions: u8,
+    /// The trigger tables of the motions scripts start by id (Limit
+    /// Form's limits run on the object-script engine, which reads them).
+    pub script_events: HashMap<u16, enemy::motion::MotionEvents>,
 }
 
 /// Reads `ids` from the set, falling back to `fallback` for absent ones;
@@ -230,6 +233,11 @@ pub(super) fn load_kit(
         }
     }
     let present = motion::read_motion_ids_optional(source, &motion_set, &scripted)?;
+    let script_events: HashMap<u16, enemy::motion::MotionEvents> = scripted
+        .iter()
+        .zip(&present)
+        .filter_map(|(&id, m)| Some((id, super::party_limit::events_of(m.as_ref()?))))
+        .collect();
     let scripted: Vec<u16> = scripted
         .iter()
         .zip(&present)
@@ -848,6 +856,7 @@ pub(super) fn load_kit(
         heal_lift,
         summary,
         set,
+        script_events,
         pax,
         weapon_motions: weapon_motion_set.is_some() as u8
             + second_weapon_motion_set.is_some() as u8,

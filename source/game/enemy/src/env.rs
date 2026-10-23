@@ -76,6 +76,19 @@ pub trait Env {
     }
     /// Position of a target actor (centre of its TARGET shape).
     fn target_position(&self, id: u32) -> Option<Vec3>;
+    /// Record `id` of the PTYA set of a player-class object (FUN_1403d74e0).
+    fn party_attack(&self, _object: u32, _id: u8) -> Option<player::ptya::Record> {
+        None
+    }
+    /// FUN_1403d7520's return: Sora's TARGET radius plus the target's.
+    fn target_reach(&self, id: u32) -> Option<f32> {
+        self.target_radius(id)
+    }
+    /// Sora's target record (+0xdc8 + 4) as FUN_1403d78d0 takes it: the
+    /// lock-on's, or the actor targeted without one.
+    fn attack_target(&self) -> Option<u32> {
+        self.lockon_target()
+    }
     /// The actor Sora has locked on to (`trap_obj_lockon_target`'s record).
     fn lockon_target(&self) -> Option<u32> {
         None

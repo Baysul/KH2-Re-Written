@@ -1597,51 +1597,123 @@
           ]
         },
         {
-          "id": "NATIVE-T208-01",
+          "id": "NATIVE-T209-01",
+          "label": "Event overlay camera on its anchor object - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-02",
+          "label": "Event overlay frame rate and radial blur feedback - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-03",
+          "label": "Object voice slot priority and line replacement - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-04",
+          "label": "Script attack hit identity kept until the attack is freed - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-05",
+          "label": "Scene light tint on the fog colour - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-06",
+          "label": "Vacuum pull on party members - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-07",
+          "label": "Hook-thread fall of the leader after a capture - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-08",
+          "label": "Landing hand-over to idle and blow landing - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-09",
+          "label": "Hits on objects a script made - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T211-01",
           "label": "Reaction command search over the held command, record 1, partner, shapes, attacks and auto offers - translation, equivalence unproved",
           "status": "PARTIAL",
           "evidence": [
-            "docs/tasks/T208-reaction-command-manager.md"
+            "docs/tasks/T211-reaction-command-manager.md"
           ]
         },
         {
-          "id": "NATIVE-T208-02",
+          "id": "NATIVE-T211-02",
           "label": "Reaction slot, target marker and Triangle press - translation, equivalence unproved",
           "status": "PARTIAL",
           "evidence": [
-            "docs/tasks/T208-reaction-command-manager.md"
+            "docs/tasks/T211-reaction-command-manager.md"
           ]
         },
         {
-          "id": "NATIVE-T208-03",
+          "id": "NATIVE-T211-03",
           "label": "Reaction slot drawing, prompt and burst on the command menu - translation, equivalence unproved",
           "status": "PARTIAL",
           "evidence": [
-            "docs/tasks/T208-reaction-command-manager.md"
+            "docs/tasks/T211-reaction-command-manager.md"
           ]
         },
         {
-          "id": "NATIVE-T208-04",
+          "id": "NATIVE-T211-04",
           "label": "Attack-borne reaction commands - translation, equivalence unproved",
           "status": "PARTIAL",
           "evidence": [
-            "docs/tasks/T208-reaction-command-manager.md"
+            "docs/tasks/T211-reaction-command-manager.md"
           ]
         },
         {
-          "id": "NATIVE-T208-05",
+          "id": "NATIVE-T211-05",
           "label": "Save point offer and heal while Save shows - translation, equivalence unproved",
           "status": "PARTIAL",
           "evidence": [
-            "docs/tasks/T208-reaction-command-manager.md"
+            "docs/tasks/T211-reaction-command-manager.md"
           ]
         },
         {
-          "id": "NATIVE-T208-06",
+          "id": "NATIVE-T211-06",
           "label": "Partner and spawn reaction command sources - translation, equivalence unproved",
           "status": "PARTIAL",
           "evidence": [
-            "docs/tasks/T208-reaction-command-manager.md"
+            "docs/tasks/T211-reaction-command-manager.md"
           ]
         }
       ]
@@ -1716,6 +1788,14 @@
           "status": "NOT RUN",
           "evidence": [
             "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "OBS-T209-01",
+          "label": "Sephiroth Heartless Angel, Meteor, grab and clear overlays - reference comparison required",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
           ]
         }
       ]

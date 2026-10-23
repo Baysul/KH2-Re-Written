@@ -223,13 +223,16 @@ fn act_clear(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(
     Ok(())
 }
 
-/// 1:11 FUN_14042b320 -> FUN_1403c86a0: restart a motion.
+/// 1:11 FUN_14042b320 -> FUN_1403c86a0: restart a motion. FUN_1403c86a0
+/// zeroes the queue's read and write indices (+0x50) first, so what was
+/// queued behind the old motion is dropped.
 fn motion_start(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = ctx.sys_of(args[0].value)?;
     let (slot, blend) = (args[1].as_int(), args[2].as_float());
     let env = ctx.env;
     let obj = ctx.object(id)?;
     let _ = m;
+    obj.sys.motion_queue.clear();
     obj.sys
         .motion_start(slot.max(0) as usize, blend, env.clips(obj.sys.model));
     Ok(())
@@ -889,4 +892,42 @@ fn pattern_disable(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Re
     let id = ctx.sys_of_ai(m, args[0].value)?;
     ctx.object(id)?.sys.pattern_mask &= !(1 << (args[1].value & 31));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traps::test_support::{call, frame, world_with};
+    use crate::world::{Object, object_handle};
+
+    #[test]
+    fn restarting_a_motion_drops_what_was_queued_behind_it() {
+        let mut world = world_with(&[0.]);
+        let mut me = Object::bare(0);
+        let mut f = frame();
+        let handle = Slot::address(object_handle(1));
+        call(
+            &mut world,
+            &mut me,
+            &mut f,
+            motion_push,
+            &[handle, Slot::int(7), Slot::float(0.)],
+        );
+        assert_eq!(world.objects[1].as_ref().unwrap().sys.motion_queue.len(), 1);
+        call(
+            &mut world,
+            &mut me,
+            &mut f,
+            motion_start,
+            &[handle, Slot::int(3), Slot::float(0.)],
+        );
+        assert!(
+            world.objects[1]
+                .as_ref()
+                .unwrap()
+                .sys
+                .motion_queue
+                .is_empty()
+        );
+    }
 }

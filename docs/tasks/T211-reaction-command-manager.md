@@ -1,4 +1,4 @@
-# T208 — The reaction command: one search, its slot, marker and press
+# T211 — The reaction command: one search, its slot, marker and press
 
 Owner Claude, 2026-10-23, requested by burba in the project chat ("start making all reaction
 command systems 1:1 with ghidra"). Gate: combat and HUD (P19/P20 work; nothing here is inferred
@@ -6,7 +6,7 @@ as a gate pass). Prerequisites: T062 (command menu), T070 (field talk), T113 (Li
 T204 (second deck, party limits, summons), T206 (boss framework: the REACTION shapes, their
 enable test and Sephiroth's Block). Build identity: branch `claude/project-thread-kyocfc` cut from
 `main` at `ec58992`, then merged with `main` at `6de4a1f` (the summons' T207); package 0.1.2, Rust 1.99.0 Windows MSVC. Source: the selected Steam build
-15194255, validated at every run; the install was only read. (T207 is the summons' record.)
+15194255, validated at every run; the install was only read. (T207 is the summons' record; this record was numbered T208 on its branch and renumbered T211 at the merge with T208–T210.)
 
 Private evidence (never in Git): `%LOCALAPPDATA%/KH2FinalRewrite/research/reaction-1to1-20261023/`
 (plain `analyzeHeadless` decompiles `out/core1`..`core3`, `hud1`, `hud2`, `dd8`, `hold2`,
@@ -213,6 +213,12 @@ and its tests, and unattended tours against the install (results below).
   - Save point (`--save-point-tour`, Twilight Town area 9): "Save" is offered from the save
     point's entry; with Sora at 1 MP the heal gives +1 every 2 ticks from tick 21 to full (100) at
     217; Triangle at 240 requests the menu.
+  - After merging `main` at `b5f4230` (T208 debug menu, T209 Sephiroth, T210 Limit Form's limits on
+    the script engine): Limit Form's limits now offer their follow-ups as limit scenes through
+    record 1, and `--limit-form-tour` gives T210's results through this search (Sonic Rave 699
+    x5 then 700, Ars Arcanum 702 x5 then 703, Strike Raid 705 x3 then 706, Infinity 684; 17
+    follow-ups); party limits 27, summons 5 limit starts and 23 follow-ups, Block, Talk and the
+    save point as above. Workspace tests: 983 passed, 0 failed, 1 ignored.
   - Talk (`--autoplay` on the talk room): "Talk" with the 0x32 marker (the green triangle) over
     the NPC from tick 0; Triangle at 60 starts the talk.
   - Limit Form (`--autoplay`, arena): Infinity at 7700 and one follow-up (Shoot) at 7819 through

@@ -69,6 +69,7 @@ mod boss;
 mod character_kit;
 mod command_layout;
 mod debug_menu;
+pub(crate) use debug_menu::DebugMenu;
 mod deck_tour;
 mod drive_fx;
 mod drive_room;
@@ -89,6 +90,7 @@ mod item_drop_view;
 mod item_room;
 mod journal_tour;
 mod level_growth;
+mod limit_form_tour;
 mod limit_tour;
 mod magic_room;
 mod magic_tour;
@@ -670,6 +672,8 @@ const SOUND_BANK_LIMIT: u32 = 256 * 1024 * 1024;
 /// Mixer key flag of the room's ambient bed, so that its stop and fade never
 /// reach a sound request that has the same id.
 const AMBIENT_KEY: u32 = 0x4000_0000;
+/// The mixer key flag of an object's voice line (its slot stops it by key).
+const VOICE_KEY: u32 = 0x2000_0000;
 /// System bank (se000, engine slot 2) sounds: cursor move, sub-menu open,
 /// close, low-HP alarm (magicsfx-01 §5).
 const SE_CURSOR: u32 = 1;
@@ -1071,6 +1075,8 @@ struct Game {
     deck_tour: bool,
     /// The unattended `--party-limit-tour` (limit_tour.rs).
     limit_tour: bool,
+    /// The unattended `--limit-form-tour` (limit_form_tour.rs).
+    limit_form_tour: bool,
     /// The unattended `--summon-tour` (summon_tour.rs).
     summon_tour: bool,
     /// The deck swap (left, logical 0x10000) and open (right, 0x10000000)
@@ -1184,6 +1190,10 @@ struct Game {
     map_fx_pending: bool,
     /// Looping sound requests to stop (a map effect that ended).
     sound_stops: Vec<u32>,
+    /// Each battle actor's voice slot (enemy_battle::VoiceSlot).
+    enemy_voice_slots: HashMap<u64, enemy_battle::VoiceSlot>,
+    /// The vacuums' pull on each party member this tick (boss::requests).
+    party_push: Vec<[f32; 3]>,
     /// Field talk: control locked, and this tick's reaction / advance
     /// presses (Triangle; decide, back or Triangle).
     talking: bool,
@@ -1203,6 +1213,10 @@ struct Game {
     /// scripts drive (boss.rs).
     camera_watch: Option<boss::Watch>,
     screen_fade: Fade,
+    /// A running mission overlay's camera (scene transform, field of view)
+    /// and its `SeqBlur` weight with the event frame it belongs to.
+    overlay_camera: Option<boss::OverlayView>,
+    overlay_blur: Option<(f32, i32)>,
     /// The voice bank of each battle enemy object (objentry id).
     enemy_voice_banks: HashMap<u32, u16>,
     /// Sora's objentry weight (vacuums).
@@ -5926,7 +5940,12 @@ fn setup(
         Vec::new(),
         [1., 1.],
     );
-    commands.insert_resource(Afterimage { blur, on: false });
+    commands.insert_resource(Afterimage {
+        blur,
+        on: false,
+        zoom: [1., 1.],
+        step: None,
+    });
     commands.insert_resource(compose);
 }
 
@@ -6035,6 +6054,10 @@ type ActiveVolume = (u64, u16, Vec<(Vec3, f32)>);
 struct Afterimage {
     blur: crate::cutscene::blur::Blur,
     on: bool,
+    /// The previous picture's zoom in use and the last overlay event frame
+    /// fed.
+    zoom: [f32; 2],
+    step: Option<i32>,
 }
 
 /// FUN_14015f030 (priority 75000, after the 3D passes, before the 2D
@@ -6049,15 +6072,31 @@ fn afterimage(
     mut cameras: Query<&mut Camera>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    // The death event's SeqBlur (alpha 56/128) feeds the same pass.
-    let alpha = game
+    // The death event's SeqBlur (alpha 56/128) and a mission overlay's feed
+    // the same pass. SeqBlur (FUN_14015f250) zooms the previous picture
+    // (514/512, 418/416); an overlay's takes a new one once per event frame.
+    let drive = game
         .drive
         .as_ref()
-        .and_then(drive_room::DriveRt::afterimage)
-        .or(game_over.and_then(|g| g.blur()));
+        .and_then(drive_room::DriveRt::afterimage);
+    let overlay = game.overlay_blur.filter(|_| drive.is_none());
+    let seq_blur = overlay.map(|o| o.0).or(game_over.and_then(|g| g.blur()));
+    let alpha = drive.or(seq_blur);
+    let zoom = if drive.is_none() && seq_blur.is_some() {
+        crate::cutscene::blur::ZOOM
+    } else {
+        [1., 1.]
+    };
+    if zoom != after.zoom {
+        after.zoom = zoom;
+        after.blur.set_zoom(zoom, &mut meshes);
+    }
+    let step = overlay.map(|o| o.1);
+    let advance = step.is_none() || step != after.step;
+    after.step = step;
     let weight = alpha.map(|a| if after.on { a } else { 0. });
     after.on = alpha.is_some();
-    after.blur.feed(weight, &mut cameras, &mut meshes);
+    after.blur.feed(weight, advance, &mut cameras, &mut meshes);
 }
 
 /// The scene image follows the window's size.
@@ -6349,7 +6388,8 @@ fn simulate(
         (
             Vec2::ZERO,
             magic_tour::jump(tick, game.magic_shift),
-            magic_tour::attack(tick, game.magic_shift),
+            magic_tour::attack(tick, game.magic_shift)
+                || game.limit_form_tour && limit_form_tour::attack(tick),
         )
     } else if let Some(tour) = &game.ability_tour {
         (
@@ -6535,7 +6575,7 @@ fn simulate(
             if let Some(r) = m.menu.items.get_mut(1) {
                 if d.limit_form() {
                     r.label = d.src.names.get(&0x2c3).cloned().unwrap_or_default();
-                    r.colour = if d.limit.is_some() { 5 } else { 0 };
+                    r.colour = if d.limit_running { 5 } else { 0 };
                 } else if !d.src.magic_label.is_empty() {
                     r.label = d.src.magic_label.clone();
                 }
@@ -7336,11 +7376,7 @@ fn simulate(
             .map_or(0, |d| std::mem::take(&mut d.pending_exp));
         drive_room::add_form_exp(&mut game, exp, slots.as_deref_mut());
         drive_room::tick(&mut game, slots.as_deref().map(|s| s.as_slice()));
-        let offered = game
-            .reaction
-            .pressed(player::reaction_command::Source::Offered);
-        let rc = offered.is_some() && game.drive.as_ref().is_some_and(|d| d.offer == offered);
-        drive_room::limit_tick(&mut game, rc, None);
+        drive_room::limit_tick(&mut game);
         drive_room::motion_effects(&mut game);
     }
     // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
@@ -8506,13 +8542,28 @@ fn play_sounds(mut game: ResMut<Game>, mut audio: ResMut<Audio>, hud: Option<Res
             requests.push((id | AMBIENT_KEY, "ambient"));
         }
     }
+    // The battle actors' voice slots (FUN_1403ce260).
+    let mut slots = std::mem::take(&mut game.enemy_voice_slots);
+    for slot in slots.values_mut() {
+        let mixer = audio.output.as_ref().and_then(|o| o.mixer.lock().ok());
+        let (stop, play) =
+            slot.update(|line| mixer.as_ref().is_some_and(|m| m.playing(line | VOICE_KEY)));
+        if let (Some(line), Some(mut m)) = (stop, mixer) {
+            m.stop(line | VOICE_KEY);
+        }
+        if let Some(line) = play {
+            requests.push((line | VOICE_KEY, "enemy_voice"));
+        }
+    }
+    game.enemy_voice_slots = slots;
     for (id, cause) in requests {
         let Audio { output, banks, .. } = &mut *audio;
-        // The ambient bed's mixer key carries a flag; its request id does not.
-        let request_id = if cause == "ambient" {
-            id & !AMBIENT_KEY
-        } else {
-            id
+        // The ambient bed's and a voice line's mixer keys carry a flag; the
+        // request ids do not.
+        let request_id = match cause {
+            "ambient" => id & !AMBIENT_KEY,
+            "enemy_voice" => id & !VOICE_KEY,
+            _ => id,
         };
         let resolved = match banks.request(request_id) {
             Ok(r) => r,
@@ -8566,7 +8617,7 @@ fn hud_tick(
     let Some(mut hud) = hud else { return };
     let mut s = hud.stats;
     if let Some(rt) = game.enemy.as_mut() {
-        // Combat drives HP; G refills it.
+        // Combat drives HP; F6 refills it.
         if keys.just_pressed(KeyCode::F6) {
             rt.sora_hp = rt.sora_target.max_hp;
         }
@@ -8980,12 +9031,12 @@ fn hud_present(
             sheet: *sheet,
         });
     }
-    if !debug.open
+    if !debug.visible()
         && let Some((sheet, widths)) = menu_font.as_ref()
     {
         let font = field_command_menu::Font { widths, pad: 1 };
         let status = format!(
-            "Enemies ({}/{}) - F3: {}",
+            "F3 Debug menu   F2 Help   Enemies {}/{}: {}",
             gallery.actors.len(),
             enemy_gallery::MAX_ACTORS,
             gallery.status
@@ -8999,8 +9050,8 @@ fn hud_present(
             sheet: *sheet,
         });
     }
-    // The debug menu (F3) draws over everything.
-    if debug.open
+    // The debug menu (F3) draws over everything, also while it closes.
+    if debug.visible()
         && let Some((sheet, widths)) = menu_font.as_ref()
     {
         let white = textures.len();
@@ -9934,6 +9985,7 @@ fn camera_control(
     mut camera: Query<(&mut Transform, &mut Projection), CameraOnly>,
     talk: Option<Res<Talk>>,
     settings: Res<settings_room::SettingsRes>,
+    game: Res<Game>,
 ) {
     // Mouse-look turns the camera (the PC layer feeds mouse motion to the
     // right stick; its sensitivity is unresolved): 0.1 at Camera Speed 5.
@@ -9959,8 +10011,34 @@ fn camera_control(
             rig.camera.vertical_fov(),
         ),
     };
+    // A mission overlay's event camera takes the view while it runs; with
+    // its camera collision on (opcode 0x46) the eye is kept out of the map
+    // as the follow camera's is (FUN_140164940 from the target). [I] The
+    // camera system's own test for event cameras (FUN_1401780d0) is taken
+    // to be that one.
+    let (pose, fov) = match game.overlay_camera {
+        Some(v) => {
+            let mut eye = v.eye;
+            if v.collision {
+                let target = to_world(v.target.to_array());
+                let cast = |a: [f32; 3], b: [f32; 3]| rig.collision.cast(a, b);
+                if let Some(p) =
+                    follow_camera::clip(target, target, to_world(eye.to_array()), &cast)
+                {
+                    eye = from_world(p);
+                }
+            }
+            let mut pose = Transform::from_translation(eye).looking_at(v.target, Vec3::Y);
+            pose.rotate_local_z(v.roll);
+            (pose, v.fov)
+        }
+        None => (
+            Transform::from_translation(eye).looking_at(look_at, Vec3::Y),
+            fov,
+        ),
+    };
     if let Ok((mut transform, mut projection)) = camera.single_mut() {
-        *transform = Transform::from_translation(eye).looking_at(look_at, Vec3::Y);
+        *transform = pose;
         if let Projection::Perspective(p) = projection.as_mut()
             && p.fov != fov
         {
@@ -11999,6 +12077,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut deck_tour = false;
     let mut summon_tour = false;
     let mut limit_tour = false;
+    let mut limit_form_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
     // Capture ticks replacing the unattended run's own list (research).
@@ -12171,6 +12250,18 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("party limit tour capture directory absent")?,
+                );
+            }
+            // So does the Limit Form tour, in the form.
+            Some("--limit-form-tour") if autoplay.is_none() => {
+                magic_tour = true;
+                limit_form_tour = true;
+                magic_form = player::forms::LIMIT;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("limit form tour capture directory absent")?,
                 );
             }
             Some("--journal-tour") if autoplay.is_none() => {
@@ -12354,7 +12445,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         None
     };
     // A form's change takes about 260 ticks before the first cast.
-    let magic_shift = if party_hit_tour || deck_tour || limit_tour || summon_tour {
+    let magic_shift = if party_hit_tour || deck_tour || limit_tour || summon_tour || limit_form_tour
+    {
         // The magic tour's schedule never comes up.
         1 << 40
     } else if magic_form != 0 {
@@ -12369,6 +12461,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         deck_tour::captures()
     } else if summon_tour {
         summon_tour::captures()
+    } else if limit_form_tour {
+        limit_form_tour::captures()
     } else if limit_tour {
         limit_tour::captures()
     } else if journal_tour {
@@ -12410,6 +12504,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         deck_tour::end()
     } else if summon_tour {
         summon_tour::end()
+    } else if limit_form_tour {
+        limit_form_tour::end()
     } else if limit_tour {
         limit_tour::end()
     } else if journal_tour {
@@ -12620,6 +12716,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         genie_command: None,
         summon_stick: [0.; 3],
         limit_tour,
+        limit_form_tour,
         party_limits: Arc::new(std::mem::take(&mut loaded.party_limits)),
         party_limit: None,
         limit_request: None,
@@ -12658,6 +12755,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         fx_clear_map: Vec::new(),
         map_fx_pending: true,
         sound_stops: Vec::new(),
+        enemy_voice_slots: HashMap::new(),
+        party_push: Vec::new(),
         talking: false,
         rc_queued: false,
         reaction_commands: None,
@@ -12665,6 +12764,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         offers_seen: 0,
         battle_won: false,
         camera_watch: None,
+        overlay_camera: None,
+        overlay_blur: None,
         screen_fade: Fade::default(),
         enemy_voice_banks: HashMap::new(),
         sora_weight: 100.,
@@ -12964,7 +13065,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         collision: CameraCollision::new(&loaded.room),
     };
     eprintln!(
-        "Test room ready (the original PC bindings). WASD moves (Left Alt walks), Space/Backspace jump, Enter/left-click decides (Attack), Up/Down choose a command, right-click/Right Shift guards, F/Right Ctrl reacts (Talk), M opens the menu, the mouse turns the camera, middle-click/Right Alt recentres, F3 opens the debug menu, Esc exits."
+        "Test room ready (the original PC bindings). WASD moves (Left Alt walks), Space/Backspace jump, Enter/left-click decides (Attack), Up/Down choose a command, right-click/Right Shift guards, F/Right Ctrl reacts (Talk), M opens the menu, the mouse turns the camera, middle-click/Right Alt recentres, F3 opens the debug menu (F2 its help), Esc exits."
     );
     let mut app = App::new();
     if let Some(area) = area_res {
