@@ -10,7 +10,7 @@ package 0.1.2, Rust 1.99.0 Windows MSVC. Source: the selected Steam build 151942
 every run; the install was only read.
 
 Private evidence (never in Git): `%LOCALAPPDATA%/KH2FinalRewrite/research/boss-01/` (plain
-`analyzeHeadless` outputs `out/i1`..`i9`, `out/j1`..`j8`, `out/k1`..`k5`), the earlier
+`analyzeHeadless` outputs `out/i1`..`i9`, `out/j1`..`j8`, `out/k1`..`k9`, `out/m1`, `m2`), the earlier
 `research/playable-room-20261008/tt-world-01/collide-01/collide-spec.md` (§1.2, §2, §3), and the
 runs `kh2-boss-out/g3`..`g7` and `cmp4/`. No Ghidra MCP was used.
 
@@ -81,7 +81,7 @@ runs `kh2-boss-out/g3`..`g7` and `cmp4/`. No Ghidra MCP was used.
 - After the merge with `main` and the three traps' masks (`g7`, same settings as `g6`): the same
   Heartless Angel / fall / land / Block sequence. In that run a revenge dash took him up raised
   ground at the arena's edge (y 196 near z 813) and he dropped to a lower surface (y -53), where
-  he stood until his next act. See the area limit below.
+  he stood until his next act. See the area limit below (it is not an enemy rule).
 
 ## Uncertainty
 
@@ -93,12 +93,13 @@ runs `kh2-boss-out/g3`..`g7` and `cmp4/`. No Ghidra MCP was used.
   area limit (FUN_14040c4b0, obj+0x6cc bit 2), the head bump (obj+0x120 bit 22), body-versus-body
   pushes (FUN_14040ad70), riding platforms (CB+0x84) and FUN_1403c8a40's range evaluation at
   motion start.
-- Found, not translated: the enemies' area limit. FUN_1403b9090's grounded branch for objects
-  with obj+0x6cc bit 2 tests the step against the shape that FUN_14040c4b0 returns (DAT_142ae9f18).
-  That shape is registered by the area's zone-event handler FUN_1403fe320 for zone type 7
-  (FUN_14040c550, `out/k1`..`k5`); a step that would leave it is cut. Without it the boss can
-  walk onto the arena's surroundings. The old movement had the same freedom (it climbed any
-  floor up to 200 units), so this is not new here.
+- Checked, not an enemy rule: FUN_1403b9090's grounded branch for objects with obj+0x6cc bit 2
+  cuts a step that would leave the shape FUN_14040c4b0 returns, which the area's zone handler
+  FUN_1403fe320 registers for zone type 7 (FUN_14040c550). The only constructor that sets that
+  bit is FUN_140403680, YS::TRPLAYER's (`out/k1`..`k9`, `m1`, `m2`; an earlier note said
+  "enemies"). So nothing but the map's class-1 polygons holds an enemy in, and the climb in `g7`
+  is what the solver allows there. Whether the installed game lets him onto that ground is not
+  checked.
 - Found, not fixed: `bghit_check_line` (6:51, four arguments) takes a hit record, the two points
   and the mask (FUN_14053eb70), and 6:52..6:54 read that record. The crate reads the points
   from the first two arguments and keeps the result in shared state; the record's layout
@@ -109,5 +110,5 @@ runs `kh2-boss-out/g3`..`g7` and `cmp4/`. No Ghidra MCP was used.
 PARTIAL. The boss's map moves, its leave and land tests and the random-position search follow
 the executable; nothing is claimed 1:1 by observation.
 
-Next: the enemies' area limit (zone type 7), the 6:51..6:54 hit record, bodies for the other enemy
-classes, and a side-by-side capture against the installed game.
+Next: the 6:51..6:54 hit record, bodies for the other enemy classes, and a side-by-side capture
+against the installed game.
