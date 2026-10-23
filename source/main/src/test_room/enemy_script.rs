@@ -265,6 +265,10 @@ impl Env for BrainEnv<'_> {
     /// arena keeps the vertical floor test.
     fn line_hit_class(&self, from: Vec3, to: Vec3, class: u32) -> Option<Vec3> {
         match self.room? {
+            // FUN_14040c2b0: mask bit 16 takes the attack ray (FUN_140171090).
+            super::RoomWorld::Map(map) if class >> 16 & 1 != 0 => {
+                map.attack_hit(from, to).map(|h| h.point)
+            }
             super::RoomWorld::Map(map) => map.line(from, to, class),
             super::RoomWorld::Triangles(_) => self.line_hit(from, to),
         }
