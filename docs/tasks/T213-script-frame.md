@@ -83,6 +83,10 @@ summon and party-limit tours, hb01 programs 75 for Sephiroth).
     reaction (motion 13 instead of 11) and the rest of that volley misses it (summon hits 78
     against 93: 883 ×1 and 1210 ×1 instead of ×13 and ×4). Every other summon, appear event and
     limit follow-up matches; exit 0, no faults.
+- After merging `main` again (the reaction-command manager, PR #124, and the world map, PR
+  #126), the summon tour on both (`s3` main, `s2` this branch): the same single difference at
+  tick 4133 (summon hits 65 on `main`, 50 here; 883 and 1210 once each instead of 13 and 4
+  times); exit 0, no faults.
 
 ## Uncertainty
 
