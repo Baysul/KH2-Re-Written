@@ -5,7 +5,8 @@ use super::*;
 /// The field stops when the debug menu opens at `END`, so the menu's pages
 /// are captured at that same tick, one per capture after `FIRST_PAGE_CAPTURE`.
 pub const CAPTURES: &[u64] = &[
-    50, 90, 130, 170, 210, 250, 280, 280, 280, 280, 280, 280, 280, 280,
+    50, 90, 130, 170, 210, 250, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280,
+    280, 280, 280, 280, 280, 280,
 ];
 pub const END: u64 = 280;
 pub const FIRST_PAGE_CAPTURE: usize = 6;
@@ -94,7 +95,8 @@ pub fn tick(
 
 /// The menu page for the capture about to be taken: the summoned list, then
 /// the preview's Playback, Motions, Actions and View tabs, then (menu closed)
-/// the skeleton over the model and the skeleton alone.
+/// the skeleton over the model and the skeleton alone, then the menu's own
+/// pages (`DebugMenu::show_tour_page`).
 pub fn show_page(
     capture: usize,
     debug: &mut debug_menu::DebugMenu,
@@ -106,9 +108,11 @@ pub fn show_page(
     if let Some(first) = gallery.actors.first().map(|a| a.id) {
         gallery.select(first);
     }
-    gallery.overlays.skeleton = step >= 4;
-    gallery.overlays.hide_model = step >= 6;
-    if step >= 5 {
+    gallery.overlays.skeleton = (4..7).contains(&step);
+    gallery.overlays.hide_model = step == 6;
+    if step >= 7 {
+        debug.show_tour_page(step - 7);
+    } else if step >= 5 {
         debug.open = false;
     } else {
         // The Actions tab (step 3) shows a typed search.

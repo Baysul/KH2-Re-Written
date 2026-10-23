@@ -398,7 +398,12 @@ fn refusal(e: &Rejection) -> &'static str {
     }
 }
 
-pub fn toggle(keys: Res<ButtonInput<KeyCode>>, pads: Query<&Gamepad>, mut skate: ResMut<Skate>) {
+pub fn toggle(
+    keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
+    debug: Option<Res<crate::test_room::DebugMenu>>,
+    mut skate: ResMut<Skate>,
+) {
     if let Some((_, frames)) = &mut skate.notice {
         *frames = frames.saturating_sub(1);
         if *frames == 0 {
@@ -412,7 +417,8 @@ pub fn toggle(keys: Res<ButtonInput<KeyCode>>, pads: Query<&Gamepad>, mut skate:
     }
     #[cfg(not(feature = "skate3"))]
     let _ = pads;
-    if !keys.just_pressed(KeyCode::KeyJ) {
+    // J typed into the debug menu's search is a letter, not the board.
+    if !keys.just_pressed(KeyCode::KeyJ) || debug.is_some_and(|d| d.open) {
         return;
     }
     #[cfg(feature = "skate3")]
