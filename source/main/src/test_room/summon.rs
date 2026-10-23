@@ -403,8 +403,9 @@ pub fn sora_in_limit(game: &mut Game) -> bool {
         // played.
         let clip =
             capture_clip(row?, c.motion).filter(|&m| game.clips.scripted_clip(m).is_some())?;
-        let length = enemy::env::Clips::length(&*a.clips, c.motion as usize);
-        Some((clip, length.saturating_sub(c.remaining)))
+        // The capture's own length (the summon's clip table holds none for
+        // these slots, which left him on frame 0).
+        Some((clip, c.length.saturating_sub(c.remaining)))
     });
     let (position, yaw) = (p.0, p.1);
     game.player.position = position;
@@ -1227,6 +1228,7 @@ fn land_attacks(game: &mut Game, a: &mut Actor, tick: u64) {
                 previous: None,
                 radius: 1.,
                 hits_sora: false,
+                rc: None,
             },
         );
     let volumes: Vec<_> = a

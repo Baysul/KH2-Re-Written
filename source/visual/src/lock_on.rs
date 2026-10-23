@@ -423,3 +423,61 @@ mod tests {
         assert_eq!(quads(reticle.step(&seq, held(3), &|p| p, 3)), 2);
     }
 }
+
+/// The reaction command's target marker: the slot (FUN_140408520) creates a
+/// dk::LockOn with its mark's group (FUN_14017c570, 0x1405cca14) at the
+/// target, moves it to the target every frame (vt+0x30), and releases it
+/// (FUN_14017bfe0) when the command, the target or the mark changes. A
+/// release plays the group before the marker's own and deletes it at the
+/// end, as the reticle's does.
+#[derive(Default)]
+pub struct Marker {
+    shown: Option<(u32, LockOn, [f32; 3])>,
+    outros: Vec<Outro>,
+}
+
+impl Marker {
+    /// One frame: `wanted` is the slot's marker (its creation serial, group
+    /// and the target point in game space).
+    pub fn step(
+        &mut self,
+        seq: &Sequence,
+        wanted: Option<(u32, usize, [f32; 3])>,
+        project: &dyn Fn([f32; 3]) -> [f32; 3],
+        sheet: usize,
+    ) -> Option<Draw> {
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|(serial, ..)| wanted.is_none_or(|w| w.0 != *serial))
+            && let Some((_, old, world)) = self.shown.take()
+        {
+            let mut lock = LockOn::new(seq, old.group.saturating_sub(1));
+            lock.screen = old.screen;
+            lock.scale = old.scale;
+            self.outros.push(Outro { lock, world });
+        }
+        let mut quads = Vec::new();
+        if let Some((serial, group, world)) = wanted {
+            let (_, lock, at) = self
+                .shown
+                .get_or_insert_with(|| (serial, LockOn::new(seq, group), world));
+            *at = world;
+            lock.update(seq, project(world));
+            if let Some(Draw::Quads { quads: q, .. }) = lock.draw(seq, sheet) {
+                quads.extend(q);
+            }
+        }
+        self.outros.retain_mut(|outro| {
+            outro.lock.update(seq, project(outro.world));
+            if outro.lock.player.finished() {
+                return false;
+            }
+            if let Some(Draw::Quads { quads: q, .. }) = outro.lock.draw(seq, sheet) {
+                quads.extend(q);
+            }
+            true
+        });
+        (!quads.is_empty()).then_some(Draw::Quads { quads, z: 0, sheet })
+    }
+}

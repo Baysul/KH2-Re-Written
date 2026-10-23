@@ -53,7 +53,10 @@ pub fn dismiss(tick: u64) -> bool {
 /// deck's own row before that), else the record-0 offer while there is
 /// one.
 pub fn follow_up(tick: u64, offered: bool, special: Option<usize>) -> Option<usize> {
-    if !reaction(tick) {
+    // The record-0 offer on a cycle's first turn; a special deck's row on
+    // its row turns.
+    let k = turn(tick)?;
+    if k >= 2 || k == 1 && special.is_none() {
         return None;
     }
     match special {
@@ -70,19 +73,36 @@ pub fn lock(tick: u64) -> bool {
     phase(tick) == Some((0, LOCK))
 }
 
-/// Stitch's limit: the deck's two rows and then the reaction command, in
-/// turn on the follow-up ticks (`None`: the reaction's turn).
-pub fn rotation(tick: u64) -> Option<usize> {
+/// The follow-up span runs in cycles of four turns of `FOLLOW_UP_EVERY`
+/// ticks: the deck's rows on the first one or two (a row's command makes
+/// the limit capture Sora anew), the reaction button on the last two. The
+/// reaction commands chain to a state of the motion the limit captures Sora
+/// in (range 26), which opens some way into it: Stitch's 600 at 30, Peter
+/// Pan's 468 at 40 of capture 255, Genie's 535 at 96 of capture 253.
+const TURNS: u64 = 4;
+
+/// The turn (0..4) whose first tick `tick` is.
+fn turn(tick: u64) -> Option<u64> {
     let (_, t) = phase(tick)?;
-    let k = t.checked_sub(FOLLOW_UPS.start)? / FOLLOW_UP_EVERY % 3;
-    (k < 2).then_some(k as usize)
+    let k = t.checked_sub(FOLLOW_UPS.start)?;
+    (FOLLOW_UPS.contains(&t) && k.is_multiple_of(FOLLOW_UP_EVERY))
+        .then_some(k / FOLLOW_UP_EVERY % TURNS)
 }
 
-/// The reaction button for the limit's follow-ups; the record-0 offer is
-/// taken on the same ticks ([`follow_up`]).
-pub fn reaction(tick: u64) -> bool {
+/// Stitch's limit: the deck's two rows on the row turns (`None`: not a row
+/// turn).
+pub fn rotation(tick: u64) -> Option<usize> {
+    turn(tick).filter(|&k| k < 2).map(|k| k as usize)
+}
+
+/// The reaction button every 3 ticks on the reaction turns, so a press
+/// lands in the window the follow-up's state needs (FUN_1403ba070), as a
+/// player's would.
+pub fn mash(tick: u64) -> bool {
     phase(tick).is_some_and(|(_, t)| {
-        FOLLOW_UPS.contains(&t) && (t - FOLLOW_UPS.start).is_multiple_of(FOLLOW_UP_EVERY)
+        FOLLOW_UPS.contains(&t)
+            && (t - FOLLOW_UPS.start) / FOLLOW_UP_EVERY % TURNS >= 2
+            && t.is_multiple_of(3)
     })
 }
 
@@ -186,7 +206,10 @@ mod tests {
                 }
                 assert!((s + t - 30..s + t + 30).all(|x| !attack(x)), "{k} {t}");
             }
-            assert!(press(s + LIMIT_DECIDE).decide && reaction(s + 710) && !reaction(s + 1000));
+            assert!(press(s + LIMIT_DECIDE).decide && turn(s + 710) == Some(0));
+            assert!(turn(s + 1000).is_none() && !mash(s + 710) && mash(s + 741));
+            assert_eq!(follow_up(s + 725, true, None), None);
+            assert_eq!(follow_up(s + 725, false, Some(1)), Some(101));
             assert!(press(s + 694).up && !press(s + 710).decide);
             assert_eq!(follow_up(s + 710, true, None), Some(0));
             assert_eq!(follow_up(s + 710, false, None), None);
