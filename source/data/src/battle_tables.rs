@@ -182,6 +182,11 @@ pub struct Enemy {
     pub exp: u16,
     /// +0x58: the przt id scattered on death (0: none).
     pub prize: u16,
+    /// +0x5a: the bonus id the kill grants (0: none).
+    pub bonus: u16,
+    /// The 32 HP pools as percent of the LVPM HP: +4 + 2k for pools 0..15,
+    /// +0x24 + 2k for 16..31 (FUN_1403c2240). Pool 0 is `hp_percent`.
+    pub pools: [u16; 32],
 }
 
 pub fn enemy(enmp: &[u8], id: u16) -> io::Result<Enemy> {
@@ -196,6 +201,10 @@ pub fn enemy(enmp: &[u8], id: u16) -> io::Result<Enemy> {
             for (i, w) in weakness.iter_mut().enumerate() {
                 *w = u16_at(rec, 72 + i * 2)?;
             }
+            let mut pools = [0; 32];
+            for (k, p) in pools.iter_mut().enumerate() {
+                *p = u16_at(rec, 4 + k * 2)?;
+            }
             return Ok(Enemy {
                 id,
                 level: u16_at(rec, 2)?,
@@ -205,10 +214,32 @@ pub fn enemy(enmp: &[u8], id: u16) -> io::Result<Enemy> {
                 weakness,
                 exp: u16_at(rec, 0x56)?,
                 prize: u16_at(rec, 0x58)?,
+                bonus: u16_at(rec, 0x5a)?,
+                pools,
             });
         }
     }
     Err(invalid("ENMP id absent"))
+}
+
+/// The ENMP row a sheet binds (FUN_1403ebf30): `id`, else row 69 (0x45).
+pub fn enemy_or_fallback(enmp: &[u8], id: u16) -> io::Result<Enemy> {
+    enemy(enmp, id).or_else(|_| enemy(enmp, 0x45))
+}
+
+/// The `patn` table (DAT_142ae59d0, read by FUN_1403ee9b0): u32 version,
+/// u32 count, then 32-byte rows: byte 0 the state pattern bit, byte 1 + r
+/// the reaction that replaces original reaction r (0xff keeps it).
+pub fn reaction_patterns(patn: &[u8]) -> io::Result<Vec<[u8; 32]>> {
+    let count = u32_at(patn, 4)? as usize;
+    (0..count)
+        .map(|k| {
+            let r = 8 + k * 32;
+            patn.get(r..r + 32)
+                .and_then(|row| row.try_into().ok())
+                .ok_or_else(|| invalid("PATN truncated"))
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

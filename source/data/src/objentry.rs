@@ -21,6 +21,15 @@ pub struct ObjectEntry {
     /// +0x57: Drive form index (FUN_1403e0cc0's form record for weapon
     /// slot 1; 1..=6 Valor..Antiform).
     pub form: u8,
+    /// +0x50: the weight (f32 bits; FUN_1403b5e00), which a vacuum's pull
+    /// scales with and 0 of which makes the object immovable.
+    pub weight_bits: u32,
+}
+
+impl ObjectEntry {
+    pub fn weight(&self) -> f32 {
+        f32::from_bits(self.weight_bits)
+    }
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -58,6 +67,7 @@ pub fn read(bytes: &[u8]) -> io::Result<Vec<ObjectEntry>> {
             neo_moveset: u16::from_le_bytes(e[78..80].try_into().unwrap()),
             character: u16::from_le_bytes(e[76..78].try_into().unwrap()),
             form: e[0x57],
+            weight_bits: u32::from_le_bytes(e[0x50..0x54].try_into().unwrap()),
         })
         .collect())
 }

@@ -202,6 +202,43 @@ impl Object {
         self.run_callback_of(world, env, by, entry, &args);
     }
 
+    /// BTLOBJ vt+0xe0 (FUN_1403f8d30 / FUN_1403dbbd0 -> FUN_140410ce0): an
+    /// attack of this object reached `victim` (FUN_1403d1730 calls it after
+    /// the hit whether or not the victim could be damaged); the script's
+    /// OBJ_ATTACK gets the victim and the attack. An attack the motion made
+    /// (a range-10 window, FUN_1403dafe0) has no object here: `slot` None
+    /// stands a record of `param_id` in for the call.
+    pub fn attack_reached(
+        &mut self,
+        world: &mut World,
+        env: &dyn Env,
+        victim: ObjId,
+        slot: Option<usize>,
+        param_id: i32,
+    ) {
+        if self.script.instance.trigger(ATTACK) <= 0 {
+            return;
+        }
+        let (slot, transient) = match slot {
+            Some(s) => (s, false),
+            None => {
+                let mut a =
+                    crate::attack::Attack::new(Some(self.id), param_id, -1, 0, self.sys.team);
+                world.attack_serial += 1;
+                a.serial = world.attack_serial;
+                (world.add_attack(a), true)
+            }
+        };
+        let args = [
+            Slot::address(object_handle(victim)),
+            Slot::address(crate::world::ATTACK_HANDLES + 0x100 * slot as u32),
+        ];
+        self.fire(world, env, ATTACK, &args);
+        if transient && let Some(s) = world.attacks.get_mut(slot) {
+            *s = None;
+        }
+    }
+
     /// A guard turned the attack back (FUN_1403d2140): it is marked reflected
     /// by `reflecter`, and the reflect callback runs with the AI object it
     /// was registered with, the attack and the reflecter.
@@ -354,13 +391,93 @@ impl Object {
     /// One frame, in the executable's order: the motion clock and its events,
     /// the script (main thread, then acts), then root motion and physics.
     pub fn tick(&mut self, world: &mut World, env: &dyn Env) {
+        self.decay_revenge(world.frame_time);
+        // The tail of BTLOBJ vt+0x10, FUN_1403b4980: the movement request
+        // (+0x10 direction, +0x1c speed) lasts one tick; a script that wants
+        // to keep moving sets it again.
+        self.sys.move_direction = [0.; 3];
+        self.sys.move_speed = 0.;
         self.sys.begin_tick(env);
         self.carry_out_motion_effects(world, env);
         // FUN_1401b15f0: a friend's think runs before its acts (FUN_1403b4f80),
         // so a script's movement request has the last word.
         self.tick_friend(world, env);
         self.tick_script(world, env);
+        self.tick_threads(world, env);
         self.sys.end_tick(env);
+    }
+
+    /// One step of each side thread of this object's program (the magic
+    /// task FUN_1403c55f0, skipped while DAT_142a11400 bit 5 holds; the
+    /// hooked object's FUN_1403d7280). A hook its holder dropped (a new
+    /// hook or `obj_hook_stop`) is gone; a thread whose code returned is
+    /// unlinked, and a finished hook frees its holder's slot
+    /// (FUN_1403d6f80). [I] All are stepped here, after the script.
+    pub fn tick_threads(&mut self, world: &mut World, env: &dyn Env) {
+        if self.threads.is_empty() || world.status & 1 << 5 != 0 {
+            return;
+        }
+        let mut kept = Vec::new();
+        for mut t in std::mem::take(&mut self.threads) {
+            if let Some(holder) = t.hooked
+                && self.hook_of(world, holder) != Some(t.handle)
+            {
+                continue;
+            }
+            run_thread(world, env, self, &mut t.thread);
+            if !t.thread.finished() {
+                kept.push(t);
+            } else if let Some(holder) = t.hooked {
+                self.clear_hook(world, holder, t.handle);
+            }
+        }
+        // Threads the steps started come after the old ones.
+        kept.append(&mut self.threads);
+        self.threads = kept;
+    }
+
+    fn hook_of(&self, world: &World, holder: ObjId) -> Option<u32> {
+        if holder == self.id {
+            return self.sys.hook;
+        }
+        if holder == crate::world::PLAYER_OBJECT {
+            return world.player_proxy.as_ref()?.sys.hook;
+        }
+        world.objects.get(holder as usize)?.as_ref()?.sys.hook
+    }
+
+    fn clear_hook(&mut self, world: &mut World, holder: ObjId, handle: u32) {
+        let sys = if holder == self.id {
+            Some(&mut self.sys)
+        } else if holder == crate::world::PLAYER_OBJECT {
+            world.player_proxy.as_mut().map(|o| &mut o.sys)
+        } else {
+            world
+                .objects
+                .get_mut(holder as usize)
+                .and_then(|o| o.as_mut())
+                .map(|o| &mut o.sys)
+        };
+        if let Some(s) = sys
+            && s.hook == Some(handle)
+        {
+            s.hook = None;
+        }
+    }
+
+    /// BTLOBJ vt+0x10 of the enemy classes (FUN_1403db440 / FUN_1403dbbf0),
+    /// before the motion step: the revenge gauge falls by the frame time,
+    /// not below 0, while the act manager is active and the running act is
+    /// not still waiting on its gate.
+    pub fn decay_revenge(&mut self, frame_time: f32) {
+        let s = &mut self.sys;
+        if s.class_flags & crate::sysobj::class_flag::ENEMY != 0
+            && s.revenge_decays(&self.acts)
+            && self.acts.flags & act::GATED == 0
+            && s.revenge > 0.
+        {
+            s.revenge = (s.revenge - frame_time).max(0.);
+        }
     }
 
     /// A summon's kn::Friend update (FUN_1401b15f0): the think, then what
@@ -432,10 +549,19 @@ impl Object {
                     }
                 }
                 Effect::Revenge => {
-                    // [U] The revenge gauge compare (+0xd48 / +0xd4c) is not modeled.
-                    world
-                        .events
-                        .push(Event::Unsupported("motion event revenge"));
+                    // FUN_14040dd70 case 0x1c: an enemy-class object whose
+                    // gauge reached its limit starts `revenge` by name
+                    // (FUN_1403cac50: no priority compare).
+                    let s = &self.sys;
+                    if s.class_flags & crate::sysobj::class_flag::ENEMY != 0
+                        && s.revenge >= s.karma_limit
+                    {
+                        let actions = self.acts.start(b"revenge");
+                        self.apply_actions(Some((world, env)), actions);
+                    }
+                }
+                Effect::ReactionGroup { kind, p0, p1 } => {
+                    self.sys.reaction_groups.range_event(kind, p0, p1)
                 }
                 Effect::Other {
                     range,

@@ -65,6 +65,7 @@ struct Locator {
     name_hash: [u8; 16],
 }
 mod ability_inventory;
+mod boss;
 mod character_kit;
 mod command_layout;
 mod debug_menu;
@@ -96,7 +97,9 @@ mod party_hit_tour;
 mod party_limit;
 mod party_room;
 mod prize_room;
+mod reaction_command;
 mod second_deck;
+mod sephiroth;
 mod settings_room;
 mod spell_fx;
 mod summon;
@@ -310,6 +313,9 @@ struct EffectSources {
     /// The sound bank number each enemy object carries (objentry id, 0 for
     /// the room's own enemy), read from the bank's header like the exe.
     enemy_banks: HashMap<u32, u16>,
+    /// The voice bank number each battle enemy object carries (its
+    /// `voice/...` asset), by objentry id.
+    enemy_voices: HashMap<u32, u16>,
     system: Option<object_effect::Pax>,
     atlas: visual::effects::Atlas,
 }
@@ -830,7 +836,7 @@ pub(crate) struct RoomPart;
 
 /// A scrolling chunk's UV animation (UVSC record, draw-01 §7).
 #[derive(Component)]
-struct UvScroll {
+pub(crate) struct UvScroll {
     material: Handle<FogMaterial>,
     speed: [f32; 2],
     ratio: [f32; 2],
@@ -840,7 +846,7 @@ struct UvScroll {
 /// TEXA workers of the current area (draw-02 section 1): frame scripts
 /// that swap sprites into an environment's texture.
 #[derive(Resource)]
-struct TexaWorkers {
+pub(crate) struct TexaWorkers {
     list: Vec<TexaWorker>,
     last_tick: u64,
 }
@@ -860,12 +866,18 @@ fn texa_tick(
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut workers) = workers else { return };
+    texa_advance(&mut workers, game.tick, &mut images);
+}
+
+/// Runs every TEXA worker up to `tick` (at most four 60 Hz ticks per call)
+/// and uploads the sprites that changed.
+pub(crate) fn texa_advance(workers: &mut TexaWorkers, tick: u64, images: &mut Assets<Image>) {
     let ticks = if workers.last_tick == u64::MAX {
         1
     } else {
-        game.tick.saturating_sub(workers.last_tick).min(4)
+        tick.saturating_sub(workers.last_tick).min(4)
     };
-    workers.last_tick = game.tick;
+    workers.last_tick = tick;
     for w in &mut workers.list {
         let mut sprite = None;
         for _ in 0..ticks {
@@ -898,8 +910,16 @@ fn uv_scroll_tick(
     scrolls: Query<&UvScroll>,
     mut materials: ResMut<Assets<FogMaterial>>,
 ) {
-    let tick = game.tick as i64;
-    for s in &scrolls {
+    uv_scroll_apply(game.tick as i64, scrolls.iter(), &mut materials);
+}
+
+/// Sets every scrolling chunk's UV offset for `tick`.
+pub(crate) fn uv_scroll_apply<'a>(
+    tick: i64,
+    scrolls: impl Iterator<Item = &'a UvScroll>,
+    materials: &mut Assets<FogMaterial>,
+) {
+    for s in scrolls {
         let off = |speed: f32, ratio: f32| -> f32 {
             let acc = tick * (speed as i32 as i64);
             ((((ratio * acc as f32) as i64) >> 16) & 0xfff) as f32 / 4096.
@@ -937,6 +957,14 @@ struct Game {
     ability_tour: Option<ability_inventory::Tour>,
     enemy_tour: bool,
     enemy_battle_tour: bool,
+    /// The Sephiroth fight (`--sephiroth`): the room's own Shadow is off and
+    /// the boss is summoned from the area's placement.
+    sephiroth: bool,
+    /// `--sephiroth-result <file>`: written with `won` after the boss dies, then
+    /// the room closes (the chained run goes on to the outro).
+    sephiroth_result: Option<PathBuf>,
+    /// `--sephiroth-tour <dir>`: the fight played unattended (sephiroth.rs).
+    sephiroth_tour: bool,
     /// `--magic-tour`: the scripted spell and combo run (magic_tour.rs).
     magic_tour: bool,
     /// The Drive form the tour casts in (`--magic-form`, 0 = none) and the
@@ -1153,6 +1181,39 @@ struct Game {
     talking: bool,
     rc_queued: bool,
     advance_queued: bool,
+    /// The reaction-command search's records (reaction_command.rs) and this
+    /// tick's offer by a battle actor.
+    reaction_commands: Option<reaction_command::Commands>,
+    enemy_reaction: Option<reaction_command::Current>,
+    /// Offers a battle actor made so far (the tours alternate on it).
+    offers_seen: u32,
+    /// DAT_142a11400 bit 1: a mission's boss was beaten (commands locked,
+    /// Sora cannot be hurt).
+    battle_won: bool,
+    /// Camera mode 3 (`camera_watch`) and the global screen fade dk::Fade
+    /// scripts drive (boss.rs).
+    camera_watch: Option<boss::Watch>,
+    screen_fade: Fade,
+    /// The voice bank of each battle enemy object (objentry id).
+    enemy_voice_banks: HashMap<u32, u16>,
+    /// Sora's objentry weight (vacuums).
+    sora_weight: f32,
+    /// The scripts' lights' scene tint (0x80 = 1.0, FUN_1403f7040).
+    scene_tint: [u8; 3],
+    /// The area's mission (boss.rs), whether its load was tried, the event
+    /// signals posted for it, and whether its clear has finished.
+    mission: Option<boss::Mission>,
+    mission_tried: bool,
+    mission_signals: Vec<(i32, i32)>,
+    mission_cleared: bool,
+    /// The game speed (DAT_140717424) a running overlay set, the share of a
+    /// field step it has accumulated, and whether the field steps now.
+    game_speed: f32,
+    speed_carry: f32,
+    field_step: bool,
+    /// DAT_142a11404: the battle style (2: a mission's boss style, forced
+    /// for the whole mission by its record's flag bit 0, FUN_1403ab690).
+    battle_style: u8,
     /// Unattended capture ticks and end for this room.
     captures: Vec<u64>,
     autoplay_end: u64,
@@ -1904,6 +1965,10 @@ struct Loaded {
     /// Base Sora's kit, and what builds the Drive forms' kits.
     kit: character_kit::Kit,
     forms: Option<drive_room::FormSources>,
+    /// 03system `cmd` with the names of the commands offered in battle.
+    reaction_commands: Option<reaction_command::Commands>,
+    /// Sora's objentry weight (+0x50).
+    sora_weight: f32,
     enemy_character: u16,
     fmab: player::growth::Fmab,
     voices: Option<drive_room::Voices>,
@@ -2923,6 +2988,11 @@ fn load(
     }
     let weapon = weapons.remove(0);
     let objects = objentry::read(&read_archive(source, &config.objentry)?)?;
+    // Sora's object (entry 0x236) weight, which vacuums scale with.
+    let sora_weight = objects
+        .iter()
+        .find(|o| o.object_id == enemy::world::PLAYER_ENTRY)
+        .map_or(100., |o| o.weight());
     let object = objects
         .iter()
         .find(|o| o.model_name == config.object_model_name.as_bytes())
@@ -3228,6 +3298,7 @@ fn load(
             external: {
                 let mut m = limit_source.motions(1);
                 m.extend(summon::capture_motions(source, &battle));
+                m.extend(boss::capture_motions(source));
                 m
             },
         },
@@ -3259,6 +3330,20 @@ fn load(
         f
     });
     // The forms' and Revert's names for the command menu.
+    let reaction_commands = config.menu.as_ref().and_then(|menu| {
+        reaction_command::load(&system, |ids| {
+            hud::load_messages_optional(
+                source,
+                &menu.messages.index,
+                menu.messages.ordinal,
+                menu.messages.name_hash,
+                ids,
+            )
+            .map_err(|e| e.to_string())
+        })
+        .inspect_err(|e| eprintln!("Reaction commands unavailable: {e}"))
+        .ok()
+    });
     let forms = match (forms, &config.menu) {
         (Some(mut f), Some(menu)) => {
             let mut wanted = f.named_commands();
@@ -3520,11 +3605,18 @@ fn load(
             // its archive): registered under its header number, which is the
             // thousand of the ids its hits play.
             let mut enemy_banks = HashMap::new();
+            let mut enemy_voices = HashMap::new();
             let mut register = |key: u32, index: &str, ordinal: usize, hash: [u8; 16]| {
                 if let Some(bytes) = sound::object_bank(source, index, ordinal, hash)
                     && let Ok(number) = banks.insert(bytes)
                 {
                     enemy_banks.insert(key, number);
+                }
+                if key != 0
+                    && let Some(bytes) = sound::object_voice_bank(source, index, ordinal, hash)
+                    && let Ok(number) = banks.insert(bytes)
+                {
+                    enemy_voices.insert(key, number);
                 }
             };
             if let Some(l) = &e.enemy {
@@ -3542,6 +3634,7 @@ fn load(
                 weapon: pax(&e.weapon)?,
                 enemy: e.enemy.as_ref().map(pax).transpose()?,
                 enemy_banks,
+                enemy_voices,
                 enemy_paxes: data::path_lookup::Library::open(source)
                     .map(|mut library| {
                         enemy_battle::SUPPORTED
@@ -3847,6 +3940,8 @@ fn load(
             None => Vec::new(),
         },
         forms,
+        reaction_commands,
+        sora_weight,
         enemy_character,
         fmab,
         voices,
@@ -4886,6 +4981,7 @@ fn area_music(area: Option<ResMut<AreaRes>>, music: Option<ResMut<MusicRes>>, au
     let Some(change) = area.music.take() else {
         return;
     };
+    m.one_track = change.pair[0] != 0 && change.pair[0] == change.pair[1];
     for (k, slot) in change.slots.into_iter().enumerate() {
         let Some(slot) = slot else { continue };
         if let Some(output) = &audio.output
@@ -6031,6 +6127,19 @@ fn compose_2d(
             frame.fill(white, [0., 0., 0., t.fade.alpha as f32 / 128.]);
         }
     }
+    // The global fade a script drives (white flashes), at priority 330000.
+    if game.screen_fade.state != fade::State::Idle
+        && let Some(white) = c.white_sheet
+    {
+        let ([r, g, b, a], _) = game.screen_fade.colour();
+        frame.fill(white, [r.min(1.), g.min(1.), b.min(1.), a]);
+    }
+    // A mission clear's overlay fades.
+    if let (Some(colour), Some(white)) =
+        (game.mission.as_ref().and_then(|m| m.fade()), c.white_sheet)
+    {
+        frame.fill(white, colour);
+    }
 }
 
 /// The exe's pad pipeline for the room (bgm-input-01 Part B): PADDATA,
@@ -6184,6 +6293,7 @@ fn simulate(
     } else if game.ability_tour.is_some()
         || game.enemy_tour
         || game.enemy_battle_tour
+        || game.sephiroth_tour
         || game.magic_tour
     {
         (false, false)
@@ -6198,6 +6308,8 @@ fn simulate(
     };
     let (stick, jump, decide) = if scripted_menu {
         (Vec2::ZERO, false, deck_buttons.decide)
+    } else if game.sephiroth_tour {
+        sephiroth::tour_input(&game, tick)
     } else if game.enemy_battle_tour {
         (
             Vec2::ZERO,
@@ -6249,6 +6361,9 @@ fn simulate(
     } else {
         (stick, jump, decide)
     };
+    // A won mission locks the commands (DAT_142a11400 bit 1 dims every row
+    // without flag bit 5, FUN_1403b6cf0).
+    let decide = decide && !game.battle_won;
     let (up, down) = if talking { (false, false) } else { (up, down) };
     // First person: the "is moving" predicates the idle and run states test
     // (FUN_1403a7830, FUN_1403a8f00) are false, so the left stick starts no
@@ -6367,6 +6482,19 @@ fn simulate(
                 };
             }
         }
+        // A battle actor's reaction command (reaction_command.rs); a
+        // limit's or a summon's offer below takes the slot instead.
+        m.menu.reaction = game.enemy_reaction.and_then(|c| {
+            Some(field_command_menu::Reaction {
+                label: game
+                    .reaction_commands
+                    .as_ref()?
+                    .names
+                    .get(&c.offer.command)?
+                    .clone(),
+                dimmed: c.offer.dimmed(),
+            })
+        });
         // A Drive form greys the commands its mask disables (FUN_1403b6cb0:
         // Magic in Valor, Limit and Antiform, Items in Antiform), and
         // Wisdom's Attack row is "Shoot" (0x16d).
@@ -6391,10 +6519,12 @@ fn simulate(
                 }
             }
             // A limit's follow-up is the reaction command (slot 1).
-            m.menu.reaction = d.offer.map(|cmd| field_command_menu::Reaction {
-                label: d.src.names.get(&cmd).cloned().unwrap_or_default(),
-                dimmed: false,
-            });
+            if let Some(cmd) = d.offer {
+                m.menu.reaction = Some(field_command_menu::Reaction {
+                    label: d.src.names.get(&cmd).cloned().unwrap_or_default(),
+                    dimmed: false,
+                });
+            }
         }
         // The Drive row: "Drive" opening the forms (submenu 3), or "Revert"
         // in a form (FUN_1403f36c0), and the open submenu's colours.
@@ -6803,7 +6933,7 @@ fn simulate(
     // Guard (Square): F or the pad's west button; unattended runs guard
     // just before two of the Shadow's claws.
     let guard = if game.autoplay.is_some() {
-        !game.magic_tour && AUTOPLAY_GUARDS.contains(&tick)
+        !game.magic_tour && !game.sephiroth_tour && AUTOPLAY_GUARDS.contains(&tick)
     } else {
         std::mem::take(&mut game.guard_queued)
     } && !talking;
@@ -6811,6 +6941,9 @@ fn simulate(
     // jump. Unattended runs hold it.
     let jump_up = game.autoplay.is_none() && game.pad.held & 0x100 == 0;
     let toggle = std::mem::take(&mut game.lock_queued);
+    if toggle {
+        game.camera_watch = None;
+    }
     let cycle = std::mem::take(&mut game.cycle_queued);
     let before = targeting.holder.target;
     let mut selected = enemy_target::select(&game, &gallery, &mut targeting, toggle, cycle, 1.);
@@ -6930,6 +7063,7 @@ fn simulate(
     }
     if game.autoplay.is_some()
         && !game.enemy_battle_tour
+        && !game.sephiroth_tour
         && !game.magic_tour
         && game.ability_tour.is_none()
         && game.autoplay_end != AUTOPLAY_TALK_END
@@ -6946,6 +7080,7 @@ fn simulate(
     }
     if game.autoplay.is_some()
         && !game.enemy_battle_tour
+        && !game.sephiroth_tour
         && !game.magic_tour
         && game.ability_tour.is_none()
         && game.autoplay_end != AUTOPLAY_TALK_END
@@ -7187,7 +7322,7 @@ fn simulate(
     let mut right_stick = 0f32;
     if game.autoplay.is_some() {
         // Unattended runs orbit 180 degrees to check Sora from the front.
-        if (660..720).contains(&tick) {
+        if (660..720).contains(&tick) && !game.sephiroth_tour {
             turn = 1.;
         }
     } else {
@@ -7251,6 +7386,11 @@ fn simulate(
     // Pad bit 32 (R2) keeps manual zoom allowed through the follow target's
     // zoom lock; no supported actor sets the lock.
     camera.zoom_override = game.pad.held & (1 << 32) != 0;
+    // Mode 3 ends with its object, or when the lock button changes mode.
+    if game.camera_watch.is_some() && boss::watch_anchor(&game, &gallery).is_none() {
+        game.camera_watch = None;
+    }
+    camera.watch_target = boss::watch_anchor(&game, &gallery).map(to_world);
     camera.lock_target = if game.target_locked {
         targeting
             .holder
@@ -8042,9 +8182,17 @@ fn talk_tick(mut game: ResMut<Game>, talk: Option<ResMut<Talk>>, hud: Option<Res
             m.menu.reaction.take()
         } else if game.talking {
             None
+        } else if let Some(dimmed) = talk.reaction {
+            Some(field_command_menu::Reaction { label, dimmed })
         } else {
-            talk.reaction
-                .map(|dimmed| field_command_menu::Reaction { label, dimmed })
+            // A battle actor's offer (reaction_command.rs).
+            game.enemy_reaction.and_then(|c| {
+                let names = &game.reaction_commands.as_ref()?.names;
+                Some(field_command_menu::Reaction {
+                    label: names.get(&c.offer.command)?.clone(),
+                    dimmed: c.offer.dimmed(),
+                })
+            })
         };
     }
 }
@@ -8890,6 +9038,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
         sora_attack,
         hero_hit_tick,
         enemy_battle_tour,
+        sephiroth_tour,
         magic_tour,
         magic_shift,
         wall,
@@ -8900,6 +9049,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
     let debug_blow = std::mem::take(debug_blow)
         || (autoplay.is_some()
             && !*enemy_battle_tour
+            && !*sephiroth_tour
             && !*magic_tour
             && AUTOPLAY_BLOWS.contains(&tick));
     let act_at_start = rt.enemy.current_act();
@@ -10803,8 +10953,12 @@ fn field_running(
     camp: Option<Res<CampRes>>,
     debug: Res<debug_menu::DebugMenu>,
     game_over: Option<Res<game_over::GameOverRes>>,
+    game: Res<Game>,
 ) -> bool {
-    camp.is_none_or(|c| !c.menu_up()) && !debug.open && game_over.is_none_or(|g| g.field_runs())
+    camp.is_none_or(|c| !c.menu_up())
+        && !debug.open
+        && game_over.is_none_or(|g| g.field_runs())
+        && game.field_step
 }
 
 /// START (logical 0x2 in the field's pad mode) opens the camp
@@ -10872,8 +11026,8 @@ fn camp_tick(
     if game.autoplay.is_some() {
         let logical = if let Some(tour) = &game.ability_tour {
             tour.logical(game.tick)
-        } else if game.magic_tour {
-            // The magic tour never opens the camp.
+        } else if game.magic_tour || game.sephiroth_tour {
+            // The magic and Sephiroth tours never open the camp.
             0
         } else {
             AUTOPLAY_CAMP
@@ -11626,6 +11780,10 @@ struct MusicRes {
     battle: bool,
     counter: u32,
     since_reset: u32,
+    /// The area's field and battle tracks are one (hb01 under program 75:
+    /// 188/188): the manager plays slot 0 and never switches (bgm-input
+    /// A4.3 `switchOn` = 0).
+    one_track: bool,
 }
 
 const MUSIC_KEYS: [u32; 2] = [9_000_000, 9_000_001];
@@ -11676,6 +11834,12 @@ fn music_tick(music: Option<ResMut<MusicRes>>, mut game: ResMut<Game>, audio: Re
         }
         m.started = true;
         game.event(serde_json::json!({"event":"bgm_start","slot":0,"tick":tick}));
+    }
+    // One track for field and battle: nothing switches. A forced battle
+    // style (a mission's record flag bit 0, DAT_142a11404 = 2) also keeps
+    // FUN_1403ab6f0 from changing the state.
+    if m.one_track || game.battle_style == 2 {
+        return;
     }
     // FUN_1403ab6f0: the target state and its hysteresis.
     let p = game.player.position;
@@ -11778,6 +11942,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut gear_tour_quick = false;
     let mut enemy_tour = false;
     let mut enemy_battle_tour = false;
+    let mut sephiroth = false;
+    let mut sephiroth_result: Option<PathBuf> = None;
+    let mut sephiroth_tour = false;
     let mut magic_tour = false;
     let mut party_hit_tour = false;
     let mut magic_form = 0u8;
@@ -11832,6 +11999,25 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("enemy tour capture directory absent")?,
+                );
+            }
+            Some("--sephiroth") => sephiroth = true,
+            Some("--sephiroth-result") => {
+                sephiroth_result = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("sephiroth result file absent")?,
+                )
+            }
+            Some("--sephiroth-tour") if autoplay.is_none() => {
+                sephiroth = true;
+                sephiroth_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("Sephiroth tour capture directory absent")?,
                 );
             }
             Some("--enemy-combat-tour") if autoplay.is_none() => {
@@ -12145,6 +12331,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         level_growth::CAPTURES.to_vec()
     } else if game_over_tour {
         game_over::CAPTURES.to_vec()
+    } else if sephiroth_tour {
+        sephiroth::tour_captures()
     } else if enemy_battle_tour {
         enemy_battle_tour::CAPTURES.to_vec()
     } else if enemy_tour {
@@ -12182,6 +12370,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         level_growth::END
     } else if game_over_tour {
         game_over::END
+    } else if sephiroth_tour {
+        sephiroth::tour_end()
     } else if enemy_battle_tour {
         enemy_battle_tour::END
     } else if enemy_tour {
@@ -12221,6 +12411,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         ability_tour: tour,
         enemy_tour,
         enemy_battle_tour,
+        sephiroth,
+        sephiroth_result,
+        sephiroth_tour,
         magic_tour,
         magic_form,
         magic_shift,
@@ -12407,6 +12600,23 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         sound_stops: Vec::new(),
         talking: false,
         rc_queued: false,
+        reaction_commands: None,
+        enemy_reaction: None,
+        offers_seen: 0,
+        battle_won: false,
+        camera_watch: None,
+        screen_fade: Fade::default(),
+        enemy_voice_banks: HashMap::new(),
+        sora_weight: 100.,
+        scene_tint: [0x80; 3],
+        mission: None,
+        mission_tried: false,
+        mission_signals: Vec::new(),
+        mission_cleared: false,
+        game_speed: 1.,
+        speed_carry: 0.,
+        field_step: true,
+        battle_style: 0,
         advance_queued: false,
         captures,
         autoplay_end,
@@ -12417,6 +12627,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         "ap_budget":game.ability_source.inventory.ap,"growth_tiers":game.ability_source.inventory.growth}));
     let drop_view = item_drop_view::load(&source);
     let mut drive_fx = drive_fx::DriveFx::default();
+    game.reaction_commands = loaded.reaction_commands.take();
+    game.sora_weight = loaded.sora_weight;
     if let Some(mut src) = loaded.forms.take() {
         drive_fx = drive_fx::DriveFx::new(src.texcommon.take(), src.prize_pax.take());
         let mut d = drive_room::DriveRt::new(src, Arc::clone(&source), loaded.enemy_character);
@@ -12541,6 +12753,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             } else {
                 e.atlas.texel_size
             };
+            game.enemy_voice_banks = e.enemy_voices.clone();
             (
                 Effects {
                     weapon: { Some(Arc::new(e.weapon)) },
@@ -12579,6 +12792,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             None,
         ),
     };
+    if let Some(a) = &area_res {
+        let setup = &a.current.state.setup;
+        game.event(serde_json::json!({"event":"area_start","world":a.current.world,
+            "area":a.current.area,"programs":a.current.programs,
+            "bg_mask":format!("{:#x}", setup.bg_mask),"battle_level":setup.battle_level,
+            "bgm":setup.bgm,"camera_mode":setup.camera_mode,
+            "events":setup.events.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>(),
+            "spawns":setup.spawns.iter().map(|r| format!("{:x}{}", r.name, if r.deferred {" (deferred)"} else {""})).collect::<Vec<_>>()}));
+    }
     let mut enemy_model = None;
     if let Some(e) = loaded.enemy {
         let spawn = loaded.spawn + e.offset;
@@ -12598,8 +12820,17 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         enemy_model = Some(e.model);
         game.enemy = Some(EnemyRuntime {
             sora_target_radius: e.sora_target_radius,
-            enabled: !game.enemy_battle_tour,
-            battle_level: e.battle_level,
+            enabled: !game.enemy_battle_tour && !game.sephiroth,
+            // FUN_1403ee1d0 at the end of the area loader: the area's op
+            // 0x1e level when it gives one (hb01 btl 75: 80). [U] With none
+            // the executable sums the story's `btlv` rows; the config's
+            // level stands in.
+            battle_level: area_res
+                .as_ref()
+                .map(|a| a.current.state.setup.battle_level)
+                .and_then(|l| u16::try_from(l).ok())
+                .filter(|&l| l > 0)
+                .unwrap_or(e.battle_level),
             clips: e.clips,
             body: e.body,
             targets: e.targets,
@@ -12688,6 +12919,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             battle: false,
             counter: 0,
             since_reset: 0,
+            one_track: false,
         });
     }
     if let Some(mut c) = loaded.camp {
@@ -12807,6 +13039,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .init_resource::<crate::skate::Skate>()
         .init_resource::<debug_menu::DebugMenu>()
         .init_resource::<enemy_battle_tour::Checks>()
+        .init_resource::<sephiroth::Fight>()
         .add_plugins(SkatePlugins)
         .add_systems(
             Startup,
@@ -12822,6 +13055,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 camp_tick,
                 game_over::tick,
                 command_layout::follow,
+                boss::mission_tick,
                 (
                     simulate,
                     summon::tick,
@@ -12830,6 +13064,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                     enemy_battle::tick,
                     enemy_gallery::tick,
                     enemy_battle_tour::tick,
+                    sephiroth::tick,
                     enemy_tour::tick,
                     field_npc_tick,
                     talk_tick,
@@ -12853,6 +13088,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 area_transition,
                 transition_time,
                 bg_visibility,
+                boss::map_tint,
                 area_music,
                 uv_scroll_tick,
                 texa_tick,

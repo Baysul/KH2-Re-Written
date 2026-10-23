@@ -130,6 +130,8 @@ pub struct LoadedArea {
 #[derive(Default)]
 pub struct MusicChange {
     pub slots: [Option<Option<Vec<u8>>>; 2],
+    /// The area's field and battle track numbers.
+    pub pair: [u16; 2],
 }
 
 /// A zone-spawned townsperson (spawn type 2).
@@ -498,6 +500,7 @@ impl AreaSource {
             });
         }
         self.last_pair = Some(pair);
+        change.pair = pair;
         change
     }
 

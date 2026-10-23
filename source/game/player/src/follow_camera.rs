@@ -294,6 +294,10 @@ pub fn clip(prev: Vec3, from: Vec3, to: Vec3, cast: Cast) -> Option<Vec3> {
 pub struct CameraInput {
     /// Native mode-2 camera anchor, in Y-down world coordinates.
     pub lock_target: Option<Vec3>,
+    /// Native mode 3 (`camera_watch`, FUN_140176310 / FUN_140176380): a
+    /// script's watched object's anchor; the lock-on routine runs on it with
+    /// the look-at blend 1.0 instead of 0.3. Mode 2 has precedence here [I].
+    pub watch_target: Option<Vec3>,
     pub player_position: Vec3,
     /// Player facing as a horizontal direction in world space.
     pub player_forward: Vec3,
@@ -627,15 +631,19 @@ impl FollowCamera {
             None => {}
         }
         if self.first_person {
-            if input.lock_target.is_none() {
+            if input.lock_target.is_none() && input.watch_target.is_none() {
                 self.tick_first_person(input, gain, cast);
                 return;
             }
             // FUN_140164870: another camera mode drops first person.
             self.first_person = false;
         }
-        if let Some(anchor) = input.lock_target {
-            self.tick_lock(input, anchor, cast, spheres);
+        let lock = input
+            .lock_target
+            .map(|a| (a, LOCK_LOOK_BLEND))
+            .or(input.watch_target.map(|a| (a, 1.)));
+        if let Some((anchor, blend)) = lock {
+            self.tick_lock(input, anchor, blend, cast, spheres);
             let feet_up = [
                 input.player_position[0],
                 input.player_position[1] - LOOK_AT_HEIGHT,
@@ -860,12 +868,19 @@ impl FollowCamera {
     /// Mode 2 (FUN_140176c70): the look point blends toward the locked
     /// target's camera anchor, the radius and yaw react to the target and the
     /// player leaving the screen, and the eye target stays on the player.
-    fn tick_lock(&mut self, input: &CameraInput, anchor: Vec3, cast: Cast, spheres: &[Sphere]) {
+    fn tick_lock(
+        &mut self,
+        input: &CameraInput,
+        anchor: Vec3,
+        blend: f32,
+        cast: Cast,
+        spheres: &[Sphere],
+    ) {
         let player = input.player_position;
         let feet_up = [player[0], player[1] - LOOK_AT_HEIGHT, player[2]];
-        // FUN_140176ec0 with k = 0.3.
+        // FUN_140176ec0 with k = 0.3 (mode 2) or 1.0 (mode 3).
         let old_look_target = self.look_at_target;
-        let toward = sub(anchor, feet_up).map(|c| LOCK_LOOK_BLEND * c);
+        let toward = sub(anchor, feet_up).map(|c| blend * c);
         let look = [0, 1, 2].map(|i| toward[i] + feet_up[i]);
         let head = [player[0], player[1] - HEAD_HEIGHT, player[2]];
         let target_flags = self.screen_flags(anchor);

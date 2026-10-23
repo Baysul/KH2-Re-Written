@@ -4,7 +4,7 @@ use std::io;
 
 pub const RECORD_SIZE: usize = 0x30;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Command {
     pub id: u16,
     /// +8: the command's name message.
@@ -34,6 +34,32 @@ pub struct Command {
     pub form_mask: u16,
     /// +0x2e: the command group.
     pub group: u8,
+    /// The fields the reaction-command search reads.
+    pub reaction: Reaction,
+}
+
+/// The reaction-command fields of a record (FUN_140407de0, FUN_1404088f0,
+/// FUN_140408080, FUN_140408520).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Reaction {
+    /// +0x10: the cosine Sora's facing must reach toward the target (-1 none).
+    pub facing_cos: f32,
+    /// +0x14 and +0x18: a yaw offset and the cosine the target's own facing
+    /// must reach toward Sora (-1 none).
+    pub target_yaw: f32,
+    pub target_cos: f32,
+    /// +0x1d: the camera on execute (1 watch the target, 3 the partner).
+    pub camera: u8,
+    /// +0x1e: the offer's priority.
+    pub priority: u8,
+    /// +0x24: the target marker (index into the marker effect table).
+    pub mark: u8,
+    /// +0x25: what execution does to Sora's current action (1, 2).
+    pub action: u8,
+    /// +0x26: the usage counter index.
+    pub counter: u16,
+    /// +0x28: past this horizontal distance the offer is dimmed (0 none).
+    pub distance: u16,
 }
 
 pub fn read(bytes: &[u8]) -> io::Result<Vec<Command>> {
@@ -61,6 +87,17 @@ pub fn read(bytes: &[u8]) -> io::Result<Vec<Command>> {
             chain: u16::from_le_bytes([r[0x22], r[0x23]]),
             form_mask: u16::from_le_bytes([r[0x2c], r[0x2d]]),
             group: r[0x2e],
+            reaction: Reaction {
+                facing_cos: f32::from_le_bytes([r[0x10], r[0x11], r[0x12], r[0x13]]),
+                target_yaw: f32::from_le_bytes([r[0x14], r[0x15], r[0x16], r[0x17]]),
+                target_cos: f32::from_le_bytes([r[0x18], r[0x19], r[0x1a], r[0x1b]]),
+                camera: r[0x1d],
+                priority: r[0x1e],
+                mark: r[0x24],
+                action: r[0x25],
+                counter: u16::from_le_bytes([r[0x26], r[0x27]]),
+                distance: u16::from_le_bytes([r[0x28], r[0x29]]),
+            },
         })
         .collect())
 }

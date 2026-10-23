@@ -123,6 +123,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         party_struck,
         gallery_targets,
         enemy_battle_tour,
+        battle_won,
         ..
     } = game;
     let Some(rt) = enemy.as_mut() else { return };
@@ -460,6 +461,15 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                     &attack,
                     v.stats.as_ref().unwrap_or(&rt.sora),
                     rt.difficulty,
+                    super::enemy_battle::HitRecordInfo {
+                        param_id: v.atkp,
+                        revenge: rows[row].revenge,
+                        pool: target.parts,
+                        // Sora's own volumes (blade, body, spells) are the
+                        // leader's; a member's are a party member's.
+                        by_leader: v.member.is_none(),
+                        by_party: v.member.is_some(),
+                    },
                 )
             {
                 battle.hp_events.push(battle.brain.hp());
@@ -794,6 +804,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                             w_id,
                             (centre, body, body_radius),
                             cand.script_slot.filter(|_| !cand.direct),
+                            cand.direct,
                         ));
                     }
                 }
@@ -841,18 +852,29 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
             atkp,
             (claw_at, body_at, body_radius),
             script_slot,
+            direct,
         )) = incoming
         {
             *hero_hit_tick = Some(tick);
             if let Some(slot) = script_slot {
                 battle.brain.mark_script_attack(slot);
             }
-            if rt.sora_invulnerable > 0. || player.range_invulnerable(clips) || cheats.invincible {
+            // DAT_142a11400 bit 1 (a won mission) keeps Sora unhurt too
+            // (FUN_1403d65a0).
+            if rt.sora_invulnerable > 0.
+                || player.range_invulnerable(clips)
+                || cheats.invincible
+                || *battle_won
+            {
                 rt.sora_record.hit(aid, group, false, |_| (0, 0));
                 event(
                     log,
                     serde_json::json!({"event":"gallery_sora_hit_invulnerable","tick":tick,"actor":actor.id,"atkp":atkp}),
                 );
+                // The owner hears of it whether or not Sora was hurt.
+                if !direct {
+                    battle.brain.attack_reached_player(script_slot, atkp);
+                }
                 continue;
             }
             if rt.sora_hp <= 0 {
@@ -938,6 +960,10 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 log,
                 serde_json::json!({"event":"gallery_sora_hit","tick":tick,"actor":actor.id,"atkp":atkp,"damage":damage,"counted":counted,"hp":rt.sora_hp,"step":row}),
             );
+            // FUN_1403d1730 ends with the owner's vt+0xe0 (OBJ_ATTACK).
+            if !direct {
+                battle.brain.attack_reached_player(script_slot, atkp);
+            }
         }
     }
 }

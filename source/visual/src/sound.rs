@@ -49,6 +49,28 @@ pub fn object_bank(
     ordinal: usize,
     name_hash: [u8; 16],
 ) -> Option<Vec<u8>> {
+    object_asset(source, index, ordinal, name_hash, b"se/obj/se")
+}
+
+/// The voice bank an object archive carries: the replacement asset its
+/// type-34 record names (`voice/battle/us/<name>`), which the object's
+/// voice object YS::VOICE_EE plays its lines from (FUN_1403da940).
+pub fn object_voice_bank(
+    source: &ProbeSource,
+    index: &str,
+    ordinal: usize,
+    name_hash: [u8; 16],
+) -> Option<Vec<u8>> {
+    object_asset(source, index, ordinal, name_hash, b"voice/")
+}
+
+fn object_asset(
+    source: &ProbeSource,
+    index: &str,
+    ordinal: usize,
+    name_hash: [u8; 16],
+    prefix: &[u8],
+) -> Option<Vec<u8>> {
     let mut checked = source.open_index(index).ok()?;
     let entry = checked
         .inventory
@@ -58,7 +80,7 @@ pub fn object_bank(
     let bank = replacement_payload::read_all_replacements(&mut checked.reader, entry)
         .ok()?
         .into_iter()
-        .find(|r| r.metadata.name_bytes.starts_with(b"se/obj/se"))?
+        .find(|r| r.metadata.name_bytes.starts_with(prefix))?
         .bytes;
     checked.verify_unchanged().ok()?;
     scd::read(&bank).ok()?;
