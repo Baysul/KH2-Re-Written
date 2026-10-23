@@ -543,6 +543,7 @@ pub fn drive(game: &mut Game, tick: u64) {
                         let p = m.follower.position;
                         let at = Vec3::new(p[0] + s * 150., p[1] + 200., p[2] + c * 150.);
                         game.party_fixed_target = Some(party_room::GalleryTarget {
+                            key: party_room::FIXED_KEY,
                             position: at,
                             centre: at + Vec3::Y * 40.,
                             radius: 40.,
