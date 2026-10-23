@@ -311,6 +311,19 @@ impl Clips {
     /// The clip a brain's motion slot plays: its choice, motion and the
     /// source key at `elapsed` (the first key while blending), as
     /// [`BattleActor::tick`] poses it.
+    /// The attack windows of slot `slot`'s clip (none while blending) and
+    /// its event clock at `elapsed`.
+    pub(super) fn windows_at(
+        &self,
+        slot: usize,
+        elapsed: u32,
+        blending: bool,
+    ) -> Option<(&[AttackWindow], f32)> {
+        let c = self.0.get(&slot)?;
+        let windows: &[AttackWindow] = if blending { &[] } else { &c.windows };
+        Some((windows, c.clock(elapsed) as f32))
+    }
+
     pub(super) fn pose_key(
         &self,
         slot: usize,

@@ -102,6 +102,12 @@ pub struct Actor {
     models: std::collections::HashMap<u32, String>,
     pax: std::collections::HashMap<u32, Option<Arc<data::object_effect::Pax>>>,
     source: Arc<data::probe_source::ProbeSource>,
+    /// The model's ATTACK shapes by group (its motions' attack windows
+    /// name them), the swings counted so far and the motion and clock of
+    /// the last frame (a new motion, or its restart, is a new swing).
+    attacks: std::collections::HashMap<u8, Vec<super::enemy_combat::HitShape>>,
+    swing: u64,
+    last_motion: (usize, u32),
 }
 
 impl Actor {
@@ -830,6 +836,7 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
                 "sora":game.player.position}),
             );
         }
+        land_swings(game, a, tick);
         land_attacks(game, a, tick);
         let reports = a.brain.take_reports();
         if !reports.unsupported.is_empty() || !reports.services.is_empty() {
@@ -925,7 +932,20 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         .ok_or("summon object absent from objentry")?;
     let entry = plain_entry(&source, object).map_err(|e| e.to_string())?;
     let kind = Arc::new(load_entry_kind(&source, &entry).map_err(|e| e.to_string())?);
-    let clips = Arc::new(build_clips(&kind, |_| Ok(Vec::new()))?);
+    // The model's ATTACK shapes and its motions' attack windows (frame
+    // trigger range 10), as the battle objects' (FUN_1403d1730's volumes).
+    let attacks = library
+        .read(&format!("obj/{}.mdlx", entry.model_name))
+        .ok()
+        .and_then(|bytes| {
+            let e = super::bar_entry_typed(&bytes, 23).ok()?;
+            data::object_collision::read(e).ok()
+        })
+        .map(|c| super::enemy_combat::attack_shapes(&c, kind.model.skinning.bones.len()))
+        .unwrap_or_default();
+    let clips = Arc::new(build_clips(&kind, |m| {
+        Ok(super::enemy_combat::motion_attack_windows(m, &attacks))
+    })?);
     let sstm = game
         .summons
         .as_ref()
@@ -1031,6 +1051,9 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         models,
         pax: Default::default(),
         source: source.clone(),
+        attacks,
+        swing: 0,
+        last_motion: (usize::MAX, 0),
         flight_spec: prty_words(&mut library, 0x3e).map(|w| {
             let mut p = actor_physics::ObjParams::defaults(sstm.fall_max);
             p.apply_prty(&w);
@@ -1152,6 +1175,107 @@ fn land_attacks(game: &mut Game, a: &mut Actor, tick: u64) {
                 .mark_attack_hit_on(at.slot, super::enemy_script::ENEMY);
             game.event(serde_json::json!({"event":"summon_hit","tick":tick,
                 "atkp":at.id,"owner":a.brain.attack_owner(at.slot)}));
+        }
+    }
+}
+
+/// The summon's motion attack windows (frame trigger range 10) that are
+/// open this frame: each of the group's ATTACK shapes, placed by the
+/// sampled pose, is a volume against the room's enemy, one hit per window
+/// and swing, with Sora's attack stats as its other strikes [I]. A summon
+/// in camera space (Stitch) is left out [I].
+fn land_swings(game: &mut Game, a: &mut Actor, tick: u64) {
+    let (motion, elapsed) = (a.brain.motion(), a.brain.elapsed());
+    if motion != a.last_motion.0 || elapsed < a.last_motion.1 {
+        a.swing += 1;
+    }
+    a.last_motion = (motion, elapsed);
+    if a.camera_pose.is_some() {
+        return;
+    }
+    let blending = a.brain.blend() > 0.;
+    let Some((windows, frame)) = a.clips.windows_at(motion, elapsed, blending) else {
+        return;
+    };
+    let open: Vec<(usize, super::enemy_combat::AttackWindow)> = windows
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, w)| w.active(frame))
+        .collect();
+    if open.is_empty() {
+        return;
+    }
+    let Some((_, selected, key)) = a.clips.pose_key(motion, elapsed, blending) else {
+        return;
+    };
+    let Ok((pose, evaluated)) = a
+        .kind
+        .model
+        .skinning
+        .sample_evaluated(&selected.motion, key)
+    else {
+        return;
+    };
+    let matrices: Vec<Mat4> = pose
+        .matrix_bits
+        .iter()
+        .map(|m| Mat4::from_cols_array(&m.map(f32::from_bits)))
+        .collect();
+    let root = Vec3::from_array(evaluated.root_translation);
+    let (position, turn) = (a.position(), Quat::from_rotation_y(a.yaw()));
+    let facing = turn * Vec3::Z;
+    for (k, w) in open {
+        let key = 1 << 59 | 1 << 58 | a.swing << 6 | k as u64;
+        for shape in a.attacks.get(&w.group).into_iter().flatten() {
+            let (m, removed) = if shape.bone == 0x4000 {
+                (Mat4::IDENTITY, Vec3::ZERO)
+            } else {
+                match matrices.get(shape.bone) {
+                    Some(m) => (*m, root),
+                    None => continue,
+                }
+            };
+            let local =
+                m.transform_point3(shape.offset) - removed + Vec3::Y * shape.position_height;
+            let centre = position + turn * local;
+            let Some(rt) = game.enemy.as_mut() else {
+                return;
+            };
+            let v = player::magic::Volume {
+                key,
+                atkp: w.id,
+                sub: 0,
+                centre: centre.to_array(),
+                radius: shape.radius,
+                height: if shape.shape == 0 {
+                    shape.height
+                } else {
+                    shape.radius
+                },
+                previous: None,
+                moving: None,
+                role: player::magic::Role::Damage,
+            };
+            let stats = rt.sora;
+            let landed = super::party_room::land_volume(
+                rt,
+                usize::MAX,
+                "summon",
+                &stats,
+                &v,
+                key,
+                facing,
+                tick,
+                &mut game.sound_queue,
+                &mut game.log,
+            );
+            if landed.is_some() {
+                a.brain.count_limit_hits(1);
+                game.event(serde_json::json!({"event":"summon_hit","tick":tick,
+                    "atkp":w.id,"window":k,"motion":motion}));
+                break;
+            }
         }
     }
 }

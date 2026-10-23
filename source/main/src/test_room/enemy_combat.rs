@@ -469,6 +469,63 @@ fn camera_spheres(entries: &[object_collision::Entry]) -> Vec<HitShape> {
 
 type CollisionShapes = (Vec<HitShape>, Vec<HitShape>, HashMap<u8, Vec<HitShape>>);
 
+/// A model's ATTACK shapes by group, for an object whose other shapes this
+/// room does not use (a summon): spheres and cylinders on a bone of the
+/// skeleton or its origin; the others are left out.
+pub(super) fn attack_shapes(
+    entries: &[object_collision::Entry],
+    bones: usize,
+) -> HashMap<u8, Vec<HitShape>> {
+    let mut attacks: HashMap<u8, Vec<HitShape>> = HashMap::new();
+    for (ordinal, e) in entries.iter().enumerate() {
+        let bone = e.bone as usize;
+        if e.kind != object_collision::ATTACK
+            || e.bone < 0
+            || (bone != 0x4000 && bone >= bones)
+            || !matches!(e.shape, 0 | object_collision::SPHERE)
+            || e.radius <= 0
+        {
+            continue;
+        }
+        attacks.entry(e.group).or_default().push(HitShape {
+            ordinal,
+            group: e.group,
+            bone,
+            offset: Vec3::from_array(e.position.map(|n| n as f32)),
+            position_height: e.position_height as f32,
+            radius: e.radius as f32,
+            height: e.height as f32,
+            shape: e.shape,
+            parts: e.parts,
+            high: matches!(e.argument, 0 | 2 | 3 | 4 | 5),
+        });
+    }
+    attacks
+}
+
+/// A motion's attack windows (frame trigger range 10: the ATKP id and the
+/// collision group) whose group has shapes.
+pub(super) fn motion_attack_windows(
+    motion: &SelectedMotion,
+    attacks: &HashMap<u8, Vec<HitShape>>,
+) -> Vec<AttackWindow> {
+    motion
+        .triggers
+        .iter()
+        .flat_map(|t| &t.records.ranges)
+        .filter(|r| r.trigger == 10 && r.parameters.len() == 2)
+        .filter_map(|r| {
+            let group = u8::try_from(r.parameters[1]).ok()?;
+            attacks.contains_key(&group).then(|| AttackWindow {
+                start: r.start_frame as u16 as f32,
+                end: r.end_frame as u16 as f32,
+                id: r.parameters[0] as u16,
+                group,
+            })
+        })
+        .collect()
+}
+
 fn collision_shapes(entries: &[object_collision::Entry], bones: usize) -> Result<CollisionShapes> {
     let mut body = Vec::new();
     let mut targets = Vec::new();
