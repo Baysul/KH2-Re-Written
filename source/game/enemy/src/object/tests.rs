@@ -149,3 +149,71 @@ fn a_delayed_shout_waits_a_random_share_of_its_delay() {
     assert!(obj.acts.pending_shout.is_none());
     assert_eq!(work_word(&obj, 0), 0x55);
 }
+
+/// OBJ_INIT starts a magic thread (2:20) at `entry` with argument 0x77 and
+/// keeps the holder in work word 8; the thread stores its argument in word
+/// 0, then 1 in word 4, halts, stores 2 and ends.
+fn magic_program() -> Vec<u8> {
+    let int = |v: u16| [0x0000, v, 0];
+    let mut words: Vec<u16> = Vec::new();
+    let entry = CODE_START + 11;
+    words.extend(int(entry as u16));
+    words.extend(int(0x77));
+    words.extend([0x000a | 2 << 6, 20]);
+    words.extend([0x0041, 8]);
+    words.push(0x0049);
+    assert_eq!(CODE_START + words.len(), entry);
+    words.extend([0x0041, 0]);
+    words.extend(int(1));
+    words.extend([0x0041, 4]);
+    words.push(0x0009);
+    words.extend(int(2));
+    words.extend([0x0041, 4]);
+    words.push(0x0049);
+    let mut b = vec![0u8; 16];
+    b[..4].copy_from_slice(b"test");
+    for v in [64u32, 64, 64] {
+        b.extend(v.to_le_bytes());
+    }
+    for v in [0u32, CODE_START as u32, 0, 0] {
+        b.extend(v.to_le_bytes());
+    }
+    for w in words {
+        b.extend(w.to_le_bytes());
+    }
+    b
+}
+
+#[test]
+fn a_magic_thread_runs_on_the_list_with_its_argument_until_it_ends() {
+    let mut world = World::default();
+    let mut obj = Object::spawn(&mut world, &NullEnv, 0, &magic_program(), Sysobj::bare()).unwrap();
+    assert_eq!(
+        world.magic.len(),
+        1,
+        "on the magic list, not under OBJ_INIT"
+    );
+    assert_eq!(
+        work_word(&obj, 8),
+        world.magic[0].handle,
+        "the script keeps the holder"
+    );
+    assert_eq!(work_word(&obj, 0), 0, "nothing runs before the list's task");
+    world.tick_magic(&NullEnv, Some(&mut obj));
+    assert_eq!(work_word(&obj, 0), 0x77);
+    assert_eq!(work_word(&obj, 4), 1);
+    assert_eq!(world.magic.len(), 1, "halted, kept");
+    world.tick_magic(&NullEnv, Some(&mut obj));
+    assert_eq!(work_word(&obj, 4), 2);
+    assert!(world.magic.is_empty(), "ended, freed");
+}
+
+#[test]
+fn the_magic_list_waits_while_status_bit_5_holds_it() {
+    let mut world = World::default();
+    let mut obj = Object::spawn(&mut world, &NullEnv, 0, &magic_program(), Sysobj::bare()).unwrap();
+    world.status |= crate::world::status::MAGIC_HOLD;
+    world.tick_magic(&NullEnv, Some(&mut obj));
+    assert_eq!(work_word(&obj, 0), 0);
+    assert_eq!(world.magic.len(), 1);
+}

@@ -2,9 +2,9 @@
 //! scripts use directly, and the services recorded as unsupported.
 
 use super::math::{read_native, read_sanitized};
-use crate::script::{Fault, Memory, Slot};
+use crate::script::{Fault, Memory, Slot, Thread};
 use crate::sysobj::Vec3;
-use crate::world::{Ctx, Event, Object, TrapFn, object_handle};
+use crate::world::{Ctx, Event, MAGIC_SLOT, MagicThread, Object, TrapFn, object_handle};
 
 type Args = [Slot; 16];
 
@@ -214,23 +214,24 @@ fn set_karma_limit(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Re
     Ok(())
 }
 
-/// 2:20 FUN_140432cd0 -> FUN_1403c5ec0: start a magic thread. [U] The magic
-/// system is not translated; the start is recorded and the script gets a handle.
+/// 2:20 FUN_140432cd0 -> FUN_1403c5ec0: a new thread of the running program
+/// (DAT_142a25048, the thread being run or its root) at word `args[0]` with
+/// one argument, `args[1]` (FUN_1403e1970, count 1), put on the magic list
+/// (FUN_1403c4e90); the script gets the holder.
 fn magic_start_thread(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let handle = ctx.world.next_magic_handle();
-    let object = ctx.me.id;
-    ctx.world.events.push(Event::MagicStart {
-        object,
-        id: args[0].as_int(),
-        arguments: [
-            args[1].as_int(),
-            args[2].as_int(),
-            args[3].as_int(),
-            args[4].as_int(),
-        ],
+    let s = &ctx.me.script;
+    let thread = Thread::with_sizes(
+        s.stack_bytes,
+        s.temp_bytes,
+        MAGIC_SLOT,
+        args[0].as_int(),
+        &[args[1]],
+    );
+    ctx.world.magic.push(MagicThread {
         handle,
-        hook: false,
-        other: None,
+        owner: ctx.me.id,
+        thread,
     });
     args[0] = Slot::address(handle);
     Ok(())

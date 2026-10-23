@@ -95,6 +95,11 @@ pub struct Actor {
     /// locked this frame (the view turns to it, FUN_140178560).
     aim_lock: bool,
     aim_recenter: bool,
+    /// Model names by object entry id (00objentry), and the PAX of each
+    /// object whose script started an effect (`obj/<model>.a.us`).
+    models: std::collections::HashMap<u32, String>,
+    pax: std::collections::HashMap<u32, Option<Arc<data::object_effect::Pax>>>,
+    source: Arc<data::probe_source::ProbeSource>,
 }
 
 impl Actor {
@@ -668,7 +673,16 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
             a.brain.command(cmd);
             game.event(serde_json::json!({"event":"genie_command","tick":tick,"command":cmd}));
         }
+        // The room's effect update as the script's effect tests see it.
+        a.brain.fx.tick = tick;
+        a.brain.fx.live = game
+            .fx_live
+            .iter()
+            .filter(|(k, _)| **k >> 56 == 1)
+            .map(|(&k, &l)| (k, l))
+            .collect();
         a.brain.tick(&game.world, game.player.position, &mut a.rng);
+        play_effects(game, a);
         if let Some(form) = a.brain.genie_form.take() {
             game.summon_form = form;
             game.event(serde_json::json!({"event":"genie_form","tick":tick,"form":form}));
@@ -838,6 +852,35 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
     game.summon = Some(s);
 }
 
+/// The summon's drawn root and heading while it is out (its script
+/// effects' anchor).
+pub fn frame(game: &Game) -> Option<(Vec3, f32)> {
+    let a = game.summon.as_ref()?.actor.as_ref()?;
+    (!a.gone()).then(|| (a.position(), a.yaw()))
+}
+
+/// The effect calls the summon's scripts made this tick, each on the PAX
+/// of the object whose script made it (FUN_1403cc650's object effects:
+/// the summon's own, or a made object's such as Chicken Little's
+/// fireworks).
+fn play_effects(game: &mut Game, a: &mut Actor) {
+    for (object, fx) in std::mem::take(&mut a.brain.fx.calls) {
+        let Some(entry) = a.brain.object_entry(object) else {
+            continue;
+        };
+        let pax = a
+            .pax
+            .entry(entry)
+            .or_insert_with(|| {
+                let name = a.models.get(&(entry & 0x0fff_ffff))?;
+                let mut library = data::path_lookup::Library::open(&a.source).ok()?;
+                super::drive_room::object_pax(&mut library, name).map(Arc::new)
+            })
+            .clone();
+        game.fx_calls.push(super::spell_fx::Call { pax, fx });
+    }
+}
+
 /// FUN_1403de610's spawn: the object's kind, clips and script at the
 /// placement, a summon on Sora's side, act `appear_skip`.
 fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor, String> {
@@ -925,7 +968,17 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
             .collect(),
         scripts: Default::default(),
     }));
+    brain.fx.drawn = true;
     brain.start_act(b"appear_skip");
+    let models = objects
+        .iter()
+        .map(|o| {
+            (
+                o.object_id,
+                String::from_utf8_lossy(&o.model_name).into_owned(),
+            )
+        })
+        .collect();
     Ok(Actor {
         pose: Vec::new(),
         kind,
@@ -943,6 +996,9 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         camera_pose: None,
         aim_lock: false,
         aim_recenter: false,
+        models,
+        pax: Default::default(),
+        source: source.clone(),
         flight_spec: prty_words(&mut library, 0x3e).map(|w| {
             let mut p = actor_physics::ObjParams::defaults(sstm.fall_max);
             p.apply_prty(&w);

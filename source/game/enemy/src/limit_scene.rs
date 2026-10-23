@@ -497,6 +497,8 @@ impl Scene {
             self.world.objects[k] = Some(o);
         }
         self.world.follow_attachments(env, None);
+        // The magic list's task runs between the objects' and the limit's.
+        self.world.tick_magic(env, Some(&mut self.program));
         run_thread(&mut self.world, env, &mut self.program, &mut self.scene);
         self.adopt(env);
         self.world.tick_attacks(env);

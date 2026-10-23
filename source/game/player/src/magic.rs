@@ -312,6 +312,8 @@ pub enum Anchor {
     Caster,
     /// A party member by slot (0 = Sora).
     Party(usize),
+    /// The summon that is out.
+    Summon,
 }
 
 /// A script's effect call on the spell's PAX (the `.mag` file's effect

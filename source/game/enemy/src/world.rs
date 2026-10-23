@@ -148,7 +148,9 @@ pub enum Event {
         object: ObjId,
         handle: u32,
     },
-    /// `magic_start_thread`: an enemy spell thread the magic system starts.
+    /// `obj_hook` (FUN_14042ca20): an action thread of the program bound to
+    /// an object, which the host runs (`magic_start_thread`'s threads are on
+    /// [`World::magic`]).
     MagicStart {
         object: ObjId,
         id: i32,
@@ -276,6 +278,8 @@ pub mod status {
     pub const PETERPAN_PRIZE_DRAIN: u32 = 1 << 11;
     /// `status_hide_shadow` / `status_show_shadow`.
     pub const HIDE_SHADOW: u32 = 1 << 12;
+    /// FUN_1403c55f0 runs no magic thread while it is set.
+    pub const MAGIC_HOLD: u32 = 1 << 5;
 }
 
 /// An object search a script made (kept while `World::trace` is on).
@@ -414,7 +418,24 @@ pub struct World {
     /// walk, run, turn, steering inertia, fast and slow inertia, the speed
     /// between them, hover height and climb speed.
     pub hover_spec: [f32; 9],
+    /// The magic list (DAT_142a23a70 / DAT_142a23a78), oldest first.
+    pub magic: Vec<MagicThread>,
 }
+
+/// A thread `magic_start_thread` started (FUN_1403c5ec0 -> FUN_1403e1970):
+/// a thread of the calling program with the caller's owner (the running
+/// thread's +0x58 / +0x60), kept on the magic list by its 16-byte holder
+/// (FUN_1403c4e90) instead of under the thread that started it.
+#[derive(Clone, Debug)]
+pub struct MagicThread {
+    /// The holder's handle, which the script gets back.
+    pub handle: u32,
+    pub owner: ObjId,
+    pub thread: Thread,
+}
+
+/// The frame slot of magic threads (the object's own threads use 0..=14).
+pub const MAGIC_SLOT: u32 = 15;
 
 /// The event path walker the `eh22_path_*` traps drive (DAT_142b59840):
 /// where it is on the event's list of points, where it goes next, and
@@ -487,6 +508,7 @@ impl Default for World {
             limit: None,
             player_scripted: false,
             hover_spec: [0.; 9],
+            magic: Vec::new(),
         }
     }
 }
@@ -663,6 +685,53 @@ impl World {
                 if !object.sys.gone {
                     self.objects[id] = Some(object);
                 }
+            }
+        }
+    }
+
+    /// FUN_1403c55f0, the magic list's task (priority 0x5014, after the
+    /// objects' 0x4e20 and before the limit's 0x5078): unless status bit 5
+    /// holds the list, each thread runs as a root thread of its owner's
+    /// program (FUN_1403e1c80 with no parent), and one that has ended with
+    /// no child left leaves the list and is freed (FUN_1403c5030). The next
+    /// holder is read before a thread runs, so threads the last one starts
+    /// wait for the next frame. `external` is an owner the host holds
+    /// outside the object list. [I] A thread whose owner is no longer
+    /// there is dropped.
+    pub fn tick_magic(&mut self, env: &dyn Env, mut external: Option<&mut Object>) {
+        if self.status & status::MAGIC_HOLD != 0 {
+            return;
+        }
+        let mut i = 0;
+        while i < self.magic.len() {
+            let last = i + 1 == self.magic.len();
+            let owner = self.magic[i].owner;
+            let mut thread = std::mem::replace(
+                &mut self.magic[i].thread,
+                Thread::with_sizes(0, 0, 0, 0, &[]),
+            );
+            let ran = match external.as_deref_mut() {
+                Some(o) if o.id == owner => {
+                    run_thread(self, env, o, &mut thread);
+                    true
+                }
+                _ => match self.objects.get_mut(owner as usize).and_then(Option::take) {
+                    Some(mut o) => {
+                        run_thread(self, env, &mut o, &mut thread);
+                        self.objects[owner as usize] = Some(o);
+                        true
+                    }
+                    None => false,
+                },
+            };
+            if ran && !thread.finished() {
+                self.magic[i].thread = thread;
+                i += 1;
+            } else {
+                self.magic.remove(i);
+            }
+            if last {
+                break;
             }
         }
     }
