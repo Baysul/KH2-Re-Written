@@ -6519,16 +6519,17 @@ fn simulate(
                     colour: 0,
                 })
                 .collect();
+            let n = rows.len();
             if m.menu.kind == field_command_menu::SECOND_DECK {
                 m.menu.second = items;
-                m.menu.second_opens = vec![None; 3];
+                m.menu.second_opens = vec![None; n];
             } else {
                 m.menu.items = items;
-                m.menu.opens = vec![None; 3];
+                m.menu.opens = vec![None; n];
             }
             m.menu.overridden = [false; 8];
             records = [None; 8];
-            for (k, r) in records.iter_mut().take(3).enumerate() {
+            for (k, r) in records.iter_mut().take(n).enumerate() {
                 *r = Some(party_limit::SPECIAL + k);
             }
             // Deck mode 0xE (FUN_1403b1780) with the limit file's `comd`
@@ -6540,7 +6541,11 @@ fn simulate(
                 .or_else(|| summon::hud_values(&game).map(|h| h.0));
             if limit.is_some_and(|l| game.party_limits.limits[l].menu_sheet.is_some()) {
                 m.menu.list = Some(rows.iter().map(|r| r.1 as u8).collect());
-                m.menu.list_mode = if game.party_limit.is_some() { 3 } else { 5 };
+                m.menu.list_mode = if game.party_limit.is_some() {
+                    3
+                } else {
+                    summon::special_mode(&game).unwrap_or(5)
+                };
             }
         }
         // [Test-room choice] While a limit runs only its rows are taken:
@@ -7030,8 +7035,15 @@ fn simulate(
         // The summon's offers: a decided row, or the reaction button on its
         // record 1, starts or carries on its limit.
         let offered = summon::offers(&game).is_some_and(|o| o[0].is_some());
-        // [Tour setup] The special deck's Cross row (Chicken Little's shot).
-        let special = summon::special_deck(&game).and_then(|r| r.iter().position(|x| x.1 == 4));
+        // [Tour setup] The special deck's Cross row (Chicken Little's shot);
+        // Stitch's two rows and the reaction command in turn.
+        let rotate = game.summon_tour && summon::special_mode(&game) == Some(4);
+        let turn = summon_tour::rotation(tick);
+        let special = if rotate {
+            turn
+        } else {
+            summon::special_deck(&game).and_then(|r| r.iter().position(|x| x.1 == 4))
+        };
         let decide = std::mem::take(&mut game.limit_decide).or_else(|| {
             game.summon_tour
                 .then(|| summon_tour::follow_up(tick, offered, special))
@@ -7040,7 +7052,7 @@ fn simulate(
         game.summon_stick = [direction.x, 0., direction.y];
         let rc = summon::offers(&game).is_some_and(|o| o[1].is_some())
             && (std::mem::take(&mut game.rc_queued)
-                || game.summon_tour && summon_tour::reaction(tick));
+                || game.summon_tour && summon_tour::reaction(tick) && !(rotate && turn.is_some()));
         summon::decide(&mut game, tick, if rc { Some(1) } else { decide });
         if summon::sora_in_limit(&mut game) {
             player::Step::default()
@@ -10319,6 +10331,12 @@ fn present(
     if let Ok(mut root) = roots.single_mut() {
         root.translation = Vec3::from_array(game.player.position);
         root.rotation = Quat::from_rotation_y(game.player.yaw);
+        // Stitch's limit draws Sora in camera space (FUN_1403cbfc0 with
+        // Stitch's second matrix).
+        if let Some((at, turn)) = summon::sora_camera_pose(&game) {
+            root.translation = at;
+            root.rotation = turn;
+        }
     }
 }
 

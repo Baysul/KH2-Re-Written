@@ -301,6 +301,9 @@ fn a_captured_motion_ends_when_the_borrowed_clip_has_played() {
             motion: 7,
             token: 9,
             remaining: 1,
+            length: 1,
+            loop_start: None,
+            next: None,
         });
         proxy.sys.capture.map(|c| c.token)
     };

@@ -191,30 +191,13 @@ fn stitch_effect_start(
     Ok(())
 }
 
-/// 10:13 FUN_140536720 -> FUN_1401c9920: the shot's muzzle effect (effect 1
-/// at bone 0x6c for 0 / 2, 0x36 for 1 / 3, left in camera space); outside
-/// a limit shot 0 counts toward the next special. [Open] The limit's
-/// damage shots (+0x126 bit 0: Sora's effect 0x4003 and the hits of attack
-/// 0x373 on the target, FUN_1401b8250).
+/// 10:13 FUN_140536720 -> FUN_1401c9920: [`friend::stitch::shot`].
 fn stitch_shot_effect(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = me(ctx, m, args[0].value)?;
     let n = args[1].as_int();
-    let limit = ctx.object(id)?.sys.state_flags & crate::sysobj::state_flag::LIMIT != 0;
-    with_stitch(ctx, id, |s| {
-        let bone = match n {
-            0 | 2 => Some(0x6c),
-            1 | 3 => Some(0x36),
-            _ => None,
-        };
-        if let Some(bone) = bone {
-            let k = s.effect(1, Some(id), id, bone, -1, false, [1, 0]);
-            s.slots[k].flags |= friend::stitch::slot_flag::DETACH;
-        }
-        if !limit && n == 0 {
-            s.counter += 1;
-        }
-    })?;
-    Ok(())
+    with_object_friend(ctx, id, |world, o, f, env| {
+        friend::stitch::shot(world, o, f, env, n)
+    })
 }
 
 /// 10:16 FUN_1405367e0 -> FUN_1401c80f0: end an effect slot.
@@ -334,10 +317,15 @@ fn friend_use_item(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Re
 /// 14 and his own +0x120 bit 8 are set, he is carried at Sora's origin
 /// (FUN_1403d9fe0 with bone 0x4000, flags 4) and Sora enters physics mode
 /// 0x3e (FUN_1403b4da0). The fades, the reticle and camera mode 9 are the
-/// host's. [Open] Stitch's FUN_1401c9d60.
+/// host's. Stitch's FUN_1401c9d60 is [`friend::stitch::start_limit`].
 fn start_limit(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     action_clear(ctx, m, args)?;
     let id = me(ctx, m, args[0].value)?;
+    if with_stitch(ctx, id, |_| ())?.is_some() {
+        return with_object_friend(ctx, id, |world, o, f, env| {
+            friend::stitch::start_limit(world, o, f, env)
+        });
+    }
     let chicken_little = with_friend(ctx, id, |f| {
         let cl = f.personality == friend::Personality::ChickenLittle;
         if cl {
@@ -349,7 +337,7 @@ fn start_limit(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result
         let sora = &mut ctx.object(PLAYER_OBJECT)?.sys;
         sora.flags |= 0x100;
         sora.state_flags |= 0x4000;
-        sora.to_limit_stand();
+        sora.to_limit_stand(0x3e);
         let sys = &mut ctx.object(id)?.sys;
         sys.flags |= 0x100;
         sys.to_ground_mode();
@@ -366,16 +354,21 @@ fn start_limit(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result
 /// 10:4 FUN_1405364b0: the personality's end-limit (vtable +0x50). Chicken
 /// Little's FUN_1401cb180 leaves his limit mode: the bits FUN_1401cb6c0 set
 /// clear, he is let go (FUN_1403da250) and Sora goes back to mode 0. A
-/// no-op for the summons outside Stitch and Chicken Little. [Open]
-/// Stitch's FUN_1401c7e00.
+/// no-op for the summons outside Stitch and Chicken Little. Stitch's
+/// FUN_1401c7e00 is [`friend::stitch::end_limit`].
 fn end_limit(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = me(ctx, m, args[0].value)?;
+    if with_stitch(ctx, id, |_| ())?.is_some() {
+        return with_object_friend(ctx, id, |world, _, f, _| {
+            friend::stitch::end_limit(world, f)
+        });
+    }
     let was = with_friend(ctx, id, |f| std::mem::replace(&mut f.limit, false))?;
     if was == Some(true) {
         let sora = &mut ctx.object(PLAYER_OBJECT)?.sys;
         sora.flags &= !0x100;
         sora.state_flags &= !0x4000;
-        sora.limit_stand = false;
+        sora.limit_stand = None;
         let sys = &mut ctx.object(id)?.sys;
         sys.flags &= !0x100;
         sys.attached = None;
@@ -732,10 +725,54 @@ fn disable_system_wishdir(
     set_flag(ctx, m, args, flag::NO_SYSTEM_WISH, true)
 }
 
-/// 7:26 FUN_14053fa00 -> FUN_1401b2870: the reaction-command callback
-/// (+0xfa0), which only Stitch's limit sets [open]; 0 here.
-fn call(_: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+/// 7:26 FUN_14053fa00 -> FUN_1401b2870: the friend's callback (+0xfa0)
+/// with the command; only Stitch's limit sets one (FUN_1401c7bf0, which
+/// returns 0).
+fn call(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = me(ctx, m, args[0].value)?;
+    let cmd = args[1].as_int();
+    let callback = ctx.object(id)?.friend.as_deref().and_then(|f| f.call);
+    if callback == Some(friend::Call::StitchCommand) {
+        with_object_friend(ctx, id, |world, o, f, env| {
+            friend::stitch::command(world, o, f, env, cmd)
+        })?;
+    }
     int(args, 0);
+    Ok(())
+}
+
+/// Run `f` with the friend object `id` and its personality apart from the
+/// world (the trap's own object, or one of the list).
+fn with_object_friend(
+    ctx: &mut Ctx<'_>,
+    id: ObjId,
+    f: impl FnOnce(
+        &mut crate::world::World,
+        &mut crate::world::Object,
+        &mut friend::Friend,
+        &dyn crate::env::Env,
+    ),
+) -> Result<(), Fault> {
+    let env = ctx.env;
+    if id == ctx.me.id {
+        let Some(mut fr) = ctx.me.friend.take() else {
+            return Ok(());
+        };
+        f(ctx.world, ctx.me, &mut fr, env);
+        ctx.me.friend = Some(fr);
+        return Ok(());
+    }
+    let mut o = ctx
+        .world
+        .objects
+        .get_mut(id as usize)
+        .and_then(Option::take)
+        .ok_or(Fault::Memory(id))?;
+    if let Some(mut fr) = o.friend.take() {
+        f(ctx.world, &mut o, &mut fr, env);
+        o.friend = Some(fr);
+    }
+    ctx.world.objects[id as usize] = Some(o);
     Ok(())
 }
 

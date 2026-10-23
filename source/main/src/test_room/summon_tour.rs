@@ -70,6 +70,14 @@ pub fn lock(tick: u64) -> bool {
     phase(tick) == Some((0, LOCK))
 }
 
+/// Stitch's limit: the deck's two rows and then the reaction command, in
+/// turn on the follow-up ticks (`None`: the reaction's turn).
+pub fn rotation(tick: u64) -> Option<usize> {
+    let (_, t) = phase(tick)?;
+    let k = t.checked_sub(FOLLOW_UPS.start)? / FOLLOW_UP_EVERY % 3;
+    (k < 2).then_some(k as usize)
+}
+
 /// The reaction button for the limit's follow-ups; the record-0 offer is
 /// taken on the same ticks ([`follow_up`]).
 pub fn reaction(tick: u64) -> bool {

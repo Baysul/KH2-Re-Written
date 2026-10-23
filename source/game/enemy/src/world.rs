@@ -579,6 +579,20 @@ impl World {
                 capture.remaining -= 1;
             }
             if capture.remaining == 0 {
+                // A looping clip plays on from its loop start; a queued
+                // capture (FUN_1403c7140) follows the one that ended.
+                if let Some(ls) = capture.loop_start.filter(|&l| l < capture.length) {
+                    capture.remaining = capture.length - ls;
+                    return;
+                }
+                if let Some((captor, motion, length, loop_start)) = capture.next.take() {
+                    capture.captor = captor;
+                    capture.motion = motion;
+                    capture.remaining = length;
+                    capture.length = length;
+                    capture.loop_start = loop_start;
+                    return;
+                }
                 sys.capture = None;
                 sys.motion.flags.word &= !(1 << 14);
                 sys.motion.flags.word |= crate::motion::flag::ENDED;
@@ -734,6 +748,72 @@ impl World {
                 break;
             }
         }
+    }
+
+    /// FUN_1403c6cc0: `victim` plays slot `motion` of `captor`'s motion set
+    /// for as long as the captor's clip lasts (a looping clip on); returns
+    /// the token `obj_motion_capture_id` reads back. The caller holds
+    /// neither object outside the world, or passes the one it holds.
+    pub fn capture_motion(
+        &mut self,
+        env: &dyn Env,
+        captor: (ObjId, u32),
+        victim: &mut Sysobj,
+        motion: i32,
+    ) -> i32 {
+        self.captures += 1;
+        let token = self.captures;
+        let (length, loop_start) = Self::capture_clip(env, captor.1, motion);
+        victim.capture = Some(crate::sysobj::Capture {
+            captor: captor.0,
+            motion,
+            token,
+            remaining: length,
+            length,
+            loop_start,
+            next: None,
+        });
+        victim.motion.flags.word &= !crate::motion::flag::ENDED;
+        victim.motion.flags.word |= 1 << 14;
+        self.events.push(Event::MotionCapture {
+            captor: captor.0,
+            victim: PLAYER_OBJECT,
+            motion,
+            blend: 0.,
+        });
+        token
+    }
+
+    /// FUN_1403c7140: queue slot `motion` of the captor's set to play on
+    /// `victim` once its current capture ends (at once when none plays).
+    pub fn queue_capture(
+        &mut self,
+        env: &dyn Env,
+        captor: (ObjId, u32),
+        victim: &mut Sysobj,
+        motion: i32,
+    ) {
+        let (length, loop_start) = Self::capture_clip(env, captor.1, motion);
+        match victim.capture.as_mut() {
+            Some(c) => c.next = Some((captor.0, motion, length, loop_start)),
+            None => {
+                self.capture_motion(env, captor, victim, motion);
+            }
+        }
+    }
+
+    /// A captured slot's length and loop start in the captor's clips.
+    fn capture_clip(env: &dyn Env, model: u32, motion: i32) -> (u32, Option<u32>) {
+        let Ok(slot) = usize::try_from(motion) else {
+            return (0, None);
+        };
+        let clips = env.clips(model);
+        let length = clips.length(slot);
+        let loop_start = clips.loop_start(slot);
+        (
+            length,
+            (loop_start > 0 && loop_start < length).then_some(loop_start),
+        )
     }
 
     /// `trap_memory_alloc`: a zeroed block in the shared static area.

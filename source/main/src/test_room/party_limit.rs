@@ -528,9 +528,9 @@ pub(super) fn room_enemy(game: &Game) -> Option<V3> {
 
 impl Running {
     /// The special deck's rows while its window is up (Trinity Limit).
-    pub fn special_deck(&self) -> Option<[(u16, u16); 3]> {
+    pub fn special_deck(&self) -> Option<Vec<(u16, u16)>> {
         let l = self.scene.limit();
-        l.special.then_some(l.combo)
+        l.special.then(|| l.combo.to_vec())
     }
 
     /// The shot pool's points to draw (Trinity Limit's shots).

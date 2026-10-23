@@ -904,10 +904,32 @@ impl ScriptBrain {
     pub fn set_position(&mut self, p: Vec3) {
         self.object.sys.position = p;
     }
-    /// Chicken Little's limit deck (mode 5) while his limit mode is on.
-    pub fn special_deck(&self) -> Option<[(u16, u16); 3]> {
+    /// A summon's limit deck while it is up: Chicken Little's (mode 5) or
+    /// Stitch's (mode 4), (command, selector) rows.
+    pub fn special_deck(&self) -> Option<Vec<(u16, u16)>> {
         let f = self.object.friend.as_deref()?;
-        f.limit.then_some(enemy::friend::CHICKEN_LITTLE_DECK)
+        if f.limit {
+            return Some(enemy::friend::CHICKEN_LITTLE_DECK.to_vec());
+        }
+        let s = f.stitch.as_deref()?;
+        s.limit.then(|| enemy::friend::STITCH_DECK.to_vec())
+    }
+    /// The deck's sheet mode (FUN_1403db140's argument).
+    pub fn special_mode(&self) -> Option<u8> {
+        let f = self.object.friend.as_deref()?;
+        if f.limit {
+            return Some(5);
+        }
+        f.stitch.as_deref()?.limit.then_some(4)
+    }
+    /// Chicken Little's limit mode (+0x28 bit 0): his first-person view.
+    pub fn chicken_limit(&self) -> bool {
+        self.object.friend.as_deref().is_some_and(|f| f.limit)
+    }
+    /// Stitch's limit: Sora rides in camera space at this screen point.
+    pub fn stitch_sora_point(&self) -> Option<[f32; 4]> {
+        let s = self.object.friend.as_deref()?.stitch.as_deref()?;
+        s.limit.then_some(enemy::friend::stitch::SORA_POINT)
     }
 
     /// Chicken Little's aim point (personality +0x40).

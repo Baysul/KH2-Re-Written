@@ -6,11 +6,18 @@
 //! [`Stitch::screen`] and its camera.
 //!
 //! [I] The motion root's heading (FUN_1403c7a90) is taken as 0 where the
-//! executable subtracts it. The limit mode (traps 10:3 / 10:4,
-//! FUN_1401c9d60 / FUN_1401c7e00, the commands 0x20d..0x20f and the shots'
-//! damage) is not ported.
+//! executable subtracts it.
+//!
+//! His limit (traps 10:3 / 10:4, FUN_1401c9d60 / FUN_1401c7e00) puts Sora
+//! in camera space beside him (the second matrix, P+0x748: the point at
+//! 0x140724330, unturned) on his motion 0xfe, freezes Sora (physics mode
+//! 0x3c), gives the command menu his deck ([`super::STITCH_DECK`]) and
+//! takes the limit commands through the `friend_call` callback
+//! (FUN_1401c7bf0): 0x20d, 0x20e and 0x20f run the table's last three
+//! entries. In the limit his shots (10:13) strike his target with attack
+//! 0x373.
 
-use super::{Action, Friend, Requests, flag};
+use super::{Action, Call, Friend, Requests, flag};
 use crate::attack::Attack;
 use crate::env::Env;
 use crate::sysobj::class_flag;
@@ -63,6 +70,17 @@ const MOTION_HP: usize = 0xcb;
 const MOTION_MP: usize = 0xcc;
 /// FUN_1401caac0's attack parameter.
 const SPECIAL_ATKP: i32 = 0x4ba;
+/// The limit's screen points: DAT_140724320 (where the limit and commands
+/// 0x20d / 0x20e put him) and DAT_140724330 (0x20f's, and Sora's place).
+pub const LIMIT_POINT: [f32; 4] = [-218., 55., DEPTH, 0.];
+pub const SORA_POINT: [f32; 4] = [185., 125., DEPTH, 0.];
+/// The motion of his set Sora rides on (captured at the start and queued
+/// after each command, FUN_1403c7140).
+const RIDE: i32 = 0xfe;
+/// The limit shots' attack (FUN_1401c9920 -> FUN_1401b8250) and the spread
+/// of their points about the view's origin (DAT_140585efc).
+const SHOT_ATKP: i32 = 0x373;
+const SHOT_SPREAD: f32 = 200.;
 
 /// Effect slot flags (P+0x30 + 0x40·i).
 pub mod slot_flag {
@@ -140,6 +158,13 @@ pub struct Stitch {
     strike: Option<usize>,
     /// The MP special asked for Sora's MP (FUN_1403c2040).
     mp_refill: bool,
+    /// The limit's deck is up (FUN_1403db140(obj, 4), FUN_1403db100 ends
+    /// it) and Sora rides in camera space.
+    pub limit: bool,
+    /// P+0x788..: Sora's shadow was shown before the limit hid it.
+    shadow_shown: bool,
+    /// The test of 0x20e asked for the enemies' stop again.
+    restop: bool,
 }
 
 impl Default for Stitch {
@@ -157,6 +182,9 @@ impl Default for Stitch {
             special: None,
             strike: None,
             mp_refill: false,
+            limit: false,
+            shadow_shown: false,
+            restop: false,
         }
     }
 }
@@ -424,9 +452,34 @@ pub fn test(action: Action, world: &World, me: &Object, f: &mut Friend, env: &dy
                 .is_some_and(|(mp, max)| mp < (max as f32 * MP_PART) as i32)
         }
         // FUN_1401c8610 / FUN_1401c8700 / FUN_1401c8440: only a running
-        // limit command continues.
-        Action::StitchCommand(motion) => continues(f) && me.sys.motion.slot == motion as usize,
+        // limit command continues, while its motion plays. FUN_1401c8700
+        // stops the enemies again (FUN_1403dbaa0(0x11), as the limit's
+        // script did) when 0x20e's motion has been replaced.
+        Action::StitchCommand(motion) => {
+            let playing = me.sys.motion.slot == motion as usize;
+            if motion == 0xcd
+                && continues(f)
+                && !playing
+                && let Some(s) = f.stitch.as_deref_mut()
+            {
+                s.restop = true;
+            }
+            continues(f) && playing
+        }
         _ => false,
+    }
+}
+
+/// FUN_1403dbaa0(0x11): every enemy takes stop request 0x11.
+fn stop_enemies(world: &mut World) {
+    for o in world.objects.iter_mut().flatten() {
+        let sys = &mut o.sys;
+        if sys.class_flags & class_flag::ENEMY != 0
+            && !sys.stop_requests.contains(&0x11)
+            && sys.stop_requests.len() < 4
+        {
+            sys.stop_requests.push(0x11);
+        }
     }
 }
 
@@ -489,7 +542,303 @@ pub fn run(action: Action, me: &mut Object, f: &mut Friend, env: &dyn Env) {
         }
         Action::StitchHp => special(me, f, env, true, first),
         Action::StitchMp => special(me, f, env, false, first),
+        // A limit command's later frames: 0x20e and 0x20f strike
+        // (FUN_1401caac0); its first call came through `friend_call`.
+        Action::StitchCommand(motion) if !first && motion != 0xc9 => {
+            if let Some(s) = f.stitch.as_deref_mut() {
+                s.strike = Some(motion as usize);
+            }
+        }
         _ => {}
+    }
+}
+
+/// The run half of the limit commands (FUN_1401c8610 0x20d, FUN_1401c8700
+/// 0x20e, FUN_1401c8440 0x20f). On the first call Stitch takes his place
+/// and motion, Sora captures the command's motion of Stitch's set with the
+/// ride (0xfe) queued after it, and the effect slots start; 0x20e and 0x20f
+/// strike every enemy (FUN_1401caac0) each frame they run.
+pub fn run_command(world: &mut World, me: &mut Object, f: &mut Friend, env: &dyn Env, motion: u16) {
+    let first = !continues(f);
+    let id = me.id;
+    if first {
+        let (point, capture) = match motion {
+            0xc9 => (LIMIT_POINT, 0x101),
+            0xcd => (LIMIT_POINT, 0xff),
+            _ => (SORA_POINT, 0x100),
+        };
+        if motion != 0xcd {
+            cycle_target(world, me, f, env);
+        }
+        if let Some(s) = f.stitch.as_deref_mut() {
+            s.set_screen(point);
+        }
+        let clips = env.clips(me.sys.model);
+        me.sys.motion_start(motion as usize, 0., clips);
+        // FUN_1403c8310(motion, 0, ...): idle queued after it.
+        me.sys.motion_queue.push((0, 0.));
+        let captor = (id, me.sys.model);
+        let token = sora(world, |world, sora| {
+            let t = world.capture_motion(env, captor, sora, capture);
+            world.queue_capture(env, captor, sora, RIDE);
+            t
+        });
+        if let Some(s) = f.stitch.as_deref_mut() {
+            match motion {
+                0xcd => {
+                    s.effect(3, None, id, -1, 0xcd, false, [1, 0]);
+                    let k = s.effect(4, Some(id), id, 0x13, 0xcd, false, [1, 0]);
+                    s.slots[k].flags |= slot_flag::DETACH;
+                    let k = s.effect(4, Some(PLAYER_OBJECT), id, 0x41, -token, false, [1, 0]);
+                    s.slots[k].flags |= slot_flag::DETACH;
+                }
+                0xf2 => {
+                    s.effect(0xc, None, id, -1, 0xf2, false, [1, 0]);
+                    let k = s.effect(0xd, Some(PLAYER_OBJECT), id, 0x41, -token, false, [1, 0]);
+                    s.slots[k].flags |= slot_flag::DETACH;
+                }
+                _ => {}
+            }
+        }
+    }
+    if motion != 0xc9
+        && let Some(s) = f.stitch.as_deref_mut()
+    {
+        s.strike = Some(motion as usize);
+    }
+}
+
+/// Sora's stand-in, lent to `f` (`FUN_1401b4b70(0)`).
+fn sora<R>(world: &mut World, f: impl FnOnce(&mut World, &mut crate::sysobj::Sysobj) -> R) -> R {
+    let mut proxy = world
+        .player_proxy
+        .take()
+        .unwrap_or_else(|| Box::new(Object::bare(PLAYER_OBJECT)));
+    let r = f(world, &mut proxy.sys);
+    world.player_proxy = Some(proxy);
+    r
+}
+
+/// 10:3 for Stitch (FUN_1401c9d60): the target list cleared, his current
+/// action ended, the limit's screen point, motion 0, Sora capturing the
+/// ride (0xfe) and drawn in camera space beside him with his shadow off,
+/// Sora's physics mode 0x3c, the `friend_call` callback and his deck.
+/// [I] Sora's Keyblades (+0xd60), which the executable carries on Sora's
+/// origin in the same camera space, are the host's to draw with him.
+pub fn start_limit(world: &mut World, me: &mut Object, f: &mut Friend, env: &dyn Env) {
+    f.targets.clear();
+    f.current = None;
+    f.flags &= !flag::CONTINUES;
+    me.sys.attached = None;
+    me.sys.to_camera_mode();
+    let clips = env.clips(me.sys.model);
+    me.sys.motion_start(MOTION_IDLE, 0., clips);
+    let captor = (me.id, me.sys.model);
+    let shown = sora(world, |world, sora| {
+        world.capture_motion(env, captor, sora, RIDE);
+        let shown = sora.state_flags & crate::sysobj::state_flag::HIDE_SHADOW == 0;
+        sora.state_flags |= crate::sysobj::state_flag::HIDE_SHADOW;
+        sora.to_limit_stand(0x3c);
+        shown
+    });
+    f.call = Some(Call::StitchCommand);
+    if let Some(s) = f.stitch.as_deref_mut() {
+        s.set_screen(LIMIT_POINT);
+        s.shadow_shown = shown;
+        s.limit = true;
+    }
+}
+
+/// 10:4 for Stitch (FUN_1401c7e00): the target list cleared, Sora back out
+/// of camera space with his shadow as it was and in physics mode 0, the
+/// deck and the callback gone.
+pub fn end_limit(world: &mut World, f: &mut Friend) {
+    f.targets.clear();
+    let shown = f.stitch.as_deref().is_some_and(|s| s.shadow_shown);
+    sora(world, |_, sora| {
+        if shown {
+            sora.state_flags &= !crate::sysobj::state_flag::HIDE_SHADOW;
+        }
+        sora.limit_stand = None;
+    });
+    if let Some(s) = f.stitch.as_deref_mut() {
+        s.limit = false;
+    }
+    f.call = None;
+}
+
+/// FUN_1401c7bf0, the `friend_call` callback: command 0x20d, 0x20e or 0x20f
+/// becomes Stitch's current action (FUN_1401cd150 finds its table entry),
+/// run now as a first call; another command runs nothing.
+pub fn command(world: &mut World, me: &mut Object, f: &mut Friend, env: &dyn Env, cmd: i32) {
+    let (k, motion) = match cmd {
+        0x20d => (4, 0xc9),
+        0x20e => (5, 0xcd),
+        0x20f => (6, 0xf2),
+        _ => return,
+    };
+    f.current = None;
+    f.flags &= !flag::CONTINUES;
+    run_command(world, me, f, env, motion);
+    f.current = Some(k);
+    f.flags &= !flag::CONTINUES;
+}
+
+/// FUN_1401c96c0: Stitch's next target. Sora's lock-on target when it is a
+/// live enemy not yet on the list; else the first live enemy not on it;
+/// else the next live one on the list after the current. A target taken
+/// from outside the list joins it.
+pub fn cycle_target(world: &World, me: &mut Object, f: &mut Friend, env: &dyn Env) {
+    let current = me.sys.target.id;
+    me.sys.target.id = 0;
+    let live = |o: ObjId| {
+        world
+            .objects
+            .get(o as usize)
+            .and_then(|x| x.as_deref())
+            .is_some_and(|x| {
+                x.sys.class_flags & class_flag::ENEMY != 0
+                    && x.sys.hp > 0
+                    && !x.sys.gone
+                    && x.targetable()
+            })
+    };
+    let record = |o: ObjId| crate::traps::target::OBJECT_TARGET | o;
+    if let Some(t) = env.lockon_target() {
+        let o = t & !crate::traps::target::OBJECT_TARGET;
+        if live(o) && !f.targets.contains(&o) {
+            f.targets.push(o);
+            me.sys.target.id = record(o);
+            return;
+        }
+    }
+    let fresh = world
+        .objects
+        .iter()
+        .flatten()
+        .map(|o| o.id)
+        .find(|&o| live(o) && !f.targets.contains(&o));
+    if let Some(o) = fresh {
+        if f.targets.len() < 32 {
+            f.targets.push(o);
+        }
+        me.sys.target.id = record(o);
+        return;
+    }
+    let n = f.targets.len();
+    let from = f
+        .targets
+        .iter()
+        .position(|&o| current & crate::traps::target::OBJECT_TARGET != 0 && record(o) == current)
+        .map_or(0, |i| i + 1);
+    if let Some(o) = (from..from + n)
+        .map(|i| f.targets[i % n])
+        .find(|&o| live(o))
+    {
+        me.sys.target.id = record(o);
+    }
+}
+
+/// FUN_1401c9920 (trap 10:13): the shot's muzzle effect (effect 1 at bone
+/// 0x6c for 0 / 2, 0x36 for 1 / 3, left in camera space). Outside a limit
+/// shot 0 counts toward the next special. In a limit (+0x124 bit 16) shots
+/// 0 and 1 add Sora's Keyblade's muzzle (effect 1 at 0x4003) and a second
+/// shot; his target is renewed when it is gone (FUN_1401c96c0), and each
+/// shot strikes it with attack 0x373 (FUN_1401b8250) from the view's origin
+/// moved up to 200 either way on x and y; a strike that lands starts
+/// effect 2 of his container where it struck.
+pub fn shot(world: &mut World, me: &mut Object, f: &mut Friend, env: &dyn Env, n: i32) {
+    let id = me.id;
+    let limit = me.sys.state_flags & crate::sysobj::state_flag::LIMIT != 0;
+    let Some(s) = f.stitch.as_deref_mut() else {
+        return;
+    };
+    let mut shots = 0;
+    let bone = match n {
+        0 | 2 => Some(0x6c),
+        1 | 3 => Some(0x36),
+        _ => None,
+    };
+    if let Some(bone) = bone {
+        let k = s.effect(1, Some(id), id, bone, -1, false, [1, 0]);
+        s.slots[k].flags |= slot_flag::DETACH;
+        shots = 1;
+        if limit && (n == 0 || n == 1) {
+            let k = s.effect(1, Some(PLAYER_OBJECT), id, 0x4003, -1, false, [1, 0]);
+            s.slots[k].flags |= slot_flag::DETACH;
+            shots = 2;
+        }
+    }
+    if !limit {
+        if n == 0 {
+            s.counter += 1;
+        }
+        return;
+    }
+    let target = |me: &Object| {
+        let t = me.sys.target.id;
+        let o = t & !crate::traps::target::OBJECT_TARGET;
+        (t & crate::traps::target::OBJECT_TARGET != 0
+            && world
+                .objects
+                .get(o as usize)
+                .and_then(|x| x.as_deref())
+                .is_some_and(|x| x.sys.hp > 0 && !x.sys.gone && x.targetable()))
+        .then_some(o)
+    };
+    if target(me).is_none() {
+        cycle_target(world, me, f, env);
+    }
+    let Some(o) = target(me) else {
+        return;
+    };
+    let origin = env.camera_eye().unwrap_or([0.; 3]);
+    let at = world
+        .objects
+        .get(o as usize)
+        .and_then(|x| x.as_deref())
+        .map(|x| x.sys.position);
+    for _ in 0..shots {
+        let _from = [
+            origin[0] + (f.rand01() - 0.5) * 2. * SHOT_SPREAD,
+            origin[1] + (f.rand01() - 0.5) * 2. * SHOT_SPREAD,
+            origin[2],
+        ];
+        // FUN_1401b8250: an attack of the shot's parameter made for the
+        // strike and freed after it.
+        let mut a = Attack::new(Some(id), SHOT_ATKP, -1, 0, me.sys.team);
+        world.attack_serial += 1;
+        a.serial = world.attack_serial;
+        let (param, serial, owner) = ([a.param_id, a.param_extra], a.serial, a.owner);
+        let slot = match world.attacks.iter().position(Option::is_none) {
+            Some(i) => i,
+            None => {
+                world.attacks.push(None);
+                world.attacks.len() - 1
+            }
+        };
+        world.attacks[slot] = Some(a);
+        world.events.push(Event::AttackStrike {
+            attack: crate::world::ATTACK_HANDLES + 0x100 * slot as u32,
+            slot,
+            target: Some(o),
+            arguments: [0, 0],
+            param,
+            serial,
+            owner,
+        });
+        world.attacks[slot] = None;
+        // The strike's spark: effect 2 of his container at the target.
+        let handle = world.next_effect_handle();
+        world.events.push(Event::EffectStart {
+            object: id,
+            effect: 2,
+            arguments: [1, 0],
+            handle,
+            position: at,
+            bound: false,
+            other: None,
+        });
     }
 }
 
@@ -562,6 +911,11 @@ fn special(me: &mut Object, f: &mut Friend, env: &dyn Env, hp: bool, first: bool
 /// before any object's motion advances.
 pub fn tick(world: &mut World, me: &mut Object, f: &mut Friend, env: &dyn Env, out: &mut Requests) {
     think(world, me, f, env, out);
+    if let Some(s) = f.stitch.as_deref_mut()
+        && std::mem::take(&mut s.restop)
+    {
+        stop_enemies(world);
+    }
     strikes(world, me, f);
     if let Some(s) = f.stitch.as_deref_mut()
         && std::mem::take(&mut s.mp_refill)

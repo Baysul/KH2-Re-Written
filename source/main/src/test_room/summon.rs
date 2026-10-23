@@ -89,6 +89,8 @@ pub struct Actor {
     attack_serial: u32,
     /// Where a summon in camera space (Stitch) stands and faces this frame.
     camera_pose: Option<(Vec3, Quat)>,
+    /// Where Sora is drawn while Stitch's limit has him in camera space.
+    sora_pose: Option<(Vec3, Quat)>,
     /// PRTY record 0x3e (Peter Pan's limit flight).
     flight_spec: Option<actor_physics::ObjParams>,
     /// Chicken Little's limit: a target is locked (+0xbf8), and it was
@@ -299,14 +301,24 @@ pub fn hud_values(game: &Game) -> Option<(usize, u16, f32, i32)> {
 /// this frame.
 pub fn aim_view(game: &Game) -> Option<([f32; 3], bool, bool)> {
     let a = game.summon.as_ref()?.actor.as_ref()?;
-    a.brain.special_deck()?;
+    a.brain.chicken_limit().then_some(())?;
     Some((a.brain.aim()?, a.aim_lock, a.aim_recenter))
 }
 
-/// The summon's special deck (Chicken Little's limit, mode 5) while it is
-/// up: (command, selector) rows.
-pub fn special_deck(game: &Game) -> Option<[(u16, u16); 3]> {
+/// The summon's special deck (Chicken Little's limit, mode 5; Stitch's,
+/// mode 4) while it is up: (command, selector) rows.
+pub fn special_deck(game: &Game) -> Option<Vec<(u16, u16)>> {
     game.summon.as_ref()?.actor.as_ref()?.brain.special_deck()
+}
+
+/// The special deck's sheet mode.
+pub fn special_mode(game: &Game) -> Option<u8> {
+    game.summon.as_ref()?.actor.as_ref()?.brain.special_mode()
+}
+
+/// Where Sora is drawn while Stitch's limit has him in camera space.
+pub fn sora_camera_pose(game: &Game) -> Option<(Vec3, Quat)> {
+    game.summon.as_ref()?.actor.as_ref()?.sora_pose
 }
 
 /// Sora as a limit's user (FUN_1403d7fa0 takes him as he stands).
@@ -361,8 +373,9 @@ pub fn sora_in_limit(game: &mut Game) -> bool {
 }
 
 /// The slots of a summon's own motion set its scripts capture for Sora
-/// (`obj_motion_capture` in P_EX330 / P_EX340 / P_EX350: 252..256).
-const CAPTURE_SLOTS: std::ops::RangeInclusive<usize> = 252..=256;
+/// (`obj_motion_capture` in P_EX330 / P_EX340 / P_EX350: 252..256; Stitch's
+/// limit, FUN_1401c9d60 and his commands: 0xfe..0x101).
+const CAPTURE_SLOTS: std::ops::RangeInclusive<usize> = 252..=257;
 
 /// The id Sora's kit keeps a summon's captured motion under: the `sumn`
 /// row above the limits' ids (0x4000..).
@@ -709,6 +722,17 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
         if let Some((at, _)) = a.camera_pose {
             a.brain.set_position(at.to_array());
         }
+        // FUN_1401cad30's second matrix (P+0x748): Sora at the point
+        // 0x140724330 scaled as Stitch's, unturned, while his limit lasts.
+        a.sora_pose = a.brain.stitch_sora_point().map(|v| {
+            let s = enemy::friend::stitch::SCALE;
+            let eye = super::from_world(rig.camera.eye);
+            let look = super::from_world(rig.camera.look_at);
+            let cam = Transform::from_translation(eye).looking_at(look, Vec3::Y);
+            let at = eye + cam.rotation * Vec3::new(v[0] * s, -v[1] * s, -v[2] * s);
+            let turn = cam.rotation * Quat::from_rotation_y(std::f32::consts::PI - v[3]);
+            (at, turn)
+        });
         // FUN_1401cb830, Chicken Little's limit frame: the lock-on button
         // (pressed bit 11) takes a target, a held right-stick bit
         // (0x3c0000) lets it go; the aim point is the target, else 300
@@ -716,7 +740,7 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
         // cycling through his target list (+0xde8) takes it each time; the
         // refusal sound (FUN_1401dd170(7)) is not played.
         a.aim_recenter = false;
-        if a.brain.special_deck().is_some() {
+        if a.brain.chicken_limit() {
             // The target's position (FUN_1403bdde0): its first TARGET
             // shape's centre.
             let enemy = super::party_limit::room_enemy(game).map(|feet| {
@@ -1001,6 +1025,7 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
         last_attack: None,
         attack_serial: 0,
         camera_pose: None,
+        sora_pose: None,
         aim_lock: false,
         aim_recenter: false,
         models,
@@ -1188,7 +1213,7 @@ pub fn present(
                 transform.rotation = a.rotation();
                 // FUN_1401cb6c0 fades Chicken Little out (+0xa10) for his
                 // limit, FUN_1401cb180 back in.
-                let shown = if a.brain.special_deck().is_some() {
+                let shown = if a.brain.chicken_limit() {
                     Visibility::Hidden
                 } else {
                     Visibility::Inherited
