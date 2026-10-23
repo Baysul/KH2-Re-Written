@@ -563,6 +563,29 @@ impl Object {
                 Effect::ReactionGroup { kind, p0, p1 } => {
                     self.sys.reaction_groups.range_event(kind, p0, p1)
                 }
+                // Range 28 (FUN_14040d810 -> FUN_1403d4b10 -> FUN_1403d3a90)
+                // and frame event 21: turn toward the target by up to the
+                // parameter in degrees, only beyond 50 units horizontally
+                // (DAT_1405b532c). [I] Only Sora's object (a limit scene's)
+                // turns here; others report the event.
+                Effect::Other {
+                    range,
+                    kind,
+                    ref params,
+                } if self.id == crate::world::PLAYER_OBJECT
+                    && (range && kind == 28 || !range && kind == 21) =>
+                {
+                    let degrees = f32::from(params.first().copied().unwrap_or(0));
+                    if let Some(at) = env.target_position(self.sys.target.id) {
+                        let d = [at[0] - self.sys.position[0], at[2] - self.sys.position[2]];
+                        if d[0].hypot(d[1]) > 50. {
+                            let delta = crate::sysobj::wrap(d[0].atan2(d[1]) - self.sys.yaw);
+                            let step = degrees.to_radians();
+                            self.sys.yaw =
+                                crate::sysobj::wrap(self.sys.yaw + delta.clamp(-step, step));
+                        }
+                    }
+                }
                 Effect::Other {
                     range,
                     kind,

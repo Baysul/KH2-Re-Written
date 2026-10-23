@@ -57,6 +57,9 @@ pub struct Scene {
     pub gauge_shown: bool,
     /// The gauge's rate (Sora's ability record +0x64).
     pub time_rate: f32,
+    /// Sora's frame events 7 reach the program's trigger 0x11 (Limit Form,
+    /// whose program is his own object's).
+    pub player_events: bool,
 }
 
 impl Scene {
@@ -131,6 +134,7 @@ impl Scene {
             actions: Vec::new(),
             gauge_shown: true,
             time_rate: 1.0,
+            player_events: false,
         })
     }
 
@@ -183,6 +187,7 @@ impl Scene {
             actions: Vec::new(),
             gauge_shown: true,
             time_rate: 1.0,
+            player_events: false,
         })
     }
 
@@ -395,6 +400,16 @@ impl Scene {
         {
             o.sys.limit_token = l.next_token();
         }
+        let mut events = Vec::new();
+        if id == PLAYER_OBJECT && self.player_events {
+            o.sys.effects.retain(|e| match *e {
+                crate::motion::Effect::ScriptEvent { p0, p1 } => {
+                    events.push((p0, p1));
+                    false
+                }
+                _ => true,
+            });
+        }
         o.carry_out_motion_effects(&mut self.world, env);
         let action = self.actions.iter().position(|(a, _)| *a == id);
         // Without an action thread nothing asks for movement this tick (the
@@ -408,6 +423,19 @@ impl Scene {
             self.world.player_proxy = object.take();
         } else {
             self.world.objects[id as usize] = object.take();
+        }
+        for (p0, p1) in events {
+            self.program.fire(
+                &mut self.world,
+                env,
+                crate::object::EVENT_SCRIPT,
+                &[
+                    Slot::address(object_handle(PLAYER_OBJECT)),
+                    Slot::int(i32::from(p0)),
+                    Slot::int(i32::from(p1)),
+                ],
+            );
+            self.adopt(env);
         }
         if let Some(k) = action {
             let mut thread =

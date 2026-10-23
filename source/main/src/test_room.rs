@@ -90,6 +90,7 @@ mod item_drop_view;
 mod item_room;
 mod journal_tour;
 mod level_growth;
+mod limit_form_tour;
 mod limit_tour;
 mod magic_room;
 mod magic_tour;
@@ -1071,6 +1072,8 @@ struct Game {
     deck_tour: bool,
     /// The unattended `--party-limit-tour` (limit_tour.rs).
     limit_tour: bool,
+    /// The unattended `--limit-form-tour` (limit_form_tour.rs).
+    limit_form_tour: bool,
     /// The unattended `--summon-tour` (summon_tour.rs).
     summon_tour: bool,
     /// The deck swap (left, logical 0x10000) and open (right, 0x10000000)
@@ -6363,7 +6366,8 @@ fn simulate(
         (
             Vec2::ZERO,
             magic_tour::jump(tick, game.magic_shift),
-            magic_tour::attack(tick, game.magic_shift),
+            magic_tour::attack(tick, game.magic_shift)
+                || game.limit_form_tour && limit_form_tour::attack(tick),
         )
     } else if let Some(tour) = &game.ability_tour {
         (
@@ -6554,17 +6558,10 @@ fn simulate(
             if let Some(r) = m.menu.items.get_mut(1) {
                 if d.limit_form() {
                     r.label = d.src.names.get(&0x2c3).cloned().unwrap_or_default();
-                    r.colour = if d.limit.is_some() { 5 } else { 0 };
+                    r.colour = if d.limit_running { 5 } else { 0 };
                 } else if !d.src.magic_label.is_empty() {
                     r.label = d.src.magic_label.clone();
                 }
-            }
-            // A limit's follow-up is the reaction command (slot 1).
-            if let Some(cmd) = d.offer {
-                m.menu.reaction = Some(field_command_menu::Reaction {
-                    label: d.src.names.get(&cmd).cloned().unwrap_or_default(),
-                    dimmed: false,
-                });
             }
         }
         // The Drive row: "Drive" opening the forms (submenu 3), or "Revert"
@@ -7201,7 +7198,15 @@ fn simulate(
         );
     }
     let step = if game.party_limit.is_some() {
+        // [Tour setup] The autoplay presses a Limit Form limit's offered
+        // follow-up every 10 ticks, as a player taps the button.
+        let form_offer = game.autoplay.is_some()
+            && tick.is_multiple_of(10)
+            && game.party_limit.as_ref().is_some_and(|r| {
+                r.offers[1].is_some() && player::limit_form::LIMITS.contains(&r.command)
+            });
         let rc = std::mem::take(&mut game.rc_queued)
+            || form_offer
             || game.deck_tour && deck_tour::reaction(tick)
             || game.limit_tour && limit_tour::reaction(tick);
         let decide = std::mem::take(&mut game.limit_decide);
@@ -7363,9 +7368,7 @@ fn simulate(
             .map_or(0, |d| std::mem::take(&mut d.pending_exp));
         drive_room::add_form_exp(&mut game, exp, slots.as_deref_mut());
         drive_room::tick(&mut game, slots.as_deref().map(|s| s.as_slice()));
-        let rc = game.drive.as_ref().is_some_and(|d| d.offer.is_some())
-            && (std::mem::take(&mut game.rc_queued) || game.autoplay.is_some());
-        drive_room::limit_tick(&mut game, rc, None);
+        drive_room::limit_tick(&mut game);
         drive_room::motion_effects(&mut game);
     }
     // Camera inputs: Q/E or J/L and the right stick turn, -/= zoom, C
@@ -8231,7 +8234,12 @@ fn talk_tick(mut game: ResMut<Game>, talk: Option<ResMut<Talk>>, hud: Option<Res
         && let Some(m) = hud.menu.as_mut()
     {
         let label = talk.label.clone();
-        m.menu.reaction = if game.drive.as_ref().is_some_and(|d| d.offer.is_some()) {
+        // A limit's follow-up (record 1) keeps the reaction slot.
+        m.menu.reaction = if game
+            .party_limit
+            .as_ref()
+            .is_some_and(|r| r.offers[1].is_some())
+        {
             m.menu.reaction.take()
         } else if game.talking {
             None
@@ -12058,6 +12066,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut deck_tour = false;
     let mut summon_tour = false;
     let mut limit_tour = false;
+    let mut limit_form_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
     // Capture ticks replacing the unattended run's own list (research).
@@ -12221,6 +12230,18 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("party limit tour capture directory absent")?,
+                );
+            }
+            // So does the Limit Form tour, in the form.
+            Some("--limit-form-tour") if autoplay.is_none() => {
+                magic_tour = true;
+                limit_form_tour = true;
+                magic_form = player::forms::LIMIT;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("limit form tour capture directory absent")?,
                 );
             }
             Some("--journal-tour") if autoplay.is_none() => {
@@ -12404,7 +12425,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         None
     };
     // A form's change takes about 260 ticks before the first cast.
-    let magic_shift = if party_hit_tour || deck_tour || limit_tour || summon_tour {
+    let magic_shift = if party_hit_tour || deck_tour || limit_tour || summon_tour || limit_form_tour
+    {
         // The magic tour's schedule never comes up.
         1 << 40
     } else if magic_form != 0 {
@@ -12419,6 +12441,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         deck_tour::captures()
     } else if summon_tour {
         summon_tour::captures()
+    } else if limit_form_tour {
+        limit_form_tour::captures()
     } else if limit_tour {
         limit_tour::captures()
     } else if journal_tour {
@@ -12458,6 +12482,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         deck_tour::end()
     } else if summon_tour {
         summon_tour::end()
+    } else if limit_form_tour {
+        limit_form_tour::end()
     } else if limit_tour {
         limit_tour::end()
     } else if journal_tour {
@@ -12665,6 +12691,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         genie_command: None,
         summon_stick: [0.; 3],
         limit_tour,
+        limit_form_tour,
         party_limits: Arc::new(std::mem::take(&mut loaded.party_limits)),
         party_limit: None,
         limit_request: None,
