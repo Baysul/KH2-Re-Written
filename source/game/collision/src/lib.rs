@@ -236,6 +236,12 @@ impl World {
 
     /// FUN_140173500 for the static map: polygon `poly`'s plane normal,
     /// normalised (the map has no transform).
+    /// The polygon's surface nibble (`attr & 0xf`, FUN_140170910).
+    pub fn polygon_surface(&self, poly: u16) -> Option<u32> {
+        let p = self.polys.get(poly as usize)?;
+        Some(p.attr & 0xf)
+    }
+
     pub fn polygon_normal(&self, poly: u16) -> Option<V3> {
         let p = self.polys.get(poly as usize)?;
         let [x, y, z, _] = self.plane(p);

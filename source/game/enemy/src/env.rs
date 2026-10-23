@@ -109,8 +109,13 @@ pub trait Env {
     /// FUN_14040c2b0 -> FUN_140171350: the map's segment ray with the
     /// polygon filter cleared, against the polygons of collision `class`
     /// (the caller's mask: 1 for the ground search, 2 for the air search).
-    fn line_hit_class(&self, from: Vec3, to: Vec3, _class: u32) -> Option<Vec3> {
-        self.line_hit(from, to)
+    fn line_hit_class(&self, from: Vec3, to: Vec3, class: u32) -> Option<Vec3> {
+        self.line_hit_polygon(from, to, class).map(|(p, _)| p)
+    }
+    /// [`Env::line_hit_class`] with the polygon hit (FUN_14040c2b0's record
+    /// +0x14); -1 when the host cannot name it.
+    fn line_hit_polygon(&self, from: Vec3, to: Vec3, _class: u32) -> Option<(Vec3, i32)> {
+        self.line_hit(from, to).map(|p| (p, -1))
     }
     /// Whether the map blocks the line between two points.
     fn line_blocked(&self, from: Vec3, to: Vec3) -> bool {
@@ -150,6 +155,11 @@ pub trait Env {
     /// The normal of a map polygon (`bg_get_normal`; -1: the polygon of the
     /// last hit). `None`: straight up.
     fn map_normal(&self, _polygon: i32) -> Option<Vec3> {
+        None
+    }
+    /// A map polygon's surface nibble (`attr & 0xf`, FUN_140170910); `None`
+    /// when the host has no such polygon.
+    fn map_surface(&self, _polygon: i32) -> Option<u32> {
         None
     }
     /// Whether an object may take a command now (FUN_1403ba070: its command

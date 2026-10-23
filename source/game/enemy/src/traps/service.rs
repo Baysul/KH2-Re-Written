@@ -561,7 +561,6 @@ fn bg_cross_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resul
     let hit = ctx
         .env
         .line_hit_class([a[0], a[1], a[2]], [b[0], b[1], b[2]], class);
-    ctx.world.last_line_cross = hit;
     if let Some(at) = hit {
         for (k, lane) in native([at[0], at[1], at[2], 1.0])[..3].iter().enumerate() {
             ctx.write_f32(m, out + 4 * k as u32, *lane);
