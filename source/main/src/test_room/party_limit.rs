@@ -10,6 +10,12 @@
 //! cost 0xff, FUN_1403a39b0) leaves Sora, the members not taking part fade
 //! out (FUN_140400990), and the scene's trigger 22 runs. The end
 //! (FUN_1403d8f40 / FUN_1403d83e0) brings them back.
+//!
+//! Limit Form's four limits run the same way: they have no `limt` row or
+//! file; their program is the form's own (`limi` of the Limit Form model,
+//! the `limitform` program), Sora plays his own Limit Form motions, its
+//! effects come from the form's container and its tint from the limit's
+//! filter light.
 use super::second_deck::{self, LimitRow};
 use data::{limit_file, motion, path_lookup::Library};
 use enemy::motion::{FrameEvent, MotionEvents, RangeEvent};
@@ -41,7 +47,14 @@ pub struct LoadedLimit {
     /// (`comd`, Trinity Limit only: FUN_1403d96d0 -> FUN_1403b2a90 ->
     /// FUN_1404065a0 -> FUN_14015de90 swaps both).
     pub menu_sheet: Option<visual::hud::Sheet>,
+    /// Limit Form's: the program plays Sora's own motions (by their ids).
+    pub own: bool,
 }
+
+/// The Limit Form model whose archive holds the `limitform` program
+/// (`limi`) and whose container holds its effects (objentry 0x95d).
+const LIMIT_FORM_MODEL: &str = "P_EX100_KH1F";
+const LIMIT_FORM_OBJECT: u32 = 0x95d;
 
 #[derive(Default)]
 pub struct LimitSource {
@@ -198,7 +211,58 @@ pub fn load(
             gauge_sheet,
             counter_sheet,
             menu_sheet,
+            own: false,
         });
+    }
+    // Limit Form's limits: the form's `limitform` program, its effects.
+    let program = library
+        .read(&format!("obj/{LIMIT_FORM_MODEL}.mdlx"))
+        .ok()
+        .and_then(|bytes| {
+            let bar = data::bar::read_bar(&bytes).ok()?;
+            let e = bar
+                .entries
+                .iter()
+                .find(|e| &e.name_bytes == b"limi" && e.size != 0)?;
+            bytes
+                .get(e.offset as usize..e.offset as usize + e.size as usize)
+                .map(<[u8]>::to_vec)
+        });
+    match program {
+        Some(program) => {
+            let pax =
+                super::drive_room::object_pax(library, LIMIT_FORM_MODEL).map(std::sync::Arc::new);
+            for command in player::limit_form::LIMITS {
+                let mut file = [0u8; 32];
+                file[..9].copy_from_slice(b"limitform");
+                let index = out.limits.len() as u8;
+                out.limits.push(LoadedLimit {
+                    row: LimitRow {
+                        id: 0,
+                        members: [SORA, 0, 0],
+                        command,
+                        ability: 0,
+                        world: 0,
+                        file,
+                    },
+                    file: limit_file::LimitFile {
+                        program: program.clone(),
+                        motions: Vec::new(),
+                        pax: None,
+                        cameras: Vec::new(),
+                        sheets: Vec::new(),
+                    },
+                    index,
+                    events: Vec::new(),
+                    pax: pax.clone(),
+                    gauge_sheet: None,
+                    counter_sheet: None,
+                    menu_sheet: None,
+                    own: true,
+                });
+            }
+        }
+        None => eprintln!("obj/{LIMIT_FORM_MODEL}.mdlx: no limitform program"),
     }
     out
 }
@@ -313,6 +377,12 @@ struct RoomEnv<'a> {
     /// Where Sora stands (the holder of his Keyblade and of what the scene
     /// attaches to him).
     player: V3,
+    /// His heading (`obj_dir` of Sora, FUN_1403b56e0).
+    player_yaw: f32,
+    /// His TARGET radius plus the Shadow's (FUN_1403d7520).
+    enemy_reach: Option<f32>,
+    /// The room targets the Shadow (locked or not; the attacks' hop target).
+    selected: bool,
     /// Sora is locked on to the Shadow (his lock-on record, obj+0xdc8).
     locked: bool,
     /// The Shadow's TARGET shape radius.
@@ -329,6 +399,8 @@ struct RoomEnv<'a> {
     effects: &'a HashMap<u32, (u64, u64)>,
     /// The room's running effects after the last effect update.
     fx_live: &'a HashMap<u64, player::magic::FxLive>,
+    /// Sora's PTYA records (`obj_party_attack`).
+    records: &'a [player::ptya::Record],
     tick: u64,
     /// Effect handles from here on were asked for during this tick; the
     /// effect update has not taken them yet.
@@ -340,7 +412,15 @@ impl Env for RoomEnv<'_> {
         self.world.floor(x, z, top)
     }
     fn movement(&self, from: V3, wished: V3) -> V3 {
-        self.world.collide(from, wished, false, &self.body).position
+        // Off the floor (a hop, a fall) the body is not held to it.
+        let airborne = wished[1] > 0.
+            || self
+                .world
+                .floor(from[0], from[2], from[1] + 1.)
+                .is_some_and(|f| from[1] > f + 0.5);
+        self.world
+            .collide(from, wished, airborne, &self.body)
+            .position
     }
     fn check_step(&self, _: V3, _: V3, _: f32, _: f32, _: f32) -> Option<u8> {
         Some(0)
@@ -354,8 +434,15 @@ impl Env for RoomEnv<'_> {
     fn player_position(&self) -> V3 {
         self.player
     }
+    fn player_yaw(&self) -> f32 {
+        self.player_yaw
+    }
     fn lockon_target(&self) -> Option<u32> {
         (self.locked && self.enemy.is_some()).then_some(enemy::traps::target::OBJECT_TARGET | ENEMY)
+    }
+    fn attack_target(&self) -> Option<u32> {
+        (self.selected && self.enemy.is_some())
+            .then_some(enemy::traps::target::OBJECT_TARGET | ENEMY)
     }
     fn target_radius(&self, id: u32) -> Option<f32> {
         (id == ENEMY).then_some(self.enemy_radius).flatten()
@@ -370,6 +457,18 @@ impl Env for RoomEnv<'_> {
     }
     fn player_move_input(&self) -> V3 {
         self.stick
+    }
+    /// Sora's PTYA set (the current kit's records).
+    fn party_attack(&self, object: u32, id: u8) -> Option<player::ptya::Record> {
+        if object != PLAYER_OBJECT {
+            return None;
+        }
+        self.records.iter().find(|r| r.id == id).copied()
+    }
+    fn target_reach(&self, id: u32) -> Option<f32> {
+        (id & !enemy::traps::target::OBJECT_TARGET == ENEMY)
+            .then_some(self.enemy_reach)
+            .flatten()
     }
     fn can_decide_command(&self, object: u32, _command: u16) -> bool {
         object == PLAYER_OBJECT && self.can_command
@@ -456,6 +555,8 @@ pub struct Running {
     pub last_reaction: u64,
     /// The Shadow's landed-hit tally as last counted.
     hits_seen: u32,
+    /// The serial of the motion Sora last started in the scene.
+    motion_serial: u64,
 }
 
 /// The character's clip view for a limit: its idle and the limit's motions.
@@ -484,6 +585,29 @@ fn view_of(
             let roots = if weapon { Vec::new() } else { roots };
             v.clips.insert(slot, (length, loop_start, roots));
             v.events.insert(slot, events);
+        }
+    }
+    v
+}
+
+/// Sora's clip view for a limit that plays his own motions (Limit Form's):
+/// each scripted motion by its id, with its trigger tables.
+fn own_view(
+    events: &HashMap<u16, MotionEvents>,
+    locomotion: &[(u32, u32); 6],
+    clip: &dyn Fn(u16) -> Option<(u32, u32, Vec<V3>)>,
+) -> ClipView {
+    let mut v = ClipView::default();
+    // Motions 0..=5 (idle, walk, run, jump, fall, land): the program queues
+    // the fall (4) behind an air finisher. [I] Their trigger tables are not
+    // given.
+    for (id, &(length, loop_start)) in locomotion.iter().enumerate() {
+        v.clips.insert(id, (length, loop_start, Vec::new()));
+    }
+    for (&id, e) in events {
+        if let Some((length, loop_start, roots)) = clip(id) {
+            v.clips.insert(usize::from(id), (length, loop_start, roots));
+            v.events.insert(usize::from(id), e.clone());
         }
     }
     v
@@ -533,6 +657,16 @@ impl Running {
         l.special.then(|| l.combo.to_vec())
     }
 
+    /// Where Sora's Keyblade flies while a Limit Form limit has let it go
+    /// (its object detached from his hand).
+    pub fn thrown_weapon(&self) -> Option<V3> {
+        if !player::limit_form::LIMITS.contains(&self.command) {
+            return None;
+        }
+        let o = self.scene.object(WEAPONS)?;
+        o.sys.attached.is_none().then_some(o.sys.position)
+    }
+
     /// The shot pool's points to draw (Trinity Limit's shots).
     pub fn shot_points(&self) -> Vec<enemy::traps::trinity::Point> {
         self.scene.shot_points()
@@ -570,10 +704,27 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
         let (_, clip, roots) = game.clips.scripted_clip(c)?;
         Some((clip.end, clip.loop_start, roots.clone()))
     };
-    let mut views = vec![
-        (1, view_of(l, 1, false, sora_idle, &sora_clip)),
-        (WEAPON_MODEL + 1, view_of(l, 1, true, sora_idle, &sora_clip)),
-    ];
+    let mut views = if l.own {
+        // Limit Form's: Sora's own scripted motions with their triggers.
+        let events = game
+            .drive
+            .as_ref()
+            .and_then(|d| d.script_events.get(&player::forms::LIMIT))
+            .cloned()
+            .unwrap_or_default();
+        let c = &game.clips;
+        let locomotion =
+            [&c.idle, &c.walk, &c.run, &c.jump, &c.fall, &c.land].map(|k| (k.end, k.loop_start));
+        vec![
+            (1, own_view(&events, &locomotion, &sora_clip)),
+            (WEAPON_MODEL + 1, ClipView::default()),
+        ]
+    } else {
+        vec![
+            (1, view_of(l, 1, false, sora_idle, &sora_clip)),
+            (WEAPON_MODEL + 1, view_of(l, 1, true, sora_idle, &sora_clip)),
+        ]
+    };
     for &(i, _) in &members {
         let kind = game.party[i].kind.clone();
         let c = kind.character;
@@ -600,8 +751,16 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
     sora.model = 1;
     sora.team = SORA_TEAM;
     sora.entry_part = u16::from(SORA);
+    // The `limitform` program acts only for the Limit Form Sora (L1604:
+    // objentry 0x95d..0x961, P_EX100_KH1F and its world variants).
+    if l.own {
+        sora.entry_id = LIMIT_FORM_OBJECT;
+    }
     sora.position = game.player.position;
     sora.yaw = game.player.yaw;
+    // His heading turns toward `obj_wish_dir` (+0x7a8) at his PRTY turn
+    // speed per tick (the sysobj steps twice its rate).
+    sora.turn_rate = game.params.turn_speed * 0.5;
     sora.weapons = vec![WEAPONS];
     let mut others = vec![Participant {
         id: WEAPONS,
@@ -667,6 +826,9 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
         stick: [0.; 3],
         enemy,
         player: game.player.position,
+        player_yaw: game.player.yaw,
+        enemy_reach: game.enemy.as_ref().map(|rt| rt.target_reach),
+        selected: game.selected_target.is_some(),
         locked: game.target_locked,
         enemy_radius: room_enemy_radius(game),
         can_command: true,
@@ -674,10 +836,14 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
         pushers: &pushers,
         effects: &HashMap::new(),
         fx_live: &game.fx_live,
+        records: &game.clips.records,
         tick,
         fresh_effects: u32::MAX,
     };
     let mut scene = Scene::start(&env, &l.file.program, command, time, sora, friends, others)?;
+    // Limit Form's program is his object's: his frame events 7 reach it
+    // (motion 247's shots, trigger 0x11).
+    scene.player_events = l.own;
     // KH2_LIMIT_TRACE: the end event lists every trap the scene called.
     if std::env::var_os("KH2_LIMIT_TRACE").is_some() {
         scene.trace();
@@ -706,6 +872,7 @@ pub fn start(game: &mut Game, command: u16, tick: u64) -> Result<(), String> {
         members,
         faded,
         offers: [None; 8],
+        motion_serial: 0,
         targets: [None; 8],
         effects: HashMap::new(),
         command,
@@ -745,6 +912,9 @@ pub fn tick(
             stick,
             enemy,
             player: game.player.position,
+            player_yaw: game.player.yaw,
+            enemy_reach: game.enemy.as_ref().map(|rt| rt.target_reach),
+            selected: game.selected_target.is_some(),
             locked: game.target_locked,
             enemy_radius: room_enemy_radius(game),
             can_command,
@@ -752,6 +922,7 @@ pub fn tick(
             pushers: &run.pushers,
             effects: &run.effects,
             fx_live: &game.fx_live,
+            records: &game.clips.records,
             tick,
             fresh_effects: run.scene.effect_watermark(),
         };
@@ -781,6 +952,14 @@ pub fn tick(
     let (status, followed) = status;
     if let Some(cmd) = followed {
         game.event(serde_json::json!({"event":"party_limit_follow_up","tick":tick,"command":cmd}));
+        // Limit Form's finishers give the form EXP (limit_exec's branch for
+        // them, limitform-01 §1.6).
+        if l.own
+            && player::forms::LIMIT_EXP_COMMANDS.contains(&cmd)
+            && let Some(d) = game.drive.as_mut()
+        {
+            d.pending_exp += 1;
+        }
     }
     // The scene re-offers its commands every tick a window is open.
     run.offers = [None; 8];
@@ -820,6 +999,36 @@ pub fn tick(
                         run.last_reaction = tick;
                     }
                 }
+            }
+            // Limit Form's: what its program starts on Sora or his Keyblade
+            // comes from the form's container (FUN_1403cc650 with Sora's
+            // object). [I] One on the Keyblade is placed where it is.
+            Event::EffectStart {
+                object,
+                effect,
+                handle,
+                position,
+                ..
+            } if l.own && (object == PLAYER_OBJECT || object == WEAPONS) => {
+                let key = FX_KEY | u64::from(handle);
+                run.effects.insert(handle, (key, tick));
+                let (bound, at) = if object == PLAYER_OBJECT {
+                    (position.is_none().then_some(Anchor::Caster), position)
+                } else {
+                    (
+                        None,
+                        position.or_else(|| run.scene.object(WEAPONS).map(|o| o.sys.position)),
+                    )
+                };
+                game.fx_calls.push(super::spell_fx::Call {
+                    pax: pax.clone(),
+                    fx: player::magic::Fx::Start {
+                        key,
+                        id: effect as u16,
+                        bound,
+                        at,
+                    },
+                });
             }
             Event::EffectStart {
                 object: LIMIT_EFFECTS,
@@ -886,18 +1095,79 @@ pub fn tick(
             _ => {}
         }
     }
+    // Limit Form's follow-ups: a range 20 of the motion Sora plays offers
+    // its command as the reaction command (FUN_14040d810 case 0x14), and
+    // the press reaches the program's trigger 23.
+    if l.own
+        && let Some((_, v)) = run.views.iter().find(|(m, _)| *m == 1)
+    {
+        let p = run.scene.player();
+        let slot = p.motion.slot;
+        let clock = enemy::motion::native_clock(p.motion.tick, v.length(slot), v.loop_start(slot));
+        let offer = v.events(slot).and_then(|e| {
+            e.ranges
+                .iter()
+                .find(|r| {
+                    r.kind == 20
+                        && u32::from(r.start) <= clock
+                        && (r.end == u16::MAX || clock < u32::from(r.end))
+                })
+                .and_then(|r| r.params.first().copied())
+        });
+        if let Some(cmd) = offer {
+            if !run.seen.contains(&cmd) {
+                run.seen.push(cmd);
+                game.event(serde_json::json!({"event":"party_limit_offer","tick":tick,
+                    "record":1,"command":cmd,"range":20}));
+            }
+            run.offers[1] = Some(cmd);
+            run.last_reaction = tick;
+        }
+    }
     // Sora stands and plays where the scene has him.
     let proxy = run.scene.player();
     let slot = proxy.motion.slot;
     game.player.position = proxy.position;
     game.player.yaw = proxy.yaw;
-    game.player.action = if slot >= MOTIONS {
+    game.player.action = if l.own && slot != 0 {
+        // Limit Form's: his own motion by its id.
+        match slot {
+            1 => Action::Walk,
+            2 => Action::Run,
+            3 => Action::Jump,
+            4 => Action::Fall,
+            5 => Action::Land,
+            _ => u16::try_from(slot)
+                .ok()
+                .filter(|&m| game.clips.scripted_clip(m).is_some())
+                .map_or(Action::Idle, Action::Scripted),
+        }
+    } else if slot >= MOTIONS {
         Action::Scripted(clip_id(l.index, (slot - MOTIONS) as u16))
     } else {
         Action::Idle
     };
+    // Limit Form's tint: the limit's filter light (2:55) as its program set
+    // it (`light_set_color`, L4909), its fade the strength.
+    if l.own {
+        let world = run.scene.world();
+        let light = world
+            .light_slot(run.scene.limit().filter)
+            .and_then(|k| world.lights.get(k)?.as_ref());
+        if let (Some(light), Some(d)) = (light, game.drive.as_mut()) {
+            d.tint = [light.color[0], light.color[1], light.color[2]];
+            d.tint_k = light.fade.value.clamp(0., 1.);
+            d.tint_step = 0.;
+        }
+    }
     game.player.frame = proxy.motion.tick;
     game.player.armed = true;
+    // Each motion the scene starts is a new attack for his swing volumes
+    // (their hit records are the motion's, FUN_1403c88c0).
+    if proxy.motion.serial != run.motion_serial {
+        run.motion_serial = proxy.motion.serial;
+        game.action_started = tick;
+    }
     for &(i, id) in &run.members {
         let Some(o) = run.scene.object(id) else {
             continue;
@@ -938,6 +1208,14 @@ pub fn tick(
     }
     if tick.is_multiple_of(30) || status == Status::Over {
         let limit = run.scene.limit();
+        let o = run.scene.player();
+        let sora_state = (
+            o.motion.slot,
+            o.motion.tick,
+            o.motion.flags.pulses,
+            o.motion.flags.ranges,
+            o.motion_queue.clone(),
+        );
         game.event(
             serde_json::json!({"event":"party_limit_tick","tick":tick,"time":limit.time,
             "pending":limit.pending,"sora_motion":slot,"offers":run.offers,
@@ -946,6 +1224,7 @@ pub fn tick(
                 .map(|o| (o.sys.motion.slot, o.sys.motion.tick, o.sys.event_parameter,
                     o.sys.motion.flags.word))).collect::<Vec<_>>(),
             "shots":run.scene.shot_points().len(),
+            "sora":sora_state,
             "faults":run.scene.faults().len()}),
         );
     }
@@ -1060,6 +1339,13 @@ fn end(game: &mut Game, run: Running, tick: u64) {
     }
     game.player.action = Action::Idle;
     game.player.frame = 0;
+    // FUN_1403d83e0: Limit Form's tint ramps out over 30 frames.
+    if player::limit_form::LIMITS.contains(&run.command)
+        && let Some(d) = game.drive.as_mut()
+    {
+        d.tint_step = -1. / player::limit_form::TINT_OUT;
+        d.limit_running = false;
+    }
     game.event(serde_json::json!({"event":"party_limit_end","tick":tick,"command":run.command,
         "missing":run.scene.missing(),"faults":run.scene.faults().len(),
         "first_faults":run.scene.faults().iter().take(4).map(|f| format!("{f:?}")).collect::<Vec<_>>(),

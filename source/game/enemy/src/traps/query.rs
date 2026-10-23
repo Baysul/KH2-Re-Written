@@ -15,6 +15,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
         (0, 0) | (1, 122) | (2, 36) => nothing,
         (1, 2) => sysobj_moveto,
         (6, 68) => super::math::strike_raid_calc_xyzrot,
+        (6, 67) => party_attack,
         (1, 217) => set_pos_trans,
         (1, 318) => play_se,
         (1, 328) => dead_mark,
@@ -323,6 +324,66 @@ fn leave_force(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result
         obj.sys.fade.start(1.0, 0.0, 0.0);
     }
     obj.sys.left = true;
+    Ok(())
+}
+
+/// 6:67 FUN_14053ef20: a player-class object (+0x6c8 bit 7) runs record
+/// `args[1]` of its PTYA set (FUN_1403d74e0) against its target record
+/// (+0xdc8) through FUN_1403d78d0: the target record takes the lock-on's,
+/// the record's motion starts (blend 0, FUN_1403c86a0, which empties the
+/// queue), a record with a hop (+0xc > 0) jumps (physics vt+0x18, mode 5)
+/// and the record's next motion (+0xa) is queued with its blend (+0x38).
+/// [I] Only Sora has a set here; a record without a hop sets no ground
+/// velocity (Limit Form's have none), the hop cap is not raised by the jump
+/// height (flag 2) and +0xd74 is not set.
+fn party_attack(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let id = ctx.sys_of_ai(m, args[0].value)?;
+    let Ok(record) = u8::try_from(args[1].as_int()) else {
+        return Ok(());
+    };
+    let env = ctx.env;
+    if id != PLAYER_OBJECT {
+        return Ok(());
+    }
+    let Some(r) = env.party_attack(id, record) else {
+        return Ok(());
+    };
+    let target = env.attack_target();
+    // FUN_1403bde30 / FUN_1403d7520: the target's centre less his, and the
+    // two TARGET radii.
+    let toward = target.and_then(|t| Some((env.target_position(t)?, env.target_reach(t)?)));
+    let sys = &mut ctx.object(id)?.sys;
+    if let Some(t) = target {
+        sys.target.id = t;
+    }
+    sys.motion_queue.clear();
+    sys.motion_start(usize::from(r.motion), 0., env.clips(sys.model));
+    if r.jump > 0. {
+        let (dir, height, speed) = match toward {
+            Some((at, reach)) => {
+                let v = [at[0] - sys.position[0], at[2] - sys.position[2]];
+                let rise = at[1] - sys.position[1];
+                let height = rise.clamp(r.jump_min, r.jump_max.max(r.jump_min));
+                let len = v[0].hypot(v[1]);
+                let per_tick = (len - reach + r.reach) / actor_physics::rise_time(height);
+                let speed = if r.speed_min <= per_tick {
+                    per_tick.min(r.speed_max)
+                } else {
+                    r.speed_min
+                };
+                let dir = if len > 0. {
+                    [v[0] / len, 0., v[1] / len]
+                } else {
+                    sys.forward()
+                };
+                (dir, height, speed)
+            }
+            // No target: straight ahead at the top speed.
+            None => (sys.forward(), r.jump, r.speed_max),
+        };
+        sys.jump_now(dir, height, speed);
+    }
+    sys.motion_queue.push((usize::from(r.blend_arg), r.blend));
     Ok(())
 }
 

@@ -12,6 +12,9 @@ use std::collections::HashMap;
 #[derive(Default)]
 pub struct ContactState {
     pub incoming_ids: HashMap<(u64, usize), (u8, i32)>,
+    /// A script attack object's id and group by its window: it keeps them
+    /// until the script frees the object (`attack_free`), across acts.
+    pub script_ids: HashMap<usize, (u8, i32)>,
     pub previous: HashMap<(u64, usize, usize), Vec3>,
     pub outgoing_previous: HashMap<(u64, usize), Vec3>,
     serial: Option<u64>,
@@ -575,6 +578,62 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 );
             }
         }
+        // Objects the actor's script made with HIT spheres (Shadow Flare's
+        // carriers, B_EX360) take the volumes too, their own records keeping
+        // one hit per volume (FUN_1403cf830 tests every object's HIT shapes).
+        if let super::enemy_battle::Brain::Script(brain) = &mut battle.brain {
+            for t in brain.made_targets() {
+                let found = volumes.iter().filter(|v| !v.guard).find_map(|v| {
+                    let &(aid, group) = rt.instance_ids.get(&v.key)?;
+                    let (c, ..) = v.centres.iter().find(|(c, r, ..)| {
+                        t.spheres.iter().any(|(s, sr)| c.distance(*s) <= r + sr)
+                    })?;
+                    Some((v, aid, group, *c))
+                });
+                let Some((v, aid, group, contact)) = found else {
+                    continue;
+                };
+                let Some(rows) = rt.steps.get(&(v.atkp, v.sub)) else {
+                    continue;
+                };
+                let Some(record) = brain.made_record_mut(t.id) else {
+                    continue;
+                };
+                if record.has(aid) {
+                    continue;
+                }
+                let (counted, row) =
+                    record.hit(aid, group, matches!(rows[0].kind, 5 | 6), |count| {
+                        let index = battle_tables::step_index(rows, count);
+                        (index, rows[index].interval)
+                    });
+                if !counted {
+                    continue;
+                }
+                let attack = params_of(&rows[row]);
+                let direction =
+                    ((t.spheres[0].0 - contact) * Vec3::new(1., 0., 1.)).normalize_or(sora_facing);
+                brain.hit_made(
+                    t.id,
+                    &enemy::damage::Hit {
+                        direction: direction.to_array(),
+                        high: false,
+                        attack: &attack,
+                        attacker: v.stats.as_ref().unwrap_or(&rt.sora),
+                        difficulty: rt.difficulty,
+                        param_id: u32::from(v.atkp),
+                        revenge: rows[row].revenge,
+                        pool: 0,
+                        by_leader: v.member.is_none(),
+                        by_party: v.member.is_some(),
+                    },
+                );
+                event(
+                    log,
+                    serde_json::json!({"event":"made_object_hit","tick":tick,"actor":actor.id,"object":t.id,"atkp":v.atkp}),
+                );
+            }
+        }
         if battle.paused || !battle.brain.alive() || battle.brain.serial() != battle.serial {
             continue;
         }
@@ -661,11 +720,20 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                     break;
                 }
             };
-            let ids = *battle
-                .contacts
-                .incoming_ids
-                .entry((battle.serial, window))
-                .or_insert_with(|| allocate(&mut rt.ids, &mut rt.next_group, rows[0].combo_group));
+            let new_ids = || allocate(&mut rt.ids, &mut rt.next_group, rows[0].combo_group);
+            let ids = if cand.script_slot.is_some() && !cand.direct {
+                *battle
+                    .contacts
+                    .script_ids
+                    .entry(window)
+                    .or_insert_with(new_ids)
+            } else {
+                *battle
+                    .contacts
+                    .incoming_ids
+                    .entry((battle.serial, window))
+                    .or_insert_with(new_ids)
+            };
             // The sweep's start is kept for every sphere, whoever it hits.
             let mut priors: Vec<Option<Vec3>> = Vec::with_capacity(cand.shapes.len());
             for &(shape_kind, ordinal, centre, radius, forced_prior) in &cand.shapes {
@@ -1017,7 +1085,24 @@ pub fn retire(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                 }
                 keep
             });
+        // A script attack's id lives as long as its object (destruction
+        // clears its seen bit, so its Interval re-hits run on the record).
+        let objects: Vec<usize> = battle
+            .brain
+            .script_attacks()
+            .iter()
+            .map(|a| SCRIPT_WINDOW + a.serial as usize)
+            .collect();
+        let alive = battle.brain.alive() && battle.error.is_none() && actor.error.is_none();
+        battle.contacts.script_ids.retain(|window, (id, _)| {
+            let keep = alive && objects.contains(window);
+            if !keep {
+                expired.push(*id)
+            }
+            keep
+        });
         live.extend(battle.contacts.incoming_ids.values().map(|(id, _)| *id));
+        live.extend(battle.contacts.script_ids.values().map(|(id, _)| *id));
         let ids = &battle.contacts.incoming_ids;
         battle
             .contacts
@@ -1036,7 +1121,10 @@ pub fn retire(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         }
         for actor in actors.iter_mut() {
             if let Some(battle) = actor.battle.as_mut() {
-                battle.brain.record_mut().clear_seen(id)
+                battle.brain.record_mut().clear_seen(id);
+                if let super::enemy_battle::Brain::Script(a) = &mut battle.brain {
+                    a.clear_made_seen(id);
+                }
             }
         }
         rt.ids.release(id);

@@ -35,6 +35,14 @@ pub fn tour_captures() -> Vec<u64> {
         .into_iter()
         .chain((600..end).step_by(600))
         .collect();
+    // `KH2RW_SEPH_TOUR_SHOTS=<tick>,<tick>,...` adds captures (e.g. during
+    // the clear overlays).
+    if let Ok(v) = std::env::var("KH2RW_SEPH_TOUR_SHOTS") {
+        c.extend(v.split(',').filter_map(|t| t.trim().parse::<u64>().ok()));
+    }
+    c.retain(|&t| t < end);
+    c.sort_unstable();
+    c.dedup();
     c.push(end);
     c
 }
@@ -91,20 +99,23 @@ pub fn tick(
         {
             game.event(serde_json::json!({"event":"sephiroth_tour_scan_failed","reason":e}));
         }
-        // [Tour setup] `KH2RW_SEPH_TOUR_LOW=<tick>`: the boss drops to a few
-        // HP at that tick, so the run reaches his death (a finisher must
-        // still land the last blow).
-        if std::env::var("KH2RW_SEPH_TOUR_LOW")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            == Some(tick)
+        // [Tour setup] `KH2RW_SEPH_TOUR_LOW=<tick>[:<hp>]`: the boss drops to
+        // `hp` (30 by default) at that tick, so the run reaches his last
+        // phase or his death (a finisher must still land the last blow).
+        let low = std::env::var("KH2RW_SEPH_TOUR_LOW").ok().and_then(|v| {
+            let mut it = v.split(':');
+            let at = it.next()?.parse::<u64>().ok()?;
+            let hp = it.next().map_or(Some(30), |h| h.parse::<i32>().ok())?;
+            Some((at, hp))
+        });
+        if let Some((_, hp)) = low.filter(|l| l.0 == tick)
             && let Some(b) = fight
                 .actor
                 .and_then(|id| gallery.actors.iter_mut().find(|a| a.id == id))
                 .and_then(|a| a.battle.as_mut())
         {
-            b.brain.set_hp(30);
-            game.event(serde_json::json!({"event":"sephiroth_tour_low","tick":tick}));
+            b.brain.set_hp(hp);
+            game.event(serde_json::json!({"event":"sephiroth_tour_low","tick":tick,"hp":hp}));
         }
         // [Tour setup] The room's Sora is level 1; he gets the HP to last
         // the run (his hits stay vulnerable, so the grab can happen).
@@ -113,6 +124,16 @@ pub fn tick(
         {
             rt.sora_target.max_hp = 9999;
             rt.sora_hp = 9999;
+        }
+        // [Tour setup] Heartless Angel leaves him at 1 HP; two seconds later
+        // he is refilled so the run goes on (the game would need a heal).
+        if tick > 60
+            && tick.is_multiple_of(120)
+            && let Some(rt) = game.enemy.as_mut()
+            && (1..1000).contains(&rt.sora_hp)
+        {
+            rt.sora_hp = rt.sora_target.max_hp;
+            game.event(serde_json::json!({"event":"sephiroth_tour_refill","tick":tick}));
         }
         // Lock on once he is there, and again whenever the lock was lost.
         if tick >= 200 && tick.is_multiple_of(60) && !game.target_locked {

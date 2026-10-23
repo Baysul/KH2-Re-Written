@@ -1143,11 +1143,12 @@ fn prty_words(library: &mut data::path_lookup::Library, index: i32) -> Option<[u
 /// entry's model script, a bare object otherwise. [Open] The made objects'
 /// models are not drawn.
 /// The host side of `sysobj_appear` (FUN_1403df930): the object entry's
-/// model script, and its class from the entry's type byte.
+/// model script, its class from the entry's type byte, and its HIT spheres.
 pub(super) struct Spawner {
     source: Arc<data::probe_source::ProbeSource>,
     models: std::collections::HashMap<u32, (String, u8)>,
     scripts: std::collections::HashMap<u32, Option<Vec<u8>>>,
+    shapes: std::collections::HashMap<u32, Vec<([f32; 3], f32)>>,
 }
 
 impl Spawner {
@@ -1170,6 +1171,7 @@ impl Spawner {
                 })
                 .collect(),
             scripts: Default::default(),
+            shapes: Default::default(),
         }
     }
 }
@@ -1191,6 +1193,16 @@ impl enemy::world::Spawner for Spawner {
         if let Some(&(_, kind)) = self.models.get(&entry) {
             sys.set_class(kind);
         }
+        sys.hit_shapes = self
+            .shapes
+            .entry(entry)
+            .or_insert_with(|| {
+                self.models
+                    .get(&entry)
+                    .map(|(model, _)| super::enemy_script::hit_spheres(&self.source, model))
+                    .unwrap_or_default()
+            })
+            .clone();
         Some(enemy::world::Appeared { payload, sys })
     }
 }
