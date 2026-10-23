@@ -1685,6 +1685,14 @@
           ]
         },
         {
+          "id": "NATIVE-T219-01",
+          "label": "Boss map body, its solve, leave and land tests, and the random-position search's collision class - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T219-boss-map-body.md"
+          ]
+        },
+        {
           "id": "NATIVE-T211-01",
           "label": "Reaction command search over the held command, record 1, partner, shapes, attacks and auto offers - translation, equivalence unproved",
           "status": "PARTIAL",

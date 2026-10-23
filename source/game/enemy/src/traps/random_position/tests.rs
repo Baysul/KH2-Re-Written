@@ -52,7 +52,7 @@ fn a_ground_point_lies_on_the_floor_within_the_ring() {
     let mut counter = 0;
     let center = [500.0, 30.0, -200.0, 1.0];
     for _ in 0..20 {
-        let p = ground_point(&map, &mut rng, &mut counter, center, 100.0, 400.0);
+        let p = ground_point(&map, &mut rng, &mut counter, center, 100.0, 400.0, 1);
         assert_eq!(p[1], 0.0);
         let d = dist(&p, &center);
         assert!((100.0 - 0.01..=400.0 + 0.01).contains(&d), "{d}");
@@ -89,7 +89,7 @@ fn without_ground_the_centre_comes_back() {
     let mut counter = 0;
     let center = [1.0, 2.0, 3.0, 1.0];
     assert_eq!(
-        ground_point(&map, &mut rng, &mut counter, center, 50.0, 60.0),
+        ground_point(&map, &mut rng, &mut counter, center, 50.0, 60.0, 1),
         center
     );
 }
@@ -108,6 +108,7 @@ fn an_air_point_is_raised_and_a_blocked_line_rejects_the_ring() {
         200.0,
         50.0,
         90.0,
+        2,
     );
     assert!((50.0..=90.0).contains(&p[1]), "{}", p[1]);
     // A wall just beside the centre blocks every line that crosses it, so a
@@ -129,6 +130,7 @@ fn an_air_point_is_raised_and_a_blocked_line_rejects_the_ring() {
             200.0,
             50.0,
             90.0,
+            2,
         );
         assert!(p[0] < 1.0);
     }

@@ -304,6 +304,14 @@ pub struct Sysobj {
     /// +0xa28 / +0xa38: wished and actual displacement of the last tick.
     pub wished: Vec3,
     pub moved: Vec3,
+    /// The map collision body (obj+0x6d0; obj+0x9b8 bit 0 "has body"). The
+    /// host sets it from the model; without it the object moves by
+    /// [`Env::movement`].
+    pub map_body: Option<crate::env::MapBody>,
+    /// obj+0x744 bit 0: the last solve found no floor under the body.
+    pub no_floor: bool,
+    /// obj+0x758: the floor normal the last solve left (engine frame).
+    pub floor_normal: Vec3,
     pub target: Target,
     /// +0x9f4: spawn arguments, and the spawn type byte at +0x1c.
     pub spawn_args: [i32; 8],
@@ -686,6 +694,9 @@ impl Sysobj {
             move_speed: 0.,
             wished: [0.; 3],
             moved: [0.; 3],
+            map_body: None,
+            no_floor: false,
+            floor_normal: [0., -1., 0.],
             target: Target::default(),
             spawn_args: [0; 8],
             appear_way: -1,
@@ -965,9 +976,44 @@ impl Sysobj {
     /// Applies a requested displacement through the collision world.
     fn apply_movement(&mut self, wished: Vec3, env: &dyn Env) {
         let from = self.position;
-        self.position = env.movement(from, wished);
+        let solved = self
+            .map_body
+            .as_ref()
+            .and_then(|body| env.collide(body, from, wished, self.air_query(), self.floor_normal));
+        if let Some(m) = solved {
+            self.position = m.position;
+            self.no_floor = m.no_floor;
+            self.floor_normal = m.normal;
+        } else {
+            self.position = env.movement(from, wished);
+        }
         self.wished = wished;
         self.moved = sub(self.position, from);
+    }
+
+    /// The floor an air move came down on this tick, if it did. With a map
+    /// body it is FUN_1403b9090's land branch: not rising (`disp.y >= 0` in
+    /// the engine's frame), the solve found a floor (`+0x744` bit 0 clear)
+    /// and FUN_1403ba1e0 lets it land (no range 3); the solver has already
+    /// put the feet on it. [I] Without one, the room's floor within 30
+    /// units above the feet.
+    fn touchdown(&self, d: Vec3, env: &dyn Env) -> Option<f32> {
+        if d[1] > 0. {
+            return None;
+        }
+        if self.map_body.is_some() {
+            let can_land = self.motion.flags.word & motion::flag::GRAVITY_FROZEN == 0;
+            return (!self.no_floor && can_land).then_some(self.position[1]);
+        }
+        let [x, y, z] = self.position;
+        env.floor(x, z, y + 30.).filter(|&floor| y <= floor)
+    }
+
+    /// FUN_1403b9090's airborne query (CB+0x70 bit 0): FUN_1403ba9a0 (an
+    /// air mode, a gravity range or `+0x120` bit 23), the mode's flag bit 1,
+    /// or a hold range.
+    fn air_query(&self) -> bool {
+        self.mode_flags() & 3 != 0 || self.gravity_frozen() || self.flags >> 23 & 1 != 0
     }
 
     /// The start of a frame (FUN_1403c6740): advance the motion clock, fire the
@@ -1358,10 +1404,7 @@ impl Sysobj {
                 clips,
             );
         }
-        if let Some(floor) = env.floor(self.position[0], self.position[2], self.position[1] + 30.)
-            && self.position[1] <= floor
-            && d[1] <= 0.
-        {
+        if let Some(floor) = self.touchdown(d, env) {
             self.position[1] = floor;
             self.hop = None;
             self.land(clips);
@@ -1438,10 +1481,7 @@ impl Sysobj {
                 clips,
             );
         }
-        if let Some(floor) = env.floor(self.position[0], self.position[2], self.position[1] + 30.)
-            && self.position[1] <= floor
-            && d[1] <= 0.
-        {
+        if let Some(floor) = self.touchdown(d, env) {
             self.position[1] = floor;
             self.jump = None;
             self.land(clips);
@@ -1618,8 +1658,15 @@ impl Sysobj {
         if !grounded_mode || ranged {
             return;
         }
-        let [x, y, z] = self.position;
-        if env.floor(x, z, y + 1.).is_some_and(|f| y - f <= 1.) || w & 0x80_0000 != 0 {
+        // `+0x744` bit 0 from the solve; without a body, the floor within
+        // one unit.
+        let on_floor = if self.map_body.is_some() {
+            !self.no_floor
+        } else {
+            let [x, y, z] = self.position;
+            env.floor(x, z, y + 1.).is_some_and(|f| y - f <= 1.)
+        };
+        if on_floor || w & 0x80_0000 != 0 {
             return;
         }
         self.flags &= !0x400_0000;

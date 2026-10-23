@@ -37,6 +37,82 @@ impl Env for Flat {
     }
 }
 
+/// A map whose floor (y = 0, for x < 100) only the body solver sees: the
+/// room's own floor test finds nothing.
+struct BodyFloor;
+
+impl Env for BodyFloor {
+    fn floor(&self, _: f32, _: f32, _: f32) -> Option<f32> {
+        None
+    }
+    fn collide(
+        &self,
+        _: &crate::env::MapBody,
+        from: Vec3,
+        d: Vec3,
+        _: bool,
+        normal: Vec3,
+    ) -> Option<crate::env::MapMove> {
+        let mut position = [from[0] + d[0], from[1] + d[1], from[2] + d[2]];
+        let floor = position[0] < 100.;
+        if floor && position[1] <= 0. {
+            position[1] = 0.;
+        }
+        Some(crate::env::MapMove {
+            position,
+            no_floor: !(floor && position[1] <= 1.),
+            normal,
+        })
+    }
+    fn clips(&self, _: u32) -> &dyn Clips {
+        &Thirty
+    }
+    fn player_position(&self) -> Vec3 {
+        [0.; 3]
+    }
+    fn target_position(&self, _: u32) -> Option<Vec3> {
+        None
+    }
+}
+
+const BODY: crate::env::MapBody = crate::env::MapBody {
+    radius: 150.,
+    height: 150.,
+    offset: 170.,
+    mode: 0,
+    class: 1,
+};
+
+#[test]
+fn a_body_leaves_and_lands_by_the_solver_not_the_room_floor() {
+    // Standing where the solver finds no floor: it leaves the ground.
+    let mut s = Sysobj::bare();
+    s.map_body = Some(BODY);
+    s.position = [150., 0., 0.];
+    s.end_tick(&BodyFloor);
+    assert!(s.no_floor && s.is_jump(), "no floor under the body: a fall");
+    // Over the solver's floor it comes down and lands, though the room's
+    // floor test answers nothing there.
+    let mut s = Sysobj::bare();
+    s.map_body = Some(BODY);
+    s.position = [50., 120., 0.];
+    s.end_tick(&BodyFloor);
+    assert!(s.is_jump());
+    for _ in 0..200 {
+        s.end_tick(&BodyFloor);
+    }
+    assert!(!s.is_jump() && close(s.position[1], 0.) && !s.no_floor);
+    // A gravity range keeps it from landing (FUN_1403ba1e0).
+    let mut s = Sysobj::bare();
+    s.map_body = Some(BODY);
+    s.position = [50., 0., 0.];
+    s.no_floor = false;
+    s.start_fall(0.);
+    s.motion.flags.word |= motion::flag::GRAVITY_FROZEN;
+    s.end_tick(&BodyFloor);
+    assert!(s.is_jump(), "range 3 holds the landing");
+}
+
 fn close(a: f32, b: f32) -> bool {
     (a - b).abs() < 1.0e-3
 }

@@ -5,9 +5,10 @@
 //! centre, shrinking the ring by 100 after each lap, until one passes.
 //!
 //! The functions work in the engine's +Y-up frame: where the executable
-//! (+Y down) raises a point by subtracting from y, these add. [U] The map
-//! check's collision mask is not used; the host's
-//! [`Env::line_hit`](crate::env::Env::line_hit) answers for all of them.
+//! (+Y down) raises a point by subtracting from y, these add. Every map test
+//! is FUN_14040c2b0 with the trap's mask as the collision class (1 from
+//! FUN_14042ead0, 2 from FUN_14042eb90), through
+//! [`Env::line_hit_class`](crate::env::Env::line_hit_class).
 
 use super::math::{native, read_native, wrap_angle};
 use crate::env::Env;
@@ -30,6 +31,9 @@ const LAP_SHRINK: f32 = 100.0;
 /// The fallback ray: straight down from just above the centre.
 const FALLBACK_UP: f32 = 200.0;
 const FALLBACK_DOWN: f32 = 1200.0;
+/// The masks the two traps pass (FUN_14042ead0, FUN_14042eb90).
+const GROUND_CLASS: u32 = 1;
+const AIR_CLASS: u32 = 2;
 
 pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
     Some(match (table, index) {
@@ -98,7 +102,8 @@ impl Ring {
     }
 }
 
-/// FUN_1403f3fa0: a point on the ground around `center`.
+/// FUN_1403f3fa0: a point on the ground around `center`, against the
+/// polygons of collision `class`.
 pub fn ground_point(
     env: &dyn Env,
     rng: &mut Lcg,
@@ -106,6 +111,7 @@ pub fn ground_point(
     center: Vec4,
     near: f32,
     far: f32,
+    class: u32,
 ) -> Vec4 {
     let mut ring = Ring::new(rng, counter, center, near, far);
     if ring.near <= ring.radius {
@@ -114,12 +120,12 @@ pub fn ground_point(
             let at = ring.point(heading, ring.radius);
             let top = [at[0], at[1] + RAY_UP, at[2]];
             let bottom = [at[0], at[1] - RAY_DOWN, at[2]];
-            if let Some(p) = env.line_hit(top, bottom) {
+            if let Some(p) = env.line_hit_class(top, bottom, class) {
                 let found = [p[0], p[1], p[2], 1.0];
                 // A clear line from the centre to just past the point.
                 let past = ring.point(heading, ring.radius + REACH);
                 let end = [past[0], found[1] + LOS_LIFT, past[2]];
-                if env.line_hit(ring.center3(), end).is_none() {
+                if env.line_hit_class(ring.center3(), end, class).is_none() {
                     return found;
                 }
             }
@@ -132,7 +138,7 @@ pub fn ground_point(
     let c = ring.center;
     let top = [c[0], c[1] + FALLBACK_UP, c[2]];
     let bottom = [c[0], c[1] - FALLBACK_DOWN, c[2]];
-    match env.line_hit(top, bottom) {
+    match env.line_hit_class(top, bottom, class) {
         Some(p) => [p[0], p[1], p[2], 1.0],
         None => c,
     }
@@ -150,6 +156,7 @@ pub fn air_point(
     far: f32,
     low: f32,
     high: f32,
+    class: u32,
 ) -> Vec4 {
     let mut ring = Ring::new(rng, counter, center, near, far);
     if ring.near <= ring.radius {
@@ -160,7 +167,7 @@ pub fn air_point(
             at[1] += draw as f32 * UNIT * (high - low) + low;
             let past = ring.point(heading, ring.radius + REACH);
             let end = [past[0], at[1] + LOS_LIFT, past[2]];
-            if env.line_hit(ring.center3(), end).is_none() {
+            if env.line_hit_class(ring.center3(), end, class).is_none() {
                 return at;
             }
             if !ring.lap() {
@@ -193,6 +200,7 @@ fn bg_random_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resu
         center,
         near,
         far,
+        GROUND_CLASS,
     );
     finish(ctx, m, args, v)
 }
@@ -212,6 +220,7 @@ fn bg_random_pos_air(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> 
         far,
         low,
         high,
+        AIR_CLASS,
     );
     finish(ctx, m, args, v)
 }

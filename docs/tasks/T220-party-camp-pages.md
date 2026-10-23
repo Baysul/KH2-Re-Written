@@ -1,4 +1,4 @@
-# T219 — Donald and Goofy in the camp: Customize, Abilities, Status, Items and Equip
+# T220 — Donald and Goofy in the camp: Customize, Abilities, Status, Items and Equip
 
 Owner Claude, 2026-10-23, requested by burba in the project chat ("finish all summons, limits, and
 party stuff until its 1:1"; "keep going"), with the coordinator session's brief: build the camp
@@ -81,5 +81,5 @@ nothing is compared with the original game.
 
 ## Next
 
-T220: the battle styles in the AI (leash scale, the gate and pick tables, Party Attack's follow
+T221: the battle styles in the AI (leash scale, the gate and pick tables, Party Attack's follow
 and formation distances); then the Drive form effects the form-effects research lists.

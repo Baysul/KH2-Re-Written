@@ -853,6 +853,45 @@ impl MapWorld {
         })
     }
 
+    /// FUN_1403b9090's solve for another object's body, in scene
+    /// coordinates; the floor normal stays in the engine's frame and is
+    /// the caller's to keep (obj+0x758). Returns the feet, CB+0x74 bit 0
+    /// and the new normal.
+    pub fn body_move(
+        &self,
+        body: &Body,
+        start: [f32; 3],
+        displacement: [f32; 3],
+        airborne: bool,
+        normal: [f32; 3],
+    ) -> ([f32; 3], bool, [f32; 3]) {
+        let mut d = engine(displacement);
+        if !airborne {
+            d = collision::project_on_floor(d, [-normal[0], -normal[1], -normal[2]]);
+        }
+        let s = collision::solve(
+            &self.world,
+            body,
+            &Query {
+                start: engine(start),
+                displacement: d,
+                airborne,
+                extra_snap: 0.,
+            },
+        );
+        let floor = collision::floor_info(&self.world, &s);
+        (engine(s.position), s.no_floor, floor.normal)
+    }
+
+    /// A script's map-line query (FUN_14040c2b0 -> FUN_140171350) in scene
+    /// coordinates: the first crossing of the segment by a polygon of
+    /// collision `class`.
+    pub fn line(&self, from: [f32; 3], to: [f32; 3], class: u32) -> Option<[f32; 3]> {
+        self.world
+            .segment(engine(from), engine(to), class)
+            .map(|(p, _)| engine(p))
+    }
+
     /// The floor material under Sora as of the last move.
     pub fn floor_ground(&self) -> u8 {
         self.floor_ground.load(std::sync::atomic::Ordering::Relaxed)

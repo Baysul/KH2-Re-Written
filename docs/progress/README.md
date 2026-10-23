@@ -4,7 +4,7 @@ Baseline: Steam app 2552430 build 15194255 candidate - supported profile unquali
 
 | Measure | Accepted / tracked | Percentage |
 |---|---:|---:|
-| Complete functions decompiled and checked | 0 / 221 (inventory incomplete) | Unmeasured |
+| Complete functions decompiled and checked | 0 / 222 (inventory incomplete) | Unmeasured |
 | Required behavior scenarios verified 1:1 | 0 / 9 (inventory incomplete) | Unmeasured |
 | Final roadmap gates accepted | 0 / 32 | 0.00% |
 
@@ -272,6 +272,7 @@ A PASS counts one reviewed unit. All other statuses count zero. Unknown required
 | NATIVE-T214-01 | World map pause menu and journal hosting - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T214-world-map-pause-menu-journal-play-time.md) |
 | NATIVE-T214-02 | World map per-world play time on the info panel - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T214-world-map-pause-menu-journal-play-time.md) |
 | NATIVE-T217-01 | Leave-ground branch of the physics step - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T217-leave-the-ground.md) |
+| NATIVE-T219-01 | Boss map body, its solve, leave and land tests, and the random-position search's collision class - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T219-boss-map-body.md) |
 
 Accepted share of the tracked subset: 0.00%. This is not a whole-game percentage.
 
