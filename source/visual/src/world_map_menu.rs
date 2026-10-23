@@ -56,6 +56,18 @@ const INFO_VALUE: [usize; 3] = [0x41, 0x42, 0x43];
 const DIGIT_VALUE: usize = 0x12;
 const DIGIT_TIME: usize = 0x1c;
 const COLON: usize = 0x26;
+/// The info panels' sprites take X origin 0x55 (FUN_14016a900's last
+/// argument in FUN_140395970 and FUN_140398ef0): outside 4:3 they sit 85
+/// units further right, as the HUD's right-half gauges do.
+const INFO_X: f32 = 85.;
+/// dk::WM_TOTAL_INFO (FUN_14038e080): priority 0x7599, X origin 0xffffffab
+/// (85 units further left outside 4:3), the frame's open, loop and close
+/// groups, the digits from group 0x27 and the colon.
+const PRIO_TOTAL: u32 = 0x7599;
+const TOTAL_X: f32 = -85.;
+const TOTAL_FRAME: [usize; 3] = [0x4b, 0x4c, 0x4d];
+const TOTAL_DIGIT: usize = 0x27;
+const TOTAL_COLON: usize = 0x31;
 
 /// Props the grid cells follow per mode ({open, close, idle} scene of the
 /// mode: 0x1405c0f28 / f30 / f38 / f40, as flat group indices).
@@ -289,6 +301,9 @@ impl Info {
             Some(INFO_VALUE[1]),
             None,
         );
+        for id in [name, time_frame, value_frame] {
+            sprites.get_mut(id).base = [INFO_X, 0.];
+        }
         let row = |sprites: &mut Sprites, parent: Id, groups: &[usize], mut x: f32| {
             for &g in groups {
                 let id = sprites.create(seq, PRIO_INFO, IMAGE, g, None, None);
@@ -377,6 +392,7 @@ impl RouteInfo {
         t.align = 2;
         t.group_position = false;
         let frame = sprites.create(seq, PRIO_INFO, IMAGE, groups[0], Some(groups[1]), Some(t));
+        sprites.get_mut(frame).base = [INFO_X, 0.];
         let star_group = INFO_STAR[usize::from(state != 0)];
         let star = sprites.create(seq, PRIO_INFO + 1, IMAGE, star_group, None, None);
         sprites.attach(star, frame);
@@ -455,6 +471,117 @@ impl RouteInfo {
         ordered(items)
     }
 }
+
+/// dk::WM_TOTAL_INFO: the total play time (hours up to three digits, a
+/// colon, two minute digits) on its frame at the top left, made at the area
+/// start (FUN_14038e880) and closed for good by the first landing or route
+/// menu (FUN_14038e7e0).
+pub struct TotalInfo {
+    sprites: Sprites,
+    frame: Id,
+    hours: [Id; 3],
+    colon: Id,
+    minutes: [Id; 2],
+    closing: bool,
+}
+
+impl TotalInfo {
+    /// FUN_14038e080: the digits start at '0' side by side.
+    pub fn new(seq: &Sequence) -> Self {
+        let mut sprites = Sprites::default();
+        let frame = sprites.create(
+            seq,
+            PRIO_TOTAL,
+            IMAGE,
+            TOTAL_FRAME[0],
+            Some(TOTAL_FRAME[1]),
+            None,
+        );
+        sprites.get_mut(frame).base = [TOTAL_X, 0.];
+        let mut x = 0.;
+        let child = |sprites: &mut Sprites, group: usize, x: &mut f32| {
+            let id = sprites.create(seq, PRIO_TOTAL, IMAGE, group, None, None);
+            sprites.attach(id, frame);
+            sprites.get_mut(id).offset = [*x, 0.];
+            *x += seq.groups[group].text_position_x as f32;
+            id
+        };
+        let hours = [0; 3].map(|_| child(&mut sprites, TOTAL_DIGIT, &mut x));
+        let colon = child(&mut sprites, TOTAL_COLON, &mut x);
+        let minutes = [0; 2].map(|_| child(&mut sprites, TOTAL_DIGIT, &mut x));
+        Self {
+            sprites,
+            frame,
+            hours,
+            colon,
+            minutes,
+            closing: false,
+        }
+    }
+
+    /// FUN_14038e7e0: the frame plays its close group (unless it already
+    /// does) and the panel goes when it ends.
+    pub fn close(&mut self, seq: &Sequence) {
+        if !self.closing {
+            self.closing = true;
+            self.sprites.close(seq, self.frame, TOTAL_FRAME[2]);
+        }
+    }
+
+    /// FUN_14038e8c0 with the play time (FUN_140157390's hours and
+    /// minutes): the hours left-aligned without leading zeros, then the
+    /// colon and the minutes.
+    pub fn update(&mut self, seq: &Sequence, hours: u32, minutes: u32) {
+        if self.sprites.alive(self.frame) {
+            let (h, used) = landing::digits(hours, 3);
+            let width = seq.groups[TOTAL_DIGIT].text_position_x as f32;
+            let mut x = 0.;
+            for (k, (id, &d)) in self.hours.into_iter().zip(&h).enumerate() {
+                self.digit(seq, id, d);
+                let s = self.sprites.get_mut(id);
+                s.offset = [x, 0.];
+                s.hidden = 2 - k >= used;
+                if !s.hidden {
+                    x += width;
+                }
+            }
+            self.sprites.get_mut(self.colon).offset = [x, 0.];
+            x += seq.groups[TOTAL_COLON].text_position_x as f32;
+            let (m, _) = landing::digits(minutes, 2);
+            for (id, &d) in self.minutes.into_iter().zip(&m) {
+                self.digit(seq, id, d);
+                self.sprites.get_mut(id).offset = [x, 0.];
+                x += width;
+            }
+        }
+        self.sprites.update(seq);
+    }
+
+    /// FUN_14016b270: a digit changes its group (an unchanged one keeps
+    /// playing).
+    fn digit(&mut self, seq: &Sequence, id: Id, d: u32) {
+        let group = TOTAL_DIGIT + d as usize;
+        if self.sprites.get(id).player.group != group {
+            self.sprites.set(seq, id, group, None);
+        }
+    }
+
+    pub fn closing(&self) -> bool {
+        self.closing
+    }
+
+    /// Gone once the frame's close group ended.
+    pub fn done(&self) -> bool {
+        self.closing && !self.sprites.alive(self.frame)
+    }
+
+    pub fn draw(&self, seq: &Sequence, font: &Font) -> Vec<(Sheet, Vec<Quad>)> {
+        let mut items = Vec::new();
+        sprite_items(&self.sprites, seq, font, &mut items);
+        ordered(items)
+    }
+}
+
 /// Texts the landing menu shows, already resolved by the caller.
 #[derive(Clone, Debug, Default)]
 pub struct MenuTexts {

@@ -1,11 +1,11 @@
-# T212 — Script vectors in the engine's frame (the mirrored script world)
+# T213 — Script vectors in the engine's frame (the mirrored script world)
 
 Owner Claude, 2026-10-23, requested by burba in the project chat ("keep making this until
 there's nothing left to do"), as the first open item T209 left. Gate: enemy AI, combat and
 scripts (P19/P20 work; nothing here is inferred as a gate pass). Prerequisites: T206/T209
 (Sephiroth), T204/T207 (summons and limits), T125/T133/T190 (object scripts). Build identity:
 branch `feature/script-space-t210` cut from `main` at `9df64ae`; package 0.1.2, Rust 1.99.0
-Windows MSVC (T210 is Limit Form's limits, PR #122; T211 the reaction-command manager, PR #124). Source: the selected Steam build 15194255, validated at every run; the install was
+Windows MSVC (T210 is Limit Form's limits, PR #122; T211 the reaction-command manager, PR #124; T212 the world map, PR #126). Source: the selected Steam build 15194255, validated at every run; the install was
 only read.
 
 Private evidence (never in Git): `%LOCALAPPDATA%/KH2FinalRewrite/research/sephiroth-01/`

@@ -113,6 +113,21 @@ Donald and Goofy follow Sora and fight in the test room (ground attacks, Donald'
 
 The Drive gauge fills, but no form can be entered. Form commands, the Anti/Final form roll, form EXP, and the form models, motions and attack sets are not implemented, and forms also need the party above.
 
+### World map (T171–T179, T212)
+
+Built (`kh2fm wm`, the launcher's World map test):
+- The map, symbols, Gummi routes and their looks from the story state; the cursor's flight,
+  follow camera, landing and route menus, the info panels and the World Menu; the arrival
+  events with their scenes, sounds and effects; the landing jump into the field.
+- From T212: R1 lock-on with the world map's lock camera and reticle, the cursor's deck (Dash,
+  or Warp while locked), the motion blend, the total play time panel, the knock-back off the
+  map's barriers, and the black fades around arriving and landing.
+
+Unfinished:
+- Start's camp menu and the journal from the landing grid; Gummi missions; the per-world play
+  time.
+- No comparison with the installed game: no save on this PC reaches the world map.
+
 ## Open decisions
 
 - Whether `docs/research/movement-feel-1to1-plan.md` stays in the repository: it contains decompiled addresses and constants.

@@ -93,6 +93,11 @@ pub const TRIANGLE_GLYPH: u8 = 0xdf;
 /// header, then the row by selector (0 none, 1..4).
 const LIST_HEADER: usize = 8;
 const LIST_ROW: [usize; 5] = [0, 0xa, 0xc, 0xb, 9];
+/// The world map's deck (kind 10): FUN_14015df90 takes the header group 8
+/// but its rows from the table's first five (0x140718330, the shown deck
+/// not being 0xE).
+pub const WORLD_MAP_DECK: u8 = 10;
+const WORLD_LIST_ROW: [usize; 5] = [0x41, 0x43, 0x45, 0x44, 0x42];
 /// FUN_14015df90's glyph for a list row's selector in deck mode 0xE (0
 /// none): 1 0xdb, 2 and 3 FUN_1402ebe70(0x1000 / 0x8000) = 0xdf / 0xde
 /// (the table at 0x1405ba7e0), 4 0xda.
@@ -317,7 +322,8 @@ pub struct CommandMenu {
     /// face button is pressed.
     pub list: Option<Vec<u8>>,
     /// The list deck's sheet mode (PLAYER_COMMAND +0xab0): 3 for a party
-    /// limit's `comd`, 5 for Chicken Little's.
+    /// limit's `comd`, 5 for Chicken Little's; [`WORLD_MAP_DECK`] for the
+    /// world map cursor's deck.
     pub list_mode: u8,
     /// The world command layout's style ([`layout_style`]); `None` with the
     /// classic menu (save config bit 6).
@@ -978,12 +984,18 @@ impl CommandMenu {
         let mut y = ROW_ANCHOR - PITCH * n as f32;
         for (i, item) in rows.iter().enumerate() {
             let s = sel.get(i).copied().unwrap_or(0) as usize;
-            let group = LIST_ROW.get(s).copied().unwrap_or(0);
+            let rows = if self.list_mode == WORLD_MAP_DECK {
+                &WORLD_LIST_ROW
+            } else {
+                &LIST_ROW
+            };
+            let group = rows.get(s).copied().unwrap_or(0);
             let colour = LIST_TEXT[item.colour.min(8)];
             let label = match LIST_GLYPH.get(s).copied().flatten() {
-                // Chicken Little's deck (kind 5) takes FUN_14015aab0's
-                // world pen, a limit's `comd` (kind 0xE) FUN_14015aba0's.
-                Some(g) if self.list_mode == 5 => {
+                // Chicken Little's deck (kind 5) and the world map's (kind
+                // 10) take FUN_14015aab0's world pen, a limit's `comd`
+                // (kind 0xE) FUN_14015aba0's.
+                Some(g) if self.list_mode == 5 || self.list_mode == WORLD_MAP_DECK => {
                     glyph_label(world_pen(self.layout_style), g, &item.label)
                 }
                 Some(g) => glyph_label(list_pen(self.list_mode), g, &item.label),

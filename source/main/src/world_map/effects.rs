@@ -232,6 +232,14 @@ impl Effects {
         self.running.retain(|r| r.handle != handle);
     }
 
+    /// FUN_1402be8f0 / FUN_1402c2830: the element is released (+0x91 = 1)
+    /// and ends as its program does.
+    pub fn release(&mut self, handle: u64) {
+        for r in self.running.iter_mut().filter(|r| r.handle == handle) {
+            r.instance.release();
+        }
+    }
+
     /// FUN_1402c65a0: the group's map elements leave, their sounds stop.
     pub fn stop_group(&mut self, group: u8, out: &mut Step) {
         for r in self.running.iter().filter(|r| r.group == Some(group)) {

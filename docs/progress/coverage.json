@@ -1669,11 +1669,11 @@
           ]
         },
         {
-          "id": "NATIVE-T212-01",
+          "id": "NATIVE-T213-01",
           "label": "Script vectors, offsets and headings in the engine frame - translation, equivalence unproved",
           "status": "PARTIAL",
           "evidence": [
-            "docs/tasks/T212-script-frame.md"
+            "docs/tasks/T213-script-frame.md"
           ]
         },
         {
@@ -1722,6 +1722,46 @@
           "status": "PARTIAL",
           "evidence": [
             "docs/tasks/T211-reaction-command-manager.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T213-01",
+          "label": "World map cursor actions, the ship blend, dash and warp path - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T212-world-map-cursor-lock-and-fades.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T212-02",
+          "label": "World map manual lock, lock-on camera and target switch - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T212-world-map-cursor-lock-and-fades.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T212-03",
+          "label": "World map cursor deck (kind 10) and its commands - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T212-world-map-cursor-lock-and-fades.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T212-04",
+          "label": "World map total play time panel and info panel anchoring - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T212-world-map-cursor-lock-and-fades.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T212-05",
+          "label": "World map jump fades (mode 1) and wall knock-back - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T212-world-map-cursor-lock-and-fades.md"
           ]
         }
       ]
