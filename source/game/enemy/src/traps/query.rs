@@ -217,13 +217,13 @@ fn get_move_to_space_pos(
     Ok(())
 }
 
-/// 1:347 FUN_14042c330 -> FUN_1403f3c20: nothing in the map blocks the line
-/// between the two objects.
+/// 1:347 FUN_14042c330 -> FUN_1403f3c20(.., 4): nothing in the map of
+/// collision class 4 blocks the line between the two objects.
 fn can_see(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let from = ctx.sys_of_ai(m, args[0].value)?;
     let to = ctx.sys_of_ai(m, args[1].value)?;
     let (a, b) = (ctx.object(from)?.sys.position, ctx.object(to)?.sys.position);
-    let clear = !ctx.env.line_blocked(a, b);
+    let clear = ctx.env.line_hit_class(a, b, 4).is_none();
     flag(args, clear);
     Ok(())
 }

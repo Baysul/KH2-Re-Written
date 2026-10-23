@@ -1099,7 +1099,8 @@ fn bg_ground_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resu
     let from = [p[0], p[1], p[2]];
     // The probe runs along the script's +Y, which is down for the engine.
     let to = [p[0], p[1] - reach, p[2]];
-    let hit = ctx.env.line_hit(from, to);
+    // FUN_1403f3dd0(.., 4): collision class 4.
+    let hit = ctx.env.line_hit_class(from, to, 4);
     let at = hit.unwrap_or(from);
     for (k, lane) in native([at[0], at[1], at[2], 1.0]).iter().enumerate() {
         ctx.write_f32(m, out + 4 * k as u32, *lane);

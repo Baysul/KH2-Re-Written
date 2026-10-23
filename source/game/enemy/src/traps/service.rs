@@ -549,14 +549,18 @@ fn enemy_each(ctx: &mut Ctx<'_>, _: &mut Memory<'_>, args: &mut Args) -> Result<
     Ok(())
 }
 
-/// 1:135 FUN_14042e6b0 -> FUN_1403f3c60: does the map cross the segment
-/// from `a` to `b`; the first crossing goes into the vector `out` when it
-/// does.
+/// 1:135 FUN_14042e6b0 -> FUN_1403f3c60: does the map (of the collision
+/// class the script passes) cross the segment from `a` to `b`; the first
+/// crossing goes into the vector `out` when it does.
 fn bg_cross_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let a = read_native(ctx, m, args[0].value)?;
     let b = read_native(ctx, m, args[1].value)?;
     let out = args[2].value;
-    let hit = ctx.env.line_hit([a[0], a[1], a[2]], [b[0], b[1], b[2]]);
+    // The fourth argument is FUN_14040c2b0's mask.
+    let class = args[3].value;
+    let hit = ctx
+        .env
+        .line_hit_class([a[0], a[1], a[2]], [b[0], b[1], b[2]], class);
     ctx.world.last_line_cross = hit;
     if let Some(at) = hit {
         for (k, lane) in native([at[0], at[1], at[2], 1.0])[..3].iter().enumerate() {

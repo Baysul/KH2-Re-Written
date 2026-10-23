@@ -213,6 +213,34 @@ impl Env for BrainEnv<'_> {
     fn floor(&self, x: f32, z: f32, top: f32) -> Option<f32> {
         self.room?.floor(x, z, top)
     }
+    /// A game map's COCT through the translated solver; the generated
+    /// arena has none.
+    fn collide(
+        &self,
+        body: &enemy::env::MapBody,
+        from: Vec3,
+        displacement: Vec3,
+        airborne: bool,
+        normal: Vec3,
+    ) -> Option<enemy::env::MapMove> {
+        let super::RoomWorld::Map(map) = self.room? else {
+            return None;
+        };
+        let body = ::collision::Body {
+            radius: body.radius,
+            height: body.height,
+            offset: body.offset,
+            mode: body.mode,
+            class: body.class,
+        };
+        let (position, no_floor, normal) =
+            map.body_move(&body, from, displacement, airborne, normal);
+        Some(enemy::env::MapMove {
+            position,
+            no_floor,
+            normal,
+        })
+    }
     // Objects the script made (`sysobj_appear`) carry their entry as the
     // model and have no motions of their own here.
     fn clips(&self, model: u32) -> &dyn EnemyClips {
@@ -232,6 +260,18 @@ impl Env for BrainEnv<'_> {
         let top = from[1].max(to[1]);
         let floor = self.room?.floor(from[0], from[2], top)?;
         (from[1].min(to[1]) <= floor && floor <= top).then_some([from[0], floor, from[2]])
+    }
+    /// A game map answers any segment for the given class; the generated
+    /// arena keeps the vertical floor test.
+    fn line_hit_class(&self, from: Vec3, to: Vec3, class: u32) -> Option<Vec3> {
+        match self.room? {
+            // FUN_14040c2b0: mask bit 16 takes the attack ray (FUN_140171090).
+            super::RoomWorld::Map(map) if class >> 16 & 1 != 0 => {
+                map.attack_hit(from, to).map(|h| h.point)
+            }
+            super::RoomWorld::Map(map) => map.line(from, to, class),
+            super::RoomWorld::Triangles(_) => self.line_hit(from, to),
+        }
     }
     fn target_position(&self, _id: u32) -> Option<Vec3> {
         None
@@ -755,14 +795,20 @@ impl ScriptBrain {
         }
     }
 
+    /// The object's map collision body, from its model (the solver then
+    /// keeps it out of the walls).
+    pub fn set_map_body(&mut self, body: Option<enemy::env::MapBody>) {
+        self.object.sys.map_body = body;
+    }
+
     /// The object's body against the map after its move: its OBJ circle is
-    /// pushed out of the room's walls over its body's height. [I] The exe's
-    /// own background test of an object's move (FUN_1403b89a0) is not
-    /// translated; without this a blow or a warp could carry the object off
-    /// the map, where no floor catches it. Objects it made keep their own
-    /// moves.
+    /// pushed out of the room's walls over its body's height. [I] For an
+    /// object without a map body only: one with a body goes through the
+    /// exe's solver (FUN_1403b9090). Without this a blow or a warp could
+    /// carry a bodiless object off the map, where no floor catches it.
+    /// Objects it made keep their own moves.
     fn keep_out_of_walls(object: &mut Object, r: f32, room: &RoomWorld) {
-        if r <= 0. || object.sys.gone {
+        if r <= 0. || object.sys.gone || object.sys.map_body.is_some() {
             return;
         }
         let [x, y, z] = object.sys.position;
@@ -1267,6 +1313,8 @@ impl ScriptBrain {
             "airborne":s.airborne,"air_blocked":s.air_blocked(),"jumping":s.is_jump(),
             "motion_flags":format!("{:#x}", s.motion.flags.word),"flags":format!("{:#x}", s.flags),
             "y":s.position[1],"wall_radius":self.wall_radius,
+            "map_body":s.map_body.map(|b| [b.radius, b.height, b.offset, b.mode as f32, b.class as f32]),
+            "no_floor":s.no_floor,
             "made":self.world.objects.iter().flatten().filter(|o| !o.sys.gone)
                 .map(|o| (o.id, o.sys.model, o.sys.hit_shapes.len())).collect::<Vec<_>>()})
     }

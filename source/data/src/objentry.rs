@@ -16,6 +16,9 @@ pub struct ObjectEntry {
     pub model_name: Vec<u8>,
     pub animation_name: Vec<u8>,
     pub neo_moveset: u16,
+    /// +0x48: the flag word (bit 3 makes FUN_140411700 give the body
+    /// collision class 2 instead of 1).
+    pub flags: u16,
     /// +0x4c: character id (FUN_1403b5b20; 1 Sora, 2 Donald, 3 Goofy).
     pub character: u16,
     /// +0x57: Drive form index (FUN_1403e0cc0's form record for weapon
@@ -65,6 +68,7 @@ pub fn read(bytes: &[u8]) -> io::Result<Vec<ObjectEntry>> {
             model_name: name(&e[8..40]),
             animation_name: name(&e[40..72]),
             neo_moveset: u16::from_le_bytes(e[78..80].try_into().unwrap()),
+            flags: u16::from_le_bytes(e[0x48..0x4a].try_into().unwrap()),
             character: u16::from_le_bytes(e[76..78].try_into().unwrap()),
             form: e[0x57],
             weight_bits: u32::from_le_bytes(e[0x50..0x54].try_into().unwrap()),
