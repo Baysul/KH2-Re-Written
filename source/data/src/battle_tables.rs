@@ -456,6 +456,36 @@ pub fn form_starting_abilities(plrp: &[u8], key: u16) -> io::Result<Vec<(u8, Vec
     Ok(out)
 }
 
+/// The new-game row of a character: the plrp row of key 0 that
+/// FUN_1403e4530(0) applies (key 1 rows are applied by no code): its
+/// item-slot count (+0xb) and the 32 ids at +0xc (bit 15 = equipped).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewGameRow {
+    pub item_slots: u8,
+    pub ids: Vec<u16>,
+}
+
+pub fn new_game_row(plrp: &[u8], character: u8) -> io::Result<Option<NewGameRow>> {
+    let count = u32_at(plrp, 4)? as usize;
+    if count > 0x400 {
+        return Err(invalid("PLRP count implausible"));
+    }
+    for k in 0..count {
+        let rec = plrp
+            .get(8 + k * 0x80..8 + (k + 1) * 0x80)
+            .ok_or_else(|| invalid("PLRP truncated"))?;
+        if u16_at(rec, 0)? == 0 && rec[2] == character {
+            return Ok(Some(NewGameRow {
+                item_slots: rec[0xb],
+                ids: (0..32)
+                    .map(|i| u16_at(rec, 0xc + i * 2))
+                    .collect::<io::Result<_>>()?,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 /// Raw ability slots from every PLRP template for a member character.
 /// Includes ordinary, developer and difficulty templates; callers choose policy.
 pub fn member_ability_lists(plrp: &[u8], character: u8) -> io::Result<Vec<Vec<u16>>> {
@@ -482,6 +512,22 @@ pub fn member_ability_lists(plrp: &[u8], character: u8) -> io::Result<Vec<Vec<u1
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_new_game_row_is_the_key_0_one() {
+        let mut bytes = vec![0u8; 8 + 2 * 0x80];
+        bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
+        for (k, key) in [1u16, 0].into_iter().enumerate() {
+            let at = 8 + k * 0x80;
+            bytes[at..at + 2].copy_from_slice(&key.to_le_bytes());
+            bytes[at + 2] = 2;
+            bytes[at + 0xb] = 2 + k as u8;
+            bytes[at + 0xc..at + 0xe].copy_from_slice(&(0x8000 | (7 + k as u16)).to_le_bytes());
+        }
+        let row = new_game_row(&bytes, 2).unwrap().unwrap();
+        assert_eq!((row.item_slots, row.ids[0], row.ids.len()), (3, 0x8008, 32));
+        assert_eq!(new_game_row(&bytes, 3).unwrap(), None);
+    }
 
     #[test]
     fn member_templates_preserve_slots_and_exclude_other_characters_and_forms() {

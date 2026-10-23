@@ -182,4 +182,5 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T212](T212-world-map-cursor-lock-and-fades.md) | World map: lock-on, dash and warp, the cursor's deck, play time and fades | PROGRESS. Translated and run against the install; nothing is compared with the original game. |
 | [T213](T213-script-frame.md) | Script vectors in the engine's frame (the mirrored script world) | PARTIAL. Constants, turns, offsets and headings cross in the engine's frame; nothing compared with the original game. |
 | [T214](T214-world-map-pause-menu-journal-play-time.md) | World map: the pause menu, the journal, per-world play time and the Gummi hand-off | PROGRESS. Run against the install; nothing is compared with the original game. |
+| [T215](T215-party-ability-gating-and-items.md) | Party ability gating, own item slots and Sora's party items | PARTIAL. Gating and items run from the new-game record; the camp cannot edit it yet. |
 | [T141](T141-ik-and-animation-parity.md) | IK aim chains, pole vectors and joint-space motion blends | PROGRESS. Master Form matches the PS2 routine; 87% of installed motions within 0.1. |
