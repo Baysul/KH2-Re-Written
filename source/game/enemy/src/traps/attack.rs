@@ -79,15 +79,7 @@ fn attack_new(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<
     );
     ctx.world.attack_serial += 1;
     a.serial = ctx.world.attack_serial;
-    let slot = ctx.world.attacks.iter().position(Option::is_none);
-    let i = match slot {
-        Some(i) => i,
-        None => {
-            ctx.world.attacks.push(None);
-            ctx.world.attacks.len() - 1
-        }
-    };
-    ctx.world.attacks[i] = Some(a);
+    let i = ctx.world.add_attack(a);
     args[0] = Slot::address(ATTACK_HANDLES + 0x100 * i as u32);
     Ok(())
 }

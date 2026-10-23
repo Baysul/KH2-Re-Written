@@ -13,6 +13,7 @@ pub mod friend;
 pub mod limit_scene;
 pub mod motion;
 pub mod object;
+pub mod reaction;
 pub mod route;
 pub mod rtn;
 pub mod script;

@@ -117,8 +117,12 @@ pub enum Effect {
     SetParameter { value: u16 },
     /// Range event 0x24 / 0x25: bit `n` of the pattern words (+0xd14 / +0xd18).
     PatternBit { word: u8, bit: u8 },
-    /// Frame event 0x1c: start the `revenge` act when the HP condition holds.
+    /// Frame event 0x1c: start the `revenge` act when the revenge gauge has
+    /// reached its limit.
     Revenge,
+    /// Range events 4..7: the reaction-command enables of the object's
+    /// collision groups (see [`crate::reaction::Groups::range_event`]).
+    ReactionGroup { kind: u8, p0: u16, p1: u16 },
     /// An event whose engine routine belongs to another subsystem (sound,
     /// effects, camera, physics modes): reported to the host unchanged.
     Other {
@@ -205,7 +209,12 @@ impl Flags {
             8 | 0x2b | 0x30 => {}
             // The remaining kinds reach other subsystems (damage-timers at
             // +0x4e0/+0x5a0, voices, the player's lock-on, hit marks).
-            4..=7 | 0xa | 0x14 | 0x16 | 0x17 | 0x1c | 0x21 | 0x33 => out.push(Effect::Other {
+            4..=7 => out.push(Effect::ReactionGroup {
+                kind: e.kind,
+                p0: p(0),
+                p1: p(1),
+            }),
+            0xa | 0x14 | 0x16 | 0x17 | 0x1c | 0x21 | 0x33 => out.push(Effect::Other {
                 range: true,
                 kind: e.kind,
                 params: e.params.clone(),

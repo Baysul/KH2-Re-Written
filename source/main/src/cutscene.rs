@@ -5,7 +5,7 @@
 pub(crate) mod blur;
 mod fx;
 mod load;
-mod screen;
+pub(crate) mod screen;
 mod texa;
 
 use crate::test_room::{BgChunk, TexaWorkers, UvScroll, spawn_room, texa_advance, uv_scroll_apply};

@@ -79,12 +79,48 @@ impl Brain {
         p: &combat::AttackParams,
         s: &combat::AttackerStats,
         difficulty: combat::Difficulty,
+        record: HitRecordInfo,
     ) -> Option<i32> {
         match self {
-            Self::Script(a) => a.hit(d, high, p, s, difficulty),
+            Self::Script(a) => a.hit(d, high, p, s, difficulty, record),
             Self::Shadow(a) => a.hit(d, high, p, s, difficulty),
             Self::Dusk(a) => a.hit(d, high, p, s, difficulty),
             Self::Soldier(a) => a.hit(d, high, p, s, difficulty),
+        }
+    }
+    /// FUN_1403ba4c0's "active" test for the reaction search: alive and
+    /// not dead-marked. The hand ports offer nothing.
+    pub fn reaction_active(&self) -> bool {
+        match self {
+            Self::Script(a) => a.targetable(),
+            _ => false,
+        }
+    }
+    /// FUN_1403ba600: whether a REACTION shape of `group` offers `command`.
+    pub fn reaction_offered(&self, command: i32, group: i32, default_groups: u32) -> bool {
+        match self {
+            Self::Script(a) => a.reaction_offered(command, group, default_groups),
+            _ => false,
+        }
+    }
+    /// FUN_1403b5fa0: Sora executed reaction command `command` on this
+    /// actor (its script's trigger 11).
+    pub fn command(&mut self, command: u16) {
+        if let Self::Script(a) = self {
+            a.command(command);
+        }
+    }
+    /// Development aid: set a script actor's HP.
+    pub fn set_hp(&mut self, hp: i32) {
+        if let Self::Script(a) = self {
+            a.set_hp(hp);
+        }
+    }
+    /// The script engine's boss state for logs (null for the hand ports).
+    pub fn boss_state(&self) -> serde_json::Value {
+        match self {
+            Self::Script(a) => a.boss_state(),
+            _ => serde_json::Value::Null,
         }
     }
     pub fn reflect(&mut self, motion: usize, back: f32) -> bool {
@@ -205,6 +241,14 @@ impl Brain {
         }
     }
     /// A script attack struck Sora.
+    /// FUN_1403d1730's owner call (vt+0xe0) for a hit on Sora: the
+    /// script's OBJ_ATTACK with the attack object (`slot`) or the motion
+    /// window's attack `atkp`.
+    pub fn attack_reached_player(&mut self, slot: Option<usize>, atkp: u16) {
+        if let Self::Script(a) = self {
+            a.attack_reached_player(slot, i32::from(atkp));
+        }
+    }
     pub fn mark_script_attack(&mut self, slot: usize) {
         if let Self::Script(a) = self {
             a.mark_attack_hit(slot);
@@ -472,6 +516,18 @@ impl dusk::Env for Arena<'_> {
     }
 }
 
+/// The parts of a hit's damage record the script-driven enemies read
+/// (FUN_1403d23c0): the ATKP id and its RevengeDamage, the HP pool of the
+/// struck shape, and who attacked.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HitRecordInfo {
+    pub param_id: u16,
+    pub revenge: u8,
+    pub pool: u8,
+    pub by_leader: bool,
+    pub by_party: bool,
+}
+
 pub struct BattleActor {
     pub brain: Brain,
     pub assets: EnemyCombat,
@@ -498,6 +554,8 @@ pub const SUPPORTED: [(u32, &str); 4] = [
 /// Sephiroth's objentry id (model N_HB630): the one boss run by the
 /// object script alone.
 pub const SEPHIROTH: u32 = 2230;
+/// The ENMP row Sephiroth's script binds.
+pub const SEPHIROTH_SHEET: u16 = 140;
 pub fn supported(e: &Entry) -> bool {
     matches!(
         (e.object_id, e.model_name.as_str(), e.character),
@@ -693,13 +751,11 @@ impl BattleActor {
             return Err("contextual motion variants are not qualified for battle".into());
         }
         let binding = if entry.object_id == SEPHIROTH {
-            // [U] Provisional: the exe's object-to-ENMP lookup is not traced yet
-            // (T200). KH2RW_SEPH_ENMP picks another row for development runs.
+            // His OBJ_INIT binds ENMP row 140 (`btlobj_set_sheet(self, 140,
+            // 0)`, FUN_140411350); the host builds the same sheet up front so
+            // his attacks on Sora use its strength.
             EnemyBinding {
-                enmp_id: std::env::var("KH2RW_SEPH_ENMP")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(34),
+                enmp_id: SEPHIROTH_SHEET,
                 prize_id: None,
             }
         } else if entry.character == 3000 {
@@ -731,6 +787,12 @@ impl BattleActor {
                 assets.stats,
                 assets.sstm,
                 clips.clone(),
+                super::enemy_script::ScriptSetup {
+                    object_type: assets.object_type,
+                    entry_id: entry.object_id,
+                    sheets: Some(assets.sheets.clone()),
+                    patn: assets.patn.clone(),
+                },
             )?))
         } else if entry.character == 1000 {
             Brain::Soldier(Box::new(soldier::Soldier::new(
@@ -851,6 +913,9 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
     // Scripts consume one shared stream. Summoning a new actor must not
     // restart that stream or give every actor an identical private seed.
     let mut rng = std::mem::take(&mut rt.rng);
+    // The command manager's tick (FUN_1403b2340) runs before the objects:
+    // the reaction search over last tick's poses, then Triangle.
+    super::reaction_command::tick(&mut game, &mut gallery.actors, tick);
     for actor in &mut gallery.actors {
         let Some(battle) = actor.battle.as_mut() else {
             continue;
@@ -864,6 +929,21 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
             .follow_capture(game.magic.as_ref().map_or(&[], |m| m.volumes.as_slice()));
         if let Brain::Script(a) = &mut battle.brain {
             a.player_yaw = game.player.yaw;
+            // A battle actor fights: the battle flag (DAT_142a11404), and
+            // whether Sora cannot be damaged (`obj_is_star`).
+            a.facts.battle = true;
+            a.facts.player_centre = super::SORA_OBJ[2];
+            a.facts.player_hp = game
+                .enemy
+                .as_ref()
+                .map(|e| (e.sora_hp, e.sora_target.max_hp));
+            a.facts.player_mp = Some((game.player.mp.cur, game.player.mp.max));
+            a.facts.player_star = game.cheats.invincible
+                || game.player.range_invulnerable(&game.clips)
+                || game
+                    .enemy
+                    .as_ref()
+                    .is_some_and(|e| e.sora_invulnerable > 0.);
         }
         let prior = (battle.brain.motion(), battle.brain.serial());
         match battle.tick(&game.world, game.player.position, &actor.kind, &mut rng) {
@@ -881,8 +961,21 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
                             game.sound_queue.push((id, "enemy_script_se"));
                         }
                     }
+                    // `obj_voice` (FUN_1403dad90 -> FUN_1403ce580): line `id`
+                    // of the object's voice bank, played by its YS::VOICE_EE
+                    // on its next update (FUN_1403ce260 -> FUN_1401de230).
+                    // [I] The request's priority test (+0x10) and the level
+                    // 0x1800 are not applied; the room plays every line.
+                    let bank = game
+                        .enemy_voice_banks
+                        .get(&battle.assets.object_id)
+                        .copied();
                     for (id, arg) in reports.voices {
-                        game.event(serde_json::json!({"event":"enemy_script_voice","tick":tick,"actor":actor.id,"id":id,"arg":arg}));
+                        if let (Some(bank), Ok(line)) = (bank, u32::try_from(id)) {
+                            game.sound_queue
+                                .push((u32::from(bank) * 1000 + line, "enemy_voice"));
+                        }
+                        game.event(serde_json::json!({"event":"enemy_script_voice","tick":tick,"actor":actor.id,"id":id,"arg":arg,"bank":bank}));
                     }
                     for name in reports.services {
                         game.event(serde_json::json!({"event":"enemy_script_service","tick":tick,"actor":actor.id,"service":name}));
@@ -922,6 +1015,7 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
     game.enemy.as_mut().expect("combat session retained").rng = rng;
     super::enemy_battle_hits::tick(&mut game, &mut gallery.actors, tick);
     super::enemy_battle_hits::retire(&mut game, &mut gallery.actors, tick);
+    super::boss::requests(&mut game, &mut gallery.actors);
 }
 
 #[cfg(test)]

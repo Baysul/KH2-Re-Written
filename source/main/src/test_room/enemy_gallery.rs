@@ -498,7 +498,7 @@ pub fn service(
                     .iter()
                     .find(|a| a.id == id)
                     .ok_or("actor absent")?;
-                let battle = super::enemy_battle::BattleActor::load(
+                let mut battle = super::enemy_battle::BattleActor::load(
                     &gallery.source,
                     &gallery.catalog.entries[actor.entry],
                     &actor.kind,
@@ -507,6 +507,14 @@ pub fn service(
                     rt.battle_level,
                     rt.difficulty,
                 )?;
+                // A boss's captures of Sora last as long as his kit's clips.
+                if let super::enemy_battle::Brain::Script(a) = &mut battle.brain {
+                    let object = gallery.catalog.entries[actor.entry].object_id;
+                    a.set_captured(super::boss::capture_lengths(&game.clips, object));
+                    if let Some(s) = super::boss::spawner(&gallery.source) {
+                        a.set_spawner(Box::new(s));
+                    }
+                }
                 let params = super::enemy_battle::target_params(&gallery.source)?;
                 gallery.target_params = Some(params);
                 game.event(serde_json::json!({"event":"enemy_battle_enabled","tick":game.tick,"actor":id,"source":battle.assets.summary(),"host":"generated flat arena; ordinary encounter context"}));

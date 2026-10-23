@@ -540,12 +540,14 @@ pub fn field_room_config(
     )
 }
 
-/// Where the Sephiroth fight starts: Hollow Bastion area 1 under the map
-/// program the meeting event jumps to (262), battle program 75 (spawn set
-/// `b_60`), at the set's player placement facing the boss. Scene coordinates
-/// (x, probe height, -z of the engine placement) and scene yaw (pi - engine
-/// yaw 0).
-const SEPHIROTH_PROGRAMS: [i16; 3] = [262, 75, 262];
+/// Where the Sephiroth fight starts: the meeting's jump (kind 2, place 75 of
+/// world 4) resolves through 07localset to Hollow Bastion area 1 with all
+/// three programs 75 (FUN_14039fbc0): map masks, battle program 75 (mission
+/// HB01_MS601, battle level 80, spawn set `b_60`) and event program 75 (BGM
+/// 188 and the signal-0x10 entry for event 602). Sora starts at the set's
+/// player placement facing the boss. Scene coordinates (x, probe height, -z
+/// of the engine placement) and scene yaw (pi - engine yaw 0).
+const SEPHIROTH_PROGRAMS: [i16; 3] = [75, 75, 75];
 const SEPHIROTH_SPAWN: [f32; 3] = [-324.849, 300., -783.13];
 
 /// The Sephiroth room config: the arena config's actor, HUD, menu, sound and

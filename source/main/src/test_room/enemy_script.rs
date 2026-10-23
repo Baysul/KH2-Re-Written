@@ -102,6 +102,11 @@ pub struct HostFacts {
     pub flight_spec: Option<player::actor_physics::ObjParams>,
     /// The TARGET radius of the room's enemy (its stand-in, [`ENEMY`]).
     pub enemy_radius: f32,
+    /// Sora cannot be damaged now (`obj_is_star`).
+    pub player_star: bool,
+    /// How far above his feet the centre of Sora's OBJ shape is (his
+    /// bone 0x4001).
+    pub player_centre: f32,
 }
 
 /// The id of the room's enemy as a stand-in in a script's world.
@@ -190,6 +195,24 @@ impl Env for BrainEnv<'_> {
     fn no_leave(&self) -> bool {
         true
     }
+    fn player_invulnerable(&self) -> bool {
+        self.facts.player_star
+    }
+    /// FUN_1403b50f0 for Sora: 0x4000 his origin, 0x4001 the centre of his
+    /// first enabled OBJ shape, both with his rotation, in the script's
+    /// +Y-down frame. [U] His skeleton's own bones are not handed over.
+    fn bone_matrix(&self, object: u32, bone: u32) -> Option<[f32; 16]> {
+        let lift = match (object, bone) {
+            (PLAYER_OBJECT, 0x4000) => 0.,
+            (PLAYER_OBJECT, 0x4001) => self.facts.player_centre,
+            _ => return None,
+        };
+        let (s, c) = self.player_yaw.sin_cos();
+        let p = self.player;
+        Some([
+            c, 0., -s, 0., 0., 1., 0., 0., s, 0., c, 0., p[0], -(p[1] + lift), p[2], 1.,
+        ])
+    }
     fn area_world(&self) -> i32 {
         2
     }
@@ -253,7 +276,19 @@ pub fn script_attacks(world: &EnemyWorld) -> Vec<ScriptAttack> {
         .collect()
 }
 
+/// How the engine builds the object around its script (FUN_1403df930):
+/// the class from the objentry type, the entry id, and the tables its traps
+/// read.
+#[derive(Clone, Debug, Default)]
+pub struct ScriptSetup {
+    pub object_type: u8,
+    pub entry_id: u32,
+    pub sheets: Option<super::enemy_combat::EnmpSheets>,
+    pub patn: Vec<[u8; 32]>,
+}
+
 pub struct ScriptBrain {
+    setup: ScriptSetup,
     world: EnemyWorld,
     object: Object,
     clips: Arc<Clips>,
@@ -300,6 +335,20 @@ pub struct ScriptBrain {
     /// record's target.
     pub offers: [Option<u16>; 8],
     pub offer_targets: [Option<u32>; 8],
+    /// Event signals the script's objects posted (FUN_1403aabe0: code and
+    /// argument), for the host's mission and area scripts.
+    pub signals: Vec<(i32, i32)>,
+    /// What the script did to Sora: the motions of its set it captured him
+    /// into (slot, blend), and the motions it queued behind them.
+    pub sora_captures: Vec<(i32, f32)>,
+    pub sora_pushed: Vec<(usize, f32)>,
+    /// HP changes (`obj_add_hp`: delta) and MP charges
+    /// (`obj_start_mpdrive`: the factor) the script made on Sora.
+    pub sora_hp: Vec<i32>,
+    pub sora_mpdrive: Vec<f32>,
+    /// Presentation requests for the host: the trap's name, the object it
+    /// names and its argument words.
+    pub presentations: Vec<(&'static str, Option<u32>, [u32; 8])>,
 }
 
 pub(super) fn script_payload(source: &ProbeSource, model: &str) -> Result<Vec<u8>, String> {
@@ -321,6 +370,7 @@ pub(super) fn script_payload(source: &ProbeSource, model: &str) -> Result<Vec<u8
 }
 
 impl ScriptBrain {
+    #[allow(clippy::too_many_arguments)]
     pub fn load(
         source: &ProbeSource,
         model: &str,
@@ -329,9 +379,11 @@ impl ScriptBrain {
         stats: combat::TargetStats,
         sstm: actor_physics::Sstm,
         clips: Arc<Clips>,
+        setup: ScriptSetup,
     ) -> Result<Self, String> {
         let payload = script_payload(source, model)?;
         let mut brain = Self {
+            setup,
             world: EnemyWorld::default(),
             object: Object::bare(0),
             clips,
@@ -356,6 +408,12 @@ impl ScriptBrain {
             commands: CommandWindows::new(),
             offers: [None; 8],
             offer_targets: [None; 8],
+            signals: Vec::new(),
+            sora_captures: Vec::new(),
+            sora_pushed: Vec::new(),
+            sora_hp: Vec::new(),
+            sora_mpdrive: Vec::new(),
+            presentations: Vec::new(),
         };
         brain.build(position, yaw, stats, sstm, &mut ScriptRandom::default())?;
         Ok(brain)
@@ -372,8 +430,16 @@ impl ScriptBrain {
         let mut sys = Sysobj::new(0, position, yaw, stats, sstm);
         sys.turn_rate = actor_physics::ObjParams::defaults(sstm.fall_max).turn;
         sys.appear_way = 2;
+        sys.set_class(self.setup.object_type);
+        sys.entry_id = self.setup.entry_id;
         self.world = EnemyWorld::default();
         self.world.tolerate_missing = true;
+        self.world.patn = self.setup.patn.clone();
+        self.world.sheets = self
+            .setup
+            .sheets
+            .clone()
+            .map(|s| Box::new(s) as Box<dyn enemy::world::SheetSource>);
         self.world.rng.0 = rng.0;
         let env = BrainEnv {
             room: None,
@@ -438,6 +504,7 @@ impl ScriptBrain {
         self.world.tick_attacks(&env);
         self.hit_the_map(room);
         self.drain_events();
+        self.take_player_queue();
         if self.object.sys.gone {
             self.world.attacks.clear();
         }
@@ -688,6 +755,24 @@ impl ScriptBrain {
                         self.offer_targets[r] = other;
                     }
                 }
+                Event::Service {
+                    name: "obj_add_hp",
+                    object: Some(PLAYER_OBJECT),
+                    words,
+                    ..
+                } => self.sora_hp.push(words[0] as i32),
+                Event::Service {
+                    name: "obj_start_mpdrive",
+                    object: Some(PLAYER_OBJECT),
+                    words,
+                    ..
+                } => self.sora_mpdrive.push(f32::from_bits(words[0])),
+                Event::Service {
+                    name: name @ ("camera_watch" | "func_screen_whiteout" | "func_screen_whitein"),
+                    object,
+                    words,
+                    ..
+                } => self.presentations.push((name, object, words)),
                 Event::Service { name, .. } => {
                     self.services.insert(name);
                 }
@@ -697,6 +782,13 @@ impl ScriptBrain {
                 // victim's is not drawn.
                 Event::MotionCapture { victim, .. }
                     if victim == PLAYER_OBJECT && self.limit.is_some() => {}
+                // A boss captures Sora into a motion of its own set.
+                Event::MotionCapture {
+                    victim,
+                    motion,
+                    blend,
+                    ..
+                } if victim == PLAYER_OBJECT => self.sora_captures.push((motion, blend)),
                 Event::MotionCapture { .. } => {
                     self.unsupported.insert("obj_motion_capture");
                 }
@@ -715,6 +807,7 @@ impl ScriptBrain {
                 Event::MagicStart { .. } => {
                     self.unsupported.insert("magic_start_thread");
                 }
+                Event::Signal { code, argument } => self.signals.push((code, argument)),
                 _ => {}
             }
         }
@@ -836,6 +929,66 @@ impl ScriptBrain {
     pub fn yaw(&self) -> f32 {
         self.object.sys.yaw
     }
+    /// FUN_1403d1730's last step for a hit on Sora: the attack's owner's
+    /// OBJ_ATTACK (FUN_140410ce0) with Sora and the attack: a script attack
+    /// object (`slot`) or a motion window's attack `param_id`.
+    pub fn attack_reached_player(&mut self, slot: Option<usize>, param_id: i32) {
+        let env = BrainEnv {
+            room: None,
+            clips: ClipView {
+                base: &self.clips,
+                captured: &self.captured,
+            },
+            player: self.player,
+            player_yaw: self.player_yaw,
+            facts: self.facts,
+            commands: &self.commands,
+        };
+        self.object
+            .attack_reached(&mut self.world, &env, PLAYER_OBJECT, slot, param_id);
+        self.drain_events();
+        self.take_player_queue();
+        self.record_faults();
+    }
+
+    /// The motions the script queued behind Sora's (his stand-in's queue);
+    /// a running limit keeps its own.
+    fn take_player_queue(&mut self) {
+        if self.limit.is_some() || self.world.limit.is_some() {
+            return;
+        }
+        if let Some(p) = self.world.player_proxy.as_mut() {
+            self.sora_pushed.append(&mut p.sys.motion_queue);
+        }
+    }
+
+    /// The lights the script made (FUN_1403f6f80's pool).
+    pub fn lights(&self) -> &[Option<enemy::world::Light>] {
+        &self.world.lights
+    }
+
+    /// The vacuums the script made (FUN_1403f8f20's list).
+    pub fn vacuums(&self) -> &[Option<enemy::world::Vacuum>] {
+        &self.world.vacuums
+    }
+
+    /// FUN_1403ba600 for the object's REACTION shape of `group`.
+    pub fn reaction_offered(&self, command: i32, group: i32, default_groups: u32) -> bool {
+        let s = &self.object.sys;
+        s.reaction_groups
+            .offered(s.script_group_bits(), default_groups, command, group)
+    }
+    /// The engine state a boss run logs: the revenge gauge and its limit,
+    /// the active state pattern, the bound sheet and the class bits.
+    pub fn boss_state(&self) -> serde_json::Value {
+        let s = &self.object.sys;
+        serde_json::json!({"yaw":s.yaw,"move":[s.move_direction[0], s.move_direction[2], s.move_speed],
+            "velocity":s.velocity,"target":s.target.id,"mode":format!("{:#x}", s.mode_flags()),
+            "revenge":s.revenge,"karma_limit":s.karma_limit,
+            "patterns":format!("{:#x}", s.active_patterns()),"sheet":s.sheet,
+            "max_hp":s.stats.max_hp,"class":format!("{:#x}", s.class_flags),
+            "dead":s.state_flags & enemy::sysobj::state_flag::DEAD_MARKED != 0})
+    }
     pub fn hp(&self) -> i32 {
         self.object.sys.hp
     }
@@ -889,6 +1042,7 @@ impl ScriptBrain {
         attack: &combat::AttackParams,
         attacker: &combat::AttackerStats,
         difficulty: combat::Difficulty,
+        record: super::enemy_battle::HitRecordInfo,
     ) -> Option<i32> {
         let env = BrainEnv {
             room: None,
@@ -904,12 +1058,21 @@ impl ScriptBrain {
         let damage = self.object.take_hit(
             &mut self.world,
             &env,
-            direction,
-            high,
-            attack,
-            attacker,
-            difficulty,
+            &enemy::damage::Hit {
+                direction,
+                high,
+                attack,
+                attacker,
+                difficulty,
+                param_id: u32::from(record.param_id),
+                revenge: record.revenge,
+                pool: record.pool,
+                by_leader: record.by_leader,
+                by_party: record.by_party,
+            },
         );
+        self.drain_events();
+        self.take_player_queue();
         self.record_faults();
         damage
     }
@@ -1021,6 +1184,7 @@ impl ScriptBrain {
             ],
         );
         self.drain_events();
+        self.take_player_queue();
         self.record_faults();
     }
 
@@ -1077,6 +1241,12 @@ impl ScriptBrain {
         self.object
             .apply_actions(Some((&mut self.world, &env)), actions);
         self.record_faults();
+    }
+
+    /// Development aid: set pool 0's HP (the tours use it to reach the end
+    /// of a long fight).
+    pub fn set_hp(&mut self, hp: i32) {
+        self.object.sys.set_pool_hp(0, hp);
     }
 
     /// Development command: force the death path.
