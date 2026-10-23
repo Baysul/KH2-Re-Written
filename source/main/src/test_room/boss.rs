@@ -210,7 +210,7 @@ pub fn requests(game: &mut Game, actors: &mut [enemy_gallery::GalleryActor]) {
         if let Some(enemy_battle::Brain::Script(a)) = actor.battle.as_ref().map(|b| &b.brain) {
             let t = enemy::world::scene_tint(a.lights());
             for k in 0..3 {
-                tint[k] = tint[k] * u32::from(t[k]) >> 7;
+                tint[k] = (tint[k] * u32::from(t[k])) >> 7;
             }
         }
     }

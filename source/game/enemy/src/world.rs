@@ -293,9 +293,9 @@ pub fn scene_tint(lights: &[Option<Light>]) -> [u8; 3] {
         if l.kind != 0 || !on || l.fade.value == 0. {
             continue;
         }
-        for k in 0..3 {
-            let own = ((f32::from(l.color[k]) - 128.) * l.fade.value) as i32 as u8;
-            c[k] = (c[k] & 0xff) * u32::from(own.wrapping_add(0x80)) >> 7;
+        for (ch, &own) in c.iter_mut().zip(&l.color) {
+            let own = ((f32::from(own) - 128.) * l.fade.value) as i32 as u8;
+            *ch = ((*ch & 0xff) * u32::from(own.wrapping_add(0x80))) >> 7;
         }
     }
     c.map(|v| (v & 0xff) as u8)

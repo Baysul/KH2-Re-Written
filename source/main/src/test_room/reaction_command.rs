@@ -154,6 +154,9 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
         locked,
     );
     if offer.map(|o| o.command) != game.enemy_reaction.map(|c| c.offer.command) {
+        if offer.is_some() {
+            game.offers_seen += 1;
+        }
         game.event(serde_json::json!({"event":"reaction_offer","tick":tick,
             "command":offer.map(|o| o.command),"owner":offer.map(|o| o.owner),
             "dimmed":offer.map(|o| o.dimmed())}));
@@ -164,7 +167,11 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
     };
     let pressed = std::mem::take(&mut game.rc_queued)
         || game.sephiroth_tour
-            && super::sephiroth::tour_reaction(tick, game.player.action.airborne());
+            && super::sephiroth::tour_reaction(
+                tick,
+                game.player.action.airborne(),
+                game.offers_seen,
+            );
     if !pressed {
         return;
     }

@@ -1177,7 +1177,11 @@ pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
             _ => {}
         }
     }
-    if game.autoplay.is_some() && game.ability_tour.is_none() && !game.magic_tour {
+    if game.autoplay.is_some()
+        && game.ability_tour.is_none()
+        && !game.magic_tour
+        && !game.sephiroth_tour
+    {
         use player::limit_form::{INFINITY, STRIKE_RAID};
         match game.tick {
             7480 => game.player.drive.refill(),

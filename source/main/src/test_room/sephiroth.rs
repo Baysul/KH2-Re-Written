@@ -42,11 +42,12 @@ pub fn tour_captures() -> Vec<u64> {
 /// The tour's pad: walk at the boss (the camera looks his way once Sora
 /// locks on), then a combo press every 10 ticks within reach. [Tour
 /// setup, not a game rule.]
-/// The tour presses Triangle whenever a command is offered and Sora stands
-/// on the ground (a landing cuts a captured motion short, as the land
-/// motion replaces it). [Tour setup.]
-pub fn tour_reaction(tick: u64, airborne: bool) -> bool {
-    tick >= 240 && !airborne
+/// The tour presses Triangle on every other command offered (the rest
+/// show what happens without it), when Sora stands on the ground (a
+/// landing cuts a captured motion short, as the land motion replaces it).
+/// [Tour setup.]
+pub fn tour_reaction(tick: u64, airborne: bool, offers: u32) -> bool {
+    tick >= 240 && !airborne && offers % 2 == 1
 }
 
 pub fn tour_input(game: &Game, tick: u64) -> (Vec2, bool, bool) {

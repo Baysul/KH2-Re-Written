@@ -210,7 +210,22 @@ impl Env for BrainEnv<'_> {
         let (s, c) = self.player_yaw.sin_cos();
         let p = self.player;
         Some([
-            c, 0., -s, 0., 0., 1., 0., 0., s, 0., c, 0., p[0], -(p[1] + lift), p[2], 1.,
+            c,
+            0.,
+            -s,
+            0.,
+            0.,
+            1.,
+            0.,
+            0.,
+            s,
+            0.,
+            c,
+            0.,
+            p[0],
+            -(p[1] + lift),
+            p[2],
+            1.,
         ])
     }
     fn area_world(&self) -> i32 {

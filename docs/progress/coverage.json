@@ -1499,6 +1499,102 @@
           "evidence": [
             "docs/tasks/T125-enemy-ai-and-combat.md"
           ]
+        },
+        {
+          "id": "NATIVE-T206-01",
+          "label": "Boss class, revenge gauge and enemy hit order - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T206-02",
+          "label": "Enemy kill veto and one-damage rule - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T206-03",
+          "label": "Reaction override table by state pattern - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T206-04",
+          "label": "Battle sheet binding from an ENMP row - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T206-05",
+          "label": "Reaction-command enable test of an object's collision groups - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T206-06",
+          "label": "Reaction-command search and press for the leader - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T206-07",
+          "label": "Script side threads and hooks - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T206-08",
+          "label": "Attack-reached callback to the owner's script - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T206-09",
+          "label": "Vacuum pull on an object - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T206-10",
+          "label": "Script lights as the scene tint - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T206-11",
+          "label": "Mission boss-clear sequence and its overlays - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T206-12",
+          "label": "Per-tick movement request reset - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
         }
       ]
     },
@@ -1564,6 +1660,14 @@
           "status": "NOT RUN",
           "evidence": [
             "docs/tasks/T125-enemy-ai-and-combat.md"
+          ]
+        },
+        {
+          "id": "OBS-T206-01",
+          "label": "Sephiroth boss fight - attacks, Block, grab, damage and defeat - reference comparison required",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/tasks/T206-boss-framework-sephiroth.md"
           ]
         }
       ]

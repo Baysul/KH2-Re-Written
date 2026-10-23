@@ -1185,6 +1185,8 @@ struct Game {
     /// tick's offer by a battle actor.
     reaction_commands: Option<reaction_command::Commands>,
     enemy_reaction: Option<reaction_command::Current>,
+    /// Offers a battle actor made so far (the tours alternate on it).
+    offers_seen: u32,
     /// DAT_142a11400 bit 1: a mission's boss was beaten (commands locked,
     /// Sora cannot be hurt).
     battle_won: bool,
@@ -6931,7 +6933,7 @@ fn simulate(
     // Guard (Square): F or the pad's west button; unattended runs guard
     // just before two of the Shadow's claws.
     let guard = if game.autoplay.is_some() {
-        !game.magic_tour && AUTOPLAY_GUARDS.contains(&tick)
+        !game.magic_tour && !game.sephiroth_tour && AUTOPLAY_GUARDS.contains(&tick)
     } else {
         std::mem::take(&mut game.guard_queued)
     } && !talking;
@@ -7061,6 +7063,7 @@ fn simulate(
     }
     if game.autoplay.is_some()
         && !game.enemy_battle_tour
+        && !game.sephiroth_tour
         && !game.magic_tour
         && game.ability_tour.is_none()
         && game.autoplay_end != AUTOPLAY_TALK_END
@@ -7077,6 +7080,7 @@ fn simulate(
     }
     if game.autoplay.is_some()
         && !game.enemy_battle_tour
+        && !game.sephiroth_tour
         && !game.magic_tour
         && game.ability_tour.is_none()
         && game.autoplay_end != AUTOPLAY_TALK_END
@@ -7318,7 +7322,7 @@ fn simulate(
     let mut right_stick = 0f32;
     if game.autoplay.is_some() {
         // Unattended runs orbit 180 degrees to check Sora from the front.
-        if (660..720).contains(&tick) {
+        if (660..720).contains(&tick) && !game.sephiroth_tour {
             turn = 1.;
         }
     } else {
@@ -9034,6 +9038,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
         sora_attack,
         hero_hit_tick,
         enemy_battle_tour,
+        sephiroth_tour,
         magic_tour,
         magic_shift,
         wall,
@@ -9044,6 +9049,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
     let debug_blow = std::mem::take(debug_blow)
         || (autoplay.is_some()
             && !*enemy_battle_tour
+            && !*sephiroth_tour
             && !*magic_tour
             && AUTOPLAY_BLOWS.contains(&tick));
     let act_at_start = rt.enemy.current_act();
@@ -11020,8 +11026,8 @@ fn camp_tick(
     if game.autoplay.is_some() {
         let logical = if let Some(tour) = &game.ability_tour {
             tour.logical(game.tick)
-        } else if game.magic_tour {
-            // The magic tour never opens the camp.
+        } else if game.magic_tour || game.sephiroth_tour {
+            // The magic and Sephiroth tours never open the camp.
             0
         } else {
             AUTOPLAY_CAMP
@@ -12596,6 +12602,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         rc_queued: false,
         reaction_commands: None,
         enemy_reaction: None,
+        offers_seen: 0,
         battle_won: false,
         camera_watch: None,
         screen_fade: Fade::default(),
