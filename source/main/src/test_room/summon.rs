@@ -1216,10 +1216,16 @@ fn land_attacks(game: &mut Game, a: &mut Actor, tick: u64) {
     let Some(enemy_at) = super::party_limit::room_enemy(game) else {
         return;
     };
-    // A direct strike (`attack_strike`, 2:17) lands where the enemy stands.
-    let struck =
-        strikes.into_iter().map(
-            |(slot, [id, extra], serial)| super::enemy_script::ScriptAttack {
+    // A direct strike (`attack_strike`, 2:17) lands where the enemy stands,
+    // pushing it away from where the strike came from when that is named.
+    let mut origins = std::collections::HashMap::new();
+    let struck: Vec<_> = strikes
+        .into_iter()
+        .map(|(slot, [id, extra], serial, from)| {
+            if let Some(f) = from {
+                origins.insert(serial, f);
+            }
+            super::enemy_script::ScriptAttack {
                 slot,
                 id,
                 extra,
@@ -1229,8 +1235,9 @@ fn land_attacks(game: &mut Game, a: &mut Actor, tick: u64) {
                 radius: 1.,
                 hits_sora: false,
                 rc: None,
-            },
-        );
+            }
+        })
+        .collect();
     let volumes: Vec<_> = a
         .brain
         .attacks()
@@ -1251,7 +1258,9 @@ fn land_attacks(game: &mut Game, a: &mut Actor, tick: u64) {
             radius: at.radius,
             height: at.radius,
             previous: at.previous,
-            moving: None,
+            moving: origins
+                .get(&at.serial)
+                .map(|f| [0, 1, 2].map(|k| enemy_at[k] - f[k])),
             role: player::magic::Role::Damage,
         };
         let yaw = a.brain.yaw();

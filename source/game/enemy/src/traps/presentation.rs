@@ -9,7 +9,7 @@
 //! vector (w = 1), the identity matrix or 0, which is what the executable
 //! returns when the subsystem has nothing.
 
-use super::math::{read_native, read_sanitized, rotate_y};
+use super::math::{native, native_yaw, read_native, read_sanitized, rotate_y};
 use crate::route::{add, normalize, scale, sub};
 use crate::script::{Fault, Memory, Slot};
 use crate::world::{Ctx, TrapFn};
@@ -34,7 +34,7 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
 /// The buffer the position-returning traps share (DAT_140756b48).
 fn return_shared(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args, v: V4) {
     let cell = ctx.world.static_cell(1, 247, 0);
-    for (k, lane) in [v[0], -v[1], v[2], v[3]].iter().enumerate() {
+    for (k, lane) in native(v).iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);
@@ -194,9 +194,10 @@ fn lightcycle_movement(
         let sys = &ctx.object(id)?.sys;
         let f = sys.forward();
         let p = sys.position;
+        let facing = native([f[0], 0.0, f[2], 0.0]);
         Ok(Cycle {
-            position: [p[0], -p[1], p[2], 1.0],
-            facing: [f[0], 0.0, f[2], sys.yaw],
+            position: native([p[0], p[1], p[2], 1.0]),
+            facing: [facing[0], 0.0, facing[2], native_yaw(sys.yaw)],
         })
     };
     let (a, b) = (cycle(ctx, own)?, cycle(ctx, other)?);

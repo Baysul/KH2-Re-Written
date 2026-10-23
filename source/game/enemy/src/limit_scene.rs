@@ -224,7 +224,8 @@ impl Scene {
             .into_iter()
             .map(|mut s| {
                 let c = s.center;
-                s.center = [p[0] + c[0], -p[1] + c[1], p[2] + c[2], 1.];
+                // Sora's scene position in the script's (engine) frame.
+                s.center = [p[0] + c[0], -p[1] + c[1], -p[2] + c[2], 1.];
                 s
             })
             .collect();

@@ -6,6 +6,7 @@
 //! down), so a position taken from an object is flipped on the way in and
 //! results are handed back as they are.
 
+use super::math::{native, native_yaw};
 use crate::route::{self, Build, PathKey, V4};
 use crate::script::{Fault, Memory, Slot};
 use crate::sysobj::class_flag;
@@ -56,14 +57,14 @@ pub fn lookup(table: u16, index: u16) -> Option<TrapFn> {
 /// FUN_1403b5b40: the object's position as the executable holds it.
 fn position(ctx: &mut Ctx<'_>, id: ObjId) -> Result<V4, Fault> {
     let p = ctx.object(id)?.sys.position;
-    Ok([p[0], -p[1], p[2], 1.0])
+    Ok(native([p[0], p[1], p[2], 1.0]))
 }
 
 /// FUN_1403b56e0: the facing vector, w the heading.
 fn facing(ctx: &mut Ctx<'_>, id: ObjId) -> Result<V4, Fault> {
     let sys = &ctx.object(id)?.sys;
-    let f = sys.forward();
-    Ok([f[0], 0.0, f[2], sys.yaw])
+    let f = native([sys.forward()[0], 0.0, sys.forward()[2], 0.0]);
+    Ok([f[0], 0.0, f[2], native_yaw(sys.yaw)])
 }
 
 /// The shared result vector of the route traps (DAT_140789ee8), handed to the
@@ -119,7 +120,8 @@ fn install_route(
     let (route, place) = route::Route::from_path(&path, build, &at, &mut || world.crt_rand());
     let sys = &mut ctx.object(id)?.sys;
     if let Some(p) = place {
-        sys.position = [p[0], -p[1], p[2]];
+        let p = native([p[0], p[1], p[2], 1.0]);
+        sys.position = [p[0], p[1], p[2]];
     }
     sys.route = Some(Box::new(route));
     Ok(true)
@@ -531,7 +533,7 @@ fn get_obj_head_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> R
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let own = position(ctx, id)?;
     let v = match ctx.env.head_position(id) {
-        Some(p) => [p[0], -p[1], p[2], 1.0],
+        Some(p) => native([p[0], p[1], p[2], 1.0]),
         None => own,
     };
     return_vector(ctx, m, args, v);
@@ -544,11 +546,11 @@ fn can_look(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<()
     let id = ctx.sys_of_ai(m, args[0].value)?;
     let other = ctx.sys_of_ai(m, args[1].value)?;
     let head = match ctx.env.head_position(other) {
-        Some(p) => [p[0], -p[1], p[2], 1.0],
+        Some(p) => native([p[0], p[1], p[2], 1.0]),
         None => position(ctx, other)?,
     };
     let (origin, limit, inclusive) = match ctx.env.look_cone(id) {
-        Some((centre, limit)) => ([centre[0], -centre[1], centre[2], 1.0], limit, true),
+        Some((centre, limit)) => (native([centre[0], centre[1], centre[2], 1.0]), limit, true),
         None => (position(ctx, id)?, 0.261_799_4, false),
     };
     let mut ahead = route::sub(&head, &origin);

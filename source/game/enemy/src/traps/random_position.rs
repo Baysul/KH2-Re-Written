@@ -9,7 +9,7 @@
 //! check's collision mask is not used; the host's
 //! [`Env::line_hit`](crate::env::Env::line_hit) answers for all of them.
 
-use super::math::{read_native, wrap_angle};
+use super::math::{native, read_native, wrap_angle};
 use crate::env::Env;
 use crate::script::{Fault, Memory, Slot};
 use crate::world::{Ctx, Lcg, TrapFn};
@@ -174,7 +174,7 @@ pub fn air_point(
 /// Both traps hand back the same buffer (DAT_140756b48).
 fn finish(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args, v: Vec4) -> Result<(), Fault> {
     let cell = ctx.world.static_cell(1, 247, 0);
-    for (k, lane) in [v[0], -v[1], v[2], v[3]].iter().enumerate() {
+    for (k, lane) in native(v).iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);

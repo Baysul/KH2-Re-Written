@@ -180,6 +180,7 @@ fn strike(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), 
         param,
         serial,
         owner,
+        from: None,
     });
     Ok(())
 }
@@ -362,7 +363,7 @@ fn reflect_vector(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Res
         out = unit([out[0] + toward[0], out[1] + toward[1], out[2] + toward[2]]);
     }
     let cell = ctx.world.static_cell(2, 43, 0);
-    for (k, lane) in [out[0], -out[1], out[2], 1.0].iter().enumerate() {
+    for (k, lane) in native([out[0], out[1], out[2], 1.0]).iter().enumerate() {
         ctx.write_f32(m, cell + 4 * k as u32, *lane);
     }
     args[0] = Slot::address(cell);
