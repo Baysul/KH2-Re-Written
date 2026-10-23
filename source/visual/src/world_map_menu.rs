@@ -863,6 +863,7 @@ impl Menu {
                     }
                 }
                 Change::EpisodeTop(_) => self.show_episodes(seq, state),
+                Change::Journal => {}
                 Change::Close => {
                     // FUN_140392430: the close scene; rows play their close
                     // group (FUN_1402f7db0); the marks and the cursor go.

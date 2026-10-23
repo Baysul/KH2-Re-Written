@@ -109,6 +109,7 @@ mod summon_tour;
 mod victim_hit;
 mod wall_hit;
 mod weapon_trail;
+pub(crate) mod world_map_camp;
 
 fn player_object_default() -> String {
     "P_EX100".into()
@@ -11239,133 +11240,15 @@ fn camp_tick(
                 .unwrap_or(0)
         })
         .collect();
-    let camp_data = |c: &CampRes,
-                     panels: pause_menu::Panels,
-                     battle_items: Option<&item_room::ItemRt>,
-                     settings: &settings_room::SettingsRes|
-     -> pause_menu::Data {
-        // The battle's item slots and stock are the live ones.
-        let mut equipment = c.equipment.clone();
-        equipment.form_ids = form_slots.iter().map(|s| s.0).collect();
-        equipment.forms = form_slots.iter().map(|s| s.1).collect();
-        let mut counts = c.stock.clone();
-        if let Some(it) = battle_items {
-            equipment.items = it.slots.clone();
-            equipment.originals = it.originals.clone();
-            counts = it.stock.clone();
-        }
-        // The camp's "new" bits (FUN_140369520): what the stock holds now
-        // that the save has not marked seen. The room's starting stock
-        // never shows NEW! [I: the new-game save's seen bits are not
-        // decoded].
-        let new_items = pause_menu::items::new_items(&counts, &c.seen, &c.starting);
-        // Level and record numbers plus what the equipment adds (stats
-        // +0x188..+0x18e, resists +0x1a8..).
-        let mut n = c.source.numbers;
-        n.strength += i32::from(gear.strength);
-        n.magic += i32::from(gear.magic);
-        n.defense += i32::from(gear.defense);
-        n.ap += i32::from(gear.ap);
-        let sora_abilities = pause_menu::abilities::MemberAbilities {
-            slots: c.ability_slots.clone(),
-            ap_max: n.ap,
-            weapon_ability: c.source.weapon_ability,
-            form_weapon_abilities: form_abilities.clone(),
-        };
-        let ap_used = pause_menu::abilities::used(&pause_menu::abilities::entries(
-            &c.source.items.table,
-            &sora_abilities,
-        ));
-        let value = |bit: usize| -> String {
-            match bit {
-                0 => format!("{}", n.level),
-                1 | 7 => "0".into(),
-                2 => format!("{}", n.next_exp),
-                3 => format!("{hp}/{max_hp}"),
-                4 => format!("{mp}/{max_mp}"),
-                5 => format!("{ap_used}/{}", n.ap),
-                10 => format!("{}", n.strength),
-                11 => format!("{}", n.magic),
-                12 => format!("{}", n.defense),
-                13..=16 => format!("{}%", 100 - i32::from(gear.resist[bit - 12])),
-                _ => "0%".into(),
-            }
-        };
-        let mut stats = vec![None; 20];
-        for (bit, label, help, style) in &c.source.stats {
-            stats[*bit] = Some(pause_menu::Stat {
-                label: label.clone(),
-                help: help.clone(),
-                style: *style,
-                value: pause_menu::encode_number(&value(*bit)),
-            });
-        }
-        pause_menu::Data {
-            entries: c.source.entries.clone(),
-            panels,
-            status: vec![pause_menu::StatusEntry {
-                bit: 0,
-                label: c.source.name.clone(),
-                help: c.source.help.clone(),
-                stats,
-            }],
-            banner: c.source.banner.clone(),
-            config: c.source.config.clone(),
-            config_flags: c.config_flags,
-            game_mode: c.game_mode,
-            items: pause_menu::items::ItemsData {
-                counts,
-                equipment: vec![equipment],
-                seen: c.seen.clone(),
-                new_items,
-                ..c.source.items.clone()
-            },
-            abilities: pause_menu::abilities::AbilitiesData {
-                members: vec![sora_abilities.clone()],
-                texts: c.source.abilities.clone(),
-            },
-            party_help: c.source.party_help.clone(),
-            equip: pause_menu::equip::EquipData {
-                stats: c.source.equip_stats.clone(),
-                totals: vec![pause_menu::equip::Totals {
-                    ap: n.ap,
-                    strength: n.strength,
-                    magic: n.magic,
-                    defense: n.defense,
-                    resists: [
-                        gear.resist[1],
-                        gear.resist[2],
-                        gear.resist[3],
-                        gear.resist[4],
-                    ],
-                }],
-                bases: vec![player::equipment_stats::Totals::start(
-                    c.source.numbers.strength as u16,
-                    c.source.numbers.magic as u16,
-                    c.source.numbers.defense as u16,
-                    c.source.numbers.ap as u16,
-                )],
-                form_weapons: vec![form_weapon.unwrap_or(0)],
-                texts: c.source.equip_texts.clone(),
-            },
-            customize: pause_menu::customize::CustomizeData {
-                shortcuts: c.shortcuts,
-                no_charge: c.no_charge,
-                texts: c.source.customize.clone(),
-            },
-            picture_sequence: c.source.picture_sequence.clone(),
-            notice: pause_menu::notice::NoticeData {
-                flags: c
-                    .journal_source
-                    .as_ref()
-                    .map_or_else(Vec::new, |j| j.flags.clone()),
-                headings: c.source.notice_headings.clone(),
-                page: c.source.notice_page.clone(),
-                callouts: c.source.notice_callouts.clone(),
-            },
-            settings: Some(settings.current.clone()),
-            languages: settings.languages.clone(),
-        }
+    let side = CampSide {
+        gear,
+        form_slots,
+        form_abilities,
+        form_weapon,
+        hp,
+        max_hp,
+        mp,
+        max_mp,
     };
     // The menu chain (menu mode 10, FUN_14031aac0): the camp; deciding a
     // journal brings the curtain down over the camp's close; the journal
@@ -11496,77 +11379,7 @@ fn camp_tick(
             c.open = None;
             game.event(serde_json::json!({"event":"camp_close","tick":tick}));
             if let (Some(kind), Some(j)) = (kind, &c.journal_source) {
-                let data = journal::JournalData {
-                    kind,
-                    // The room stands in for Twilight Town (world 2) and a
-                    // save with no story flags [test-room values].
-                    world: 2,
-                    worlds: j.worlds.clone(),
-                    stories: j.stories.clone(),
-                    flags: {
-                        let mut f = j.flags.clone();
-                        // The tour shows everything (story flag 0x4837).
-                        if game.journal_tour {
-                            f.extend(journal_tour::STORY_FLAGS);
-                        }
-                        f
-                    },
-                    // FUN_140339500 counts each `limi` command's limit in
-                    // save+0x3d48 (FUN_1403e7c30 / FUN_1403e8150): none
-                    // in this save; no reports, pieces, missions, minigames
-                    // or synthesis either [test-room values].
-                    unlocks: journal::Unlocks {
-                        limits: game.journal_tour,
-                        ..Default::default()
-                    },
-                    texts: j.texts.clone(),
-                    tops: j.tops.iter().map(|(code, _)| code.clone()).collect(),
-                    world_icons: !j.world_icons.is_empty(),
-                    chars: j.chars.clone(),
-                    diag: j.diag.clone(),
-                    albums: j.albums.clone(),
-                    reports: j.reports.clone(),
-                    treasures: j.treasures.clone(),
-                    item_names: j.item_names.clone(),
-                    opened_bits: j.opened_bits.clone(),
-                    owned_items: j.owned_items.clone(),
-                    seen_chars: c.seen_chars.clone(),
-                    seen_albums: c.seen_albums.clone(),
-                    // No limit has been used in this save [test-room value].
-                    limit_counts: (0..j.limits.len())
-                        .map(|i| {
-                            if game.journal_tour {
-                                journal_tour::LIMIT_COUNTS.get(i).copied().unwrap_or(0)
-                            } else {
-                                0
-                            }
-                        })
-                        .collect(),
-                    limits: j.limits.clone(),
-                    seen_limits: c.seen_limits.clone(),
-                    quests: j.quests.clone(),
-                    minigames: j.minigames.clone(),
-                    // No minigame has been played and no menu flag is set
-                    // in this save [test-room values].
-                    minigame_records: if game.journal_tour {
-                        journal_tour::minigame_records()
-                    } else {
-                        Vec::new()
-                    },
-                    menu_flags: Vec::new(),
-                    seen_quests: c.seen_quests.clone(),
-                    seen_minigames: c.seen_minigames.clone(),
-                    seen_story: c.seen_story.clone(),
-                    // No synthesis yet [test-room value]; the tour gives
-                    // the Moogle and some finds.
-                    synthesis: if game.journal_tour {
-                        journal_tour::SYNTHESIS
-                    } else {
-                        journal::Synthesis::default()
-                    },
-                    moogle_names: j.moogle_names.clone(),
-                    seen_synthesis: c.seen_synthesis.clone(),
-                };
+                let data = journal_data(c, j, kind, 2, game.journal_tour);
                 let (opened, s) = Journal::open(&j.book.layout, data);
                 game.event(serde_json::json!({"event":"journal_open","tick":tick,
                     "kind":kind,"state":opened.state}));
@@ -11602,7 +11415,7 @@ fn camp_tick(
             // curtain lifts (FUN_14031a690).
             let (menu, s) = Camp::open(
                 layout,
-                camp_data(c, panels, game.items.as_ref(), &settings),
+                camp_data(c, panels, game.items.as_ref(), &settings, &side),
                 c.memory,
             );
             c.open = Some(menu);
@@ -11615,7 +11428,7 @@ fn camp_tick(
     } else if c.curtain.is_none() && c.pad.pressed & 0x2 != 0 && !game.talking {
         let (menu, s) = Camp::open(
             layout,
-            camp_data(c, panels, game.items.as_ref(), &settings),
+            camp_data(c, panels, game.items.as_ref(), &settings, &side),
             c.memory,
         );
         c.open = Some(menu);
@@ -11650,7 +11463,7 @@ fn camp_tick(
             Ok(()) => {
                 let mut old = c.open.take().expect("camp open");
                 old.commit_config();
-                let mut data = camp_data(c, panels_again, game.items.as_ref(), &settings);
+                let mut data = camp_data(c, panels_again, game.items.as_ref(), &settings, &side);
                 let o = &old.data;
                 data.config_flags = o.config_flags;
                 data.items.counts.clone_from(&o.items.counts);
@@ -11683,6 +11496,246 @@ fn camp_tick(
                 }
             }
         }
+    }
+}
+
+/// What the field (or the world map) lends the camp: the equipment's
+/// totals, the owned forms with their Keyblades and abilities, the form
+/// weapon and Sora's HP and MP.
+struct CampSide {
+    gear: player::equipment_stats::Totals,
+    form_slots: Vec<(u8, u16)>,
+    form_abilities: Vec<u16>,
+    form_weapon: Option<u16>,
+    hp: i32,
+    max_hp: i32,
+    mp: i32,
+    max_mp: i32,
+}
+
+/// The camp's data when it opens (FUN_140354340 and the pages' sources):
+/// the room's camp state, the panels and what the field (or the world map)
+/// lends it.
+fn camp_data(
+    c: &CampRes,
+    panels: pause_menu::Panels,
+    battle_items: Option<&item_room::ItemRt>,
+    settings: &settings_room::SettingsRes,
+    side: &CampSide,
+) -> pause_menu::Data {
+    let CampSide {
+        gear,
+        form_slots,
+        form_abilities,
+        form_weapon,
+        hp,
+        max_hp,
+        mp,
+        max_mp,
+    } = side;
+    let (gear, hp, max_hp, mp, max_mp) = (*gear, *hp, *max_hp, *mp, *max_mp);
+    // The battle's item slots and stock are the live ones.
+    let mut equipment = c.equipment.clone();
+    equipment.form_ids = form_slots.iter().map(|s| s.0).collect();
+    equipment.forms = form_slots.iter().map(|s| s.1).collect();
+    let mut counts = c.stock.clone();
+    if let Some(it) = battle_items {
+        equipment.items = it.slots.clone();
+        equipment.originals = it.originals.clone();
+        counts = it.stock.clone();
+    }
+    // The camp's "new" bits (FUN_140369520): what the stock holds now
+    // that the save has not marked seen. The room's starting stock
+    // never shows NEW! [I: the new-game save's seen bits are not
+    // decoded].
+    let new_items = pause_menu::items::new_items(&counts, &c.seen, &c.starting);
+    // Level and record numbers plus what the equipment adds (stats
+    // +0x188..+0x18e, resists +0x1a8..).
+    let mut n = c.source.numbers;
+    n.strength += i32::from(gear.strength);
+    n.magic += i32::from(gear.magic);
+    n.defense += i32::from(gear.defense);
+    n.ap += i32::from(gear.ap);
+    let sora_abilities = pause_menu::abilities::MemberAbilities {
+        slots: c.ability_slots.clone(),
+        ap_max: n.ap,
+        weapon_ability: c.source.weapon_ability,
+        form_weapon_abilities: form_abilities.clone(),
+    };
+    let ap_used = pause_menu::abilities::used(&pause_menu::abilities::entries(
+        &c.source.items.table,
+        &sora_abilities,
+    ));
+    let value = |bit: usize| -> String {
+        match bit {
+            0 => format!("{}", n.level),
+            1 | 7 => "0".into(),
+            2 => format!("{}", n.next_exp),
+            3 => format!("{hp}/{max_hp}"),
+            4 => format!("{mp}/{max_mp}"),
+            5 => format!("{ap_used}/{}", n.ap),
+            10 => format!("{}", n.strength),
+            11 => format!("{}", n.magic),
+            12 => format!("{}", n.defense),
+            13..=16 => format!("{}%", 100 - i32::from(gear.resist[bit - 12])),
+            _ => "0%".into(),
+        }
+    };
+    let mut stats = vec![None; 20];
+    for (bit, label, help, style) in &c.source.stats {
+        stats[*bit] = Some(pause_menu::Stat {
+            label: label.clone(),
+            help: help.clone(),
+            style: *style,
+            value: pause_menu::encode_number(&value(*bit)),
+        });
+    }
+    pause_menu::Data {
+        entries: c.source.entries.clone(),
+        panels,
+        status: vec![pause_menu::StatusEntry {
+            bit: 0,
+            label: c.source.name.clone(),
+            help: c.source.help.clone(),
+            stats,
+        }],
+        banner: c.source.banner.clone(),
+        config: c.source.config.clone(),
+        config_flags: c.config_flags,
+        game_mode: c.game_mode,
+        items: pause_menu::items::ItemsData {
+            counts,
+            equipment: vec![equipment],
+            seen: c.seen.clone(),
+            new_items,
+            ..c.source.items.clone()
+        },
+        abilities: pause_menu::abilities::AbilitiesData {
+            members: vec![sora_abilities.clone()],
+            texts: c.source.abilities.clone(),
+        },
+        party_help: c.source.party_help.clone(),
+        equip: pause_menu::equip::EquipData {
+            stats: c.source.equip_stats.clone(),
+            totals: vec![pause_menu::equip::Totals {
+                ap: n.ap,
+                strength: n.strength,
+                magic: n.magic,
+                defense: n.defense,
+                resists: [
+                    gear.resist[1],
+                    gear.resist[2],
+                    gear.resist[3],
+                    gear.resist[4],
+                ],
+            }],
+            bases: vec![player::equipment_stats::Totals::start(
+                c.source.numbers.strength as u16,
+                c.source.numbers.magic as u16,
+                c.source.numbers.defense as u16,
+                c.source.numbers.ap as u16,
+            )],
+            form_weapons: vec![form_weapon.unwrap_or(0)],
+            texts: c.source.equip_texts.clone(),
+        },
+        customize: pause_menu::customize::CustomizeData {
+            shortcuts: c.shortcuts,
+            no_charge: c.no_charge,
+            texts: c.source.customize.clone(),
+        },
+        picture_sequence: c.source.picture_sequence.clone(),
+        notice: pause_menu::notice::NoticeData {
+            flags: c
+                .journal_source
+                .as_ref()
+                .map_or_else(Vec::new, |j| j.flags.clone()),
+            headings: c.source.notice_headings.clone(),
+            page: c.source.notice_page.clone(),
+            callouts: c.source.notice_callouts.clone(),
+        },
+        settings: Some(settings.current.clone()),
+        languages: settings.languages.clone(),
+    }
+}
+
+/// The journal's data when it opens: its tables and the camp's seen marks;
+/// `world` is the game world it opens for (DAT_140717008) and `tour` the
+/// journal tour's extras.
+fn journal_data(
+    c: &CampRes,
+    j: &JournalSource,
+    kind: u8,
+    world: i32,
+    tour: bool,
+) -> journal::JournalData {
+    journal::JournalData {
+        kind,
+        world,
+        worlds: j.worlds.clone(),
+        stories: j.stories.clone(),
+        flags: {
+            let mut f = j.flags.clone();
+            // The tour shows everything (story flag 0x4837).
+            if tour {
+                f.extend(journal_tour::STORY_FLAGS);
+            }
+            f
+        },
+        // FUN_140339500 counts each `limi` command's limit in
+        // save+0x3d48 (FUN_1403e7c30 / FUN_1403e8150): none
+        // in this save; no reports, pieces, missions, minigames
+        // or synthesis either [test-room values].
+        unlocks: journal::Unlocks {
+            limits: tour,
+            ..Default::default()
+        },
+        texts: j.texts.clone(),
+        tops: j.tops.iter().map(|(code, _)| code.clone()).collect(),
+        world_icons: !j.world_icons.is_empty(),
+        chars: j.chars.clone(),
+        diag: j.diag.clone(),
+        albums: j.albums.clone(),
+        reports: j.reports.clone(),
+        treasures: j.treasures.clone(),
+        item_names: j.item_names.clone(),
+        opened_bits: j.opened_bits.clone(),
+        owned_items: j.owned_items.clone(),
+        seen_chars: c.seen_chars.clone(),
+        seen_albums: c.seen_albums.clone(),
+        // No limit has been used in this save [test-room value].
+        limit_counts: (0..j.limits.len())
+            .map(|i| {
+                if tour {
+                    journal_tour::LIMIT_COUNTS.get(i).copied().unwrap_or(0)
+                } else {
+                    0
+                }
+            })
+            .collect(),
+        limits: j.limits.clone(),
+        seen_limits: c.seen_limits.clone(),
+        quests: j.quests.clone(),
+        minigames: j.minigames.clone(),
+        // No minigame has been played and no menu flag is set
+        // in this save [test-room values].
+        minigame_records: if tour {
+            journal_tour::minigame_records()
+        } else {
+            Vec::new()
+        },
+        menu_flags: Vec::new(),
+        seen_quests: c.seen_quests.clone(),
+        seen_minigames: c.seen_minigames.clone(),
+        seen_story: c.seen_story.clone(),
+        // No synthesis yet [test-room value]; the tour gives
+        // the Moogle and some finds.
+        synthesis: if tour {
+            journal_tour::SYNTHESIS
+        } else {
+            journal::Synthesis::default()
+        },
+        moogle_names: j.moogle_names.clone(),
+        seen_synthesis: c.seen_synthesis.clone(),
     }
 }
 

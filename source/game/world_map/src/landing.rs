@@ -95,6 +95,10 @@ pub enum Change {
     /// The episode rows show from this episode on (FUN_1402facd0 and the
     /// row texts of FUN_1403928a0).
     EpisodeTop(usize),
+    /// Triangle on the grid opens the journal's page (FUN_14038e050 with
+    /// the menu's world → FUN_1402e4bc0(0, FUN_1402f23d0(world))); the menu
+    /// stays under it.
+    Journal,
 }
 
 /// FUN_1402f9440's results the menu handles.
@@ -362,9 +366,9 @@ impl Landing {
                 c.push(Change::Scene { scene: 6, next: 8 });
                 return;
             }
-            // Triangle opens the world's journal page (FUN_14038e050 →
-            // FUN_1402e4bc0) [U: not ported].
+            // Triangle opens the journal (FUN_14038e050 → FUN_1402e4bc0).
             if p & pad::TRIANGLE != 0 {
+                c.push(Change::Journal);
                 return;
             }
         }
@@ -542,6 +546,14 @@ mod tests {
         assert_eq!(s, vec![Sound::Decide]);
         assert_eq!(c, vec![Change::Close]);
         assert_eq!(l.outcome, Some(Outcome::Land(Target::at(2, 3, 0x63))));
+    }
+
+    #[test]
+    fn triangle_in_the_grid_asks_for_the_journal() {
+        let mut l = Landing::new(2, grid(vec![cell(1, false)]), Target::NONE, Vec::new());
+        let (s, c) = l.input(pad::TRIANGLE, 0);
+        assert_eq!((s, c), (Vec::new(), vec![Change::Journal]));
+        assert_eq!((l.mode, l.outcome), (POINTS, None));
     }
 
     #[test]
