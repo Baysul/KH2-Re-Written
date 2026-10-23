@@ -84,6 +84,9 @@ pub struct NpcKind {
     pub anims: Anims,
     pub target: Option<TargetShape>,
     pub look: Option<LookShape>,
+    /// The REACTION entry (collision kind 5) the search offers Talk through:
+    /// argument 0x83 takes the spawn record's command (+0x2c).
+    pub reaction: Option<object_collision::Entry>,
     /// The type-0 (map collision) shape the meet test overlaps: centre
     /// height, radius, height (shape 0/3 ellipsoid, npc-01 section 3.5).
     pub body: [f32; 3],
@@ -252,7 +255,12 @@ impl NpcKind {
             .iter()
             .find(|e| e.kind == LOOK_SHAPE)
             .map_or(0.261_799_4, |e| (e.radius as f32).to_radians());
+        let reaction = collision
+            .iter()
+            .find(|e| e.kind == object_collision::REACTION)
+            .copied();
         Ok(Self {
+            reaction,
             name: model_name,
             anims: Anims {
                 idle: build_anim(&model, &idle, bone)?,

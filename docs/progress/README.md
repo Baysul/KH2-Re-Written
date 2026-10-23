@@ -4,7 +4,7 @@ Baseline: Steam app 2552430 build 15194255 candidate - supported profile unquali
 
 | Measure | Accepted / tracked | Percentage |
 |---|---:|---:|
-| Complete functions decompiled and checked | 0 / 207 (inventory incomplete) | Unmeasured |
+| Complete functions decompiled and checked | 0 / 213 (inventory incomplete) | Unmeasured |
 | Required behavior scenarios verified 1:1 | 0 / 9 (inventory incomplete) | Unmeasured |
 | Final roadmap gates accepted | 0 / 32 | 0.00% |
 
@@ -258,6 +258,12 @@ A PASS counts one reviewed unit. All other statuses count zero. Unknown required
 | NATIVE-T209-07 | Hook-thread fall of the leader after a capture - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T209-sephiroth-follow-ups.md) |
 | NATIVE-T209-08 | Landing hand-over to idle and blow landing - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T209-sephiroth-follow-ups.md) |
 | NATIVE-T209-09 | Hits on objects a script made - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T209-sephiroth-follow-ups.md) |
+| NATIVE-T211-01 | Reaction command search over the held command, record 1, partner, shapes, attacks and auto offers - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T211-reaction-command-manager.md) |
+| NATIVE-T211-02 | Reaction slot, target marker and Triangle press - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T211-reaction-command-manager.md) |
+| NATIVE-T211-03 | Reaction slot drawing, prompt and burst on the command menu - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T211-reaction-command-manager.md) |
+| NATIVE-T211-04 | Attack-borne reaction commands - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T211-reaction-command-manager.md) |
+| NATIVE-T211-05 | Save point offer and heal while Save shows - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T211-reaction-command-manager.md) |
+| NATIVE-T211-06 | Partner and spawn reaction command sources - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T211-reaction-command-manager.md) |
 
 Accepted share of the tracked subset: 0.00%. This is not a whole-game percentage.
 
