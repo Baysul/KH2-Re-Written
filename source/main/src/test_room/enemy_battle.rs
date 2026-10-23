@@ -567,6 +567,43 @@ pub const SUPPORTED: [(u32, &str); 4] = [
 /// Sephiroth's objentry id (model N_HB630): the one boss run by the
 /// object script alone.
 pub const SEPHIROTH: u32 = 2230;
+
+/// An object's YS::VOICE_EE: the line it was asked for (+0xc, -1 none), the
+/// priority of the last accepted request (+0x10) and the line playing
+/// (+0x14). [I] The priority's starting value is taken as 0.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VoiceSlot {
+    pending: Option<u32>,
+    priority: i32,
+    playing: Option<u32>,
+}
+
+impl VoiceSlot {
+    /// FUN_1403ce580: a request is taken when nothing waits or plays, or
+    /// when its priority is at least the held one.
+    pub fn request(&mut self, line: u32, priority: i32) -> bool {
+        let taken = (self.pending.is_none() && self.playing.is_none()) || self.priority <= priority;
+        if taken {
+            self.pending = Some(line);
+            self.priority = priority;
+        }
+        taken
+    }
+
+    /// FUN_1403ce260, the object's update: a waiting line stops the one
+    /// playing (FUN_1401de500) and plays (FUN_1403ce560 -> FUN_1401de230);
+    /// otherwise a line that finished is dropped. Returns (stop, play).
+    pub fn update(&mut self, still_playing: impl Fn(u32) -> bool) -> (Option<u32>, Option<u32>) {
+        if let Some(line) = self.pending.take() {
+            let stop = self.playing.replace(line);
+            return (stop, Some(line));
+        }
+        if self.playing.is_some_and(|l| !still_playing(l)) {
+            self.playing = None;
+        }
+        (None, None)
+    }
+}
 /// The ENMP row Sephiroth's script binds.
 pub const SEPHIROTH_SHEET: u16 = 140;
 pub fn supported(e: &Entry) -> bool {
@@ -859,7 +896,10 @@ impl BattleActor {
     ) -> Result<(usize, f32), String> {
         if !self.paused && !self.brain.gone() {
             match &mut self.brain {
-                Brain::Script(a) => a.tick(world, player, rng),
+                Brain::Script(a) => {
+                    a.wall_radius = self.assets.wall_radius;
+                    a.tick(world, player, rng)
+                }
                 Brain::Shadow(a) => a.tick(rng, &*self.clips, &Arena(world), player, player),
                 Brain::Dusk(a) => a.tick(
                     dusk::Input::arena(
@@ -975,20 +1015,23 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
                         }
                     }
                     // `obj_voice` (FUN_1403dad90 -> FUN_1403ce580): line `id`
-                    // of the object's voice bank, played by its YS::VOICE_EE
-                    // on its next update (FUN_1403ce260 -> FUN_1401de230).
-                    // [I] The request's priority test (+0x10) and the level
-                    // 0x1800 are not applied; the room plays every line.
+                    // of the object's voice bank at priority `arg`, played by
+                    // its YS::VOICE_EE on its update (play_sounds). [I] The
+                    // level 0x1800 is not applied.
                     let bank = game
                         .enemy_voice_banks
                         .get(&battle.assets.object_id)
                         .copied();
                     for (id, arg) in reports.voices {
-                        if let (Some(bank), Ok(line)) = (bank, u32::try_from(id)) {
-                            game.sound_queue
-                                .push((u32::from(bank) * 1000 + line, "enemy_voice"));
-                        }
-                        game.event(serde_json::json!({"event":"enemy_script_voice","tick":tick,"actor":actor.id,"id":id,"arg":arg,"bank":bank}));
+                        let taken = match (bank, u32::try_from(id)) {
+                            (Some(bank), Ok(line)) => game
+                                .enemy_voice_slots
+                                .entry(actor.id)
+                                .or_default()
+                                .request(u32::from(bank) * 1000 + line, arg),
+                            _ => false,
+                        };
+                        game.event(serde_json::json!({"event":"enemy_script_voice","tick":tick,"actor":actor.id,"id":id,"arg":arg,"bank":bank,"taken":taken}));
                     }
                     for name in reports.services {
                         game.event(serde_json::json!({"event":"enemy_script_service","tick":tick,"actor":actor.id,"service":name}));
@@ -1054,5 +1097,24 @@ mod tests {
         assert!(!native_frame_event(4, 10, 10, 4));
         assert!(native_frame_event(5, 11, 10, 4));
         assert!(!native_frame_event(10, 11, 10, 4));
+    }
+
+    #[test]
+    fn voice_slot_takes_requests_by_priority_and_replaces_the_line() {
+        let mut v = VoiceSlot::default();
+        // Idle: anything is taken.
+        assert!(v.request(10, 5));
+        // A waiting line of priority 5 refuses a lower one, takes an equal one.
+        assert!(!v.request(11, 4));
+        assert!(v.request(12, 5));
+        assert_eq!(v.update(|_| true), (None, Some(12)));
+        // Playing at 5: a lower request is refused, a higher one replaces
+        // the playing line on the next update.
+        assert!(!v.request(13, 1));
+        assert!(v.request(14, 9));
+        assert_eq!(v.update(|_| true), (Some(12), Some(14)));
+        // Once the line ends the slot is free again, whatever the priority.
+        assert_eq!(v.update(|_| false), (None, None));
+        assert!(v.request(15, 0));
     }
 }

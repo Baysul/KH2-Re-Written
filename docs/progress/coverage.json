@@ -1595,6 +1595,78 @@
           "evidence": [
             "docs/tasks/T206-boss-framework-sephiroth.md"
           ]
+        },
+        {
+          "id": "NATIVE-T209-01",
+          "label": "Event overlay camera on its anchor object - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-02",
+          "label": "Event overlay frame rate and radial blur feedback - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-03",
+          "label": "Object voice slot priority and line replacement - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-04",
+          "label": "Script attack hit identity kept until the attack is freed - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-05",
+          "label": "Scene light tint on the fog colour - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-06",
+          "label": "Vacuum pull on party members - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-07",
+          "label": "Hook-thread fall of the leader after a capture - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-08",
+          "label": "Landing hand-over to idle and blow landing - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T209-09",
+          "label": "Hits on objects a script made - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
+          ]
         }
       ]
     },
@@ -1668,6 +1740,14 @@
           "status": "NOT RUN",
           "evidence": [
             "docs/tasks/T206-boss-framework-sephiroth.md"
+          ]
+        },
+        {
+          "id": "OBS-T209-01",
+          "label": "Sephiroth Heartless Angel, Meteor, grab and clear overlays - reference comparison required",
+          "status": "NOT RUN",
+          "evidence": [
+            "docs/tasks/T209-sephiroth-follow-ups.md"
           ]
         }
       ]

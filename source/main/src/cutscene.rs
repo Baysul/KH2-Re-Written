@@ -33,9 +33,9 @@ use visual::room::{mesh, rgba_image};
 use visual::sound;
 
 /// Event frames per second.
-const EVENT_FPS: f32 = 30.;
+pub(crate) const EVENT_FPS: f32 = 30.;
 /// Simulation ticks per second.
-const TICK_HZ: f64 = 60.;
+pub(crate) const TICK_HZ: f64 = 60.;
 
 #[derive(Component)]
 struct ActorPart {
