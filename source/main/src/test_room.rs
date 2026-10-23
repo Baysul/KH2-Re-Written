@@ -981,6 +981,9 @@ struct Game {
     prize_tour: bool,
     /// The unattended `--npc-tour` (Sora walks into a townsperson).
     npc_tour: bool,
+    /// The unattended `--save-point-tour` (Sora stands on the area's save
+    /// point with his MP spent).
+    save_point_tour: bool,
     /// The unattended `--journal-tour` (the journal's Limits pages).
     journal_tour: bool,
     /// The unattended `--badge-tour` (an item pickup, then the camp's NEW! badges).
@@ -1196,11 +1199,12 @@ struct Game {
     talking: bool,
     rc_queued: bool,
     advance_queued: bool,
-    /// The reaction-command search's records (reaction_command.rs) and this
-    /// tick's offer by a battle actor.
+    /// The reaction-command search's records and the command manager's
+    /// reaction state: the slot, the held command, this tick's press
+    /// (reaction_command.rs).
     reaction_commands: Option<reaction_command::Commands>,
-    enemy_reaction: Option<reaction_command::Current>,
-    /// Offers a battle actor made so far (the tours alternate on it).
+    reaction: reaction_command::State,
+    /// Offers the search made so far (the tours alternate on it).
     offers_seen: u32,
     /// DAT_142a11400 bit 1: a mission's boss was beaten (commands locked,
     /// Sora cannot be hurt).
@@ -1284,6 +1288,8 @@ struct Hud {
     field: Sheet,
     reticle: visual::lock_on::Reticle,
     reticle_draw: Option<Draw>,
+    /// The reaction command's target marker (FUN_140408520 → FUN_14017c570).
+    reaction_marker: visual::lock_on::Marker,
     /// Chicken Little's limit reticle (FUN_14017c570 with 3, or 0x19 on a
     /// target), bound to his aim point.
     limit_reticle: Option<visual::lock_on::LockOn>,
@@ -1644,8 +1650,9 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
                 clip.actionable.push((start, stop));
             }
             0 | 1 => clip.actionable.push((start, stop)),
-            // Script windows (16, 17), reaction offers (20) and 26.
-            16 | 17 | 20 | 26 => {
+            // Script windows (16, 17), reaction offers (20), the partner's
+            // command (25) and the state (26).
+            16 | 17 | 20 | 25 | 26 => {
                 let p = record.parameters.first().copied().unwrap_or(0);
                 clip.windows.push((start, stop, record.trigger, p));
             }
@@ -4608,7 +4615,8 @@ fn area_transition(
     );
     game.event(serde_json::json!({"event":"area_enter","world":world,"area":number,
         "entrance":entrance,"programs":next.programs,"bg_mask":format!("{:#x}", next.state.setup.bg_mask),
-        "spawn":position.to_array(),"yaw":yaw}));
+        "spawn":position.to_array(),"yaw":yaw,
+        "save_points":next.save_points.iter().map(|(p, _)| p.to_array()).collect::<Vec<_>>()}));
     area.previous = Some(area.current.area);
     area.visited.insert((next.world, next.area));
     area.music = Some(std::mem::take(&mut next.music));
@@ -4856,6 +4864,19 @@ fn field_npc_tick(
                 talk.position = n.position;
                 talk.yaw = n.yaw;
                 talk.home_yaw = n.yaw;
+                if talk.reaction_shape != kind.reaction || talk.spawn_command != n.reaction {
+                    let e = kind.reaction;
+                    let tick = game.tick;
+                    game.event(
+                        serde_json::json!({"event":"talk_reaction_shape","tick":tick,
+                        "argument":e.map(|e| e.argument),"group":e.map(|e| e.group),
+                        "bone":e.map(|e| e.bone),"position":e.map(|e| e.position),
+                        "pos_h":e.map(|e| e.position_height),"radius":e.map(|e| e.radius),
+                        "height":e.map(|e| e.height),"spawn_command":n.reaction}),
+                    );
+                }
+                talk.reaction_shape = kind.reaction;
+                talk.spawn_command = n.reaction;
                 talk.target = Shape {
                     bone: t.bone,
                     offset: t.offset,
@@ -5445,6 +5466,7 @@ fn setup(
             field,
             reticle: Default::default(),
             reticle_draw: None,
+            reaction_marker: Default::default(),
             limit_reticle: None,
             sheets,
             iris,
@@ -6527,19 +6549,14 @@ fn simulate(
                 };
             }
         }
-        // A battle actor's reaction command (reaction_command.rs); a
-        // limit's or a summon's offer below takes the slot instead.
-        m.menu.reaction = game.enemy_reaction.and_then(|c| {
-            Some(field_command_menu::Reaction {
-                label: game
-                    .reaction_commands
-                    .as_ref()?
-                    .names
-                    .get(&c.offer.command)?
-                    .clone(),
-                dimmed: c.offer.dimmed(),
-            })
-        });
+        // The command manager's reaction slot (reaction_command.rs) and the
+        // prompt's pen for this layout (FUN_140153850).
+        m.menu.reaction = reaction_command::menu_reaction(&game);
+        m.menu.reaction_pen = field_command_menu::reaction_pen(
+            m.layout.as_deref().unwrap_or_default(),
+            m.menu.list_mode,
+            m.menu.list.is_some(),
+        );
         // A Drive form greys the commands its mask disables (FUN_1403b6cb0:
         // Magic in Valor, Limit and Antiform, Items in Antiform), and
         // Wisdom's Attack row is "Shoot" (0x16d).
@@ -6624,10 +6641,6 @@ fn simulate(
                 deck.and_then(|d| d.names.get(&cmd).cloned())
                     .unwrap_or_default()
             };
-            m.menu.reaction = offers[1].map(|cmd| field_command_menu::Reaction {
-                label: name(cmd),
-                dimmed: false,
-            });
             let second = m.menu.kind == field_command_menu::SECOND_DECK;
             for (row, record) in [(0, 0), (second_deck::LIMIT_ROW, 2)] {
                 let Some(cmd) = offers[record] else {
@@ -7198,17 +7211,11 @@ fn simulate(
         );
     }
     let step = if game.party_limit.is_some() {
-        // [Tour setup] The autoplay presses a Limit Form limit's offered
-        // follow-up every 10 ticks, as a player taps the button.
-        let form_offer = game.autoplay.is_some()
-            && tick.is_multiple_of(10)
-            && game.party_limit.as_ref().is_some_and(|r| {
-                r.offers[1].is_some() && player::limit_form::LIMITS.contains(&r.command)
-            });
-        let rc = std::mem::take(&mut game.rc_queued)
-            || form_offer
-            || game.deck_tour && deck_tour::reaction(tick)
-            || game.limit_tour && limit_tour::reaction(tick);
+        // The manager's record 1 taken with Triangle (reaction_command.rs).
+        let rc = game
+            .reaction
+            .pressed(player::reaction_command::Source::Offered)
+            .is_some();
         let decide = std::mem::take(&mut game.limit_decide);
         let stick = [direction.x, 0., direction.y];
         party_limit::tick(&mut game, tick, rc, decide, stick)
@@ -7231,9 +7238,10 @@ fn simulate(
                 .flatten()
         });
         game.summon_stick = [direction.x, 0., direction.y];
-        let rc = summon::offers(&game).is_some_and(|o| o[1].is_some())
-            && (std::mem::take(&mut game.rc_queued)
-                || game.summon_tour && summon_tour::reaction(tick) && !(rotate && turn.is_some()));
+        let rc = game
+            .reaction
+            .pressed(player::reaction_command::Source::Offered)
+            .is_some_and(|c| summon::offers(&game).is_some_and(|o| o[1] == Some(c)));
         summon::decide(&mut game, tick, if rc { Some(1) } else { decide });
         if summon::sora_in_limit(&mut game) {
             player::Step::default()
@@ -7511,6 +7519,19 @@ fn simulate(
         let position = game.player.position;
         let armed = game.player.armed;
         game.action_started = game.tick;
+        // A command Sora asked for (the manager's request): it ends a held
+        // reaction command (FUN_1403a89a0).
+        if !matches!(
+            action,
+            Action::Idle
+                | Action::Walk
+                | Action::Run
+                | Action::Fall
+                | Action::Land
+                | Action::Hurt(_)
+        ) {
+            game.reaction.request_made = true;
+        }
         let motion = game.player.motion_id(&game.clips);
         let ptya_id = match action {
             Action::Attack(i) | Action::AirAttack(i) => Some(game.clips.records[i].id),
@@ -7930,8 +7951,7 @@ struct NpcSource {
 /// Axel): centre 200 up, radius 200, height 200 (dialogue-01 §2.2).
 const SORA_OBJ: [f32; 3] = [35., 55., 85.];
 const REACTION_SPHERE: [f32; 3] = [200., 200., 200.];
-/// cmd 31 "Talk": angle gate cos 135° (+0x10); message 0x81ea.
-const TALK_DOT: f32 = -std::f32::consts::FRAC_1_SQRT_2;
+/// cmd 31 "Talk": message 0x81ea.
 const TALK_LABEL: u32 = 0x81ea;
 /// Screen cross-dissolve length (FUN_140163040(8.0, 1): 2 × 8 frames) and
 /// the talk camera's field of view (0x14071a290, 60°).
@@ -7942,6 +7962,9 @@ const TALK_FOV: f32 = std::f32::consts::FRAC_PI_3;
 /// script and the talk camera (FUN_140401410 / FUN_140400f90).
 #[derive(Resource)]
 struct Talk {
+    /// The NPC's REACTION entry and its spawn record's command (+0x2c).
+    reaction_shape: Option<data::object_collision::Entry>,
+    spawn_command: u16,
     position: Vec3,
     yaw: f32,
     home_yaw: f32,
@@ -7955,6 +7978,8 @@ struct Talk {
     font: SystemFont,
     lines: HashMap<u32, Vec<u8>>,
     colour: u32,
+    /// The Talk label (message 0x81ea), for the slot when the command
+    /// table's names lack it.
     label: Vec<u8>,
     script: Vec<visual::dialogue::Op>,
     /// Script position while talking.
@@ -7967,8 +7992,6 @@ struct Talk {
     /// Remaining cross-dissolve frames, and a snapshot to take this frame.
     dissolve: u32,
     snapshot: bool,
-    /// Reaction candidate this frame: Some(dimmed).
-    reaction: Option<bool>,
 }
 
 #[derive(Component)]
@@ -8112,12 +8135,14 @@ fn talk_camera(talk: &Talk, player: Vec3) -> (Vec3, Vec3) {
 /// One frame of field talk: the NPC's idle, the reaction-command test
 /// (FUN_140407de0 / FUN_1404088f0), and while talking the script
 /// (FUN_1403ecb60), its windows and Sora turning toward the NPC.
-fn talk_tick(mut game: ResMut<Game>, talk: Option<ResMut<Talk>>, hud: Option<ResMut<Hud>>) {
+fn talk_tick(mut game: ResMut<Game>, talk: Option<ResMut<Talk>>) {
     use visual::dialogue::{Op, TalkWindow};
     let Some(mut talk) = talk else { return };
     let tick = game.tick;
     let autoplay = game.autoplay.is_some();
-    let rc = std::mem::take(&mut game.rc_queued) || (autoplay && AUTOPLAY_TALK.contains(&tick));
+    // Talk taken from the reaction slot this tick (reaction_command.rs: the
+    // NPC's sphere, cmd 31, through the command manager's search).
+    let rc = game.reaction.pressed_on(reaction_command::TALK).is_some();
     let advance =
         std::mem::take(&mut game.advance_queued) || (autoplay && AUTOPLAY_ADVANCE.contains(&tick));
     // The talk motion (0x32) is absent from Axel's set, so he keeps idling.
@@ -8127,35 +8152,19 @@ fn talk_tick(mut game: ResMut<Game>, talk: Option<ResMut<Talk>>, hud: Option<Res
     }
     talk.dissolve = talk.dissolve.saturating_sub(1);
     let sora = Vec3::from_array(game.player.position);
-    if talk.active.is_none() {
-        let sora_centre = sora + Vec3::Y * SORA_OBJ[2];
-        let npc_centre = talk.position + Vec3::Y * REACTION_SPHERE[2];
-        let d = npc_centre - sora_centre;
-        let (r, h) = (
-            REACTION_SPHERE[0] + SORA_OBJ[0],
-            REACTION_SPHERE[1] + SORA_OBJ[1],
-        );
-        let inside = (d.x * d.x + d.z * d.z) / (r * r) + d.y * d.y / (h * h) < 1.;
-        // cmd flags bit 4: no Talk in battle (an enemy is active).
-        let battle = game.enemy.as_ref().is_some_and(|rt| rt.enemy.alive());
-        let facing = Vec3::new(game.player.yaw.sin(), 0., game.player.yaw.cos());
-        let dir = (d * Vec3::new(1., 0., 1.)).normalize_or_zero();
-        talk.reaction = (inside && !battle && !game.player.action.airborne())
-            .then(|| dir.dot(facing) < TALK_DOT);
-        if rc && talk.reaction == Some(false) {
-            // FUN_140401410 → FUN_140400f90: lock Sora, snap the NPC to face
-            // him, cross-dissolve to the talk camera.
-            talk.active = Some(0);
-            game.talking = true;
-            let to_sora = sora - talk.position;
-            talk.yaw = to_sora.x.atan2(to_sora.z);
-            talk.snapshot = true;
-            talk.dissolve = DISSOLVE_FRAMES;
-            let cam = talk_camera(&talk, sora);
-            talk.camera = Some(cam);
-            game.event(serde_json::json!({"event":"talk_start","tick":tick,
-                "camera_eye":cam.0.to_array(),"camera_target":cam.1.to_array()}));
-        }
+    if talk.active.is_none() && rc {
+        // FUN_140401410 → FUN_140400f90: lock Sora, snap the NPC to face
+        // him, cross-dissolve to the talk camera.
+        talk.active = Some(0);
+        game.talking = true;
+        let to_sora = sora - talk.position;
+        talk.yaw = to_sora.x.atan2(to_sora.z);
+        talk.snapshot = true;
+        talk.dissolve = DISSOLVE_FRAMES;
+        let cam = talk_camera(&talk, sora);
+        talk.camera = Some(cam);
+        game.event(serde_json::json!({"event":"talk_start","tick":tick,
+            "camera_eye":cam.0.to_array(),"camera_target":cam.1.to_array()}));
     }
     if let Some(mut i) = talk.active {
         // Sora turns toward the NPC at his turn rate (FUN_1403b65c0).
@@ -8229,32 +8238,6 @@ fn talk_tick(mut game: ResMut<Game>, talk: Option<ResMut<Talk>>, hud: Option<Res
     talk.closing.retain(|w| !w.deleted());
     for s in sounds {
         game.sound_queue.push((s, "talk"));
-    }
-    if let Some(mut hud) = hud
-        && let Some(m) = hud.menu.as_mut()
-    {
-        let label = talk.label.clone();
-        // A limit's follow-up (record 1) keeps the reaction slot.
-        m.menu.reaction = if game
-            .party_limit
-            .as_ref()
-            .is_some_and(|r| r.offers[1].is_some())
-        {
-            m.menu.reaction.take()
-        } else if game.talking {
-            None
-        } else if let Some(dimmed) = talk.reaction {
-            Some(field_command_menu::Reaction { label, dimmed })
-        } else {
-            // A battle actor's offer (reaction_command.rs).
-            game.enemy_reaction.and_then(|c| {
-                let names = &game.reaction_commands.as_ref()?.names;
-                Some(field_command_menu::Reaction {
-                    label: names.get(&c.offer.command)?.clone(),
-                    dimmed: c.offer.dimmed(),
-                })
-            })
-        };
     }
 }
 
@@ -8748,14 +8731,41 @@ fn hud_tick(
         field,
         reticle_draw,
         limit_reticle,
+        reaction_marker,
         ..
     } = &mut *hud;
-    *reticle_draw = reticle.step(
-        &field.sequence,
-        held,
-        &|at| camera.map_or([0.; 3], |camera| camera.project(at)),
-        0,
-    );
+    let project = |at| camera.map_or([0.; 3], |camera| camera.project(at));
+    *reticle_draw = reticle.step(&field.sequence, held, &project, 0);
+    // The reaction command's marker over its target, drawn with the
+    // reticle (both dk::LockOn sprites of the `fiel` sheet).
+    // (The search runs in scene space; the camera projects game-world
+    // points, Y down.)
+    let marker =
+        reaction_command::marker(&game).map(|(serial, group, at)| (serial, group, to_world(at)));
+    if let Some((serial, group, at)) = marker
+        && game.reaction.marker_logged != serial
+    {
+        game.reaction.marker_logged = serial;
+        let groups = field.sequence.groups.len();
+        let tick = game.tick;
+        game.event(serde_json::json!({"event":"reaction_marker","tick":tick,
+            "group":group,"fiel_groups":groups,"at":at,"screen":project(at),
+            "reticle_at":held.map(|h| h.1),"reticle_screen":held.map(|h| project(h.1))}));
+    }
+    if let Some(Draw::Quads { quads, .. }) =
+        reaction_marker.step(&field.sequence, marker, &project, 0)
+    {
+        match reticle_draw.as_mut() {
+            Some(Draw::Quads { quads: q, .. }) => q.extend(quads),
+            _ => {
+                *reticle_draw = Some(Draw::Quads {
+                    quads,
+                    z: 0,
+                    sheet: 0,
+                })
+            }
+        }
+    }
     // Chicken Little's limit (FUN_1401cb830): his reticle at the aim point,
     // group 0x19 on a locked target, else 3, in place of the lock's.
     match summon::aim_view(&game) {
@@ -12061,6 +12071,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut growth_tour = false;
     let mut prize_tour = false;
     let mut npc_tour = false;
+    let mut save_point_tour = false;
     let mut badge_tour = false;
     let mut journal_tour = false;
     let mut deck_tour = false;
@@ -12187,6 +12198,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("game over tour capture directory absent")?,
+                );
+            }
+            Some("--save-point-tour") if autoplay.is_none() => {
+                save_point_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("save point tour capture directory absent")?,
                 );
             }
             Some("--npc-tour") if autoplay.is_none() => {
@@ -12449,6 +12469,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         journal_tour::CAPTURES.to_vec()
     } else if npc_tour {
         NPC_TOUR_CAPTURES.to_vec()
+    } else if save_point_tour {
+        reaction_command::SAVE_TOUR_CAPTURES.to_vec()
     } else if magic_tour {
         magic_tour::captures(magic_shift)
     } else if prize_tour {
@@ -12490,6 +12512,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         journal_tour::END
     } else if npc_tour {
         NPC_TOUR_END
+    } else if save_point_tour {
+        reaction_command::SAVE_TOUR_END
     } else if magic_tour {
         magic_tour::END + magic_shift
     } else if prize_tour {
@@ -12548,6 +12572,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         growth_tour,
         prize_tour,
         npc_tour,
+        save_point_tour,
         badge_tour,
         journal_tour,
         hero_hit_tick: None,
@@ -12735,7 +12760,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         talking: false,
         rc_queued: false,
         reaction_commands: None,
-        enemy_reaction: None,
+        reaction: Default::default(),
         offers_seen: 0,
         battle_won: false,
         camera_watch: None,
@@ -12814,6 +12839,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 "font_texel_scale":n.font.texel_scale}));
             (
                 Some(Talk {
+                    reaction_shape: None,
+                    spawn_command: 0,
                     position,
                     yaw: n.yaw,
                     home_yaw: n.yaw,
@@ -12836,13 +12863,14 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                     camera: None,
                     dissolve: 0,
                     snapshot: false,
-                    reaction: None,
                 }),
                 Some(n.model),
             )
         }
         None => (
             loaded.area_talk.map(|t| Talk {
+                reaction_shape: None,
+                spawn_command: 0,
                 // Pointed at the nearest townsperson by field_npc_tick; far
                 // away until then so no reaction shows.
                 position: Vec3::splat(1.0e9),
@@ -12873,7 +12901,6 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 camera: None,
                 dissolve: 0,
                 snapshot: false,
-                reaction: None,
             }),
             None,
         ),
@@ -12935,7 +12962,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             "bg_mask":format!("{:#x}", setup.bg_mask),"battle_level":setup.battle_level,
             "bgm":setup.bgm,"camera_mode":setup.camera_mode,
             "events":setup.events.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>(),
-            "spawns":setup.spawns.iter().map(|r| format!("{:x}{}", r.name, if r.deferred {" (deferred)"} else {""})).collect::<Vec<_>>()}));
+            "spawns":setup.spawns.iter().map(|r| format!("{:x}{}", r.name, if r.deferred {" (deferred)"} else {""})).collect::<Vec<_>>(),
+            "save_points":a.current.save_points.iter().map(|(p, _)| p.to_array()).collect::<Vec<_>>()}));
     }
     let mut enemy_model = None;
     if let Some(e) = loaded.enemy {
@@ -13193,6 +13221,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 command_layout::follow,
                 boss::mission_tick,
                 (
+                    // The command manager's reaction search and Triangle
+                    // (FUN_1403b2340) run before Sora's update.
+                    reaction_command::tick,
                     simulate,
                     summon::tick,
                     skate_tick,

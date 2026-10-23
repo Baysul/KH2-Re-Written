@@ -1298,6 +1298,29 @@ impl Player {
         Clip::within(&self.clip(clips).actionable, self.motion_frame(clips))
     }
 
+    /// Motion range 26 (FUN_14040d810 case 0x1a: +0x18c bit 21 with its
+    /// value in +0x638): the state a chained reaction command needs.
+    pub fn reaction_state(&self, clips: &Clips) -> Option<u16> {
+        let frame = self.motion_frame(clips);
+        self.clip(clips)
+            .windows
+            .iter()
+            .find(|w| w.2 == 26 && (w.0..=w.1).contains(&frame))
+            .map(|w| w.3 as u16)
+    }
+
+    /// Motion range 25 (FUN_14040d810 case 0x19: +0x18c bit 20 with the
+    /// command in +0x638): the partner's reaction command (only M_EX770's
+    /// capture 253 holds one, command 28).
+    pub fn partner_command(&self, clips: &Clips) -> Option<u16> {
+        let frame = self.motion_frame(clips);
+        self.clip(clips)
+            .windows
+            .iter()
+            .find(|w| w.2 == 25 && (w.0..=w.1).contains(&frame))
+            .map(|w| w.3 as u16)
+    }
+
     /// Whether range 46 covers the current motion frame.
     pub fn first_person_blocked(&self, clips: &Clips) -> bool {
         Clip::within(&self.clip(clips).no_first_person, self.motion_frame(clips))

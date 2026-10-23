@@ -122,6 +122,10 @@ pub struct LoadedArea {
     pub player: (Vec3, f32),
     /// The map's own effects (its first BAR entry of type 18, FUN_1401613c0).
     pub pax: Option<Arc<data::object_effect::Pax>>,
+    /// The area's save points (spawns of the `SAVE_POINT` object, objentry
+    /// type 7): scene position (Y up) and the REACTION entry of its model's
+    /// collision table (command 0x37 "Save").
+    pub save_points: Vec<(Vec3, data::object_collision::Entry)>,
 }
 
 /// What the field and battle music slots must do on entering an area
@@ -402,6 +406,7 @@ impl AreaSource {
         });
         let collision = map_collision(&map, state.setup.bg_mask)?;
         let pax = map_pax(&map).map(Arc::new);
+        let save_points = self.save_points(&spawns);
         let player = Area::player_spawn(&spawns)
             .map(|s| {
                 let [x, y, z] = s.entity.position;
@@ -427,8 +432,50 @@ impl AreaSource {
                 lines,
                 player,
                 pax,
+                save_points,
             },
         ))
+    }
+
+    /// The spawns of the `SAVE_POINT` object with the REACTION entry of its
+    /// model archive (`obj/SAVE_POINT.mdlx` holds only a collision table:
+    /// one kind-5 sphere, argument 0x37, centre 50 up, radius and height 50).
+    fn save_points(&mut self, spawns: &[Spawn]) -> Vec<(Vec3, data::object_collision::Entry)> {
+        let is_save = |id: u32| {
+            self.object_index.get(&id).is_some_and(|&i| {
+                let o = &self.objects[i];
+                o.object_type == 7 && o.model_name.starts_with(b"SAVE_POINT")
+            })
+        };
+        let points: Vec<Vec3> = spawns
+            .iter()
+            .filter(|s| is_save(s.entity.object))
+            .map(|s| {
+                let [x, y, z] = s.entity.position;
+                Vec3::new(x, -y, -z)
+            })
+            .collect();
+        if points.is_empty() {
+            return Vec::new();
+        }
+        let shape = self
+            .library
+            .read("obj/SAVE_POINT.mdlx")
+            .ok()
+            .and_then(|b| {
+                let table = data::bar::read_bar(&b).ok()?;
+                let e = table.entries.iter().find(|e| e.entry_type == 23)?;
+                let bytes = b.get(e.offset as usize..e.offset as usize + e.size as usize)?;
+                data::object_collision::read(bytes).ok()
+            })
+            .and_then(|c| {
+                c.into_iter()
+                    .find(|e| e.kind == data::object_collision::REACTION)
+            });
+        match shape {
+            Some(e) => points.into_iter().map(|p| (p, e)).collect(),
+            None => Vec::new(),
+        }
     }
 
     /// FUN_1403a5920: the room's command-layout digit, arif row byte +0x34
