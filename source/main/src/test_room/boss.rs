@@ -8,6 +8,10 @@ use super::*;
 /// The bosses whose scripts capture Sora, and the slots of their motion sets
 /// they capture him into: Sephiroth (N_HB630.mset 252 AQ90 the Block pose,
 /// 253 AQ90 the Block counter, 254 AQ91 the grab).
+/// [U] M_EX770 (objentry 306) captures Sora into 252, 253 (`rc_catch`,
+/// whose body motion holds range 25 = 28, the partner's reaction command),
+/// 255 and 256, but its motion slot 202 has a clock the room's enemy motion
+/// does not admit, so it is not fielded here.
 pub const CAPTURES: &[(u32, &[usize])] = &[(enemy_battle::SEPHIROTH, &[252, 253, 254])];
 
 /// The id Sora's kit keeps a boss's captured motion under: below the
@@ -150,6 +154,12 @@ pub fn requests(game: &mut Game, actors: &mut [enemy_gallery::GalleryActor]) {
         let mpdrive = std::mem::take(&mut a.sora_mpdrive);
         // FUN_1403aabe0's signals go to the mission's trigger 10.
         game.mission_signals.append(&mut a.signals);
+        if !captures.is_empty() {
+            // [I] The partner (+0x2b0) the search offers range 25's command
+            // for is the object holding Sora's capture: its trigger 11 takes
+            // the command (M_EX770's handles 27 and 28).
+            game.reaction.captor = Some(actor.id as u32);
+        }
         play_on_sora(game, object, &captures, &pushed);
         for delta in hp {
             sora_hp_change(game, delta);

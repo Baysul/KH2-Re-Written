@@ -4,7 +4,7 @@ Baseline: Steam app 2552430 build 15194255 candidate - supported profile unquali
 
 | Measure | Accepted / tracked | Percentage |
 |---|---:|---:|
-| Complete functions decompiled and checked | 0 / 202 (inventory incomplete) | Unmeasured |
+| Complete functions decompiled and checked | 0 / 204 (inventory incomplete) | Unmeasured |
 | Required behavior scenarios verified 1:1 | 0 / 8 (inventory incomplete) | Unmeasured |
 | Final roadmap gates accepted | 0 / 32 | 0.00% |
 
@@ -253,6 +253,8 @@ A PASS counts one reviewed unit. All other statuses count zero. Unknown required
 | NATIVE-T208-02 | Reaction slot, target marker and Triangle press - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T208-reaction-command-manager.md) |
 | NATIVE-T208-03 | Reaction slot drawing, prompt and burst on the command menu - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T208-reaction-command-manager.md) |
 | NATIVE-T208-04 | Attack-borne reaction commands - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T208-reaction-command-manager.md) |
+| NATIVE-T208-05 | Save point offer and heal while Save shows - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T208-reaction-command-manager.md) |
+| NATIVE-T208-06 | Partner and spawn reaction command sources - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T208-reaction-command-manager.md) |
 
 Accepted share of the tracked subset: 0.00%. This is not a whole-game percentage.
 

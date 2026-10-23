@@ -1134,6 +1134,31 @@ mod tests {
     }
 
     #[test]
+    fn the_partner_command_outranks_shapes_and_the_offered_record_in_mode_7() {
+        let mut w = world();
+        let mut catch = block();
+        catch.id = 28;
+        catch.exec = 28;
+        catch.priority = 255;
+        w.rows.insert(28, catch);
+        let mut seed = 1;
+        let mut i = inputs(vec![sphere(7, [0., 170., 750.])]);
+        i.offered = Some((664, Target::default()));
+        i.sora.partner = Some((28, 9));
+        let o = search(&w, &i, &mut seed).unwrap();
+        assert_eq!(
+            (
+                o.command(),
+                o.priority,
+                o.candidate.mode,
+                o.candidate.target.owner
+            ),
+            (28, PARTNER, MODE_PARTNER, 9)
+        );
+        assert_eq!(o.candidate.source, Source::Partner);
+    }
+
+    #[test]
     fn a_form_mask_is_read_through_the_record_chain_and_a_group_lock_dims() {
         let mut w = world();
         let mut base = block();

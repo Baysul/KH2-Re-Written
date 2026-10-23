@@ -1627,6 +1627,22 @@
           "evidence": [
             "docs/tasks/T208-reaction-command-manager.md"
           ]
+        },
+        {
+          "id": "NATIVE-T208-05",
+          "label": "Save point offer and heal while Save shows - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T208-reaction-command-manager.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T208-06",
+          "label": "Partner and spawn reaction command sources - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T208-reaction-command-manager.md"
+          ]
         }
       ]
     },

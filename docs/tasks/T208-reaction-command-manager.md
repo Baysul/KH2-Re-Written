@@ -81,11 +81,11 @@ group 4 at the slot.
 | Score | FUN_1404088f0 | translated (T206) | the 0.5 factor only for the leader |
 | Mode | FUN_140401d60, FUN_1403b6cf0, FUN_1403b6cb0, FUN_1403f29c0 | no group lock, mask of the record itself | shared tail, mask through the +2 chain, group lock; Drive / summon / limit cases from the room's existing rules |
 | Model gate | FUN_1403b6a10 | translated (T206) | unchanged |
-| Collision shapes, spawn and clash commands | FUN_140407de0 | kind 5 only | + `shape_command` (0x83, kind 14); the room's actors carry neither |
+| Collision shapes, spawn and clash commands | FUN_140407de0 | kind 5 only | + `shape_command`; the townspeople's Talk comes through 0x83 (their entry's argument 131 with the spawn record's +0x2c = 31); kind 14 has no source (no ATKP row sets +0x20) |
 | Attack-borne commands | FUN_140407b40, FUN_140437b70 | not done | offered from script attacks with `attack_set_rc` |
 | Command held after Triangle | FUN_1403a89a0, FUN_1403a81c0 | not done | priority 0xc9, mode 8, cleared as above |
 | Manager record 1 (limits, summons, party limits) | FUN_1403b2660, FUN_1403b2850 | each module drew and took its own offer | one candidate at 0xcb through the search |
-| Partner command | +0x18c bit 20 | not done | in the search; the room has no partner state |
+| Partner command | +0x18c bit 20 (range 0x19), +0x638, +0x2b0 | not done | range 25 of Sora's motion, the capturing actor as partner [I], trigger 11 on it; the only installed source is M_EX770's capture 253 (command 28), not fielded (its motion clock) |
 | Auto Summon / auto forms / Auto Limit | FUN_140407a90, FUN_1404079a0, FUN_1403e7950, FUN_1404077f0 | not done | offered and carried out |
 | Slot, marker | FUN_140408520, FUN_14017c570, FUN_14017bfe0 | no marker | marker sprite with release outro |
 | Triangle | FUN_1403b2340, FUN_1403b22d0, FUN_1403b6950, FUN_1403ba070 | Talk, drive, summon, party limit and enemies each read Triangle | one press; decider and window test |
@@ -93,7 +93,7 @@ group 4 at the slot.
 | Talk (field) | cmd 31 through FUN_140407de0 | hard-coded sphere test | a shape in the search |
 | Sephiroth's Block / Split Flash | collision entry 18, range 4, trigger 11 | T206 | unchanged, now through the one search |
 | Script enables (1:49..54), callback (1:325) | FUN_14040a590…, FUN_1403b5fa0 | T206 | unchanged |
-| Save-point heal while "Save" shows | FUN_140418f30 (command 0x37) | not done | not done (no save point in the room) |
+| Save points and their heal while "Save" shows | SAVE_POINT (objentry 570), FUN_140418f30, FUN_1403a8b10 case 0x37 | not done | save points from the area's own spawns (Twilight Town areas 5 and 9) with their model's REACTION entry; the heal (+1 HP / +1 MP every 2.0); the press logs the menu request (no Save screen in the room) |
 
 ## Steps
 
@@ -130,23 +130,33 @@ and its tests, and unattended tours against the install (results below).
   the object's reset; FUN_1403a81c0 is called from the classes' KO handlers (FUN_140404d60 at
   Sora's vt+0xb0, FUN_1404051e0, FUN_140403300 / FUN_140403b00) and eight per-class thunks. The
   room ends it on Sora's next command (an action he starts that is not movement, a landing or a
-  hit) and on his KO. [I] It also ends it when a talk ends (the talk branch was not checked).
-- While a summon's limit scene captures Sora, the window test counts as open and the no-control
-  test as passed [U]. His captured clips do carry the states the follow-ups chain to (Genie's 543
-  → range 26 = 535 at frames 96..136, Stitch's 527 → 600 at 30..102), but in the room the
-  summons' scripts capture him anew before those windows open (Genie: a new capture 15 ticks
-  into the 136-tick one). With the executable's tests no follow-up was ever taken and the
-  limits stalled (the last summon's limit never started), so the summon-limit flow has to be
-  checked first. The scene's proxy of Sora holds no motion flags (+0x18c 0x4000, +0x638 0).
+  hit) and on his KO. A talk does not end it: FUN_1403a8b10 case 0x1f and FUN_140401410 clear the
+  movement request and two slot fields (mgr+0xb50 / +0xb58) but not +0xdd8, and the operand scan
+  finds no +0xdd8 write in the talk code.
+- Summon limits run the executable's exact window and no-control tests. Sora's captured clips
+  carry the states the follow-ups chain to (installed data: Genie's capture 253 range 26 = 535
+  from frame 96, Stitch's 254 / 257 = 600 from 0 / 30, Peter Pan's 253 / 255 = 468 from 0 / 40).
+  The earlier "re-capture before the window" was the summon tour's own deck-row decide on the
+  same tick, not the scripts (Genie's trigger 23: 542 captures 253 and offers 543; 543 captures
+  255, whose no-gravity range 0..90 dims 543 by its flag bit 1 until it ends). The tour now runs
+  its follow-up span in 60-tick cycles: deck rows on the first turn(s), Triangle every 3 ticks on
+  the last two [tour setup].
 - Found on the way: Sora's captured motions in summon limits were shown on frame 0 throughout
   (the frame came from the summon's clip table, which holds no length for those slots); they now
   play from the capture's own length. The scripts' flow does not read that frame (the same runs
   before and after).
 - FUN_1403b6a10's +0xde0 == 0xc case ("no reaction at all") is a state the room's forms never
   take [U]; Antiform (+0xde0 == 6) dims the slot as FUN_140408520 does.
-- The partner command (+0x18c bit 20) and the clash (kind 14) and spawn (0x83) commands are in
-  the search, but the room's objects never set them. An attack whose owner was moved to another
-  object with `attack_set_rc_owner` is not resolved to that actor.
+- Partner command: a scan of all 654 installed motion sets finds range 0x19 only in M_EX770's
+  (objentry 306, and its _RAW / _TR variants) capture 253, value 28; its script's act `rc_catch`
+  captures Sora into 253 and its trigger 11 handles 27 and 28. The room takes the capturing actor
+  as the partner [I: the writer of +0x2b0 was not found; `obj_attach` writes +0x6a0]. M_EX770
+  itself is not fielded: its motion slot 202 has a native clock the room's enemy motion does not
+  admit, so the path is covered by a unit test only.
+- Clash commands (kind 14, +0xcf0): no installed ATKP row has a ReflectRC (+0x20 is 0 in all
+  2713), so nothing in the original data drives this path.
+- An attack whose owner was moved to another object with `attack_set_rc_owner` is not resolved
+  to that actor.
 - FUN_140401d60's cases with state are taken from the room's existing rules: the Drive command's
   (case 4, `drive_room`), the summons' and the limits' (`second_deck`); the other cases count as
   0 (but 0 / 0x67 / 0x68, which are 5). FUN_1403c3950 (a member's readiness for case 0x2c3) was
@@ -156,8 +166,10 @@ and its tests, and unattended tours against the install (results below).
   status bits as the room keeps them.
 - The menu lock (mgr+0x24 bits 0 and 1), the command-group lock (mgr+0xbe4), the event-slot
   refusal (FUN_1403ad500) and the model flag bit 15 are wired but always clear in the room.
-- The save point's heal while "Save" (command 0x37) shows (FUN_140418f30) is not ported: the
-  room has no save point.
+- Save points: `SAVE_POINT.mdlx` holds only a collision table (one REACTION sphere, argument
+  0x37, 50 up, radius and height 50); the room places one per area spawn of objentry 570. Its look
+  (`SAVE_POINT.a.us`, effects) is not drawn, and pressing "Save" only logs the request: the room
+  has no Save screen. The heal's global fast mode (FUN_14039b780(0)+8 bit 25) is not wired.
 - The ReactionDecideSprite (vtable 0x1405b1bc8) adds only a pool return (FUN_14015b460) and a
   destructor (FUN_14015a9a0) to the generic sprite; its update is FUN_14016b3c0, which deletes it
   at its group's end, as drawn here. The custom-layout second burst (group 99 at the root) is
@@ -192,6 +204,15 @@ and its tests, and unattended tours against the install (results below).
     counts as main's run above; Block in the Sephiroth tour is unchanged.
   - After the hold and capture-frame changes: the summon tour again gives main's 64 follow-ups;
     Block's held slot lasts from the press (280) to Sora's next attack (430).
+  - Final build (exact tests in summon limits, restructured summon tour): all four summons'
+    limits start (5 starts) and their reaction follow-ups are taken (Genie 543, Stitch 527,
+    Peter Pan 470 x2) with 23 follow-ups in all; party limits 27 (as main); Block, Talk as above.
+  - Townspeople (`--npc-tour`, Twilight Town): the NPC's REACTION entry (argument 131 = 0x83,
+    root, offset (0, -200, 0), radius 200, height 200) with its spawn command 31 offers Talk;
+    Triangle starts the talk.
+  - Save point (`--save-point-tour`, Twilight Town area 9): "Save" is offered from the save
+    point's entry; with Sora at 1 MP the heal gives +1 every 2 ticks from tick 21 to full (100) at
+    217; Triangle at 240 requests the menu.
   - Talk (`--autoplay` on the talk room): "Talk" with the 0x32 marker (the green triangle) over
     the NPC from tick 0; Triangle at 60 starts the talk.
   - Limit Form (`--autoplay`, arena): Infinity at 7700 and one follow-up (Shoot) at 7819 through
@@ -202,11 +223,11 @@ and its tests, and unattended tours against the install (results below).
 PARTIAL. The command manager's reaction command (the search over every source in the
 executable's order, the held command, record 1, the partner, shapes, attack-borne commands and
 the auto abilities; the slot with its marker; the press; the HUD slot and burst) is translated
-and runs against the install for Sephiroth's Block, Talk, party limits, summons and Limit Form.
+and runs against the install for Sephiroth's Block, Talk (the test NPC and the townspeople), party
+limits, summons, Limit Form and the save points.
 Nothing is compared with the original game, so no behaviour is claimed 1:1 by observation.
 
-Next: (1) the summons' limit flow (when their scripts capture Sora), so the window and
-no-control tests can run there; (2) the talk branch's effect on the held command; (3) the
-partner command and clash commands once the room has objects that set them; (4) the save
-point's heal (FUN_140418f30) with save points; (5) side-by-side captures against the installed
-game.
+Next: (1) field M_EX770 (its motion clock) so the partner command runs end to end; (2) the save
+point's look and the Save screen; (3) the writer of +0x2b0; (4) side-by-side captures against the
+installed game (slot timing, marker art, the Block window, summon follow-up windows, the save
+point's heal speed, the held command after a talk).

@@ -977,6 +977,9 @@ struct Game {
     prize_tour: bool,
     /// The unattended `--npc-tour` (Sora walks into a townsperson).
     npc_tour: bool,
+    /// The unattended `--save-point-tour` (Sora stands on the area's save
+    /// point with his MP spent).
+    save_point_tour: bool,
     /// The unattended `--journal-tour` (the journal's Limits pages).
     journal_tour: bool,
     /// The unattended `--badge-tour` (an item pickup, then the camp's NEW! badges).
@@ -1633,8 +1636,9 @@ fn clip_for(selected: &motion::SelectedMotion) -> Result<(Clip, u32), Box<dyn st
                 clip.actionable.push((start, stop));
             }
             0 | 1 => clip.actionable.push((start, stop)),
-            // Script windows (16, 17), reaction offers (20) and 26.
-            16 | 17 | 20 | 26 => {
+            // Script windows (16, 17), reaction offers (20), the partner's
+            // command (25) and the state (26).
+            16 | 17 | 20 | 25 | 26 => {
                 let p = record.parameters.first().copied().unwrap_or(0);
                 clip.windows.push((start, stop, record.trigger, p));
             }
@@ -4597,7 +4601,8 @@ fn area_transition(
     );
     game.event(serde_json::json!({"event":"area_enter","world":world,"area":number,
         "entrance":entrance,"programs":next.programs,"bg_mask":format!("{:#x}", next.state.setup.bg_mask),
-        "spawn":position.to_array(),"yaw":yaw}));
+        "spawn":position.to_array(),"yaw":yaw,
+        "save_points":next.save_points.iter().map(|(p, _)| p.to_array()).collect::<Vec<_>>()}));
     area.previous = Some(area.current.area);
     area.visited.insert((next.world, next.area));
     area.music = Some(std::mem::take(&mut next.music));
@@ -4845,6 +4850,19 @@ fn field_npc_tick(
                 talk.position = n.position;
                 talk.yaw = n.yaw;
                 talk.home_yaw = n.yaw;
+                if talk.reaction_shape != kind.reaction || talk.spawn_command != n.reaction {
+                    let e = kind.reaction;
+                    let tick = game.tick;
+                    game.event(
+                        serde_json::json!({"event":"talk_reaction_shape","tick":tick,
+                        "argument":e.map(|e| e.argument),"group":e.map(|e| e.group),
+                        "bone":e.map(|e| e.bone),"position":e.map(|e| e.position),
+                        "pos_h":e.map(|e| e.position_height),"radius":e.map(|e| e.radius),
+                        "height":e.map(|e| e.height),"spawn_command":n.reaction}),
+                    );
+                }
+                talk.reaction_shape = kind.reaction;
+                talk.spawn_command = n.reaction;
                 talk.target = Shape {
                     bone: t.bone,
                     offset: t.offset,
@@ -7908,6 +7926,9 @@ const TALK_FOV: f32 = std::f32::consts::FRAC_PI_3;
 /// script and the talk camera (FUN_140401410 / FUN_140400f90).
 #[derive(Resource)]
 struct Talk {
+    /// The NPC's REACTION entry and its spawn record's command (+0x2c).
+    reaction_shape: Option<data::object_collision::Entry>,
+    spawn_command: u16,
     position: Vec3,
     yaw: f32,
     home_yaw: f32,
@@ -11972,6 +11993,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut growth_tour = false;
     let mut prize_tour = false;
     let mut npc_tour = false;
+    let mut save_point_tour = false;
     let mut badge_tour = false;
     let mut journal_tour = false;
     let mut deck_tour = false;
@@ -12097,6 +12119,15 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("game over tour capture directory absent")?,
+                );
+            }
+            Some("--save-point-tour") if autoplay.is_none() => {
+                save_point_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("save point tour capture directory absent")?,
                 );
             }
             Some("--npc-tour") if autoplay.is_none() => {
@@ -12344,6 +12375,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         journal_tour::CAPTURES.to_vec()
     } else if npc_tour {
         NPC_TOUR_CAPTURES.to_vec()
+    } else if save_point_tour {
+        reaction_command::SAVE_TOUR_CAPTURES.to_vec()
     } else if magic_tour {
         magic_tour::captures(magic_shift)
     } else if prize_tour {
@@ -12383,6 +12416,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         journal_tour::END
     } else if npc_tour {
         NPC_TOUR_END
+    } else if save_point_tour {
+        reaction_command::SAVE_TOUR_END
     } else if magic_tour {
         magic_tour::END + magic_shift
     } else if prize_tour {
@@ -12441,6 +12476,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         growth_tour,
         prize_tour,
         npc_tour,
+        save_point_tour,
         badge_tour,
         journal_tour,
         hero_hit_tick: None,
@@ -12702,6 +12738,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 "font_texel_scale":n.font.texel_scale}));
             (
                 Some(Talk {
+                    reaction_shape: None,
+                    spawn_command: 0,
                     position,
                     yaw: n.yaw,
                     home_yaw: n.yaw,
@@ -12730,6 +12768,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         }
         None => (
             loaded.area_talk.map(|t| Talk {
+                reaction_shape: None,
+                spawn_command: 0,
                 // Pointed at the nearest townsperson by field_npc_tick; far
                 // away until then so no reaction shows.
                 position: Vec3::splat(1.0e9),
@@ -12821,7 +12861,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
             "bg_mask":format!("{:#x}", setup.bg_mask),"battle_level":setup.battle_level,
             "bgm":setup.bgm,"camera_mode":setup.camera_mode,
             "events":setup.events.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>(),
-            "spawns":setup.spawns.iter().map(|r| format!("{:x}{}", r.name, if r.deferred {" (deferred)"} else {""})).collect::<Vec<_>>()}));
+            "spawns":setup.spawns.iter().map(|r| format!("{:x}{}", r.name, if r.deferred {" (deferred)"} else {""})).collect::<Vec<_>>(),
+            "save_points":a.current.save_points.iter().map(|(p, _)| p.to_array()).collect::<Vec<_>>()}));
     }
     let mut enemy_model = None;
     if let Some(e) = loaded.enemy {

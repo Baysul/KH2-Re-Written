@@ -371,14 +371,6 @@ fn sora_sys(game: &Game) -> enemy::sysobj::Sysobj {
     sora
 }
 
-/// A summon's limit scene drives Sora now.
-pub fn in_limit_scene(game: &Game) -> bool {
-    game.summon
-        .as_ref()
-        .and_then(|s| s.actor.as_ref())
-        .is_some_and(|a| a.brain.limit_player().is_some())
-}
-
 /// While the summon's limit runs Sora stands and turns where it has him
 /// (the scripted stand-in); his own update does not run. During the
 /// `appear` event he is held where he stands (FUN_1403de610 releases

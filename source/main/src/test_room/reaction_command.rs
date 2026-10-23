@@ -23,6 +23,20 @@ use player::reaction_command as rc;
 pub const SORA: u32 = 0xffff_0000;
 pub const TALK: u32 = 0xffff_0001;
 pub const SUMMON: u32 = 0xffff_0002;
+/// Save point `k` of the area is `SAVE_POINT + k`.
+pub const SAVE_POINT: u32 = 0xffff_0100;
+/// Command 0x37 "Save" (exec 0x37).
+const SAVE_COMMAND: u16 = 0x37;
+/// FUN_140418f30: the heal's step (DAT_140717480, 1.0 a frame) and the
+/// timer it fires at (DAT_140623b18, 2.0).
+const SAVE_HEAL_STEP: f32 = 1.;
+const SAVE_HEAL_AT: f32 = 2.;
+
+/// The `--save-point-tour`: Sora stands on the area's first save point from
+/// tick 20 with 1 MP (and the party at 1 HP), and presses Triangle at 240.
+/// [Tour setup.]
+pub const SAVE_TOUR_CAPTURES: [u64; 3] = [30, 120, 245];
+pub const SAVE_TOUR_END: u64 = 300;
 /// The townspeople's and the test NPC's reaction (cmd 31 "Talk").
 const TALK_COMMAND: u16 = 0x1f;
 
@@ -142,10 +156,12 @@ pub struct State {
     pub talk_label: Vec<u8>,
     /// The last marker the run log recorded.
     pub marker_logged: u32,
+    /// The actor whose script captured Sora last (the partner).
+    pub captor: Option<u32>,
+    /// The save point's heal timer (+0xc0c).
+    pub save_timer: f32,
     /// Sora asked for a command since the last tick (his update's request).
     pub request_made: bool,
-    /// Sora talked since the hold began.
-    hold_talk: bool,
 }
 
 impl Default for State {
@@ -159,8 +175,9 @@ impl Default for State {
             points: Vec::new(),
             talk_label: Vec::new(),
             marker_logged: 0,
+            captor: None,
+            save_timer: 0.,
             request_made: false,
-            hold_talk: false,
         }
     }
 }
@@ -208,7 +225,9 @@ impl rc::Env for World<'_> {
     }
 
     fn offered(&self, shape: &rc::Shape) -> bool {
-        if shape.owner == TALK {
+        if shape.owner >= SORA {
+            // The Talk NPC's and the save points' shapes: their groups are
+            // on by default (the table's mask), nothing switches them.
             return true;
         }
         self.actors
@@ -254,20 +273,10 @@ impl rc::Env for World<'_> {
 }
 
 /// Sora's FUN_1403ba070 state as the room keeps it: an ANB range 0..2 or a
-/// reaction's tail for the window, range 26 for the state. [U] While a
-/// summon's limit scene captures him the window counts as open and the
-/// no-control test as passed: his captured clips do carry the states the
-/// follow-ups chain to (Genie's 543 → range 26 = 535 at frames 96..136,
-/// Stitch's 527 → 600 at 30..102), but the room's summon scripts capture
-/// him anew before those windows open, so with the executable's tests no
-/// follow-up is ever taken and the limits stall.
+/// reaction's tail for the window, range 26 for the state, also of the
+/// motions a summon's limit captures him in (Genie's 543 chains to the 535
+/// of capture 253, Stitch's 527 to the 600 of his).
 fn sora_actor(game: &Game) -> rc::Actor {
-    if summon::in_limit_scene(game) {
-        return rc::Actor {
-            window: true,
-            ..Default::default()
-        };
-    }
     rc::Actor {
         no_control: game.player.no_control(&game.clips),
         state: game.player.reaction_state(&game.clips),
@@ -282,6 +291,7 @@ pub fn tick(
     gallery: Option<ResMut<EnemyGallery>>,
     talk: Option<Res<Talk>>,
     hud: Option<ResMut<Hud>>,
+    area: Option<Res<AreaRes>>,
 ) {
     let tick = game.tick;
     let mut gallery = gallery;
@@ -300,17 +310,13 @@ pub fn tick(
     // The hold ends with Sora's next request (FUN_1403a89a0 clears +0xdd8
     // for any request before it holds a Triangle one), and with his object's
     // reset or KO (FUN_1403a7330, slot 0 of the player classes; FUN_1403a81c0
-    // from the KO handlers, e.g. FUN_140404d60 at Sora's vt+0xb0). [I] The
-    // room also ends it when a talk ends.
-    if state.hold.is_some()
-        && (std::mem::take(&mut state.request_made)
-            || game.player.dead()
-            || state.hold_talk && !game.talking)
-    {
+    // from the KO handlers, e.g. FUN_140404d60 at Sora's vt+0xb0). A talk
+    // does not end it (FUN_1403a8b10 case 0x1f and FUN_140401410 leave
+    // +0xdd8 alone).
+    if state.hold.is_some() && (state.request_made || game.player.dead()) {
         state.hold = None;
     }
     state.request_made = false;
-    state.hold_talk = state.hold.is_some() && (state.hold_talk || game.talking);
     let menu_kind = hud
         .as_ref()
         .and_then(|h| h.menu.as_ref())
@@ -318,7 +324,39 @@ pub fn tick(
             Some(sub) => sub.kind as u8,
             None => m.menu.kind as u8,
         });
-    let inputs = inputs(&game, actors, talk.as_deref(), &state, menu_kind);
+    let save_points = area
+        .as_deref()
+        .map_or(&[][..], |a| a.current.save_points.as_slice());
+    if game.save_point_tour
+        && let Some(&(at, _)) = save_points.first()
+    {
+        if tick >= 20 {
+            game.player.position = (at + Vec3::Z * 20.).to_array();
+        }
+        if tick == 20 {
+            game.player.mp.cur = 1;
+            for m in &mut game.party {
+                m.hp = 1;
+            }
+        }
+        if tick == 240 {
+            game.rc_queued = true;
+        }
+    }
+    let mut inputs = inputs(&game, actors, talk.as_deref(), &state, menu_kind);
+    // The area's save points (REACTION entries of SAVE_POINT, command 0x37).
+    for (k, &(at, e)) in save_points.iter().enumerate() {
+        inputs.shapes.push(rc::Shape {
+            owner: SAVE_POINT + k as u32,
+            group: e.group,
+            command: rc::shape_command(5, e.argument as u16, 0, None),
+            centre: (at + Vec3::Y * f32::from(e.position_height)).to_array(),
+            radius: f32::from(e.radius),
+            height: f32::from(e.height),
+            owner_yaw: 0.,
+            attack: None,
+        });
+    }
     let world = World {
         commands: &commands,
         actors,
@@ -350,6 +388,10 @@ pub fn tick(
         .chain(&inputs.attacks)
         .map(|s| (s.target(), s.centre))
         .collect();
+    // FUN_140408520: while "Save" shows usable, FUN_140418f30 heals.
+    if state.slot.shown.command == SAVE_COMMAND && state.slot.shown.mode < 4 {
+        save_heal(&mut game, &mut state.save_timer);
+    }
     if offer.map(|o| o.command()) != state.offer.map(|o| o.command()) {
         if offer.is_some() {
             game.offers_seen += 1;
@@ -403,7 +445,11 @@ pub fn tick(
         Some(rc::Press::Refused) => game.sound_queue.push((5, "menu_denied")),
         Some(rc::Press::Ignored) => {
             // [Run log] Why a shown command was not taken.
-            let action = format!("{:?}", game.player.action);
+            let action = format!(
+                "{:?} frame {}",
+                game.player.action,
+                game.player.motion_frame(&game.clips)
+            );
             game.event(serde_json::json!({"event":"reaction_ignored","tick":tick,
                 "command":shown.map(|c| c.command),"mode":shown.map(|c| c.mode),
                 "flags":row.map(|r| r.flags),"decider":row.map(|r| r.decider),
@@ -487,22 +533,49 @@ fn inputs(
             });
         }
     }
-    // The Talk NPC's REACTION sphere (r 200, h 200, 200 up) while nobody
-    // talks.
+    // The Talk NPC's REACTION shape while nobody talks: a townsperson's own
+    // entry (kind 5; argument 0x83 takes its spawn record's command, +0x2c,
+    // FUN_140407de0), centred on the root raised by its height offset [I:
+    // the root bone, the offset turned by the NPC's heading]; the test NPC
+    // keeps the measured sphere (r 200, h 200, 200 up) and command 31.
     if let Some(t) = talk
         && t.active.is_none()
         && !game.talking
     {
-        shapes.push(rc::Shape {
-            owner: TALK,
-            group: 0,
-            command: TALK_COMMAND,
-            centre: (t.position + Vec3::Y * REACTION_SPHERE[2]).to_array(),
-            radius: REACTION_SPHERE[0],
-            height: REACTION_SPHERE[1],
-            owner_yaw: t.yaw,
-            attack: None,
-        });
+        let shape = match t.reaction_shape {
+            Some(e) => {
+                let offset = Quat::from_rotation_y(t.yaw)
+                    * Vec3::new(
+                        f32::from(e.position[0]),
+                        -f32::from(e.position[1]),
+                        f32::from(e.position[2]),
+                    );
+                let spawn = (t.spawn_command != 0).then_some(t.spawn_command);
+                let command = rc::shape_command(5, e.argument as u16, 0, spawn);
+                (command != 0x83).then(|| rc::Shape {
+                    owner: TALK,
+                    group: e.group,
+                    command,
+                    centre: (t.position + offset + Vec3::Y * f32::from(e.position_height))
+                        .to_array(),
+                    radius: f32::from(e.radius),
+                    height: f32::from(e.height),
+                    owner_yaw: t.yaw,
+                    attack: None,
+                })
+            }
+            None => Some(rc::Shape {
+                owner: TALK,
+                group: 0,
+                command: TALK_COMMAND,
+                centre: (t.position + Vec3::Y * REACTION_SPHERE[2]).to_array(),
+                radius: REACTION_SPHERE[0],
+                height: REACTION_SPHERE[1],
+                owner_yaw: t.yaw,
+                attack: None,
+            }),
+        };
+        shapes.extend(shape);
     }
     let p = Vec3::from_array(game.player.position);
     let drive = game.drive.as_ref();
@@ -513,9 +586,7 @@ fn inputs(
         height: SORA_OBJ[1],
         yaw: game.player.yaw,
         battle,
-        // [U] Not while a summon's limit scene captures him (see
-        // `sora_actor`).
-        no_control: !summon::in_limit_scene(game) && game.player.no_control(&game.clips),
+        no_control: game.player.no_control(&game.clips),
         state: sora_actor(game).state,
         form: drive.filter(|d| d.active).map_or(0, |d| d.form),
         // FUN_1403b6a10 refuses everything for +0xde0 == 0xc, a state the
@@ -527,6 +598,9 @@ fn inputs(
         won: game.battle_won,
         leader: true,
         hold: state.hold,
+        // Range 25 of Sora's motion (+0x18c bit 20, +0x638) with the
+        // partner (+0x2b0).
+        partner: game.player.partner_command(&game.clips).zip(state.captor),
         no_shapes: game.party_limit.is_some(),
         ..Default::default()
     };
@@ -664,11 +738,7 @@ fn tour_press(game: &Game, shown: Option<rc::Candidate>, tick: u64) -> bool {
                 || game.limit_tour && limit_tour::reaction(tick)
         }
         rc::Source::Offered if c.target.owner == SUMMON => {
-            // Stitch's rows and the reaction command take turns.
-            let rotate = game.summon_tour && summon::special_mode(game) == Some(4);
-            game.summon_tour
-                && summon_tour::reaction(tick)
-                && !(rotate && summon_tour::rotation(tick).is_some())
+            game.summon_tour && summon_tour::mash(tick)
         }
         rc::Source::Offered => game.autoplay.is_some(),
         rc::Source::Shape if c.target.owner == TALK => {
@@ -691,7 +761,7 @@ fn tour_press(game: &Game, shown: Option<rc::Candidate>, tick: u64) -> bool {
 /// from [`State::press`].
 fn carry_out(game: &mut Game, actors: &mut [GalleryActor], c: rc::Candidate, tick: u64) {
     match c.source {
-        rc::Source::Shape if c.target.owner < SORA => {
+        rc::Source::Shape | rc::Source::Partner if c.target.owner < SORA => {
             // Sora's update (FUN_1403a89a0) runs the request the same tick
             // (FUN_1403d6fc0 → vt+0x138 → FUN_1403a8b10); the press already
             // tested his windows (FUN_1403b6950). FUN_1401b15f0, which takes
@@ -709,6 +779,14 @@ fn carry_out(game: &mut Game, actors: &mut [GalleryActor], c: rc::Candidate, tic
                 game.event(serde_json::json!({"event":"reaction_executed","tick":tick,
                     "command":c.command,"owner":c.target.owner,"sora_action":action,"sora_frame":frame}));
             }
+        }
+        // FUN_1403a8b10 case 0x37: the save point's menu (FUN_1403a5650(7),
+        // FUN_1402e4950). [Not ported] The room has no Save screen.
+        rc::Source::Shape if c.command == SAVE_COMMAND => {
+            game.event(
+                serde_json::json!({"event":"save_menu_requested","tick":tick,
+                "save_point":c.target.owner - SAVE_POINT}),
+            );
         }
         rc::Source::Auto(item) => {
             let Some(row) = game
@@ -782,4 +860,50 @@ pub fn menu_reaction(game: &Game) -> Option<field_command_menu::Reaction> {
         flag3: row.flags & 8 != 0,
         restart: c.flags & 2 != 0,
     })
+}
+
+/// FUN_140418f30: the save point's heal. Its timer gains 1.0 a frame; at
+/// 2.0 each party member gets 1 HP and 1 MP (FUN_1403c0c30 / FUN_1403c0cd0,
+/// which shortens a running MP charge instead) unless already full, a member
+/// whose object is not out is refilled at once (FUN_1403c2040 /
+/// FUN_1403c0860), and the timer starts again.
+fn save_heal(game: &mut Game, timer: &mut f32) {
+    *timer += SAVE_HEAL_STEP;
+    if *timer < SAVE_HEAL_AT {
+        return;
+    }
+    *timer = 0.;
+    let mut healed = 0;
+    // Sora (his HP is kept by the battle runtime, when there is one).
+    let hp_full = game
+        .enemy
+        .as_ref()
+        .is_none_or(|rt| rt.sora_hp >= rt.sora_target.max_hp);
+    let mp = &game.player.mp;
+    if !(hp_full && !mp.charging() && mp.cur >= mp.max) {
+        if let Some(rt) = game.enemy.as_mut() {
+            rt.sora_hp = (rt.sora_hp + 1).min(rt.sora_target.max_hp);
+        }
+        game.player.mp.add(1);
+        healed += 1;
+    }
+    for m in &mut game.party {
+        if m.stored {
+            m.hp = m.max_hp;
+            m.mp.cur = m.mp.max;
+            continue;
+        }
+        let full = m.hp >= m.max_hp && !m.mp.charging() && m.mp.cur >= m.mp.max;
+        if !full {
+            m.hp = (m.hp + 1).min(m.max_hp);
+            m.mp.add(1);
+            healed += 1;
+        }
+    }
+    if healed > 0 {
+        let tick = game.tick;
+        let hp = game.enemy.as_ref().map(|rt| rt.sora_hp);
+        let mp = game.player.mp.cur;
+        game.event(serde_json::json!({"event":"save_heal","tick":tick,"sora_hp":hp,"sora_mp":mp}));
+    }
 }
