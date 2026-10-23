@@ -342,6 +342,13 @@ impl World {
         self.ray_filtered(p0, p1, class, true)
     }
 
+    /// FUN_140171350: the same ray with the polygon filter cleared
+    /// (FUN_1401745c0(W, 0, 0, 0, 0)), so nibble-4 polygons count; the
+    /// script's map-line queries (FUN_14040c2b0) pass their mask as `class`.
+    pub fn segment(&self, p0: V3, p1: V3, class: u32) -> Option<(V3, u16)> {
+        self.ray_filtered(p0, p1, class, false)
+    }
+
     /// The camera's segment query (FUN_140171210): the same ray with the
     /// polygon filter cleared (FUN_1401745c0(W, 0, 0, 0, 0)), so nibble-4
     /// polygons count, and class 0xf. Returns the hit point, the polygon's

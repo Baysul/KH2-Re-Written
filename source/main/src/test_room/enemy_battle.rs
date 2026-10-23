@@ -898,6 +898,7 @@ impl BattleActor {
             match &mut self.brain {
                 Brain::Script(a) => {
                     a.wall_radius = self.assets.wall_radius;
+                    a.set_map_body(self.assets.map_body);
                     a.tick(world, player, rng)
                 }
                 Brain::Shadow(a) => a.tick(rng, &*self.clips, &Arena(world), player, player),

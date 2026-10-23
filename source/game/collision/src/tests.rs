@@ -276,3 +276,14 @@ fn attack_ray_hits_only_class_four_polygons() {
         Some(1)
     );
 }
+
+#[test]
+fn the_script_segment_keeps_nibble_four_polygons_of_its_class_only() {
+    let (from, to) = ([0., -100., 0.], [600., -100., 0.]);
+    // A nibble-4 wall for class 1 (attribute bit 5): the body ray skips it,
+    // the script's segment does not; class 2 (bit 6) passes through.
+    let w = World::new(&room(0x24), !0).unwrap();
+    assert!(w.ray(from, to, 1).is_none());
+    assert_eq!(w.segment(from, to, 1).unwrap().0, [300., -100., 0.]);
+    assert!(w.segment(from, to, 2).is_none());
+}

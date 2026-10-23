@@ -160,6 +160,31 @@ pub struct EnemyCombat {
     /// The radius of the first OBJ shape (collision kind 1), the body circle
     /// a script object keeps out of the walls; 0 without one.
     pub wall_radius: f32,
+    /// The map collision body (see [`map_body`]); `None` for the classes
+    /// whose constructor is not traced, which keep the host's movement.
+    pub map_body: Option<enemy::env::MapBody>,
+}
+
+/// The map body of a boss-class object (objentry type 3): FUN_1403b3200
+/// reads the first collision entry of kind 0 or 4, and the boss
+/// constructor (FUN_1403f8da0 -> FUN_140411700) sets class 1, or 2 when the
+/// object entry's +0x48 bit 3 is set.
+fn map_body(
+    collision: &[object_collision::Entry],
+    object_type: u8,
+    flags: u16,
+) -> Option<enemy::env::MapBody> {
+    if object_type != 3 {
+        return None;
+    }
+    let e = collision.iter().find(|e| e.kind == 0 || e.kind == 4)?;
+    Some(enemy::env::MapBody {
+        radius: f32::from(e.radius),
+        height: f32::from(e.height),
+        offset: f32::from(e.position_height),
+        mode: u32::from(e.kind != 0),
+        class: 1 + u32::from(flags >> 3 & 1),
+    })
 }
 
 fn payload<'a>(bytes: &'a [u8], name: &[u8; 4]) -> Result<&'a [u8]> {
@@ -246,6 +271,7 @@ impl EnemyCombat {
             .iter()
             .find(|e| e.kind == 1)
             .map_or(0., |e| f32::from(e.radius));
+        let map_body = map_body(&collision, object.object_type, object.flags);
         let reactions = reaction_shapes(&collision, kind.model.skinning.bones.len());
         let (body, targets, attacks) =
             collision_shapes(&collision, kind.model.skinning.bones.len())?;
@@ -394,6 +420,7 @@ impl EnemyCombat {
             sheets,
             patn,
             wall_radius,
+            map_body,
         })
     }
 
@@ -808,6 +835,7 @@ mod tests {
             reactions: Vec::new(),
             default_groups: 1,
             wall_radius: 0.,
+            map_body: None,
             sheets: EnmpSheets {
                 enmp: Default::default(),
                 lvpm: Default::default(),

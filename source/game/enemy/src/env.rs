@@ -27,6 +27,32 @@ pub trait Clips {
     }
 }
 
+/// A body's map collision record (`CB`, obj+0x6d0) as the object's model
+/// gives it: the first BAR-type-23 entry of kind 0 or 4 (FUN_1403c9bc0(.., 0x11)
+/// in FUN_1403b3200): radius (+0x10), height (+0x12), the sphere's centre
+/// above the feet (+0x0e), mode 1 for a kind-4 entry, and the class the
+/// object's constructor set (CB+0x70 bits 3-6).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MapBody {
+    pub radius: f32,
+    pub height: f32,
+    pub offset: f32,
+    pub mode: u32,
+    pub class: u32,
+}
+
+/// One body-versus-map move (FUN_14016fec0, then FUN_140170c10).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MapMove {
+    /// Feet position after the move.
+    pub position: Vec3,
+    /// CB+0x74 bit 0 (obj+0x744): no floor under the body.
+    pub no_floor: bool,
+    /// The floor plane's normal (obj+0x758) in the engine's frame, for the
+    /// next tick's ground projection; (0, -1, 0) without a floor.
+    pub normal: Vec3,
+}
+
 /// The world around the actor.
 pub trait Env {
     /// Highest walkable floor at (x, z) below `top`.
@@ -38,6 +64,20 @@ pub trait Env {
             to[1] = to[1].max(y);
         }
         to
+    }
+    /// FUN_1403b9090's solve for a body (FUN_14016fec0): a grounded move is
+    /// first turned into the floor plane whose normal (engine frame) the
+    /// last move left. `None` when the host has no map solver; the object
+    /// then moves by [`Env::movement`].
+    fn collide(
+        &self,
+        _body: &MapBody,
+        _from: Vec3,
+        _displacement: Vec3,
+        _airborne: bool,
+        _normal: Vec3,
+    ) -> Option<MapMove> {
+        None
     }
     /// The engine's ground probe (0 level, 1 higher, 2 lower, 3 no ground).
     fn check_step(
@@ -65,6 +105,12 @@ pub trait Env {
     /// The first point where the map crosses the segment (`bghit_check_line`).
     fn line_hit(&self, _from: Vec3, _to: Vec3) -> Option<Vec3> {
         None
+    }
+    /// FUN_14040c2b0 -> FUN_140171350: the map's segment ray with the
+    /// polygon filter cleared, against the polygons of collision `class`
+    /// (the caller's mask: 1 for the ground search, 2 for the air search).
+    fn line_hit_class(&self, from: Vec3, to: Vec3, _class: u32) -> Option<Vec3> {
+        self.line_hit(from, to)
     }
     /// Whether the map blocks the line between two points.
     fn line_blocked(&self, from: Vec3, to: Vec3) -> bool {
