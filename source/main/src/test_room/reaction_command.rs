@@ -142,8 +142,9 @@ pub struct State {
     pub talk_label: Vec<u8>,
     /// The last marker the run log recorded.
     pub marker_logged: u32,
-    /// Since the hold began Sora left idle / walk / run, or talked.
-    hold_away: bool,
+    /// Sora asked for a command since the last tick (his update's request).
+    pub request_made: bool,
+    /// Sora talked since the hold began.
     hold_talk: bool,
 }
 
@@ -158,7 +159,7 @@ impl Default for State {
             points: Vec::new(),
             talk_label: Vec::new(),
             marker_logged: 0,
-            hold_away: false,
+            request_made: false,
             hold_talk: false,
         }
     }
@@ -254,9 +255,12 @@ impl rc::Env for World<'_> {
 
 /// Sora's FUN_1403ba070 state as the room keeps it: an ANB range 0..2 or a
 /// reaction's tail for the window, range 26 for the state. [U] While a
-/// summon's limit scene captures him, the room plays his captured clips
-/// without their motion flags (the scene's proxy of him holds none either),
-/// so the window counts as open and the no-control test as passed there.
+/// summon's limit scene captures him the window counts as open and the
+/// no-control test as passed: his captured clips do carry the states the
+/// follow-ups chain to (Genie's 543 → range 26 = 535 at frames 96..136,
+/// Stitch's 527 → 600 at 30..102), but the room's summon scripts capture
+/// him anew before those windows open, so with the executable's tests no
+/// follow-up is ever taken and the limits stall.
 fn sora_actor(game: &Game) -> rc::Actor {
     if summon::in_limit_scene(game) {
         return rc::Actor {
@@ -293,29 +297,20 @@ pub fn tick(
     if let Some(t) = talk.as_deref() {
         state.talk_label.clone_from(&t.label);
     }
-    // The hold ends with Sora's next command or hit: FUN_1403a89a0 clears
-    // +0xdd8 for any request, and the state handlers that bring him back to
-    // idle call FUN_1403a81c0 [I: the room clears it when he is hurt, comes
-    // back to idle, walk or run after leaving them, or ends a talk].
-    if state.hold.is_some() {
-        use player::Action;
-        let free = matches!(
-            game.player.action,
-            Action::Idle | Action::Walk | Action::Run | Action::Land
-        );
-        if matches!(game.player.action, Action::Hurt(_))
-            || state.hold_away && free
-            || state.hold_talk && !game.talking
-        {
-            state.hold = None;
-        }
-        state.hold_away |= !free;
-        state.hold_talk |= game.talking;
+    // The hold ends with Sora's next request (FUN_1403a89a0 clears +0xdd8
+    // for any request before it holds a Triangle one), and with his object's
+    // reset or KO (FUN_1403a7330, slot 0 of the player classes; FUN_1403a81c0
+    // from the KO handlers, e.g. FUN_140404d60 at Sora's vt+0xb0). [I] The
+    // room also ends it when a talk ends.
+    if state.hold.is_some()
+        && (std::mem::take(&mut state.request_made)
+            || game.player.dead()
+            || state.hold_talk && !game.talking)
+    {
+        state.hold = None;
     }
-    if state.hold.is_none() {
-        state.hold_away = false;
-        state.hold_talk = false;
-    }
+    state.request_made = false;
+    state.hold_talk = state.hold.is_some() && (state.hold_talk || game.talking);
     let menu_kind = hud
         .as_ref()
         .and_then(|h| h.menu.as_ref())

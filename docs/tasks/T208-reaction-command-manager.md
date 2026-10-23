@@ -125,13 +125,23 @@ and its tests, and unattended tours against the install (results below).
   range of the leader's constructor FUN_1403a7a40) holds the command and runs FUN_1403d6fc0 on
   the request in the tick it was made. A press is now carried out at once (the press itself
   already tested his windows); before, a press outside a window was dropped.
-- The hold's end: FUN_1403a81c0 is called from state handlers whose meaning was not traced; the
-  room clears the hold when Sora is hurt, returns to idle / walk / run after leaving them, or
-  ends a talk [I].
-- While a summon's limit scene captures Sora, the room plays his captured clips without their
-  motion flags, and the scene's proxy of him holds none (its +0x18c was 0x4000 and +0x638 0 in the
-  runs). There the window test counts as open and the no-control test as passed [U]; with the
-  real tests Genie's and Stitch's follow-ups were refused.
+- The hold's end. FUN_1403a89a0 clears +0xdd8 for any request before it holds a Triangle one;
+  FUN_1403a7330 (slot 0 of three player-class vtables, 0x1405c47d0 / 4980 / 4b30) clears it at
+  the object's reset; FUN_1403a81c0 is called from the classes' KO handlers (FUN_140404d60 at
+  Sora's vt+0xb0, FUN_1404051e0, FUN_140403300 / FUN_140403b00) and eight per-class thunks. The
+  room ends it on Sora's next command (an action he starts that is not movement, a landing or a
+  hit) and on his KO. [I] It also ends it when a talk ends (the talk branch was not checked).
+- While a summon's limit scene captures Sora, the window test counts as open and the no-control
+  test as passed [U]. His captured clips do carry the states the follow-ups chain to (Genie's 543
+  → range 26 = 535 at frames 96..136, Stitch's 527 → 600 at 30..102), but in the room the
+  summons' scripts capture him anew before those windows open (Genie: a new capture 15 ticks
+  into the 136-tick one). With the executable's tests no follow-up was ever taken and the
+  limits stalled (the last summon's limit never started), so the summon-limit flow has to be
+  checked first. The scene's proxy of Sora holds no motion flags (+0x18c 0x4000, +0x638 0).
+- Found on the way: Sora's captured motions in summon limits were shown on frame 0 throughout
+  (the frame came from the summon's clip table, which holds no length for those slots); they now
+  play from the capture's own length. The scripts' flow does not read that frame (the same runs
+  before and after).
 - FUN_1403b6a10's +0xde0 == 0xc case ("no reaction at all") is a state the room's forms never
   take [U]; Antiform (+0xde0 == 6) dims the slot as FUN_140408520 does.
 - The partner command (+0x18c bit 20) and the clash (kind 14) and spawn (0x83) commands are in
@@ -148,8 +158,10 @@ and its tests, and unattended tours against the install (results below).
   refusal (FUN_1403ad500) and the model flag bit 15 are wired but always clear in the room.
 - The save point's heal while "Save" (command 0x37) shows (FUN_140418f30) is not ported: the
   room has no save point.
-- The ReactionDecideSprite is drawn as a one-shot of group 4; its own vtable (0x1405b1bc8) was
-  not decompiled, nor the custom-layout second burst (group 99 at the root).
+- The ReactionDecideSprite (vtable 0x1405b1bc8) adds only a pool return (FUN_14015b460) and a
+  destructor (FUN_14015a9a0) to the generic sprite; its update is FUN_14016b3c0, which deletes it
+  at its group's end, as drawn here. The custom-layout second burst (group 99 at the root) is
+  not drawn.
 
 ## Results
 
@@ -178,6 +190,8 @@ and its tests, and unattended tours against the install (results below).
     already diverged before its first offer. After the merge with `6de4a1f` (whose tour takes
     Stitch's rows and Triangle in turn) the run gives 64 follow-ups, the same commands and
     counts as main's run above; Block in the Sephiroth tour is unchanged.
+  - After the hold and capture-frame changes: the summon tour again gives main's 64 follow-ups;
+    Block's held slot lasts from the press (280) to Sora's next attack (430).
   - Talk (`--autoplay` on the talk room): "Talk" with the 0x32 marker (the green triangle) over
     the NPC from tick 0; Triangle at 60 starts the talk.
   - Limit Form (`--autoplay`, arena): Infinity at 7700 and one follow-up (Shoot) at 7819 through
@@ -191,8 +205,8 @@ the auto abilities; the slot with its marker; the press; the HUD slot and burst)
 and runs against the install for Sephiroth's Block, Talk, party limits, summons and Limit Form.
 Nothing is compared with the original game, so no behaviour is claimed 1:1 by observation.
 
-Next: (1) the motion flags of the captured clips Sora plays in summon limits (so the window and
-no-control tests run there); (2) FUN_1403a81c0's callers, to end the hold as the executable
-does; (3) the partner command and clash commands once the room has objects that set them; (4)
-the save point's heal (FUN_140418f30) with save points; (5) the ReactionDecideSprite's own
-update (vtable 0x1405b1bc8); (6) side-by-side captures against the installed game.
+Next: (1) the summons' limit flow (when their scripts capture Sora), so the window and
+no-control tests can run there; (2) the talk branch's effect on the held command; (3) the
+partner command and clash commands once the room has objects that set them; (4) the save
+point's heal (FUN_140418f30) with save points; (5) side-by-side captures against the installed
+game.

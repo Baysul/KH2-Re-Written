@@ -7465,6 +7465,19 @@ fn simulate(
         let position = game.player.position;
         let armed = game.player.armed;
         game.action_started = game.tick;
+        // A command Sora asked for (the manager's request): it ends a held
+        // reaction command (FUN_1403a89a0).
+        if !matches!(
+            action,
+            Action::Idle
+                | Action::Walk
+                | Action::Run
+                | Action::Fall
+                | Action::Land
+                | Action::Hurt(_)
+        ) {
+            game.reaction.request_made = true;
+        }
         let motion = game.player.motion_id(&game.clips);
         let ptya_id = match action {
             Action::Attack(i) | Action::AirAttack(i) => Some(game.clips.records[i].id),
