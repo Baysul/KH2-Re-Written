@@ -713,6 +713,15 @@ impl RoomWorld {
         }
     }
 
+    /// The first point where the map crosses the segment (scene
+    /// coordinates; `bghit_check_line` for the scripts).
+    pub fn line_hit(&self, from: [f32; 3], to: [f32; 3]) -> Option<[f32; 3]> {
+        match self {
+            RoomWorld::Triangles(w) => w.segment_hit(from, to),
+            RoomWorld::Map(w) => w.line_hit(from, to),
+        }
+    }
+
     /// The collision triangles in scene coordinates (for the skateboard).
     pub fn skate_triangles(&self) -> Vec<[Vec3; 3]> {
         match self {
@@ -6403,7 +6412,8 @@ fn simulate(
             Vec2::ZERO,
             magic_tour::jump(tick, game.magic_shift),
             magic_tour::attack(tick, game.magic_shift)
-                || game.limit_form_tour && limit_form_tour::attack(tick),
+                || game.limit_form_tour
+                    && limit_form_tour::attack(tick, game.player.action == Action::GuardRecoil),
         )
     } else if let Some(tour) = &game.ability_tour {
         (
@@ -7003,7 +7013,15 @@ fn simulate(
     // Guard (Square): F or the pad's west button; unattended runs guard
     // just before two of the Shadow's claws.
     let guard = if game.autoplay.is_some() {
+        let claw = game.enemy.as_ref().is_some_and(|rt| {
+            matches!(
+                rt.enemy.current_act(),
+                Some(shadow::ActKind::ClawL | shadow::ActKind::ClawR | shadow::ActKind::ClawF)
+            )
+        });
+        let guarding = matches!(game.player.action, Action::Guard | Action::GuardRecoil);
         !game.magic_tour && !game.sephiroth_tour && AUTOPLAY_GUARDS.contains(&tick)
+            || game.limit_form_tour && limit_form_tour::guard(tick, claw, guarding)
     } else {
         std::mem::take(&mut game.guard_queued)
     } && !talking;

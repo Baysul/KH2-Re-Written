@@ -130,8 +130,11 @@ pub trait Env {
     fn target_reach(&self, id: u32) -> Option<f32> {
         self.target_radius(id)
     }
-    /// Sora's target record (+0xdc8 + 4) as FUN_1403d78d0 takes it: the
-    /// lock-on's, or the actor targeted without one.
+    /// Sora's target record (+0xdc8 + 4) as FUN_1403d78d0 takes it: +0xdc8
+    /// is the target holder DAT_142a11208 (built by FUN_1403dcb30, set by
+    /// FUN_1403a7a40), whose automatic and manual states FUN_1403dcd70 /
+    /// FUN_1403dd650 keep the lock-on's actor or the one targeted without
+    /// one.
     fn attack_target(&self) -> Option<u32> {
         self.lockon_target()
     }
