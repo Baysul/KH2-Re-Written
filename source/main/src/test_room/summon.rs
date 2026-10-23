@@ -750,6 +750,13 @@ pub fn tick(mut game: ResMut<Game>, gallery: Res<EnemyGallery>, rig: Res<super::
             if let Some(aim) = aim {
                 a.brain.set_aim(aim.to_array());
             }
+            // FUN_1401cb050 then turns Sora to the view (FUN_1403b6420 with
+            // the view matrix's +0x10 and +0x30 as x and z) [I: read as
+            // the camera's forward on the ground].
+            let forward = super::from_world(rig.camera.look_at) - super::from_world(rig.camera.eye);
+            if forward.x != 0. || forward.z != 0. {
+                a.brain.turn_limit_player(forward.x.atan2(forward.z));
+            }
         } else {
             a.aim_lock = false;
         }

@@ -678,6 +678,15 @@ impl ScriptBrain {
         self.world.player_proxy.as_deref().map(|p| &p.sys)
     }
 
+    /// FUN_1403b6420 on Sora's stand-in during the limit: his heading.
+    pub fn turn_limit_player(&mut self, yaw: f32) {
+        if self.limit.is_some()
+            && let Some(p) = self.world.player_proxy.as_deref_mut()
+        {
+            p.sys.yaw = yaw;
+        }
+    }
+
     /// A follow-up command Sora took (trigger 23 with the command).
     pub fn limit_follow_up(&mut self, command: u16) {
         let Some(mut scene) = self.limit.take() else {

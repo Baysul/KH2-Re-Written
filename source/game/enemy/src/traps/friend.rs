@@ -330,26 +330,57 @@ fn friend_use_item(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Re
 /// summons outside Stitch and Chicken Little take FUN_1401cd1f0: the
 /// current action ends. Chicken Little's FUN_1401cb6c0 also enters his
 /// limit mode (+0x28 bit 0), whose deck the host shows
-/// ([`friend::CHICKEN_LITTLE_DECK`]). [Open] Stitch's FUN_1401c9d60; the
-/// rest of FUN_1401cb6c0 (the attach to Sora, the fades, the reticle and
-/// camera mode 9, Sora's physics mode 0x3e).
+/// ([`friend::CHICKEN_LITTLE_DECK`]): Sora's +0x120 bit 8 and +0x124 bit
+/// 14 and his own +0x120 bit 8 are set, he is carried at Sora's origin
+/// (FUN_1403d9fe0 with bone 0x4000, flags 4) and Sora enters physics mode
+/// 0x3e (FUN_1403b4da0). The fades, the reticle and camera mode 9 are the
+/// host's. [Open] Stitch's FUN_1401c9d60.
 fn start_limit(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     action_clear(ctx, m, args)?;
     let id = me(ctx, m, args[0].value)?;
-    with_friend(ctx, id, |f| {
-        if f.personality == friend::Personality::ChickenLittle {
+    let chicken_little = with_friend(ctx, id, |f| {
+        let cl = f.personality == friend::Personality::ChickenLittle;
+        if cl {
             f.limit = true;
         }
+        cl
     })?;
+    if chicken_little == Some(true) {
+        let sora = &mut ctx.object(PLAYER_OBJECT)?.sys;
+        sora.flags |= 0x100;
+        sora.state_flags |= 0x4000;
+        sora.to_limit_stand();
+        let sys = &mut ctx.object(id)?.sys;
+        sys.flags |= 0x100;
+        sys.to_ground_mode();
+        sys.attached = Some(crate::sysobj::Attach {
+            to: PLAYER_OBJECT,
+            bone: 0x4000,
+            flags: 4,
+            callback: None,
+        });
+    }
     Ok(())
 }
 
 /// 10:4 FUN_1405364b0: the personality's end-limit (vtable +0x50). Chicken
-/// Little's FUN_1401cb180 leaves his limit mode; a no-op for the summons
-/// outside Stitch and Chicken Little. [Open] Stitch's FUN_1401c7e00.
+/// Little's FUN_1401cb180 leaves his limit mode: the bits FUN_1401cb6c0 set
+/// clear, he is let go (FUN_1403da250) and Sora goes back to mode 0. A
+/// no-op for the summons outside Stitch and Chicken Little. [Open]
+/// Stitch's FUN_1401c7e00.
 fn end_limit(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
     let id = me(ctx, m, args[0].value)?;
-    with_friend(ctx, id, |f| f.limit = false)?;
+    let was = with_friend(ctx, id, |f| std::mem::replace(&mut f.limit, false))?;
+    if was == Some(true) {
+        let sora = &mut ctx.object(PLAYER_OBJECT)?.sys;
+        sora.flags &= !0x100;
+        sora.state_flags &= !0x4000;
+        sora.limit_stand = false;
+        let sys = &mut ctx.object(id)?.sys;
+        sys.flags &= !0x100;
+        sys.attached = None;
+        sys.to_ground_mode();
+    }
     Ok(())
 }
 

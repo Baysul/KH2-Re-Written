@@ -438,6 +438,13 @@ pub struct Sysobj {
     pub limit_flight: Option<LimitFlight>,
     /// Physics mode 0x2a (Genie's limit hover, `obj_limit_hover`).
     pub limit_hover: Option<LimitHover>,
+    /// Physics mode 0x3e (object 0x140750d08, word 0x900), which
+    /// FUN_1401cb6c0 puts Sora in for Chicken Little's limit: its entry,
+    /// exit and step slots are empty (FUN_140409ab0 / ac0 / b30 / b40), so
+    /// the object does not move; its motion slot is the ground idle picker
+    /// (FUN_140422520); its fall and landing slots (FUN_140536260 /
+    /// FUN_1405362c0) change to mode 0x3f.
+    pub limit_stand: bool,
     /// Physics mode 3 with a camera-space matrix (FUN_1403b4da0(obj, 3),
     /// FUN_1403cbfc0: +0x124 bit 6, +0x8c8 bit 12): the object does not
     /// move by itself; its host places it from the camera (Stitch).
@@ -707,6 +714,7 @@ impl Sysobj {
             camera_space: false,
             limit_flight: None,
             limit_hover: None,
+            limit_stand: false,
             model_hidden: false,
             texture_animation: false,
             tex_fade: Fade::default(),
@@ -732,6 +740,9 @@ impl Sysobj {
         if self.camera_space {
             // Mode 3's +0xc.
             0x100
+        } else if self.limit_stand {
+            // Mode 0x3e's +0xc.
+            0x900
         } else if self.limit_flight.is_some() {
             // Mode 0x34's +0xc.
             0x10a
@@ -1017,7 +1028,7 @@ impl Sysobj {
         self.tex_fade.step(1.0);
         // A carried object does not move by itself (physics mode 3); the
         // world places it on its holder. Nor does one in camera space.
-        if self.attached.is_some() || self.camera_space {
+        if self.attached.is_some() || self.camera_space || self.limit_stand {
             return;
         }
         if let Some(f) = self.limit_flight {
@@ -1156,6 +1167,7 @@ impl Sysobj {
         if let Some(h) = self.limit_hover.take() {
             self.turn_rate = h.turn;
         }
+        self.limit_stand = false;
         self.jump = None;
         self.hop = None;
         self.fly = None;
@@ -1509,6 +1521,15 @@ impl Sysobj {
             inertia: spec.word10,
             turn,
         });
+    }
+
+    /// FUN_1403b4da0(obj, 0x3e): the current mode's exit, then mode 0x3e,
+    /// which has no entry of its own.
+    pub fn to_limit_stand(&mut self) {
+        self.leave_air_modes();
+        self.camera_space = false;
+        self.limit_stand = true;
+        self.sampler.reset();
     }
 
     /// `obj_limit_hover` (FUN_14053d680): a velocity of `v`'s direction
