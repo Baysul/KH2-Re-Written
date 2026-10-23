@@ -1669,6 +1669,54 @@
           ]
         },
         {
+          "id": "NATIVE-T211-01",
+          "label": "Reaction command search over the held command, record 1, partner, shapes, attacks and auto offers - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T211-reaction-command-manager.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T211-02",
+          "label": "Reaction slot, target marker and Triangle press - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T211-reaction-command-manager.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T211-03",
+          "label": "Reaction slot drawing, prompt and burst on the command menu - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T211-reaction-command-manager.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T211-04",
+          "label": "Attack-borne reaction commands - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T211-reaction-command-manager.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T211-05",
+          "label": "Save point offer and heal while Save shows - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T211-reaction-command-manager.md"
+          ]
+        },
+        {
+          "id": "NATIVE-T211-06",
+          "label": "Partner and spawn reaction command sources - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T211-reaction-command-manager.md"
+          ]
+        },
+        {
           "id": "NATIVE-T212-01",
           "label": "World map cursor actions, the ship blend, dash and warp path - translation, equivalence unproved",
           "status": "PARTIAL",

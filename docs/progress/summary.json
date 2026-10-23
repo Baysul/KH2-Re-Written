@@ -2,17 +2,17 @@
   "schema_version": 1,
   "game": "KH2 Final Mix",
   "baseline": "Steam app 2552430 build 15194255 candidate - supported profile unqualified",
-  "ledger_sha256": "3e70d48c23171c09bc58a8c895fc36113d9f808eb817b684ed73908165f4ca70",
+  "ledger_sha256": "de480a164f02f5f38413160560ef8993797c463577ab4a13d2076ee424abad24",
   "inventories": {
     "decompilation": {
       "complete": false,
-      "tracked": 212,
+      "tracked": 218,
       "passed": 0,
       "statuses": {
         "BLOCKED": 0,
         "FAIL": 0,
         "NOT RUN": 0,
-        "PARTIAL": 212,
+        "PARTIAL": 218,
         "PASS": 0
       },
       "tracked_percent": 0.0,
