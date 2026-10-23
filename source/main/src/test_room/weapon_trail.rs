@@ -14,15 +14,25 @@ use data::object_effect::{BonePos, Pax};
 /// The weapon PAX element the trail uses.
 const TRAIL_ELEMENT: u16 = 10;
 
-/// The two points of `bone` in engine world space for this tick, or `None`
-/// without a weapon pose.
-pub fn points(game: &Game, bone: &BonePos) -> Option<[[f32; 3]; 2]> {
+/// A slot's blade and hand matrices and its weapon vertices per frame.
+fn slot_poses(cp: &ClipPoses, slot: usize) -> (&[Mat4], &[Mat4], &[Vec<Vec3>]) {
+    if slot == 0 {
+        (&cp.blade, &cp.weapon, &cp.weapon_frames)
+    } else {
+        (&cp.blade2, &cp.weapon2, &cp.weapon2_frames)
+    }
+}
+
+/// The two points of `bone` on weapon slot `slot`'s blade in engine world
+/// space for this tick, or `None` without a weapon pose.
+pub fn points(game: &Game, bone: &BonePos, slot: usize) -> Option<[[f32; 3]; 2]> {
     let clip = *game.poses.get(&(game.player.action, game.player.armed))?;
     let cp = game.clip_poses.get(clip)?;
     let frame = game.player.motion_frame(&game.clips) as usize;
-    let blade = cp.blade.get(frame.min(cp.blade.len().checked_sub(1)?))?;
-    let hand = cp.weapon.get(frame.min(cp.weapon.len().checked_sub(1)?))?;
-    let length = game.trail_length?;
+    let (blades, hands, _) = slot_poses(cp, slot);
+    let blade = blades.get(frame.min(blades.len().checked_sub(1)?))?;
+    let hand = hands.get(frame.min(hands.len().checked_sub(1)?))?;
+    let length = game.trail_length[slot]?;
     let at = Vec3::from_array(game.player.position);
     let turn = Quat::from_rotation_y(game.player.yaw);
     let to_scene = |ratio: f32| {
@@ -34,11 +44,12 @@ pub fn points(game: &Game, bone: &BonePos) -> Option<[[f32; 3]; 2]> {
 
 /// The blade bone's length: the mesh extent along the bone's x axis divided
 /// by the trail element's far ratio (3.7 for the Keyblades).
-fn calibrate(game: &Game, far_ratio: f32) -> Option<f32> {
+fn calibrate(game: &Game, far_ratio: f32, slot: usize) -> Option<f32> {
     let clip = *game.poses.get(&(game.player.action, game.player.armed))?;
     let cp = game.clip_poses.get(clip)?;
-    let blade = cp.blade.first()?;
-    let verts = cp.weapon_frames.first()?;
+    let (blades, _, frames) = slot_poses(cp, slot);
+    let blade = blades.first()?;
+    let verts = frames.first()?;
     let inverse = blade.inverse();
     let (mut lo, mut hi) = (f32::MAX, f32::MIN);
     for v in verts {
@@ -53,8 +64,8 @@ fn calibrate(game: &Game, far_ratio: f32) -> Option<f32> {
     Some(lo.abs().max(hi.abs()) / far_ratio.abs())
 }
 
-/// The effect owner id of the trail's instance.
-pub const OWNER: u8 = 0xfc;
+/// The effect owner ids of each slot's trail instance.
+pub const OWNERS: [u8; 2] = [0xfc, 0xf8];
 
 /// FUN_1403effa0, the weapon object's per-frame trail routine: with no live
 /// trail effect (`obj+0xc00` clear), an open range-12 window (`obj+0x18c`
@@ -63,47 +74,52 @@ pub const OWNER: u8 = 0xfc;
 /// (FUN_1402be8e0) and the handle cleared, so the next window starts a new
 /// one. [I] FUN_1403ba840's blocking conditions (`obj+0x124 & 0x180`, an event
 /// mode, a menu) are taken as clear.
-pub fn tick(game: &mut Game, pax: Option<&Arc<Pax>>) {
+/// Every weapon object runs it (FUN_1403efa60), so slot 1's Keyblade
+/// (Valor, Master, Final) trails on its own motion's windows with its own
+/// element 10; slot 0's room Keyblade only while drawn.
+pub fn tick(game: &mut Game, pax: Option<&Arc<Pax>>, slot: usize) {
     let Some(pax) = pax else { return };
     let Some(element) = pax.by_id(TRAIL_ELEMENT) else {
         return;
     };
-    let window = window_open(game);
-    if window && game.trail_length.is_none() {
-        game.trail_length = calibrate(game, element.bone_pos.ratio_b);
+    let owner = OWNERS[slot];
+    let window = window_open(game, slot);
+    if window && game.trail_length[slot].is_none() {
+        game.trail_length[slot] = calibrate(game, element.bone_pos.ratio_b, slot);
         let tick = game.tick;
-        let length = game.trail_length;
-        game.event(serde_json::json!({"event":"weapon_trail_length","tick":tick,"length":length}));
+        let length = game.trail_length[slot];
+        game.event(serde_json::json!({"event":"weapon_trail_length","tick":tick,"slot":slot,"length":length}));
     }
-    if !game.trail_live {
+    if !game.trail_live[slot] {
         if window {
             game.fx_queue.push(drive_fx::Placed {
                 req: drive_fx::FxRequest {
                     pax: pax.clone(),
                     id: TRAIL_ELEMENT,
-                    owner: OWNER,
+                    owner,
                 },
-                anchor: drive_fx::Anchor::Weapon,
+                anchor: drive_fx::Anchor::Weapon(slot),
             });
-            game.trail_live = true;
+            game.trail_live[slot] = true;
         }
     } else if !window {
-        game.fx_release.push(OWNER);
-        game.trail_live = false;
+        game.fx_release.push(owner);
+        game.trail_live[slot] = false;
     }
 }
 
-/// Whether the weapon motion's range 12 holds at this frame.
-fn window_open(game: &Game) -> bool {
-    if !game.player.armed {
+/// Whether the slot's weapon motion holds range 12 at this frame.
+fn window_open(game: &Game, slot: usize) -> bool {
+    if slot == 0 && !game.player.armed {
         return false;
     }
     let Some(&clip) = game.poses.get(&(game.player.action, game.player.armed)) else {
         return false;
     };
     let frame = game.player.motion_frame(&game.clips);
-    game.clip_poses[clip]
-        .trails
+    let cp = &game.clip_poses[clip];
+    let windows = if slot == 0 { &cp.trails } else { &cp.trails2 };
+    windows
         .iter()
         .any(|&(start, end)| start <= frame && frame <= end)
 }

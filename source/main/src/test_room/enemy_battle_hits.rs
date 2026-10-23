@@ -547,6 +547,7 @@ pub fn tick(game: &mut Game, actors: &mut [GalleryActor], tick: u64) {
                             random: rows[row].hit_effect_random,
                             contact,
                             direction,
+                            own: v.member.is_none() && v.magic.is_none() && (v.key >> 5) & 3 == 2,
                         }),
                     }
                 }

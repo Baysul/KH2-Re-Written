@@ -24,6 +24,9 @@ use visual::overlay::{LayoutMaterial, Ui2dFrame};
 const LAYER_BASE: usize = 8;
 /// (x, y) size of the zoomed quad over the screen: (514/512, 418/416).
 pub const ZOOM: [f32; 2] = [514. / 512., 418. / 416.];
+/// The Drive change's quad (FUN_14040d000 sets cx = cy = 2 before
+/// FUN_1403f7880: (0x100 + 2)·2 / 512, (0xd0 + 2)·2 / 416).
+pub const DRIVE_ZOOM: [f32; 2] = [516. / 512., 420. / 416.];
 
 #[derive(Resource)]
 pub struct Blur {

@@ -40,9 +40,29 @@ pub enum Anchor {
     Map { index: usize },
     /// A battle enemy (by gallery actor id): a bound element follows it.
     Actor(u64),
-    /// The equipped weapon: a trail element (BonePos pair) follows the
+    /// A weapon slot (0 or 1): a trail element (BonePos pair) follows its
     /// blade bone.
-    Weapon,
+    Weapon(usize),
+    /// A Wisdom bullet (by key): the element takes its position and
+    /// direction every tick (`effect_set_pos` / `effect_set_dir`).
+    Bullet(u64),
+}
+
+/// An instance's world matrix at `at` turned to `dir` (scene coordinates),
+/// keeping the element's scale.
+fn aimed(at: [f32; 3], dir: [f32; 3], scale: [f32; 3]) -> Mat {
+    let d = to_world(dir);
+    let pitch = (-d[1]).atan2((d[0] * d[0] + d[2] * d[2]).sqrt());
+    let yaw = d[0].atan2(d[2]);
+    ::effect::instance_matrix(to_world(at), [pitch, yaw, 0.], scale)
+}
+
+/// Slot `slot`'s blade tip in scene coordinates this frame (bone code
+/// 0x4003 / 0x4004's point).
+pub fn blade_tip(game: &Game, slot: usize) -> Option<Vec3> {
+    let pose = sora_pose(game);
+    let (_, tip) = pose.slots[slot]?;
+    Some(pose.root.transform_point3(tip))
 }
 
 /// A start request that names its anchor (Sora's own use [`FxRequest`]).
@@ -106,14 +126,17 @@ struct Running {
     enemy_element: Option<object_effect::Element>,
     /// The battle actor an element follows, with the element.
     actor_element: Option<(u64, object_effect::Element)>,
-    /// The BonePos pair a swing trail follows on the weapon's blade bone.
-    trail: Option<object_effect::BonePos>,
+    /// The weapon slot and BonePos pair a swing trail follows on that
+    /// slot's blade bone.
+    trail: Option<(usize, object_effect::BonePos)>,
     /// The background group a map element belongs to.
     group: Option<u8>,
     /// The element's sound, stopped with the element (map beds loop).
     sound_id: Option<u32>,
     /// The serial it holds in the hit-effect ring (0 = none).
     spark: u64,
+    /// The Wisdom bullet it follows, with the element's scale.
+    bullet: Option<(u64, [f32; 3])>,
     /// The element's sound (sound > 0) and the ticks until it plays: it
     /// starts with the element, after its start wait.
     sound: Option<u32>,
@@ -170,8 +193,15 @@ impl DriveFx {
     }
 }
 
-/// Sora's scene-space object matrix and the bone matrices of this frame.
-fn sora_pose(game: &Game) -> (Mat4, Option<&HashMap<usize, Mat4>>) {
+/// Sora this frame: his scene-space object matrix, the bone matrices, and
+/// each weapon slot's grip matrix and blade tip (model space).
+struct SoraPose<'a> {
+    root: Mat4,
+    bones: Option<&'a HashMap<usize, Mat4>>,
+    slots: [Option<(Mat4, Vec3)>; 2],
+}
+
+fn sora_pose(game: &Game) -> SoraPose<'_> {
     let p = game.player.position;
     let root = Mat4::from_rotation_translation(
         Quat::from_rotation_y(game.player.yaw),
@@ -179,22 +209,60 @@ fn sora_pose(game: &Game) -> (Mat4, Option<&HashMap<usize, Mat4>>) {
     );
     let clip = game.poses.get(&(game.player.action, game.player.armed));
     let frame = game.player.motion_frame(&game.clips) as usize;
-    let bones = clip
-        .and_then(|&c| game.clip_poses.get(c))
-        .and_then(|c| c.body.get(frame.min(c.body.len().saturating_sub(1))));
-    (root, bones)
+    let cp = clip.and_then(|&c| game.clip_poses.get(c));
+    let bones = cp.and_then(|c| c.body.get(frame.min(c.body.len().saturating_sub(1))));
+    // FUN_1403b5450's slot matrix and the blade length along it: the hand
+    // joint holding the weapon, and the weapon vertex farthest from it [I].
+    let slot = |grips: &[Mat4], verts: &[Vec<Vec3>]| -> Option<(Mat4, Vec3)> {
+        let grip = *grips.get(frame.min(grips.len().checked_sub(1)?))?;
+        let v = verts.get(frame.min(verts.len().checked_sub(1)?))?;
+        let tip = v
+            .iter()
+            .copied()
+            .max_by(|a, b| a.length_squared().total_cmp(&b.length_squared()))?;
+        Some((grip, grip.transform_point3(tip)))
+    };
+    let slots = cp.map_or([None, None], |c| {
+        [
+            slot(&c.weapon, &c.weapon_frames),
+            slot(&c.weapon2, &c.weapon2_frames),
+        ]
+    });
+    SoraPose { root, bones, slots }
 }
 
 /// FUN_1402c49d0 for a bound element: the bone's matrix (the bone read
 /// through FUN_1401a7af0 negates its y and z columns) or the object's.
-fn bound_world(root: Mat4, bones: Option<&HashMap<usize, Mat4>>, bind: &Bind) -> Mat {
-    let m = if bind.bone < 0 || bind.bone >= 0x4000 {
-        root
-    } else {
-        match bones.and_then(|b| b.get(&(bind.bone as usize))) {
-            Some(b) => root * *b * Mat4::from_diagonal(Vec4::new(1., -1., -1., 1.)),
+/// FUN_1403b50f0's codes: 0x4003 / 0x4004 a weapon slot's blade tip,
+/// 0x4005 / 0x4006 its grip, 0x4007 / 0x4008 the blade's middle (slot 0 /
+/// 1); 0x4000, 0x4002 and the shape codes 0x4001 / 0x4009 stay on the
+/// object [I: the shape centres are not posed here].
+/// A weapon code's matrix: the grip's axes at the tip (0x4003 / 0x4004),
+/// the grip (0x4005 / 0x4006) or halfway along the blade (0x4007 / 0x4008).
+fn slot_matrix(grip: Mat4, tip: Vec3, code: i16) -> Mat4 {
+    let along = match code {
+        0x4003 | 0x4004 => 1.,
+        0x4007 | 0x4008 => 0.5,
+        _ => 0.,
+    };
+    let mut m = grip;
+    m.w_axis = grip.w_axis.truncate().lerp(tip, along).extend(1.);
+    m
+}
+
+fn bound_world(pose: &SoraPose, bind: &Bind) -> Mat {
+    let flip = Mat4::from_diagonal(Vec4::new(1., -1., -1., 1.));
+    let root = pose.root;
+    let m = match bind.bone {
+        0x4003..=0x4008 => match pose.slots[(bind.bone - 0x4003) as usize % 2] {
+            Some((grip, tip)) => root * slot_matrix(grip, tip, bind.bone) * flip,
             None => root,
-        }
+        },
+        b if !(0..0x4000).contains(&b) => root,
+        b => match pose.bones.and_then(|m| m.get(&(b as usize))) {
+            Some(m) => root * *m * flip,
+            None => root,
+        },
     };
     ::effect::math::mul(&to_game(m), &bind.local)
 }
@@ -231,6 +299,27 @@ pub fn tick(
             r.instance.release();
         }
     }
+    // A Wisdom bullet's element: killed with a hit, faded over 8 frames when
+    // its life runs out (`effect_fadeout(fx, 8.0, 0)`).
+    let ends = game
+        .drive
+        .as_mut()
+        .map(|d| std::mem::take(&mut d.bullet_ends))
+        .unwrap_or_default();
+    for (key, faded) in ends {
+        if faded {
+            for r in fx
+                .running
+                .iter_mut()
+                .filter(|r| r.bullet.is_some_and(|b| b.0 == key))
+            {
+                r.instance.fade_out(8.);
+                r.bullet = None;
+            }
+        } else {
+            fx.running.retain(|r| r.bullet.is_none_or(|b| b.0 != key));
+        }
+    }
     // Effects displaced from the hit-effect ring fade out over four frames.
     for serial in std::mem::take(&mut sparks.fade_fx) {
         for r in fx.running.iter_mut().filter(|r| r.spark == serial) {
@@ -253,7 +342,7 @@ pub fn tick(
         fx.running
             .retain(|r| !(r.group.is_some() && group.is_none_or(|g| r.group == Some(g))));
     }
-    let (root, bones) = sora_pose(&game);
+    let pose = sora_pose(&game);
     let mut sounds = Vec::new();
     let mut log = Vec::new();
     let tick = game.tick;
@@ -291,6 +380,7 @@ pub fn tick(
         let local = ::effect::instance_matrix(element.translation, element.rotation, element.scale);
         let mut enemy_element = None;
         let mut actor_element = None;
+        let mut bullet = None;
         let (bind, world) = match anchor {
             Anchor::Sora => {
                 let bind = (element.flags & 1 != 0).then_some(Bind {
@@ -298,13 +388,13 @@ pub fn tick(
                     local,
                 });
                 let world = match &bind {
-                    Some(b) => bound_world(root, bones, b),
-                    None => ::effect::math::mul(&to_game(root), &local),
+                    Some(b) => bound_world(&pose, b),
+                    None => ::effect::math::mul(&to_game(pose.root), &local),
                 };
                 (bind, world)
             }
             Anchor::Map { .. } => (None, local),
-            Anchor::Weapon => (None, ::effect::math::IDENTITY),
+            Anchor::Weapon(_) => (None, ::effect::math::IDENTITY),
             Anchor::Actor(id) => {
                 let Some(&(position, yaw)) = game.actor_poses.get(&id) else {
                     continue;
@@ -327,6 +417,17 @@ pub fn tick(
                 None,
                 ::effect::instance_matrix(to_world(at.to_array()), [pitch, yaw, 0.], element.scale),
             ),
+            Anchor::Bullet(key) => {
+                let Some(b) = game
+                    .drive
+                    .as_ref()
+                    .and_then(|d| d.bullets.iter().find(|b| b.key == key))
+                else {
+                    continue;
+                };
+                bullet = Some((key, element.scale));
+                (None, aimed(b.pos, b.dir, element.scale))
+            }
             Anchor::Enemy => {
                 let Some((position, yaw)) = enemy_at else {
                     continue;
@@ -382,8 +483,13 @@ pub fn tick(
                 owner: req.owner,
                 enemy_element,
                 actor_element,
-                trail: (matches!(anchor, Anchor::Weapon) && element.flags & 0x10000 != 0)
-                    .then_some(element.bone_pos),
+                bullet,
+                trail: match anchor {
+                    Anchor::Weapon(slot) if element.flags & 0x10000 != 0 => {
+                        Some((slot, element.bone_pos))
+                    }
+                    _ => None,
+                },
                 group: matches!(anchor, Anchor::Map { .. }).then_some(element.group),
                 sound_id: sound.filter(|_| matches!(anchor, Anchor::Map { .. })),
                 sound: sound.filter(|_| wait > 0.),
@@ -399,7 +505,7 @@ pub fn tick(
     }
     let view = game_view(rig.camera.eye, rig.camera.look_at);
     let view_inverse = Mat4::from_cols_array_2d(&view).inverse();
-    let (root, bones) = sora_pose(&game);
+    let pose = sora_pose(&game);
     let fx = &mut *fx;
     fx.batches.clear();
     fx.dirty = true;
@@ -409,7 +515,7 @@ pub fn tick(
     let mut unsupported = Vec::new();
     for r in fx.running.iter_mut() {
         if let Some(b) = &r.bind {
-            r.instance.world = bound_world(root, bones, b);
+            r.instance.world = bound_world(&pose, b);
         }
         if let Some((id, element)) = &r.actor_element
             && let Some(&(position, yaw)) = game.actor_poses.get(id)
@@ -419,8 +525,16 @@ pub fn tick(
         if let (Some(element), Some((position, yaw))) = (&r.enemy_element, enemy_at) {
             r.instance.world = super::bound_world(position, yaw, element);
         }
-        if let Some(bone) = &r.trail {
-            r.instance.trail = super::weapon_trail::points(&game, bone);
+        if let Some((slot, bone)) = &r.trail {
+            r.instance.trail = super::weapon_trail::points(&game, bone, *slot);
+        }
+        if let Some((key, scale)) = r.bullet
+            && let Some(b) = game
+                .drive
+                .as_ref()
+                .and_then(|d| d.bullets.iter().find(|b| b.key == key))
+        {
+            r.instance.world = aimed(b.pos, b.dir, scale);
         }
         let q = r.instance.frame(&view, &mut fx.rng);
         for &k in &r.instance.unsupported {
@@ -445,10 +559,12 @@ pub fn tick(
         }
     }
     fx.running.retain(|r| !r.instance.finished());
-    game.trail_live = fx
-        .running
-        .iter()
-        .any(|r| r.owner == super::weapon_trail::OWNER && !r.instance.is_released());
+    for (slot, owner) in super::weapon_trail::OWNERS.into_iter().enumerate() {
+        game.trail_live[slot] = fx
+            .running
+            .iter()
+            .any(|r| r.owner == owner && !r.instance.is_released());
+    }
     // The prizes on the ground (obj/PRIZE.mdlx, program 203): billboards at
     // each prize's centre.
     if let (Some((dpd, prize)), Some(rt)) = (&fx.prize, game.enemy.as_ref()) {
@@ -779,5 +895,23 @@ pub fn present(
             e.insert(ChildOf(s.0));
         }
         fx.spawned.push(e.id());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn weapon_codes_sit_on_the_tip_the_grip_and_the_middle() {
+        let grip =
+            Mat4::from_rotation_translation(Quat::from_rotation_z(0.5), Vec3::new(1., 2., 3.));
+        let tip = Vec3::new(1., 12., 3.);
+        let at = |code| slot_matrix(grip, tip, code).w_axis.truncate();
+        assert_eq!(at(0x4003), tip);
+        assert_eq!(at(0x4006), Vec3::new(1., 2., 3.));
+        assert_eq!(at(0x4008), Vec3::new(1., 7., 3.));
+        // The grip's axes are kept.
+        assert_eq!(slot_matrix(grip, tip, 0x4003).x_axis, grip.x_axis);
     }
 }
