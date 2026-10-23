@@ -7139,8 +7139,7 @@ fn simulate(
         };
     }
     if game.party_items_tour {
-        // [Tour setup] Sora's slots hold the three items before each use
-        // (Donald's and Goofy's own item uses draw on them too).
+        // [Tour setup] Sora's slots hold the three items before each use.
         if party_items_tour::use_slot(tick + 1).is_some()
             && let Some(rt) = game.items.as_mut()
         {
@@ -12670,6 +12669,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 voices: kind.voices.clone(),
                 voice_at: (u16::MAX, 0),
                 item_fired: false,
+                save: kind.new_game,
                 event: 0,
                 blade: None,
                 shield: None,
