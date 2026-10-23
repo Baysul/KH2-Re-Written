@@ -117,6 +117,9 @@ pub struct ItemInfo {
 /// `originals` are the item slots' original items (R+0x44).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Equipment {
+    /// The member's character id (1 Sora, 2 Donald, 3 Goofy; 0 is taken
+    /// as Sora): it picks the weapon type Equip offers.
+    pub character: u8,
     pub weapon: u16,
     /// Member record +2: second member weapon, distinct from a form's weapon.
     /// The development room leaves this slot empty.
@@ -203,6 +206,29 @@ pub fn type_icon(kind: u8, alt: bool) -> u8 {
         _ => (0xb, 0xb),
     };
     if alt { other } else { icon }
+}
+
+/// The item type of a character's weapons: the (character, type) pairs
+/// at 0x1405bbe48 (FUN_14034bc80 filter 1).
+pub fn weapon_type(character: u8) -> u8 {
+    const PAIRS: [(u8, u8); 14] = [
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (7, 5),
+        (5, 6),
+        (9, 7),
+        (10, 8),
+        (6, 9),
+        (13, 10),
+        (11, 11),
+        (8, 12),
+        (12, 13),
+        (14, 2),
+        (15, 9),
+    ];
+    let c = character.max(1);
+    PAIRS.iter().find(|p| p.0 == c).map_or(2, |p| p.1)
 }
 
 /// The types each stock tab lists (FUN_14034bc80 with the tab's filter).
@@ -1040,6 +1066,29 @@ impl Camp {
             let dy = if k == 2 { y + thumb } else { y };
             self.sprites.get_mut(id).offset = [origin[0], origin[1] + dy];
         }
+    }
+
+    /// The scrollbar takes a new row count (its thumb length, then its
+    /// place).
+    pub(super) fn scroll_total(
+        &mut self,
+        seq: &Sequence,
+        row0: usize,
+        rows_total: usize,
+        visible: usize,
+    ) {
+        let Some(parent) = self.item_ui.scroll_parent else {
+            return;
+        };
+        let length = seq.groups[self.sprites.get(parent).player.group].text_scale as f32;
+        let t = seq.groups[SCROLL[1][0]].text_scale as f32;
+        let total = rows_total.max(visible).max(1);
+        let s = (visible as f32 / total as f32).min(1.) * length / t;
+        self.item_ui.scroll_scale = s;
+        if let Some(&thumb) = self.item_ui.scroll.get(1) {
+            self.sprites.get_mut(thumb).scale = [1., s];
+        }
+        self.scroll_to(seq, row0, rows_total, visible);
     }
 
     /// The scrollbar closes (FUN_1402fab60).
