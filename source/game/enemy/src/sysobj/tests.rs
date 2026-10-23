@@ -198,29 +198,38 @@ fn arming_a_jump_resets_the_fall_and_land_motions() {
 }
 
 #[test]
-fn a_summon_left_in_the_air_by_a_frozen_range_falls_and_lands() {
+fn a_grounded_object_left_in_the_air_falls_once_no_range_holds_it() {
+    // FUN_1403b9090: a range 0x1e (or 3) keeps a grounded object's root-driven
+    // air phase going; it does not leave the ground.
     let mut s = Sysobj::bare();
     s.class_flags |= class_flag::SUMMON;
     s.position = [0., 140., 0.];
     s.motion.flags.word |= motion::flag::GRAVITY_FROZEN_2;
     s.end_tick(&Flat);
-    assert!(s.is_jump(), "off the floor and not rising: a fall");
+    assert!(!s.is_jump(), "held by the range");
+    // Range 0x1d (`+0x18c` bit 23) stops it leaving; the script flag word's
+    // bit 23 (`+0x120`) does not.
+    s.motion.flags.word = 0x80_0000;
+    s.end_tick(&Flat);
+    assert!(!s.is_jump(), "held by range 0x1d");
+    s.flags |= 1 << 23;
+    // Without a range, off the floor: it leaves the ground (the summon class
+    // first takes motion 4) and falls to the floor; the fall (FUN_1403b7850)
+    // sets `+0x120` bit 26.
+    s.motion.flags.word = 0;
+    s.end_tick(&Flat);
+    assert!(s.is_jump(), "off the floor in the ground mode: a fall");
     assert_eq!(s.motion.slot, 4);
     assert_eq!(s.jump_motions, JumpMotions::default());
-    s.motion.flags.word = 0;
+    assert_ne!(s.flags & 0x400_0000, 0);
     for _ in 0..200 {
         s.end_tick(&Flat);
     }
     assert!(!s.is_jump() && close(s.position[1], 0.));
-    // On the floor, or without the range, nothing happens.
+    // On the floor nothing happens.
     let mut g = Sysobj::bare();
-    g.motion.flags.word |= motion::flag::GRAVITY_FROZEN_2;
     g.end_tick(&Flat);
     assert!(!g.is_jump());
-    let mut h = Sysobj::bare();
-    h.position = [0., 140., 0.];
-    h.end_tick(&Flat);
-    assert!(!h.is_jump());
 }
 
 #[test]
