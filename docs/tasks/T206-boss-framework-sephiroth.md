@@ -100,7 +100,20 @@ never switches (one track), and the mission's battle style 2 keeps the battle st
 
 ## Checks
 
-See Results.
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`,
+`cargo test --workspace --locked`, `cargo build --workspace --locked`, the release helper
+(`build-release.bat` → `tools/Build-Launcher.ps1`), `python tools/progress.py` and its tests, and
+unattended runs of the fight against the install:
+
+```
+KH2RW room <Steam-root> <manifest> <hb01-programs-75 config> --sephiroth-tour <new dir> --log <file>
+  KH2RW_SEPH_TOUR_END=<ticks>  KH2RW_SEPH_TOUR_LOW=<tick>  KH2RW_SEPH_TOUR_LOG=<every>
+```
+
+The tour is a test setup, not a game rule: Sora gets 9999 HP (the room's Sora is level 1),
+locks on, walks to the boss and attacks every 10 ticks, presses Triangle on every other
+offer, and with `KH2RW_SEPH_TOUR_LOW` the boss drops to 30 HP at that tick so the run reaches
+his death (the last blow must still be a finisher).
 
 ## Uncertainty
 
@@ -124,8 +137,35 @@ See Results.
 
 ## Results
 
-Pending.
+- fmt, clippy (no warnings), workspace tests (all pass; one test ignored as on `main`),
+  workspace build: PASS. Release helper: see the pull request.
+- New unit tests: the kill veto and the boss death signal, the pattern-15 one-damage rule,
+  `patn` rows, the revenge decay, the reaction-command enables and entries, the Triangle search
+  (priority, score, dimming, form gate, the ellipsoid test), the vacuum pull, the light tint.
+- Run `t7` (4800 ticks, against the install): mission 236 `HB01_MS601` loads (flags 0x1b1,
+  bonus 35, clear sound 23, both overlays); battle level 80, BGM 188/188; Sephiroth binds ENMP 140
+  (HP 3000, 15 Scan bars), boss class 0x412, patterns 0xc404. Donald's fire does 0 and Goofy's
+  hits do 1. Block is offered during Split Flash (tick 277), Triangle captures Sora into slot 252,
+  the 1353 hit on the posed Sora runs `rc_success` (slot 253, white-out/in, camera watch). His
+  other acts run: Spin Slash, Upper, Air Slash, Shadow Flare S and L, Faiga Wall, Power Up (at 30
+  % HP), warps, revenge. Normal hits leave him at 1 HP; Sora's finisher (ATKP 129) kills him at
+  tick 3511; signal 4 → `dead_boss` → bonus 35 ("Drive Gauge Powered Up!") → both overlays →
+  the clear at 3605. His sounds (bank 363) and voice lines (bank 5243) resolve and play.
+- Earlier runs found and fixed: his spawn facing (scene yaw = pi − engine yaw), the movement
+  request that never cleared (a runaway after `move_warp`), the room's generic autoplay script
+  opening the pause menu during the tour.
+- Not seen in the runs: Heartless Angel, Meteor, the grab after an unblocked Split Flash (the
+  tour's alternation saw only one Split Flash), his phase lines at 70 % HP.
 
 ## Verdict and next task
 
-Pending.
+PARTIAL. The boss framework (class, revenge, hit order and veto, `patn`, sheets, reaction
+commands, captures, script threads, OBJ_ATTACK, mission clear) is translated from the exe and
+runs Sephiroth's own script against the install from meeting to clear; nothing has been
+compared with the original game, so no behaviour is claimed 1:1 by observation.
+
+Next: (1) runs that reach Heartless Angel, Meteor and the grab; (2) the clear overlays' cameras
+and radial blur, the voice priority; (3) Sora-side effects of hook threads (`obj_fly`,
+`fly_to_jump`) and the vacuum on Donald and Goofy; (4) the light tint on fog and map effects;
+(5) the reaction-command marker and HUD burst; (6) a side-by-side capture against the installed
+game.
