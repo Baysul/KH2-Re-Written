@@ -96,6 +96,7 @@ mod magic_room;
 mod magic_tour;
 mod party_blade;
 mod party_hit_tour;
+mod party_items_tour;
 mod party_limit;
 mod party_room;
 mod prize_room;
@@ -1084,6 +1085,8 @@ struct Game {
     limit_tour: bool,
     /// The unattended `--limit-form-tour` (limit_form_tour.rs).
     limit_form_tour: bool,
+    /// The unattended `--party-items-tour` (party_items_tour.rs).
+    party_items_tour: bool,
     /// The unattended `--summon-tour` (summon_tour.rs).
     summon_tour: bool,
     /// The deck swap (left, logical 0x10000) and open (right, 0x10000000)
@@ -7158,6 +7161,25 @@ fn simulate(
             _ => menu_item,
         };
     }
+    if game.party_items_tour {
+        // [Tour setup] Sora's slots hold the three items before each use.
+        if party_items_tour::use_slot(tick + 1).is_some()
+            && let Some(rt) = game.items.as_mut()
+        {
+            rt.slots = party_items_tour::SLOTS.to_vec();
+        }
+        if let Some(k) = party_items_tour::wear(tick) {
+            for (i, m) in game.party.iter_mut().enumerate() {
+                m.hp = m.max_hp / 3;
+                m.mp.cur = 0;
+                if k == 2 && i == 1 {
+                    m.hp = 0;
+                    m.follower.ko(m.kind.ko_time);
+                }
+            }
+        }
+        menu_item = party_items_tour::use_slot(tick).or(menu_item);
+    }
     let cast = cast.or(menu_cast);
     // Spells and items a form disables are refused (FUN_1403b6cb0).
     let (cast, menu_item) = match game.drive.as_ref() {
@@ -12088,6 +12110,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
     let mut summon_tour = false;
     let mut limit_tour = false;
     let mut limit_form_tour = false;
+    let mut party_items_tour = false;
     let mut game_over_tour = false;
     let mut enemy_audit = None;
     // Capture ticks replacing the unattended run's own list (research).
@@ -12272,6 +12295,17 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                         .next()
                         .cloned()
                         .ok_or("limit form tour capture directory absent")?,
+                );
+            }
+            // And the party items tour.
+            Some("--party-items-tour") if autoplay.is_none() => {
+                magic_tour = true;
+                party_items_tour = true;
+                autoplay = Some(
+                    options
+                        .next()
+                        .cloned()
+                        .ok_or("party items tour capture directory absent")?,
                 );
             }
             Some("--journal-tour") if autoplay.is_none() => {
@@ -12471,7 +12505,12 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         None
     };
     // A form's change takes about 260 ticks before the first cast.
-    let magic_shift = if party_hit_tour || deck_tour || limit_tour || summon_tour || limit_form_tour
+    let magic_shift = if party_hit_tour
+        || deck_tour
+        || limit_tour
+        || summon_tour
+        || limit_form_tour
+        || party_items_tour
     {
         // The magic tour's schedule never comes up.
         1 << 40
@@ -12489,6 +12528,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         summon_tour::captures()
     } else if limit_form_tour {
         limit_form_tour::captures()
+    } else if party_items_tour {
+        party_items_tour::captures()
     } else if limit_tour {
         limit_tour::captures()
     } else if journal_tour {
@@ -12532,6 +12573,8 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         summon_tour::end()
     } else if limit_form_tour {
         limit_form_tour::end()
+    } else if party_items_tour {
+        party_items_tour::end()
     } else if limit_tour {
         limit_tour::end()
     } else if journal_tour {
@@ -12677,6 +12720,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
                 voices: kind.voices.clone(),
                 voice_at: (u16::MAX, 0),
                 item_fired: false,
+                save: kind.new_game,
                 event: 0,
                 blade: None,
                 shield: None,
@@ -12743,6 +12787,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         summon_stick: [0.; 3],
         limit_tour,
         limit_form_tour,
+        party_items_tour,
         party_limits: Arc::new(std::mem::take(&mut loaded.party_limits)),
         party_limit: None,
         limit_request: None,

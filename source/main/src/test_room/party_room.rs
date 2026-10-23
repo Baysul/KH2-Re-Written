@@ -125,6 +125,10 @@ pub struct PartyKind {
     /// reads (FUN_1403f9130).
     pub object_type: u8,
     pub weight: f32,
+    /// The character record a new game starts the member with.
+    pub new_game: party_members::Save,
+    /// SSTM +0x164: the Item Boost each equipped Item Boost adds.
+    pub item_boost_rate: u16,
 }
 
 /// A member in the room.
@@ -163,6 +167,8 @@ pub struct MemberRt {
     pub voice_at: (u16, u32),
     /// The item-use trigger of the running item motion has fired.
     pub item_fired: bool,
+    /// The member's character record (abilities, item slots, frequencies).
+    pub save: party_members::Save,
     /// The HUD event the gauge has not read yet (0 none, 1-3 hit, 4 heal;
     /// FUN_1403d60c0 and FUN_1403d2eb0 post it).
     pub event: u8,
@@ -198,6 +204,8 @@ pub struct PendingItem {
     pub item: u16,
     /// The party slot it is for (0 Sora, 1 Donald, 2 Goofy).
     pub target: u8,
+    /// The user's Item Boost (percent added to 100).
+    pub boost: u16,
 }
 
 /// The wait between the use trigger and the heal (`DAT_140623bcc`).
@@ -629,6 +637,9 @@ pub fn load(
         .ok_or("SSTM record")?;
     let sstm = actor_physics::Sstm::read(record).ok_or("SSTM record truncated")?;
     let rates = party_hit::Rates::read(record).ok_or("SSTM rates truncated")?;
+    let item_boost_rate = player::abilities::Rates::read(record)
+        .ok_or("SSTM rates truncated")?
+        .w164;
     // Goofy's own object script runs the Bash on the object-script engine.
     let script = if records
         .iter()
@@ -655,6 +666,17 @@ pub fn load(
             })
             .collect(),
     ));
+    // The new-game record: the plrp row of key 0, its consumables (03system
+    // `item` type 0) in the item slots, the rest in the ability slots.
+    let kinds: HashMap<u16, u8> = data::item_table::read(bar_entry(system, b"item")?)?
+        .iter()
+        .map(|r| (r.id, r.kind))
+        .collect();
+    let new_game = data::battle_tables::new_game_row(plrp, character as u8)?
+        .map(|row| {
+            party_members::Save::new_game(row.item_slots, &row.ids, |id| kinds.get(&id) == Some(&0))
+        })
+        .unwrap_or(party_members::Save::EMPTY);
     Ok(PartyKind {
         name,
         model,
@@ -686,6 +708,8 @@ pub fn load(
         blade_clips,
         object_type: entry.object_type,
         weight: entry.weight(),
+        new_game,
+        item_boost_rate,
     })
 }
 
@@ -1580,10 +1604,6 @@ pub fn tick(game: &mut Game, tick: u64) {
         }
         mp
     };
-    let counts: Vec<std::cell::Cell<u32>> = (0..8u16)
-        .map(|id| std::cell::Cell::new(items.as_ref().map_or(0, |rt| rt.count(id))))
-        .collect();
-    let stock = |id: u16| counts.get(id as usize).map_or(0, |c| c.get());
     // The tour orders its casts; the AI casts on its own elsewhere.
     let spells = (*party_spells || std::env::var_os("KH2RW_PARTY_COMBAT").is_some())
         && (!*magic_tour || *party_hit_tour || super::magic_tour::free_party(tick, *magic_shift));
@@ -1722,7 +1742,7 @@ pub fn tick(game: &mut Game, tick: u64) {
             spells,
             hp,
             mp_all,
-            items: &stock,
+            save: &m.save,
             actionable: &actionable,
             sstm: kind.sstm,
             rates: kind.rates,
@@ -1746,8 +1766,9 @@ pub fn tick(game: &mut Game, tick: u64) {
             m.follower.position = moved.position;
         }
         m.motion_voices(sound_queue);
-        // FUN_1403f6790 at the item-use trigger: the item leaves Sora's slots
-        // and its heal is queued; a hit before the trigger uses nothing.
+        // FUN_1403f6790 at the item-use trigger: the item leaves the member's
+        // own slots (FUN_1403c49c0 with its character) and its heal is
+        // queued; a hit before the trigger uses nothing.
         match m.follower.attack.and_then(|a| a.item.map(|i| (a, i))) {
             Some((a, (item, target)))
                 if !m.item_fired
@@ -1758,14 +1779,20 @@ pub fn tick(game: &mut Game, tick: u64) {
                         .is_some_and(|f| a.tick >= f) =>
             {
                 m.item_fired = true;
-                if items.as_mut().is_some_and(|rt| rt.take(item)) {
-                    if let Some(c) = counts.get(item as usize) {
-                        c.set(c.get().saturating_sub(1));
-                    }
+                if m.save.take(item) {
+                    // [I] The user's Item Boost is built from its equipped
+                    // Item Boosts as Sora's is (abilities +0x54).
+                    let boosts = m
+                        .save
+                        .abilities
+                        .iter()
+                        .filter(|&&v| v == 0x8000 | 0x19b)
+                        .count() as u16;
                     party_items.push(PendingItem {
                         delay: ITEM_DELAY,
                         item,
                         target,
+                        boost: boosts.wrapping_mul(kind.item_boost_rate),
                     });
                     // FUN_1403f6b30's first update: system element 0 at the
                     // user.
@@ -2266,11 +2293,11 @@ pub fn tick(game: &mut Game, tick: u64) {
     party_items.retain_mut(|p| {
         p.delay -= 1.;
         if p.delay <= 0. {
-            due.push((p.item, p.target));
+            due.push((p.item, p.target, p.boost));
         }
         p.delay > 0.
     });
-    for (item, target) in due {
+    for (item, target, boost) in due {
         let Some(info) = items
             .as_ref()
             .and_then(|rt| rt.src.items.get(&item).copied())
@@ -2283,9 +2310,10 @@ pub fn tick(game: &mut Game, tick: u64) {
             vec![target as usize]
         };
         for slot in slots {
-            // FUN_1403c4b80: a share of the maxima, 100% (Item Boost is
-            // Sora's own).
-            let share = |max: i32| (max * info.amount as i32 * 100 + 9999) / 10000;
+            // FUN_1403c4b80: a share of the maxima, the user's Item Boost
+            // added to 100%.
+            let pct = 100 + i32::from(boost);
+            let share = |max: i32| (max * info.amount as i32 * pct + 9999) / 10000;
             let (hp_max, mp_max) = if slot == 0 {
                 (
                     enemy.as_ref().map(|rt| rt.sora_target.max_hp),

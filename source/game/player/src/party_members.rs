@@ -7,16 +7,19 @@
 //! FUN_1401cc890 / FUN_1401cc8c0; the formation distance is not decoded
 //! (`DAT_14071d760` is filled at run time) and is a test-room value. The
 //! friend AI keeps no combo chain: each decision picks one eligible record
-//! at random, never the same one three times in a row.
+//! at random; a pick that would make a fourth repeat falls back on the
+//! Rare entries.
 //!
 //! Donald's four spells are records too (57-60, `FUN_1401cc650` /
 //! `FUN_1401cc1a0`): they need the think loop's random MP-scaled permit
 //! (`FUN_1401b53b0`) and an MP bar that is not charging, and play the act of
-//! `party_spell`.
+//! `party_spell`. Each spell is an ability: the member's character record
+//! ([`Save`]) must hold it equipped, and its Customize frequency decides
+//! when the loop tries it.
 //!
 //! The personality's table also holds the item entries (`FUN_1401cc970` for
 //! HP, `FUN_1401cce90` for MP): a member under 45% of its HP or MP uses the
-//! first item of a preference list that Sora's item slots hold, on itself,
+//! first item of a preference list that its own item slots hold, on itself,
 //! Sora or the other member, and a partner in need (`FUN_1401b3a30`, entry
 //! flags 0x10 and 0x20) is served before any attack is chosen.
 
@@ -71,6 +74,118 @@ pub enum Spell {
     Tornado,
     Turbo,
     Bash,
+}
+
+/// FUN_1401cd270 / FUN_1401cd230 (the map at 0x1407249d0, filled into each
+/// action entry by FUN_1401cccf0): a spell's ability item and its index in
+/// the member's frequencies (FUN_1401dc060: 7 + the index).
+pub fn ability_of(spell: Spell) -> (u16, usize) {
+    match spell {
+        Spell::Fire => (0xa5, 7),
+        Spell::Blizzard => (0xa6, 8),
+        Spell::Thunder => (0xa7, 9),
+        Spell::Cure => (0xa8, 10),
+        Spell::Tornado => (0x1a7, 7),
+        Spell::Bash => (0x1ad, 8),
+        Spell::Turbo => (0x1a9, 9),
+    }
+}
+
+/// The Customize frequencies (record +0xf5..): 0 Free (items: Often),
+/// 1 Well-Balanced, 2 Rare (items: Last hope); 3 makes FUN_1401b2880 refuse.
+pub mod frequency {
+    pub const FREE: u8 = 0;
+    pub const WELL_BALANCED: u8 = 1;
+    pub const RARE: u8 = 2;
+    pub const OFF: u8 = 3;
+}
+
+/// A member's character record (save +0x24f0 + 0x114 * (t - 1),
+/// FUN_1403a14e0): what the AI's ability and item tests read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Save {
+    /// +0x54: the ability slots; the low 15 bits the ability item, bit 15
+    /// set when it is equipped.
+    pub abilities: [u16; 80],
+    /// +0x34: the item slots, the first `item_slots` (+0x12) in use.
+    pub items: [u16; 8],
+    pub item_slots: u8,
+    /// +0xf5: the frequencies, [0..7] items 1..7, [7 + k] ability k.
+    pub frequency: [u8; 31],
+}
+
+impl Save {
+    pub const EMPTY: Save = Save {
+        abilities: [0; 80],
+        items: [0; 8],
+        item_slots: 0,
+        frequency: [frequency::FREE; 31],
+    };
+
+    /// FUN_1403e4530(0) with one plrp row of key 0 on a zeroed record
+    /// (FUN_1403a0e70, FUN_1401dc010): the item-slot count (+0xb), then each
+    /// id through FUN_1403c3f00(id & 0x7fff, char, id >> 15): a consumable
+    /// takes the first empty item slot (FUN_1403a1380), an ability the first
+    /// empty ability slot with its equip bit (FUN_1403a1330).
+    pub fn new_game(item_slots: u8, ids: &[u16], consumable: impl Fn(u16) -> bool) -> Save {
+        let mut s = Save {
+            item_slots: item_slots.min(8),
+            ..Save::EMPTY
+        };
+        for &id in ids.iter().filter(|&&id| id != 0) {
+            let item = id & 0x7fff;
+            let n = usize::from(s.item_slots);
+            let (slots, value): (&mut [u16], u16) = if consumable(item) {
+                (&mut s.items[..n], item)
+            } else {
+                (&mut s.abilities, id)
+            };
+            if let Some(slot) = slots.iter_mut().find(|v| **v == 0) {
+                *slot = value;
+            }
+        }
+        s
+    }
+
+    /// FUN_1403c4380 for a consumable: how many item slots hold it.
+    pub fn count(&self, item: u16) -> u32 {
+        self.items[..usize::from(self.item_slots)]
+            .iter()
+            .filter(|&&v| v == item)
+            .count() as u32
+    }
+
+    /// FUN_1403c49c0: the last item slot holding it empties.
+    pub fn take(&mut self, item: u16) -> bool {
+        let n = usize::from(self.item_slots);
+        match self.items[..n].iter().rposition(|&v| v == item) {
+            Some(j) => {
+                self.items[j] = 0;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// FUN_1401b2880's ability test: the spell's frequency, or None when it
+    /// is off (3), not held or held but not equipped.
+    pub fn spell_frequency(&self, spell: Spell) -> Option<u8> {
+        let (item, index) = ability_of(spell);
+        let f = self.frequency[index];
+        let equipped = self
+            .abilities
+            .iter()
+            .any(|&v| v & 0x7fff == item && v & 0x8000 != 0);
+        (f != frequency::OFF && equipped).then_some(f)
+    }
+
+    /// An item's frequency (FUN_1401dc060: items 1..7 at 0..6).
+    pub fn item_frequency(&self, item: u16) -> u8 {
+        match item {
+            1..=7 => self.frequency[usize::from(item - 1)],
+            _ => frequency::FREE,
+        }
+    }
 }
 
 /// The consumables an item entry looks for.
@@ -350,8 +465,9 @@ pub struct Scene<'a, W: World> {
     pub hp: [Option<(i32, i32)>; 3],
     /// MP and maximum MP of the same three.
     pub mp_all: [Option<(i32, i32)>; 3],
-    /// How many slots of Sora's items hold an item (`FUN_1403c4380`).
-    pub items: &'a dyn Fn(u16) -> u32,
+    /// The member's character record: its abilities, item slots and
+    /// frequencies.
+    pub save: &'a Save,
     /// The motion's range 2 start, the tick a reaction lets the member act
     /// again (`obj+0x18c` bits 2-4).
     pub actionable: &'a dyn Fn(u16) -> Option<u32>,
@@ -499,12 +615,12 @@ impl Follower {
             .find(|&i| hp[i].is_some_and(|(cur, max)| cur < (max as f32 * ratio) as i32))
     }
 
-    /// The spell gate of FUN_1401b2880: a record with a cost needs the
-    /// permit and an MP bar that is not charging; Cure also a member to
-    /// heal.
+    /// The spell gate of FUN_1401b2880: the ability held, equipped and not
+    /// off; a record with a cost needs the permit and an MP bar that is not
+    /// charging; Cure also a member to heal.
     fn spell_ready<W: World>(&self, r: &Record, scene: &Scene<W>) -> bool {
         let Some(spell) = r.spell else { return true };
-        if !scene.spells {
+        if !scene.spells || scene.save.spell_frequency(spell).is_none() {
             return false;
         }
         if let Some((_, _, charging)) = scene.mp
@@ -519,7 +635,8 @@ impl Follower {
     /// `FUN_1401cc970` / `FUN_1401cce90`: the item an item entry uses and the
     /// party slot it is for. The target is the partner in need (HP only), else
     /// the first of this member, Sora and the other member under 45%; two or
-    /// more under it prefer the Mega items. Items come from Sora's slots.
+    /// more under it prefer the Mega items. Items come from the member's own
+    /// slots, each while its frequency is Often or a partner is in need.
     pub fn item_pick<W: World>(&self, need: ItemNeed, scene: &Scene<W>) -> Option<(u16, u8)> {
         let own = self.slot as usize + 1;
         let low = |i: usize| match need {
@@ -550,7 +667,10 @@ impl Follower {
             (ItemNeed::Mp, false) => &[3, 6, 4, 7],
             (ItemNeed::Mp, true) => &[6, 3, 7, 4],
         };
-        let item = list.iter().copied().find(|&id| (scene.items)(id) > 0)?;
+        let in_need = self.partner_in_need(&scene.hp).is_some();
+        let item = list.iter().copied().find(|&id| {
+            (scene.save.item_frequency(id) < frequency::RARE || in_need) && scene.save.count(id) > 0
+        })?;
         Some((item, target? as u8))
     }
 
@@ -589,27 +709,51 @@ impl Follower {
         None
     }
 
-    /// FUN_1401b1d40 over the attack records: the random pick among the
-    /// eligible ones, skipping a record chosen three times running.
+    /// FUN_1401b1d40 over the attack records. Pass 0: the random pick among
+    /// the eligible ones that are not Rare, a Well-Balanced spell only with
+    /// MP for its cost. A pick that would make a fourth repeat of the last
+    /// three goes to pass 1, the Rare ones alone; none there, or the repeat
+    /// again, and the member follows instead. [I] The repeat test's
+    /// obj+0xe08 < 0xe condition is not modelled.
     fn choose<W: World>(
         &mut self,
         records: &[Record],
         t: &Target,
         scene: &Scene<W>,
     ) -> Option<Record> {
+        let freq = |r: &Record| {
+            r.spell
+                .and_then(|s| scene.save.spell_frequency(s))
+                .unwrap_or(frequency::FREE)
+        };
+        let mp = scene.mp.map_or(i32::MAX, |m| m.0);
         let candidates: Vec<Record> = records
             .iter()
             .copied()
-            .filter(|r| self.ready(r, t, scene))
+            .filter(|r| {
+                let f = freq(r);
+                f != frequency::RARE
+                    && !(f == frequency::WELL_BALANCED && r.cost >= 1 && mp < i32::from(r.cost))
+                    && self.ready(r, t, scene)
+            })
             .collect();
         if candidates.is_empty() {
             return None;
         }
         let mut pick = candidates[self.rand(candidates.len() as u32) as usize];
-        if self.history.iter().all(|&h| h == pick.id)
-            && let Some(other) = candidates.iter().find(|r| r.id != pick.id)
-        {
-            pick = *other;
+        if self.history.iter().all(|&h| h == pick.id) {
+            let rare: Vec<Record> = records
+                .iter()
+                .copied()
+                .filter(|r| freq(r) == frequency::RARE && self.ready(r, t, scene))
+                .collect();
+            if rare.is_empty() {
+                return None;
+            }
+            pick = rare[self.rand(rare.len() as u32) as usize];
+            if self.history.iter().all(|&h| h == pick.id) {
+                return None;
+            }
         }
         self.history = [self.history[1], self.history[2], pick.id];
         Some(pick)
@@ -1107,8 +1251,28 @@ mod tests {
     fn no_actionable(_: u16) -> Option<u32> {
         None
     }
-    fn no_items(_: u16) -> u32 {
-        0
+    /// Every spell equipped, no items.
+    const EVERY: Save = {
+        let mut s = Save::EMPTY;
+        let ids = [0xa5, 0xa6, 0xa7, 0xa8, 0x1a7, 0x1ad, 0x1a9];
+        let mut k = 0;
+        while k < ids.len() {
+            s.abilities[k] = 0x8000 | ids[k];
+            k += 1;
+        }
+        s
+    };
+
+    /// [`EVERY`] with these items in its slots.
+    const fn with_items(items: [u16; 5]) -> Save {
+        let mut s = EVERY;
+        let mut k = 0;
+        while k < 5 {
+            s.items[k] = items[k];
+            k += 1;
+        }
+        s.item_slots = 5;
+        s
     }
     pub(super) fn test_sstm() -> Sstm {
         let mut record = [0u8; 0x3c];
@@ -1159,7 +1323,7 @@ mod tests {
             mp: None,
             hp: [None; 3],
             mp_all: [None; 3],
-            items: &no_items,
+            save: &EVERY,
             actionable: &no_actionable,
             sstm: test_sstm(),
             rates: test_rates(),
@@ -1265,7 +1429,7 @@ mod tests {
             mp: Some(mp),
             hp,
             mp_all: [None; 3],
-            items: &no_items,
+            save: &EVERY,
             actionable: &no_actionable,
             sstm: test_sstm(),
             rates: test_rates(),
@@ -1321,6 +1485,60 @@ mod tests {
             .map(|r| r.id)
             .collect();
         assert_eq!(ready, vec![58]);
+    }
+
+    /// Donald's new-game record (plrp row 1): Potion and Ether, Thunder and
+    /// Cure equipped.
+    fn donald_new_game() -> Save {
+        Save::new_game(2, &[0x8001, 0x8003, 0x80a7, 0x80a8], |id| id <= 7)
+    }
+
+    #[test]
+    fn a_new_game_record_fills_items_and_equipped_abilities() {
+        let s = donald_new_game();
+        assert_eq!((s.count(1), s.count(3), s.count(2)), (1, 1, 0));
+        assert_eq!(s.spell_frequency(Spell::Thunder), Some(frequency::FREE));
+        assert_eq!(s.spell_frequency(Spell::Fire), None);
+        let mut s = s;
+        assert!(s.take(1) && !s.take(1));
+        // Held but not equipped, or equipped but off: refused.
+        let mut held = Save::EMPTY;
+        held.abilities[0] = 0xa6;
+        assert_eq!(held.spell_frequency(Spell::Blizzard), None);
+        let mut off = EVERY;
+        off.frequency[ability_of(Spell::Blizzard).1] = frequency::OFF;
+        assert_eq!(off.spell_frequency(Spell::Blizzard), None);
+    }
+
+    #[test]
+    fn the_frequencies_decide_when_a_spell_is_chosen() {
+        // At 600 only Blizzard (250-750) is in range.
+        let t = Target {
+            position: [0., 0., 600.],
+            radius: 40.,
+        };
+        let pick = |save: &Save, mp: i32, history: [u8; 3]| {
+            let mut f = Follower::spawn([0., 0., 0.], 0., 0);
+            f.permit = true;
+            f.history = history;
+            let mut scene = spell_scene(Some(t), &Flat, (mp, 100, false), [Some((20, 20)); 3]);
+            scene.save = save;
+            f.choose(&DONALD, &t, &scene).map(|r| r.id)
+        };
+        let mut s = EVERY;
+        let k = ability_of(Spell::Blizzard).1;
+        assert_eq!(pick(&s, 100, [255; 3]), Some(58));
+        // A fourth Blizzard in a row is not taken while no Rare entry stands in.
+        assert_eq!(pick(&s, 100, [58; 3]), None);
+        // Not equipped: never.
+        assert_eq!(pick(&donald_new_game(), 100, [255; 3]), None);
+        // Well-Balanced needs the MP for its cost.
+        s.frequency[k] = frequency::WELL_BALANCED;
+        assert_eq!(pick(&s, 100, [255; 3]), Some(58));
+        assert_eq!(pick(&s, 1, [255; 3]), None);
+        // Rare: only in place of a fourth repeat.
+        s.frequency[k] = frequency::RARE;
+        assert_eq!(pick(&s, 100, [255; 3]), None);
     }
 
     #[test]
@@ -1408,7 +1626,7 @@ mod tests {
             mp: None,
             hp: [None; 3],
             mp_all: [None; 3],
-            items: &no_items,
+            save: &EVERY,
             actionable: &ready_at_58,
             sstm: test_sstm(),
             rates: test_rates(),
@@ -1558,7 +1776,7 @@ mod tests {
             mp: None,
             hp: [None; 3],
             mp_all: [None; 3],
-            items: &no_items,
+            save: &EVERY,
             actionable: &ready_at_58,
             sstm: test_sstm(),
             rates: test_rates(),
@@ -1623,13 +1841,13 @@ mod tests {
     fn item_scene<'a>(
         hp: [Option<(i32, i32)>; 3],
         mp: [Option<(i32, i32)>; 3],
-        items: &'a dyn Fn(u16) -> u32,
+        save: &'a Save,
         target: Option<Target>,
     ) -> Scene<'a, Flat> {
         Scene {
             hp,
             mp_all: mp,
-            items,
+            save,
             target,
             spells: true,
             mp: Some((100, 100, false)),
@@ -1637,25 +1855,23 @@ mod tests {
         }
     }
 
-    fn stock(id: u16) -> u32 {
-        matches!(id, 1 | 2 | 3 | 5 | 6) as u32
-    }
+    const STOCK: Save = with_items([1, 2, 3, 5, 6]);
 
     #[test]
     fn an_hp_item_goes_to_the_first_member_under_45_percent() {
         let f = Follower::spawn([0.; 3], 0., 0);
         let full = Some((100, 100));
         // Donald (own slot 1) at 44: the Potion for himself.
-        let s = item_scene([full, Some((44, 100)), full], [None; 3], &stock, None);
+        let s = item_scene([full, Some((44, 100)), full], [None; 3], &STOCK, None);
         assert_eq!(f.item_pick(ItemNeed::Hp, &s), Some((1, 1)));
         // 45 is not under 45.
-        let s = item_scene([full, Some((45, 100)), full], [None; 3], &stock, None);
+        let s = item_scene([full, Some((45, 100)), full], [None; 3], &STOCK, None);
         assert_eq!(f.item_pick(ItemNeed::Hp, &s), None);
         // Sora under 45 and above a quarter: Sora, before Goofy.
         let s = item_scene(
             [Some((30, 100)), full, Some((40, 100))],
             [None; 3],
-            &stock,
+            &STOCK,
             None,
         );
         assert_eq!(f.item_pick(ItemNeed::Hp, &s).map(|p| p.1), Some(0));
@@ -1664,11 +1880,11 @@ mod tests {
         let s = item_scene(
             [Some((30, 100)), full, Some((10, 100))],
             [None; 3],
-            &stock,
+            &STOCK,
             None,
         );
         assert_eq!(f.item_pick(ItemNeed::Hp, &s).map(|p| p.0), Some(5));
-        let no_mega = |id: u16| (id == 1) as u32;
+        let no_mega = with_items([1, 0, 0, 0, 0]);
         let s = item_scene(
             [Some((30, 100)), full, Some((10, 100))],
             [None; 3],
@@ -1677,7 +1893,7 @@ mod tests {
         );
         assert_eq!(f.item_pick(ItemNeed::Hp, &s).map(|p| p.0), Some(1));
         // Nothing in the slots, nothing used.
-        let none = |_: u16| 0;
+        let none = EVERY;
         let s = item_scene([Some((30, 100)), full, full], [None; 3], &none, None);
         assert_eq!(f.item_pick(ItemNeed::Hp, &s), None);
     }
@@ -1690,7 +1906,7 @@ mod tests {
         let s = item_scene(
             [Some((25, 100)), Some((40, 100)), full],
             [None; 3],
-            &stock,
+            &STOCK,
             None,
         );
         assert_eq!(f.item_pick(ItemNeed::Hp, &s).map(|p| p.1), Some(0));
@@ -1702,16 +1918,16 @@ mod tests {
         let hp = [Some((100, 100)); 3];
         // Goofy (own slot 2) at 40% MP: the Ether for himself.
         let mp = [Some((100, 100)), Some((100, 100)), Some((40, 100))];
-        let s = item_scene(hp, mp, &stock, None);
+        let s = item_scene(hp, mp, &STOCK, None);
         assert_eq!(f.item_pick(ItemNeed::Mp, &s), Some((3, 2)));
         // Two under it: the Mega-Ether.
         let mp = [Some((10, 100)), Some((100, 100)), Some((40, 100))];
-        let s = item_scene(hp, mp, &stock, None);
+        let s = item_scene(hp, mp, &STOCK, None);
         assert_eq!(f.item_pick(ItemNeed::Mp, &s), Some((6, 2)));
         // A dead member needs no MP.
         let dead = [Some((100, 100)), Some((0, 100)), Some((100, 100))];
         let mp = [Some((100, 100)), Some((0, 100)), Some((100, 100))];
-        let s = item_scene(dead, mp, &stock, None);
+        let s = item_scene(dead, mp, &STOCK, None);
         assert_eq!(f.item_pick(ItemNeed::Mp, &s), None);
     }
 
@@ -1726,7 +1942,7 @@ mod tests {
         let full = Some((100, 100));
         let s = Scene {
             length: &all_motions,
-            ..item_scene([Some((25, 100)), full, full], [None; 3], &stock, Some(t))
+            ..item_scene([Some((25, 100)), full, full], [None; 3], &STOCK, Some(t))
         };
         let mut used = false;
         for _ in 0..20 {
