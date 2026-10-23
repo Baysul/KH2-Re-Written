@@ -278,8 +278,9 @@ struct WorldMap {
     cursor_fx: [Option<u64>; 3],
     /// The floor material under the cursor (obj+0x780).
     floor: u8,
-    /// 03system 'cmd' texts by command id (the reaction's label).
-    command_texts: HashMap<u16, u32>,
+    /// 03system 'cmd' texts and flags (+8, +0xc) by command id (the
+    /// reaction's label and FUN_14015d670's flag bit 3).
+    command_texts: HashMap<u16, (u32, u32)>,
     /// The cursor's deck on the field command menu (dk::COMMAND_DRAW on
     /// the world map's 'comw' layout) and the lock-on reticle (the field
     /// 2D 'fiel' sheet).
@@ -1701,12 +1702,17 @@ fn tick(mut wm: ResMut<WorldMap>, ui: Res<UiRes>) {
             icon: 0,
             colour: 0,
         }];
-        menu.reaction = reaction_cmd
-            .and_then(|c| command_texts.get(&c))
-            .map(|&text| Reaction {
+        // The symbols' and routes' reactions are offered in display mode 0
+        // (FUN_140407de0 with no angle gate).
+        menu.reaction = reaction_cmd.and_then(|c| {
+            command_texts.get(&c).map(|&(text, flags)| Reaction {
+                command: c,
                 label: ui.ui.message(text),
-                dimmed: false,
-            });
+                mode: 0,
+                flag3: flags & 8 != 0,
+                restart: false,
+            })
+        });
         menu.update(&sheet.sequence);
     }
     // The reticle on the held target's centre (FUN_1403dd770: group 0x1b,
@@ -2917,23 +2923,27 @@ fn run(args: Vec<PathBuf>) -> Result<AppExit> {
         Ok(bytes[e.offset as usize..e.offset as usize + e.size as usize].to_vec())
     };
     // 'cmd': 0x30-byte records {u16 id, u16 execute, u16, u8, u8, i32
-    // text, ...} after a version and a count.
-    let (commands, command_texts): (HashMap<u16, u16>, HashMap<u16, u32>) = {
+    // text, u32 flags, ...} after a version and a count.
+    let (commands, command_texts): (HashMap<u16, u16>, HashMap<u16, (u32, u32)>) = {
         let c = entry(&system, &system_bar, b"cmd\0")?;
         let n = u32::from_le_bytes(c.get(4..8).ok_or("cmd count")?.try_into()?) as usize;
-        let records: Vec<(u16, u16, u32)> = (0..n)
+        let records: Vec<(u16, u16, u32, u32)> = (0..n)
             .filter_map(|k| {
-                let r = c.get(8 + k * 0x30..8 + k * 0x30 + 12)?;
+                let r = c.get(8 + k * 0x30..8 + k * 0x30 + 16)?;
                 Some((
                     u16::from_le_bytes([r[0], r[1]]),
                     u16::from_le_bytes([r[2], r[3]]),
                     u32::from_le_bytes([r[8], r[9], r[10], r[11]]),
+                    u32::from_le_bytes([r[12], r[13], r[14], r[15]]),
                 ))
             })
             .collect();
         (
-            records.iter().map(|&(id, exec, _)| (id, exec)).collect(),
-            records.iter().map(|&(id, _, text)| (id, text)).collect(),
+            records.iter().map(|&(id, exec, _, _)| (id, exec)).collect(),
+            records
+                .iter()
+                .map(|&(id, _, text, flags)| (id, (text, flags)))
+                .collect(),
         )
     };
     let pref = entry(&system, &system_bar, b"pref")?;
