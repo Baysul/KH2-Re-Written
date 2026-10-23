@@ -519,19 +519,20 @@ pub struct DriveRt {
     /// Each kit's object PAX, the effect starts this tick, the kit whose
     /// object was just replaced, and the motion trigger scan's position.
     pub paxes: HashMap<u8, Arc<data::object_effect::Pax>>,
+    /// Each form's script motions' trigger tables (Limit Form's limits).
+    pub script_events: HashMap<u8, HashMap<u16, enemy::motion::MotionEvents>>,
     pub fx_requests: Vec<drive_fx::FxRequest>,
     pub fx_owner_left: Option<u8>,
     fx_scan: Option<(u64, Action, u32)>,
     previous_shown: u8,
-    /// Limit Form: the running limit, a requested one, the reaction
-    /// command offered this tick, and the limit's colour filter (colour
-    /// and ramp 0..=1).
-    pub limit: Option<player::limit_form::Limit>,
+    /// Limit Form: one of its limits runs (the party-limit scene), a
+    /// requested one, and the limit's colour filter (colour and ramp
+    /// 0..=1).
+    pub limit_running: bool,
     pub limit_request: Option<u16>,
-    pub offer: Option<u16>,
     pub tint: [u8; 3],
     pub tint_k: f32,
-    tint_step: f32,
+    pub tint_step: f32,
     /// The change's afterimage: ramp k (alpha = trunc(0x70·k)), its speed
     /// and the ticks left once the swap starts its fade.
     after: Option<(f32, f32, u32)>,
@@ -584,14 +585,14 @@ impl DriveRt {
             enemy_character,
             menu_forms: Vec::new(),
             bullets: Vec::new(),
-            limit: None,
+            limit_running: false,
             limit_request: None,
-            offer: None,
             tint: [128; 3],
             tint_k: 0.,
             tint_step: 0.,
             after: None,
             paxes: HashMap::new(),
+            script_events: HashMap::new(),
             fx_requests: Vec::new(),
             fx_owner_left: None,
             fx_scan: None,
@@ -694,7 +695,7 @@ impl DriveRt {
                 let cost = self.src.commands.get(&c).map_or(0, |r| r.cost);
                 (
                     c,
-                    player::limit_form::colour(cost, self.limit.is_some(), mp, charging),
+                    player::limit_form::colour(cost, self.limit_running, mp, charging),
                 )
             })
             .collect()
@@ -891,6 +892,7 @@ fn swap_kit(game: &mut Game, form: u8) -> Result<(), String> {
             if let Some(p) = kit.pax {
                 d.paxes.insert(form, Arc::new(p));
             }
+            d.script_events.insert(form, kit.script_events);
             Stash {
                 blade: kit.blades,
                 weapon_pax: kit.weapon_pax.map(Arc::new),
@@ -1190,6 +1192,22 @@ pub fn tick(game: &mut Game, abilities: Option<&[u16]>) {
             7700 => d.limit_request = Some(INFINITY),
             8060 => d.limit_request = Some(STRIKE_RAID),
             _ => {}
+        }
+    }
+    if game.limit_form_tour {
+        let tick = game.tick;
+        if super::limit_form_tour::place(tick) {
+            game.player.mp.cur = game.player.mp.max;
+            game.player.mp_charging = false;
+            // [Tour setup] In front of the Shadow, facing it.
+            if let Some(rt) = game.enemy.as_ref() {
+                let e = rt.enemy.position;
+                game.player.position = [e[0], e[1], e[2] + super::limit_form_tour::STAND_OFF];
+                game.player.yaw = std::f32::consts::PI;
+            }
+        }
+        if let Some(cmd) = super::limit_form_tour::limit(tick) {
+            d.limit_request = Some(cmd);
         }
     }
     d.overlay = (d.overlay + d.overlay_step).clamp(0., 1.);
@@ -1507,24 +1525,6 @@ pub fn shots(game: &mut Game) {
     };
     let hits = &m.last_hits;
     d.bullets.retain(|b| !hits.contains(&b.key));
-    if let Some(l) = d.limit.as_mut() {
-        for &k in hits {
-            l.hit(k);
-        }
-        for (key, atkp, centre, radius, previous, dir) in l.volumes() {
-            m.volumes.push(player::magic::Volume {
-                key,
-                atkp,
-                sub: 0,
-                centre,
-                radius,
-                height: radius,
-                previous,
-                moving: Some(dir),
-                role: player::magic::Role::Damage,
-            });
-        }
-    }
     if d.active && d.form == forms::WISDOM && d.change.is_none() {
         let clip = player.clip(clips);
         if matches!(player.action, Action::Attack(_) | Action::AirAttack(_)) {
@@ -1655,118 +1655,50 @@ pub fn motion_effects(game: &mut Game) {
     }
 }
 
-/// One tick of Limit Form's limits, after the player's: a requested limit
-/// starts (FUN_1403d8b40), a pressed follow-up runs, the limit's threads
-/// step, its effects start, and the filter ramps.
-pub fn limit_tick(game: &mut Game, rc: bool, abilities: Option<&mut Vec<u16>>) {
+/// Limit Form's limits: a requested limit starts (FUN_1403d8b40) on the
+/// object-script engine, its `limitform` program run as a party limit's
+/// scene (`party_limit`), which then ticks in place of Sora's update; the
+/// tint follows the limit's filter light and ramps out after it.
+pub fn limit_tick(game: &mut Game) {
     let Some(d) = game.drive.as_mut() else { return };
     d.tint_k = (d.tint_k + d.tint_step).clamp(0., 1.);
     let request = d.limit_request.take();
-    let offered = d.offer.take();
     if !d.limit_form() {
-        d.limit = None;
         return;
     }
-    if let Some(cmd) = request
-        && d.limit.is_none()
-    {
-        let cost = d.src.commands.get(&cmd).map_or(0, |r| r.cost);
-        let colour =
-            player::limit_form::colour(cost, false, game.player.mp.cur, game.player.mp_charging);
-        if colour < 4 && game.player.can_command(&game.clips) {
-            let l = player::limit_form::Limit::start(cmd, cost, &mut game.player, &game.clips);
-            game.action_started = game.tick;
-            let Some(d) = game.drive.as_mut() else { return };
-            d.tint = l.tint;
-            d.tint_step = 1. / player::limit_form::TINT_IN;
-            d.limit = Some(l);
-            let tick = game.tick;
+    let Some(cmd) = request else { return };
+    if game.party_limit.is_some() {
+        return;
+    }
+    let cost = d.src.commands.get(&cmd).map_or(0, |r| r.cost);
+    let colour =
+        player::limit_form::colour(cost, false, game.player.mp.cur, game.player.mp_charging);
+    if colour >= 4 || !game.player.can_command(&game.clips) {
+        return;
+    }
+    let tick = game.tick;
+    match super::party_limit::start(game, cmd, tick) {
+        Ok(()) => {
+            game.action_started = tick;
+            if let Some(d) = game.drive.as_mut() {
+                d.limit_running = true;
+            }
             game.event(
                 serde_json::json!({"event":"limit_start","tick":tick,"cmd":cmd,"cost":cost}),
             );
         }
-    }
-    let Some(d) = game.drive.as_mut() else { return };
-    let Some(mut l) = d.limit.take() else { return };
-    let mut exp = false;
-    if rc && let Some(cmd) = offered {
-        exp = l.follow_up(cmd, &mut game.player, &game.clips);
-        game.action_started = game.tick;
-        let tick = game.tick;
-        game.event(serde_json::json!({"event":"limit_follow_up","tick":tick,"cmd":cmd}));
-    }
-    let targets: Vec<Vec3> = game
-        .enemy
-        .as_ref()
-        .filter(|rt| rt.enemy.targetable())
-        .map(|rt| {
-            enemy_targets(rt)
-                .iter()
-                .map(|t| Vec3::from_array(t.centre))
-                .collect()
-        })
-        .unwrap_or_default();
-    let p = game.player.position;
-    let hand = game
-        .clip_poses
-        .get(game.poses[&(game.player.action, game.player.armed)])
-        .and_then(|c| {
-            c.weapon.get(
-                (game.player.motion_frame(&game.clips) as usize)
-                    .min(c.weapon.len().saturating_sub(1)),
-            )
-        })
-        .copied()
-        .unwrap_or(Mat4::IDENTITY);
-    let root = Mat4::from_rotation_translation(
-        Quat::from_rotation_y(game.player.yaw),
-        Vec3::from_array(p),
-    );
-    let top = (root * hand).transform_point3(Vec3::new(-78., 0., 0.));
-    let scene = player::limit_form::Scene {
-        targets: &targets.iter().map(|v| v.to_array()).collect::<Vec<_>>(),
-        body: [p[0], p[1] + 70., p[2]],
-        keyblade_top: top.to_array(),
-    };
-    let input = player::Input::default();
-    let Some(d) = game.drive.as_mut() else { return };
-    let out = l.tick(
-        &mut game.player,
-        &game.clips,
-        &input,
-        &scene,
-        &game.world,
-        &mut d.seed,
-    );
-    let pax = d.paxes.get(&forms::LIMIT).cloned();
-    if let Some(pax) = pax {
-        for id in out.effects {
-            d.fx_requests.push(drive_fx::FxRequest {
-                pax: pax.clone(),
-                id,
-                owner: forms::LIMIT,
-            });
+        Err(e) => {
+            game.event(
+                serde_json::json!({"event":"limit_refused","tick":tick,"cmd":cmd,"error":e}),
+            );
         }
-        let _ = out.effects_at;
     }
-    d.offer = out.offer;
-    if out.ended {
-        d.tint_step = -1. / player::limit_form::TINT_OUT;
-        let tick = game.tick;
-        game.event(serde_json::json!({"event":"limit_end","tick":tick}));
-    } else {
-        d.limit = Some(l);
-    }
-    if exp {
-        let Some(d) = game.drive.as_mut() else { return };
-        d.pending_exp += 1;
-    }
-    let _ = abilities;
 }
 
-/// Strike Raid's thrown Keyblade (limitform `fly`): drawn where the
-/// thread holds it (the path point plus Judgment's wobble), blade along
-/// its direction [I: motion 235's spin is not applied].
+/// Strike Raid's thrown Keyblade: while the `limitform` program has let it
+/// go (`obj_detach`, then `obj_set_pos` each frame of its `fly` thread) it
+/// is drawn where the scene holds its object, blade along its travel.
+/// [I] The program's `obj_set_xyzrot` angles are not applied.
 type HandQuery<'w, 's> = Query<
     'w,
     's,
@@ -1778,20 +1710,26 @@ pub fn thrown_keyblade(
     game: Res<Game>,
     roots: Query<&Transform, (With<SoraRoot>, Without<WeaponRoot>)>,
     mut hands: HandQuery,
+    mut last: Local<Option<(Vec3, Vec3)>>,
 ) {
-    let Some(k) = game
-        .drive
+    let Some(at) = game
+        .party_limit
         .as_ref()
-        .and_then(|d| d.limit.as_ref())
-        .and_then(|l| l.keyblade)
+        .and_then(|r| r.thrown_weapon())
+        .map(Vec3::from_array)
     else {
+        *last = None;
         return;
     };
     let (Ok(root), Ok((mut t, mut v))) = (roots.single(), hands.single_mut()) else {
         return;
     };
-    let at = Vec3::from_array(k.pos) + Vec3::from_array(k.offset);
-    let dir = Vec3::from_array(k.dir).normalize_or(Vec3::Z);
+    let dir = match *last {
+        Some((p, d)) if p.distance_squared(at) < 1e-4 => d,
+        Some((p, _)) => (at - p).normalize_or(Vec3::Z),
+        None => Vec3::new(game.player.yaw.sin(), 0., game.player.yaw.cos()),
+    };
+    *last = Some((at, dir));
     let world = Transform {
         translation: at,
         rotation: Quat::from_rotation_arc(Vec3::NEG_X, dir),
