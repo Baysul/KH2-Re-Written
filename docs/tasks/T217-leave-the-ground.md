@@ -57,7 +57,9 @@ nothing else brings him down.
 ## Results
 
 - fmt, clippy (no warnings), workspace tests (all pass; one test ignored as on `main`),
-  workspace build: PASS. Release helper: see the pull request.
+  workspace build: PASS, also after merging `main` at `d4d0c24`. Release helper
+  (`build-release.bat`): PASS. The tours below ran before that merge (it brought only the
+  lens-flare effect programs, T216).
 - Sephiroth (`g1`, HP 2000): after Heartless Angel he leaves the ground at y 590 and falls to the
   floor in about 60 ticks (fall mode 0x181), lands (motion 5) and the fight goes on from there.
 - Side by side with `main` (private `cmp3/`), all exit 0:
