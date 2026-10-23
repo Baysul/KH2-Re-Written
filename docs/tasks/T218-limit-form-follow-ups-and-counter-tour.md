@@ -1,4 +1,4 @@
-# T217 — Limit Form follow-ups: shots and the map, Strike Raid's spin, the hop target, Zantetsu Counter
+# T218 — Limit Form follow-ups: shots and the map, Strike Raid's spin, the hop target, Zantetsu Counter
 
 Owner Claude, 2026-10-23, requested by burba in the project chat ("keep working on it until
 there's nothing left to do"), with the coordinator session's list of open items from T210.
