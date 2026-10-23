@@ -174,5 +174,6 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T204](T204-summons.md) | Summons come, last their time and leave from the second deck | PARTIAL. |
 | [T205](T205-one-launcher-executable.md) | One launcher executable | PASS for the build output: the helper leaves one launcher executable and the game runs inside it. |
 | [T206](T206-boss-framework-sephiroth.md) | Boss framework, and Sephiroth on it | PARTIAL. The exe's boss rules, reaction commands, captures and mission clear are translated and run against the install; nothing is compared with the original game yet. |
+| [T207](T207-summon-limits-and-party-follow-ups.md) | Summon limits, script effects, appear event and party follow-ups | PARTIAL. |
 | [T208](T208-reaction-command-manager.md) | The reaction command: one search, its slot, marker and press | PARTIAL. Every source of the Triangle slot runs through the executable's search; Block, Talk, party limits, summons and Limit Form use it; nothing is compared with the original game yet. |
 | [T141](T141-ik-and-animation-parity.md) | IK aim chains, pole vectors and joint-space motion blends | PROGRESS. Master Form matches the PS2 routine; 87% of installed motions within 0.1. |

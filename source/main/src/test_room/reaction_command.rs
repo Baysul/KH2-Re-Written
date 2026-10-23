@@ -669,7 +669,11 @@ fn tour_press(game: &Game, shown: Option<rc::Candidate>, tick: u64) -> bool {
                 || game.limit_tour && limit_tour::reaction(tick)
         }
         rc::Source::Offered if c.target.owner == SUMMON => {
-            game.summon_tour && summon_tour::reaction(tick)
+            // Stitch's rows and the reaction command take turns.
+            let rotate = game.summon_tour && summon::special_mode(game) == Some(4);
+            game.summon_tour
+                && summon_tour::reaction(tick)
+                && !(rotate && summon_tour::rotation(tick).is_some())
         }
         rc::Source::Offered => game.autoplay.is_some(),
         rc::Source::Shape if c.target.owner == TALK => {

@@ -5,9 +5,8 @@ command systems 1:1 with ghidra"). Gate: combat and HUD (P19/P20 work; nothing h
 as a gate pass). Prerequisites: T062 (command menu), T070 (field talk), T113 (Limit Form), T202 to
 T204 (second deck, party limits, summons), T206 (boss framework: the REACTION shapes, their
 enable test and Sephiroth's Block). Build identity: branch `claude/project-thread-kyocfc` cut from
-`main` at `ec58992`; package 0.1.2, Rust 1.99.0 Windows MSVC. Source: the selected Steam build
-15194255, validated at every run; the install was only read. (T207 is left for the summons PR
-that also numbered itself T206.)
+`main` at `ec58992`, then merged with `main` at `6de4a1f` (the summons' T207); package 0.1.2, Rust 1.99.0 Windows MSVC. Source: the selected Steam build
+15194255, validated at every run; the install was only read. (T207 is the summons' record.)
 
 Private evidence (never in Git): `%LOCALAPPDATA%/KH2FinalRewrite/research/reaction-1to1-20261023/`
 (plain `analyzeHeadless` decompiles `out/core1`..`core3`, `hud1`, `hud2`, `dd8`, `hold2`,
@@ -154,8 +153,8 @@ and its tests, and unattended tours against the install (results below).
 
 ## Results
 
-- fmt, clippy with `-D warnings`, workspace build: PASS. Workspace tests: 967 passed, 0 failed,
-  1 ignored (the test `main` already ignores). Smoke (`--frames 180`): exit 0. Release helper
+- fmt, clippy with `-D warnings`, workspace build: PASS. Workspace tests: 970 passed, 0 failed,
+  1 ignored after the merge (967 before it) (the test `main` already ignores). Smoke (`--frames 180`): exit 0. Release helper
   (`Build-Launcher.ps1 -Skate3`): PASS. `tools/progress.py` and its tests: PASS.
 - New unit tests: the search's order and priorities, the score, the hold in mode 8 and its
   takeover by a state-locked shape, the form mask through the +2 chain and the group lock, the
@@ -176,7 +175,9 @@ and its tests, and unattended tours against the install (results below).
   - Summons (`--summon-tour`): follow-ups by command 543 ×20, 530 ×15, 479 ×12, 470 ×8 and 527
     ×20, against main's 543 ×20, 530 ×15, 479 ×12, 470 ×8 and 525/526/527 ×9. Stitch's script
     offered 527 throughout here where it alternated on main: the summon scripts' state had
-    already diverged before its first offer, so this is not a like-for-like comparison.
+    already diverged before its first offer. After the merge with `6de4a1f` (whose tour takes
+    Stitch's rows and Triangle in turn) the run gives 64 follow-ups, the same commands and
+    counts as main's run above; Block in the Sephiroth tour is unchanged.
   - Talk (`--autoplay` on the talk room): "Talk" with the 0x32 marker (the green triangle) over
     the NPC from tick 0; Triangle at 60 starts the talk.
   - Limit Form (`--autoplay`, arena): Infinity at 7700 and one follow-up (Shoot) at 7819 through

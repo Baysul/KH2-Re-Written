@@ -1047,6 +1047,11 @@ struct Game {
     summon_serial: u64,
     /// FUN_1403f3fa0's direction counter (DAT_142ae5d78).
     summon_octant: u32,
+    /// The save's config bits (+0x41a4) as the camp's Config last left
+    /// them, and the summons whose `appear` event has played
+    /// (DAT_142a24ed8).
+    config_flags: u32,
+    summons_seen: u32,
     /// DAT_1409acdd7: Genie's form number (1 Valor, 2 Wisdom, 4 Master,
     /// 5 Final), kept between summons.
     summon_form: u8,
@@ -6637,16 +6642,17 @@ fn simulate(
                     colour: 0,
                 })
                 .collect();
+            let n = rows.len();
             if m.menu.kind == field_command_menu::SECOND_DECK {
                 m.menu.second = items;
-                m.menu.second_opens = vec![None; 3];
+                m.menu.second_opens = vec![None; n];
             } else {
                 m.menu.items = items;
-                m.menu.opens = vec![None; 3];
+                m.menu.opens = vec![None; n];
             }
             m.menu.overridden = [false; 8];
             records = [None; 8];
-            for (k, r) in records.iter_mut().take(3).enumerate() {
+            for (k, r) in records.iter_mut().take(n).enumerate() {
                 *r = Some(party_limit::SPECIAL + k);
             }
             // Deck mode 0xE (FUN_1403b1780) with the limit file's `comd`
@@ -6658,7 +6664,11 @@ fn simulate(
                 .or_else(|| summon::hud_values(&game).map(|h| h.0));
             if limit.is_some_and(|l| game.party_limits.limits[l].menu_sheet.is_some()) {
                 m.menu.list = Some(rows.iter().map(|r| r.1 as u8).collect());
-                m.menu.list_mode = if game.party_limit.is_some() { 3 } else { 5 };
+                m.menu.list_mode = if game.party_limit.is_some() {
+                    3
+                } else {
+                    summon::special_mode(&game).unwrap_or(5)
+                };
             }
         }
         // [Test-room choice] While a limit runs only its rows are taken:
@@ -7155,8 +7165,15 @@ fn simulate(
         // The summon's offers: a decided row, or the reaction button on its
         // record 1, starts or carries on its limit.
         let offered = summon::offers(&game).is_some_and(|o| o[0].is_some());
-        // [Tour setup] The special deck's Cross row (Chicken Little's shot).
-        let special = summon::special_deck(&game).and_then(|r| r.iter().position(|x| x.1 == 4));
+        // [Tour setup] The special deck's Cross row (Chicken Little's shot);
+        // Stitch's two rows and the reaction command in turn.
+        let rotate = game.summon_tour && summon::special_mode(&game) == Some(4);
+        let turn = summon_tour::rotation(tick);
+        let special = if rotate {
+            turn
+        } else {
+            summon::special_deck(&game).and_then(|r| r.iter().position(|x| x.1 == 4))
+        };
         let decide = std::mem::take(&mut game.limit_decide).or_else(|| {
             game.summon_tour
                 .then(|| summon_tour::follow_up(tick, offered, special))
@@ -10453,6 +10470,12 @@ fn present(
     if let Ok(mut root) = roots.single_mut() {
         root.translation = Vec3::from_array(game.player.position);
         root.rotation = Quat::from_rotation_y(game.player.yaw);
+        // Stitch's limit draws Sora in camera space (FUN_1403cbfc0 with
+        // Stitch's second matrix).
+        if let Some((at, turn)) = summon::sora_camera_pose(&game) {
+            root.translation = at;
+            root.rotation = turn;
+        }
     }
 }
 
@@ -11273,6 +11296,7 @@ fn camp_tick(
             settings.save_if_changed();
             c.memory = menu.memory;
             c.config_flags = menu.data.config_flags;
+            game.config_flags = c.config_flags;
             c.stock = menu.data.items.counts.clone();
             c.seen = menu.data.items.seen.clone();
             c.shortcuts = menu.data.customize.shortcuts;
@@ -12540,6 +12564,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         summon_dismiss: false,
         summon_serial: 0,
         summon_octant: 0,
+        // The camp's new-game config (FUN_1402e4fc0).
+        config_flags: 0x40b,
+        summons_seen: 0,
         summon_form: 0,
         genie_command: None,
         summon_stick: [0.; 3],

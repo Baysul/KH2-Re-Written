@@ -27,6 +27,52 @@ struct BrainEnv<'a> {
     facts: HostFacts,
     /// Each command's (+0x22 chain, +0x1f decider, +0xc flags).
     commands: &'a CommandWindows,
+    fx: &'a BrainFx,
+}
+
+/// Effect keys of a summon's script effects (above the limits' and the
+/// party's).
+pub const SUMMON_FX_KEY: u64 = 1 << 56;
+
+/// The script's effect handles as the room plays them. A host that draws
+/// them (the summon's, from each object's own PAX) turns `drawn` on; for
+/// the others `effect_is_active` answers no, as the engine's default does.
+#[derive(Default)]
+pub struct BrainFx {
+    pub drawn: bool,
+    /// Handle -> (effect key, tick asked for).
+    handles: std::collections::HashMap<u32, (u64, u64)>,
+    /// This brain's running effects after the room's last effect update.
+    pub live: std::collections::HashMap<u64, player::magic::FxLive>,
+    pub tick: u64,
+    /// Handles from here on were asked for during this tick.
+    fresh: u32,
+    /// The effect calls for the host, each with the object whose script
+    /// made it.
+    pub calls: Vec<(u32, player::magic::Fx)>,
+}
+
+impl BrainFx {
+    /// As the limit host's (`party_limit::RoomEnv`): the room's effect
+    /// while it runs; one asked for this tick, or one the effect update has
+    /// not taken yet, counts as running.
+    fn active(&self, handle: u32) -> bool {
+        if !self.drawn {
+            return false;
+        }
+        let Some(&(key, started)) = self.handles.get(&handle) else {
+            return handle >= self.fresh;
+        };
+        match self.live.get(&key) {
+            Some(l) if l.tracked => l.alive,
+            Some(_) => false,
+            None => self.tick <= started + 1,
+        }
+    }
+    fn position(&self, handle: u32) -> Option<Vec3> {
+        let &(key, _) = self.handles.get(&handle)?;
+        self.live.get(&key).filter(|l| l.tracked).map(|l| l.pos)
+    }
 }
 
 /// The command records the motion-window test reads (FUN_1403b6950).
@@ -115,6 +161,12 @@ pub const ENEMY: u32 = 1;
 impl Env for BrainEnv<'_> {
     fn battle(&self) -> bool {
         self.facts.battle
+    }
+    fn effect_active(&self, handle: u32) -> bool {
+        self.fx.active(handle)
+    }
+    fn effect_position(&self, handle: u32) -> Option<Vec3> {
+        self.fx.position(handle)
     }
     fn drive_time(&self) -> f32 {
         self.facts.drive_time
@@ -373,6 +425,8 @@ pub struct ScriptBrain {
     /// record's target.
     pub offers: [Option<u16>; 8],
     pub offer_targets: [Option<u32>; 8],
+    /// The script's effects as the room plays them.
+    pub fx: BrainFx,
     /// Event signals the script's objects posted (FUN_1403aabe0: code and
     /// argument), for the host's mission and area scripts.
     pub signals: Vec<(i32, i32)>,
@@ -446,6 +500,7 @@ impl ScriptBrain {
             commands: CommandWindows::new(),
             offers: [None; 8],
             offer_targets: [None; 8],
+            fx: BrainFx::default(),
             signals: Vec::new(),
             sora_captures: Vec::new(),
             sora_pushed: Vec::new(),
@@ -489,6 +544,7 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
             facts: self.facts,
             commands: &self.commands,
+            fx: &self.fx,
         };
         self.object = Object::spawn(&mut self.world, &env, 0, &self.payload, sys)
             .map_err(|e| format!("object script rejected: {e:?}"))?;
@@ -501,6 +557,7 @@ impl ScriptBrain {
         self.world.rng.0 = rng.0;
         self.offers = [None; 8];
         self.offer_targets = [None; 8];
+        self.fx.fresh = self.world.effect_watermark();
         let env = BrainEnv {
             room: Some(room),
             clips: ClipView {
@@ -511,6 +568,7 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
             facts: self.facts,
             commands: &self.commands,
+            fx: &self.fx,
         };
         if let Some(mut scene) = self.limit.take() {
             // The limit's tick: Sora and the summon take part, the summon's
@@ -568,6 +626,7 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
             facts: self.facts,
             commands: &self.commands,
+            fx: &self.fx,
         };
         self.object
             .attack_struck(&mut self.world, &env, slot, PLAYER_OBJECT);
@@ -604,6 +663,7 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
             facts: self.facts,
             commands: &self.commands,
+            fx: &self.fx,
         };
         self.object
             .attack_reflected(&mut self.world, &env, slot, PLAYER_OBJECT);
@@ -722,6 +782,20 @@ impl ScriptBrain {
         self.world.player_proxy.as_deref().map(|p| &p.sys)
     }
 
+    /// The motion the script has Sora capture now (outside a limit too).
+    pub fn player_capture(&self) -> Option<enemy::sysobj::Capture> {
+        self.world.player_proxy.as_deref()?.sys.capture
+    }
+
+    /// FUN_1403b6420 on Sora's stand-in during the limit: his heading.
+    pub fn turn_limit_player(&mut self, yaw: f32) {
+        if self.limit.is_some()
+            && let Some(p) = self.world.player_proxy.as_deref_mut()
+        {
+            p.sys.yaw = yaw;
+        }
+    }
+
     /// A follow-up command Sora took (trigger 23 with the command).
     pub fn limit_follow_up(&mut self, command: u16) {
         let Some(mut scene) = self.limit.take() else {
@@ -737,6 +811,7 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
             facts: self.facts,
             commands: &self.commands,
+            fx: &self.fx,
         };
         scene.swap_parts(&mut self.world, &mut self.object);
         if let Some(l) = scene.world.limit.as_mut()
@@ -758,11 +833,52 @@ impl ScriptBrain {
         for event in std::mem::take(&mut self.world.events) {
             match event {
                 Event::EffectStart {
-                    effect, position, ..
+                    object,
+                    effect,
+                    position,
+                    handle,
+                    other,
+                    ..
                 } => {
                     if let Ok(id) = u16::try_from(effect) {
                         self.effects.push(ScriptEffect { id, at: position });
+                        if self.fx.drawn {
+                            let key = SUMMON_FX_KEY | u64::from(handle);
+                            self.fx.handles.insert(handle, (key, self.fx.tick));
+                            // [I] Bound to the summon's root when it or its
+                            // own object starts it; another object's effect
+                            // starts where that object stands.
+                            let by = other.unwrap_or(object);
+                            let (bound, at) = if by == self.object.id {
+                                (Some(player::magic::Anchor::Summon), position)
+                            } else {
+                                (None, position.or_else(|| self.object_position(by)))
+                            };
+                            self.fx
+                                .calls
+                                .push((object, player::magic::Fx::Start { key, id, bound, at }));
+                        }
                     }
+                }
+                Event::EffectCommand {
+                    trap,
+                    handle,
+                    vector,
+                    ..
+                } if self.fx.drawn => {
+                    let Some(&(key, _)) = self.fx.handles.get(&handle) else {
+                        continue;
+                    };
+                    // Script frame (Y down) to the room's.
+                    let v = vector.map(|v| [v[0], -v[1], v[2]]);
+                    let fx = match (trap, v) {
+                        (38, Some(v)) => player::magic::Fx::Pos(key, v),
+                        (41, Some(v)) => player::magic::Fx::Dir(key, v),
+                        (44, _) => player::magic::Fx::LoopEnd(key),
+                        (51 | 85, _) => player::magic::Fx::Kill(key),
+                        _ => continue,
+                    };
+                    self.fx.calls.push((self.object.id, fx));
                 }
                 Event::Voice { id, arg, .. } => self.voices.push((id, arg)),
                 Event::Unsupported(name) => {
@@ -842,8 +958,10 @@ impl ScriptBrain {
                     serial,
                     ..
                 } => self.enemy_strikes.push((slot, param, serial)),
+                // Only a limit scene runs the action threads `obj_hook`
+                // binds to objects.
                 Event::MagicStart { .. } => {
-                    self.unsupported.insert("magic_start_thread");
+                    self.unsupported.insert("obj_hook");
                 }
                 Event::Signal { code, argument } => self.signals.push((code, argument)),
                 _ => {}
@@ -893,15 +1011,60 @@ impl ScriptBrain {
     pub fn position(&self) -> Vec3 {
         self.object.sys.position
     }
+    /// Where an object of the script's world stands (its own, or one its
+    /// script made).
+    fn object_position(&self, id: u32) -> Option<Vec3> {
+        if id == self.object.id {
+            return Some(self.object.sys.position);
+        }
+        let o = self.world.objects.get(id as usize)?.as_deref()?;
+        Some(o.sys.position)
+    }
+    /// The model of an object the script made (its object entry's).
+    pub fn object_entry(&self, id: u32) -> Option<u32> {
+        if id == self.object.id {
+            return Some(self.object.sys.entry_id);
+        }
+        Some(
+            self.world
+                .objects
+                .get(id as usize)?
+                .as_deref()?
+                .sys
+                .entry_id,
+        )
+    }
     /// Where the host put an object it places itself (Stitch's camera
     /// space).
     pub fn set_position(&mut self, p: Vec3) {
         self.object.sys.position = p;
     }
-    /// Chicken Little's limit deck (mode 5) while his limit mode is on.
-    pub fn special_deck(&self) -> Option<[(u16, u16); 3]> {
+    /// A summon's limit deck while it is up: Chicken Little's (mode 5) or
+    /// Stitch's (mode 4), (command, selector) rows.
+    pub fn special_deck(&self) -> Option<Vec<(u16, u16)>> {
         let f = self.object.friend.as_deref()?;
-        f.limit.then_some(enemy::friend::CHICKEN_LITTLE_DECK)
+        if f.limit {
+            return Some(enemy::friend::CHICKEN_LITTLE_DECK.to_vec());
+        }
+        let s = f.stitch.as_deref()?;
+        s.limit.then(|| enemy::friend::STITCH_DECK.to_vec())
+    }
+    /// The deck's sheet mode (FUN_1403db140's argument).
+    pub fn special_mode(&self) -> Option<u8> {
+        let f = self.object.friend.as_deref()?;
+        if f.limit {
+            return Some(5);
+        }
+        f.stitch.as_deref()?.limit.then_some(4)
+    }
+    /// Chicken Little's limit mode (+0x28 bit 0): his first-person view.
+    pub fn chicken_limit(&self) -> bool {
+        self.object.friend.as_deref().is_some_and(|f| f.limit)
+    }
+    /// Stitch's limit: Sora rides in camera space at this screen point.
+    pub fn stitch_sora_point(&self) -> Option<[f32; 4]> {
+        let s = self.object.friend.as_deref()?.stitch.as_deref()?;
+        s.limit.then_some(enemy::friend::stitch::SORA_POINT)
     }
 
     /// Chicken Little's aim point (personality +0x40).
@@ -981,6 +1144,7 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
             facts: self.facts,
             commands: &self.commands,
+            fx: &self.fx,
         };
         self.object
             .attack_reached(&mut self.world, &env, PLAYER_OBJECT, slot, param_id);
@@ -1092,6 +1256,7 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
             facts: self.facts,
             commands: &self.commands,
+            fx: &self.fx,
         };
         let damage = self.object.take_hit(
             &mut self.world,
@@ -1126,6 +1291,7 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
             facts: self.facts,
             commands: &self.commands,
+            fx: &self.fx,
         };
         self.object.reflect(&mut self.world, &env, motion, back);
         self.record_faults();
@@ -1190,6 +1356,7 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
             facts: self.facts,
             commands: &self.commands,
+            fx: &self.fx,
         };
         self.object
             .attack_struck(&mut self.world, &env, slot, target);
@@ -1210,6 +1377,7 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
             facts: self.facts,
             commands: &self.commands,
+            fx: &self.fx,
         };
         self.object.fire(
             &mut self.world,
@@ -1274,6 +1442,7 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
             facts: self.facts,
             commands: &self.commands,
+            fx: &self.fx,
         };
         let actions = self.object.acts.start(name);
         self.object
@@ -1303,6 +1472,7 @@ impl ScriptBrain {
             player_yaw: self.player_yaw,
             facts: self.facts,
             commands: &self.commands,
+            fx: &self.fx,
         };
         let actions = self.object.acts.start(b"dead");
         self.object

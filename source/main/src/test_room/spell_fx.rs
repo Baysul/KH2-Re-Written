@@ -131,6 +131,8 @@ struct Frames {
     body_lift: f32,
     heal_lift: f32,
     members: Vec<MemberFrame>,
+    /// The summon that is out (its drawn root and heading).
+    summon: Option<MemberFrame>,
 }
 
 /// A party member's frame of this tick: origin, facing, the staff's top as
@@ -197,6 +199,15 @@ impl Frames {
                 }
             })
             .collect();
+        // [I] A summon's bones are not sampled: its effects take its root,
+        // lifted by Sora's heights for the body-centre codes.
+        let summon = super::summon::frame(game).map(|(pos, yaw)| MemberFrame {
+            pos,
+            yaw,
+            staff: None,
+            body_lift: 85.,
+            heal_lift: 105.,
+        });
         Frames {
             root,
             hand: hand.copied(),
@@ -205,6 +216,7 @@ impl Frames {
             body_lift: game.magic.as_ref().map_or(85., |m| m.src.body_lift),
             heal_lift: game.magic.as_ref().map_or(105., |m| m.src.heal_lift),
             members,
+            summon,
         }
     }
 
@@ -212,6 +224,7 @@ impl Frames {
     fn bone(&self, anchor: Anchor, bone: i16) -> Mat4 {
         let member = match anchor {
             Anchor::Party(i) if i > 0 => self.members.get(i - 1),
+            Anchor::Summon => self.summon.as_ref(),
             _ => None,
         };
         let root = match member {
@@ -817,6 +830,7 @@ mod tests {
                 body_lift: 70.,
                 heal_lift: 90.,
             }],
+            summon: None,
         }
     }
 
