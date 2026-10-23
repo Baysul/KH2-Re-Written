@@ -234,6 +234,15 @@ impl World {
         self.planes[p.plane as usize]
     }
 
+    /// FUN_140173500 for the static map: polygon `poly`'s plane normal,
+    /// normalised (the map has no transform).
+    pub fn polygon_normal(&self, poly: u16) -> Option<V3> {
+        let p = self.polys.get(poly as usize)?;
+        let [x, y, z, _] = self.plane(p);
+        let l = (x * x + y * y + z * z).sqrt();
+        (l > 0.).then(|| [x / l, y / l, z / l])
+    }
+
     /// FUN_1401741c0 with the body filter `(attr & 0xf) != 4`
     /// (FUN_1401745c0(W, 0xf, 4, 1, 0)). Body and floor queries clear
     /// W+0xe7, so the nibble-5 class bypass never applies here.

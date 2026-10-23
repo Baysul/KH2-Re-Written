@@ -153,6 +153,11 @@ pub struct Ui {
     /// The loaded message tables in search order, sys.bar second (the
     /// 0xadc fallback's table).
     tables: [HashMap<u32, Vec<u8>>; 3],
+    /// The field command menu's layout for the world map
+    /// (`field2d/<lang>/wm<n>command.2dd` 'comw', FUN_140153ee0) and its
+    /// name, and the field 2D sheet with the lock-on reticle ('fiel').
+    pub command: Option<(String, hud::Sheet)>,
+    pub field: Option<(String, hud::Sheet)>,
 }
 
 fn locate(library: &Library, name: &str) -> Result<(&'static str, usize, [u8; 16])> {
@@ -265,7 +270,23 @@ impl Ui {
                 ]
             },
             tables: [area, sys, journal],
+            command: None,
+            field: None,
         };
+        // The world map is area 0 of world 15 (FUN_140154e20).
+        let name = src.command_layout(15, 0, "us", false);
+        ui.command = locate(library, &name)
+            .and_then(|(i, o, h)| hud::load(source, i, o, h, b"comw"))
+            .map_err(|e| eprintln!("{name}: command layout unavailable: {e}"))
+            .ok()
+            .map(|sheet| (name, sheet));
+        ui.field = ["field2d/us/wm0field.2dd", "field2d/us/zz0field.2dd"]
+            .into_iter()
+            .find_map(|name| {
+                let (i, o, h) = locate(library, name).ok()?;
+                let sheet = hud::load(source, i, o, h, b"fiel").ok()?;
+                Some((name.to_owned(), sheet))
+            });
         for &r in routes {
             let texts = MenuTexts {
                 rows: [

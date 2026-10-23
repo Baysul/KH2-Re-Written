@@ -4,7 +4,7 @@ Baseline: Steam app 2552430 build 15194255 candidate - supported profile unquali
 
 | Measure | Accepted / tracked | Percentage |
 |---|---:|---:|
-| Complete functions decompiled and checked | 0 / 213 (inventory incomplete) | Unmeasured |
+| Complete functions decompiled and checked | 0 / 218 (inventory incomplete) | Unmeasured |
 | Required behavior scenarios verified 1:1 | 0 / 9 (inventory incomplete) | Unmeasured |
 | Final roadmap gates accepted | 0 / 32 | 0.00% |
 
@@ -264,6 +264,11 @@ A PASS counts one reviewed unit. All other statuses count zero. Unknown required
 | NATIVE-T211-04 | Attack-borne reaction commands - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T211-reaction-command-manager.md) |
 | NATIVE-T211-05 | Save point offer and heal while Save shows - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T211-reaction-command-manager.md) |
 | NATIVE-T211-06 | Partner and spawn reaction command sources - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T211-reaction-command-manager.md) |
+| NATIVE-T212-01 | World map cursor actions, the ship blend, dash and warp path - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T212-world-map-cursor-lock-and-fades.md) |
+| NATIVE-T212-02 | World map manual lock, lock-on camera and target switch - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T212-world-map-cursor-lock-and-fades.md) |
+| NATIVE-T212-03 | World map cursor deck (kind 10) and its commands - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T212-world-map-cursor-lock-and-fades.md) |
+| NATIVE-T212-04 | World map total play time panel and info panel anchoring - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T212-world-map-cursor-lock-and-fades.md) |
+| NATIVE-T212-05 | World map jump fades (mode 1) and wall knock-back - translation, equivalence unproved | PARTIAL | [record](../../docs/tasks/T212-world-map-cursor-lock-and-fades.md) |
 
 Accepted share of the tracked subset: 0.00%. This is not a whole-game percentage.
 

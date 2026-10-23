@@ -243,6 +243,13 @@ struct AreaConfig {
     /// Program overrides [map, btl, evt] for the first load (−1 = story).
     #[serde(default = "no_programs")]
     programs: [i16; 3],
+    /// The arrival presentation of the jump that opened this area
+    /// (FUN_1401561b0 by the jump's mode, DAT_140abad88): 1, a world change
+    /// such as the world map's landing (FUN_1403946d0 → FUN_140152990 mode
+    /// 1), fades in from black over n = 15 (FUN_140156c90). 0 starts at
+    /// once.
+    #[serde(default)]
+    arrival: u8,
 }
 
 fn no_programs() -> [i16; 3] {
@@ -2011,6 +2018,8 @@ struct Loaded {
     /// Message window art, font and labels for townspeople talk.
     area_talk: Option<AreaTalk>,
     stay: bool,
+    /// The config's arrival mode (AreaConfig::arrival).
+    arrival: u8,
     summary: serde_json::Value,
     hud: Option<HudSource>,
     enemy: Option<EnemySource>,
@@ -3904,6 +3913,7 @@ fn load(
         arena_mesh,
         area_talk,
         stay: config.area.as_ref().is_some_and(|a| a.stay),
+        arrival: config.area.as_ref().map_or(0, |a| a.arrival),
         params,
         sstm,
         abilities: ability_source,
@@ -12391,6 +12401,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         poses.insert(*action, *clip);
     }
     let stay = loaded.stay;
+    let arrival = loaded.arrival;
     let step_bank = loaded
         .area
         .as_ref()
@@ -12399,24 +12410,39 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         .area
         .as_ref()
         .and_then(|(_, a)| room_ambient(&loaded.step_info, a.world, a.area));
-    let area_res = loaded.area.map(|(source, mut current)| AreaRes {
-        music: Some(std::mem::take(&mut current.music)),
-        rendered: current.npcs.len(),
-        bg_mask: current.state.setup.bg_mask,
-        banner: source
-            .place_name(current.world, current.area)
-            .map(|t| (t.clone(), 120)),
-        guide: None,
-        guide_hold: 0,
-        visited: std::iter::once((current.world, current.area)).collect(),
-        source,
-        current,
-        previous: None,
-        pending: None,
-        transition: None,
-        explore: !stay,
-        talk_npc: None,
-        was_talking: false,
+    let area_res = loaded.area.map(|(source, mut current)| {
+        let here = (current.world, current.area, current.state.entrance);
+        AreaRes {
+            music: Some(std::mem::take(&mut current.music)),
+            rendered: current.npcs.len(),
+            bg_mask: current.state.setup.bg_mask,
+            banner: source
+                .place_name(current.world, current.area)
+                .map(|t| (t.clone(), 120)),
+            guide: None,
+            guide_hold: 0,
+            visited: std::iter::once((current.world, current.area)).collect(),
+            source,
+            current,
+            previous: None,
+            pending: None,
+            // FUN_1401561b0 mode 1: a world change fades in from black over
+            // n = 15 with no iris.
+            transition: (arrival == 1).then(|| {
+                let mut fade = Fade::default();
+                fade.fade_in(15, false);
+                Transition {
+                    stage: Stage::Opening,
+                    iris: None,
+                    fade,
+                    target: here,
+                    job: None,
+                }
+            }),
+            explore: !stay,
+            talk_npc: None,
+            was_talking: false,
+        }
     });
     let talk_room = loaded.npc.is_some();
     let mut player = Player::new(loaded.spawn.to_array(), loaded.yaw);
