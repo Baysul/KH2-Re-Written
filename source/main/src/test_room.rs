@@ -69,6 +69,7 @@ mod boss;
 mod character_kit;
 mod command_layout;
 mod debug_menu;
+pub(crate) use debug_menu::DebugMenu;
 mod deck_tour;
 mod drive_fx;
 mod drive_room;
@@ -8575,7 +8576,7 @@ fn hud_tick(
     let Some(mut hud) = hud else { return };
     let mut s = hud.stats;
     if let Some(rt) = game.enemy.as_mut() {
-        // Combat drives HP; G refills it.
+        // Combat drives HP; F6 refills it.
         if keys.just_pressed(KeyCode::F6) {
             rt.sora_hp = rt.sora_target.max_hp;
         }
@@ -8962,12 +8963,12 @@ fn hud_present(
             sheet: *sheet,
         });
     }
-    if !debug.open
+    if !debug.visible()
         && let Some((sheet, widths)) = menu_font.as_ref()
     {
         let font = field_command_menu::Font { widths, pad: 1 };
         let status = format!(
-            "Enemies ({}/{}) - F3: {}",
+            "F3 Debug menu   F2 Help   Enemies {}/{}: {}",
             gallery.actors.len(),
             enemy_gallery::MAX_ACTORS,
             gallery.status
@@ -8981,8 +8982,8 @@ fn hud_present(
             sheet: *sheet,
         });
     }
-    // The debug menu (F3) draws over everything.
-    if debug.open
+    // The debug menu (F3) draws over everything, also while it closes.
+    if debug.visible()
         && let Some((sheet, widths)) = menu_font.as_ref()
     {
         let white = textures.len();
@@ -12928,7 +12929,7 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         collision: CameraCollision::new(&loaded.room),
     };
     eprintln!(
-        "Test room ready (the original PC bindings). WASD moves (Left Alt walks), Space/Backspace jump, Enter/left-click decides (Attack), Up/Down choose a command, right-click/Right Shift guards, F/Right Ctrl reacts (Talk), M opens the menu, the mouse turns the camera, middle-click/Right Alt recentres, F3 opens the debug menu, Esc exits."
+        "Test room ready (the original PC bindings). WASD moves (Left Alt walks), Space/Backspace jump, Enter/left-click decides (Attack), Up/Down choose a command, right-click/Right Shift guards, F/Right Ctrl reacts (Talk), M opens the menu, the mouse turns the camera, middle-click/Right Alt recentres, F3 opens the debug menu (F2 its help), Esc exits."
     );
     let mut app = App::new();
     if let Some(area) = area_res {
