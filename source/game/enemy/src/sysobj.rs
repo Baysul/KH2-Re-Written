@@ -282,7 +282,8 @@ pub struct Sysobj {
     pub alpha: f32,
     pub fade: Fade,
     pub hidden: bool,
-    /// +0x9b8 bit 4: leaving; the object is removed once faded.
+    /// +0x9b8 bit 4: leaving; the object is removed once its alpha is 0
+    /// (see [`Sysobj::end_tick`]).
     pub left: bool,
     pub gone: bool,
     /// +0x120: script-settable flags (`obj_set_flag`).
@@ -1172,6 +1173,14 @@ impl Sysobj {
         // (+0xaa4), run with the frame.
         self.fade.step(1.0);
         self.tex_fade.step(1.0);
+        // FUN_1403bfd30, after the fades: a leaving object (`+0x9b8` bit 4)
+        // whose alpha reached 0 goes to its class's vt+0x38 (FUN_1403b2e10
+        // and the classes' wrappers), which frees its script and motion and
+        // marks it for removal (`+0x120` bit 28).
+        if self.left && self.fade.value == 0. {
+            self.gone = true;
+            return;
+        }
         // A carried object does not move by itself (physics mode 3); the
         // world places it on its holder. Nor does one in camera space.
         if self.attached.is_some() || self.camera_space || self.limit_stand.is_some() {

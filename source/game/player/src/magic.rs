@@ -322,6 +322,8 @@ pub enum Anchor {
     Party(usize),
     /// The summon that is out.
     Summon,
+    /// A battle enemy by gallery actor id (a script brain's own effects).
+    Actor(u64),
 }
 
 /// A script's effect call on the spell's PAX (the `.mag` file's effect

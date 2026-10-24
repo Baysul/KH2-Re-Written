@@ -556,7 +556,55 @@ pub struct BattleActor {
     clips: Arc<Clips>,
     pub paused: bool,
     pub error: Option<String>,
+    /// A script brain's effect containers (see [`ScriptFx`]).
+    script_fx: Option<ScriptFx>,
 }
+
+/// A script brain's effects on the tracked effect path (`spell_fx`), as the
+/// summon's: each call on the PAX of the object whose script made it
+/// (FUN_1403cc650's object effects), loaded on first use.
+struct ScriptFx {
+    library: data::path_lookup::Library,
+    models: HashMap<u32, String>,
+    paxes: HashMap<u32, Option<Arc<data::object_effect::Pax>>>,
+}
+
+impl ScriptFx {
+    fn open(source: &ProbeSource) -> Option<Self> {
+        let mut library = data::path_lookup::Library::open(source).ok()?;
+        let objects = data::objentry::read(&library.read("00objentry.bin").ok()?).ok()?;
+        let models = objects
+            .iter()
+            .map(|o| {
+                (
+                    o.object_id,
+                    String::from_utf8_lossy(&o.model_name).into_owned(),
+                )
+            })
+            .collect();
+        Some(Self {
+            library,
+            models,
+            paxes: HashMap::new(),
+        })
+    }
+
+    fn pax(&mut self, entry: u32) -> Option<Arc<data::object_effect::Pax>> {
+        let Self {
+            library,
+            models,
+            paxes,
+        } = self;
+        paxes
+            .entry(entry)
+            .or_insert_with(|| {
+                let name = models.get(&(entry & 0x0fff_ffff))?;
+                super::drive_room::object_pax(library, name).map(Arc::new)
+            })
+            .clone()
+    }
+}
+
 /// The supported enemies' objentry ids and model names.
 pub const SUPPORTED: [(u32, &str); 4] = [
     (301, "M_EX010"),
@@ -872,6 +920,9 @@ impl BattleActor {
             .ok_or("initial source motion absent")?;
         let frame = c.key(0);
         let pose = assets.sample_shapes(kind, &c.motion, frame, position, yaw, false)?;
+        let script_fx = matches!(brain, Brain::Script(_))
+            .then(|| ScriptFx::open(source))
+            .flatten();
         Ok(Self {
             brain,
             motion: c.motion.clone(),
@@ -885,6 +936,7 @@ impl BattleActor {
             clips,
             paused: false,
             error: None,
+            script_fx,
         })
     }
     pub fn tick(
@@ -979,6 +1031,21 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
             .brain
             .follow_capture(game.magic.as_ref().map_or(&[], |m| m.volumes.as_slice()));
         if let Brain::Script(a) = &mut battle.brain {
+            // Its effects on the tracked path: their state after the room's
+            // last effect update, as the script's effect tests see it.
+            if battle.script_fx.is_some() {
+                let base = super::enemy_script::ACTOR_FX_KEY | (actor.id & 0xff_ffff) << 32;
+                a.fx.drawn = true;
+                a.fx.anchor = Some(player::magic::Anchor::Actor(actor.id));
+                a.fx.key_base = base;
+                a.fx.tick = tick;
+                a.fx.live = game
+                    .fx_live
+                    .iter()
+                    .filter(|(k, _)| **k >> 32 == base >> 32)
+                    .map(|(&k, &l)| (k, l))
+                    .collect();
+            }
             a.player_yaw = game.player.yaw;
             // A battle actor fights: the battle flag (DAT_142a11404), and
             // whether Sora cannot be damaged (`obj_is_star`).
@@ -1036,6 +1103,17 @@ pub fn tick(mut game: ResMut<Game>, mut gallery: ResMut<EnemyGallery>) {
                     }
                     for name in reports.unsupported {
                         game.event(serde_json::json!({"event":"enemy_script_unsupported","tick":tick,"actor":actor.id,"service":name}));
+                    }
+                    if let (Brain::Script(a), Some(sfx)) =
+                        (&mut battle.brain, battle.script_fx.as_mut())
+                    {
+                        for (object, fx) in std::mem::take(&mut a.fx.calls) {
+                            let Some(entry) = a.object_entry(object) else {
+                                continue;
+                            };
+                            let pax = sfx.pax(entry);
+                            game.fx_calls.push(super::spell_fx::Call { pax, fx });
+                        }
                     }
                     let object = battle.assets.object_id;
                     for e in battle.brain.take_script_effects() {

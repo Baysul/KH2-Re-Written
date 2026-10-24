@@ -1,4 +1,4 @@
-# T223 — Drive form effects: Keyblade anchors, form hit sparks, Wisdom's bullet, the second trail
+# T225 — Drive form effects: Keyblade anchors, form hit sparks, Wisdom's bullet, the second trail
 
 Owner Claude, 2026-10-23, requested by burba in the project chat ("finish all summons, limits, and
 party stuff until its 1:1"; "keep going"), with the coordinator session's item "Drive form
