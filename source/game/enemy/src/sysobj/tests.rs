@@ -398,3 +398,28 @@ fn a_gravity_range_holds_a_jump_at_its_height_then_it_falls_from_there() {
     }
     assert!(!s.is_jump() && close(s.position[1], 0.));
 }
+
+#[test]
+fn a_leaving_object_is_removed_when_its_alpha_reaches_zero() {
+    // obj_leave: alpha out at once, then removal on that frame.
+    let mut s = Sysobj::bare();
+    s.fade.start(1.0, 0.0, 0.0);
+    s.left = true;
+    s.end_tick(&Flat);
+    assert!(s.gone);
+    // A slower fade out keeps it until the alpha is 0.
+    let mut s = Sysobj::bare();
+    s.fade.start(1.0, 0.0, 4.0);
+    s.left = true;
+    for _ in 0..3 {
+        s.end_tick(&Flat);
+        assert!(!s.gone, "still fading at {}", s.fade.value);
+    }
+    s.end_tick(&Flat);
+    assert!(s.gone);
+    // Faded out without leaving: it stays.
+    let mut s = Sysobj::bare();
+    s.fade.start(1.0, 0.0, 0.0);
+    s.end_tick(&Flat);
+    assert!(!s.gone);
+}
