@@ -28,6 +28,7 @@ pub(super) struct KitInputs<'a> {
     /// The slot 0 Keyblade's own effects (`obj/<model>.a.us`), when the kit
     /// was built for a chosen Keyblade.
     pub weapon_pax: Option<data::object_effect::Pax>,
+    pub weapon2_pax: Option<data::object_effect::Pax>,
     /// Actor joints carrying weapon slots 0 and 1 (SKLT primary and
     /// secondary bone); slot 1 only for forms with a second Keyblade.
     pub weapon_joint: usize,
@@ -108,6 +109,7 @@ pub(super) struct Kit {
     pub weapon2: Option<model_inspection::InspectionModel>,
     pub blades: [Blade; 2],
     pub weapon_pax: Option<data::object_effect::Pax>,
+    pub weapon2_pax: Option<data::object_effect::Pax>,
     /// HIT spheres (bone, offset, radius, high) and the TARGET shape's
     /// radius and height.
     pub body: Vec<(usize, Vec3, f32, bool)>,
@@ -170,6 +172,7 @@ pub(super) fn load_kit(
         weapon2,
         blades,
         weapon_pax,
+        weapon2_pax,
         weapon_joint,
         second_joint,
         motion_set,
@@ -510,27 +513,32 @@ pub(super) fn load_kit(
                     .get(&selected.slot)
                     .map(own_hits)
                     .unwrap_or_default();
-                // The weapon motion's range trigger 12 marks the swing trail.
-                let trails: Vec<(u32, u32)> = weapon_motions[0]
-                    .get(&selected.slot)
-                    .map(|m| {
-                        m.triggers
-                            .iter()
-                            .flat_map(|t| &t.records.ranges)
-                            .filter(|r| r.trigger == 12)
-                            .map(|r| {
-                                (
-                                    r.start_frame.max(0) as u32,
-                                    if r.end_frame < 0 {
-                                        clip.end
-                                    } else {
-                                        r.end_frame as u32
-                                    },
-                                )
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                // The weapon motion's range trigger 12 marks the swing trail
+                // (each slot's own motion).
+                let trail_windows = |k: usize| -> Vec<(u32, u32)> {
+                    weapon_motions[k]
+                        .get(&selected.slot)
+                        .map(|m| {
+                            m.triggers
+                                .iter()
+                                .flat_map(|t| &t.records.ranges)
+                                .filter(|r| r.trigger == 12)
+                                .map(|r| {
+                                    (
+                                        r.start_frame.max(0) as u32,
+                                        if r.end_frame < 0 {
+                                            clip.end
+                                        } else {
+                                            r.end_frame as u32
+                                        },
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let trails = trail_windows(0);
+                let trails2 = trail_windows(1);
                 for offset in 0..=clip.end {
                     let frame = key_start + offset;
                     for (k, (frames_k, blade_k)) in [
@@ -646,6 +654,7 @@ pub(super) fn load_kit(
                     hits,
                     hits2,
                     trails,
+                    trails2,
                     actor_hits: own_hits(selected),
                     body: body_frames,
                     sounds: weapon_motions[0]
@@ -846,6 +855,7 @@ pub(super) fn load_kit(
         weapon2,
         blades,
         weapon_pax,
+        weapon2_pax,
         body,
         attack,
         target_radius,

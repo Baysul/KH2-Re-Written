@@ -335,12 +335,15 @@ struct EffectSources {
 /// Effects raised by combat this tick.
 enum EffectRequest {
     /// Keyblade hit spark (FUN_1403d1b40): ATKP hit effect and random
-    /// count, contact point and hit direction in scene coordinates.
+    /// count, contact point and hit direction in scene coordinates. `own`:
+    /// the window is in Sora's own motion set, so the container is his
+    /// shown object's PAX (form-effects spec §2), not the Keyblade's.
     Hit {
         effect: u8,
         random: u8,
         contact: Vec3,
         direction: Vec3,
+        own: bool,
     },
     /// An enemy attack landing on Sora (FUN_1403d1b40 with the attacker's
     /// own container): `object` is the attacker's objentry id (0 = the
@@ -619,8 +622,10 @@ struct ClipPoses {
     /// (start, end, ATKP id, collision group), in clip ticks; then slot 1's.
     hits: Vec<(u32, u32, u16, u8)>,
     hits2: Vec<(u32, u32, u16, u8)>,
-    /// Trail windows (the weapon motion's range trigger 12), in clip ticks.
+    /// Trail windows (the weapon motion's range trigger 12), in clip ticks;
+    /// then slot 1's.
     trails: Vec<(u32, u32)>,
+    trails2: Vec<(u32, u32)>,
     /// The actor motion's own range-10 windows (the drive motions' ATKP
     /// 124 / 125), on the object's attack shapes.
     actor_hits: Vec<(u32, u32, u16, u8)>,
@@ -1203,8 +1208,11 @@ struct Game {
     actor_scan: HashMap<u64, (u64, f32)>,
     /// Weapon trail: whether its effect is alive (the exe's handle at
     /// `obj+0xc00`, FUN_1403effa0), and the calibrated bone length.
-    trail_live: bool,
-    trail_length: Option<f32>,
+    /// Each weapon slot's trail: live, and the blade length it measured.
+    trail_live: [bool; 2],
+    trail_length: [Option<f32>; 2],
+    /// Slot 1's Keyblade effects (its own `obj/<model>.a.us`).
+    weapon2_pax: Option<Arc<object_effect::Pax>>,
     /// Effect owners whose running instances are to be released.
     fx_release: Vec<u8>,
     /// Map effect groups to end (None = all of them).
@@ -3389,6 +3397,7 @@ fn load(
             weapon2: None,
             blades: Default::default(),
             weapon_pax: None,
+            weapon2_pax: None,
             weapon_joint,
             second_joint: None,
             motion_set: selection.clone(),
@@ -6162,7 +6171,8 @@ fn afterimage(
 ) {
     // The death event's SeqBlur (alpha 56/128) and a mission overlay's feed
     // the same pass. SeqBlur (FUN_14015f250) zooms the previous picture
-    // (514/512, 418/416); an overlay's takes a new one once per event frame.
+    // (514/512, 418/416), the Drive change (516/512, 420/416); an overlay's
+    // takes a new one once per event frame.
     let drive = game
         .drive
         .as_ref()
@@ -6170,7 +6180,9 @@ fn afterimage(
     let overlay = game.overlay_blur.filter(|_| drive.is_none());
     let seq_blur = overlay.map(|o| o.0).or(game_over.and_then(|g| g.blur()));
     let alpha = drive.or(seq_blur);
-    let zoom = if drive.is_none() && seq_blur.is_some() {
+    let zoom = if drive.is_some() {
+        crate::cutscene::blur::DRIVE_ZOOM
+    } else if seq_blur.is_some() {
         crate::cutscene::blur::ZOOM
     } else {
         [1., 1.]
@@ -7724,7 +7736,9 @@ fn effects_tick(
     {
         fx.weapon = Some(pax);
     }
-    weapon_trail::tick(&mut game, fx.weapon.as_ref());
+    weapon_trail::tick(&mut game, fx.weapon.as_ref(), 0);
+    let second = game.weapon2_pax.clone();
+    weapon_trail::tick(&mut game, second.as_ref(), 1);
     let view = game_view(rig.camera.eye, rig.camera.look_at);
     for request in std::mem::take(&mut game.effect_queue) {
         let (pax, element, world, label, bound) = match request {
@@ -7733,8 +7747,19 @@ fn effects_tick(
                 random,
                 contact,
                 direction,
+                own,
             } => {
-                let Some(pax) = fx.weapon.clone() else {
+                // The attack's owner holds the container (ATTACK+0x28): the
+                // weapon object for a Keyblade window, Sora's shown kit for
+                // his own (a form with no matching element shows nothing).
+                let pax = if own {
+                    game.drive
+                        .as_ref()
+                        .and_then(|d| d.paxes.get(&d.shown).cloned())
+                } else {
+                    fx.weapon.clone()
+                };
+                let Some(pax) = pax else {
                     continue;
                 };
                 // mask = (1 << (32 + hitEffect − 1)) | 1. A random count
@@ -9564,6 +9589,7 @@ fn combat_tick(game: &mut Game, tick: u64) {
                         random,
                         contact,
                         direction: dir,
+                        own: key.is_none() && (instance >> 5) & 3 == 2,
                     }),
                 }
             }
@@ -13218,8 +13244,9 @@ fn run(mut args: Vec<PathBuf>) -> Result<AppExit, Box<dyn std::error::Error>> {
         fx_queue: Vec::new(),
         actor_poses: HashMap::new(),
         actor_scan: HashMap::new(),
-        trail_live: false,
-        trail_length: None,
+        trail_live: [false; 2],
+        trail_length: [None; 2],
+        weapon2_pax: None,
         fx_release: Vec::new(),
         fx_clear_map: Vec::new(),
         map_fx_pending: true,

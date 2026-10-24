@@ -346,6 +346,20 @@ impl FormSources {
             Some((model, blade)) => (Some(model), blade),
             None => (None, character_kit::Blade::new()),
         };
+        // Slot 1's own effects (its trail): the slot-1 Keyblade's archive.
+        let weapon2_pax = weapon2
+            .is_some()
+            .then(|| {
+                let item = if weapons.sub != 0 {
+                    weapons.sub
+                } else {
+                    weapons.main
+                };
+                keyblades
+                    .model(item)
+                    .and_then(|m| object_pax(&mut Library::open(source).ok()?, m))
+            })
+            .flatten();
         let collision_archive = if self.hurt {
             let mut lib = Library::open(source)?;
             Some(lib.read_found(&model)?)
@@ -368,6 +382,7 @@ impl FormSources {
                 weapon2,
                 blades: [blade0, blade1],
                 weapon_pax,
+                weapon2_pax,
                 weapon_joint: self.weapon_joint,
                 second_joint,
                 motion_set,
@@ -450,8 +465,10 @@ struct Stash {
     attack: HashMap<u8, Vec<(usize, Vec3, f32)>>,
     /// The kit's two Keyblades' attack spheres.
     blade: [character_kit::Blade; 2],
-    /// Its slot 0 Keyblade's effects (None: the room's default).
+    /// Its slot 0 Keyblade's effects (None: the room's default), and slot
+    /// 1's.
     weapon_pax: Option<Arc<data::object_effect::Pax>>,
+    weapon2_pax: Option<Arc<data::object_effect::Pax>>,
 }
 
 /// Drive state of the session.
@@ -536,8 +553,10 @@ pub struct DriveRt {
     /// The change's afterimage: ramp k (alpha = trunc(0x70·k)), its speed
     /// and the ticks left once the swap starts its fade.
     after: Option<(f32, f32, u32)>,
-    /// Wisdom Form's bullets in flight.
+    /// Wisdom Form's bullets in flight, and those that ended this tick
+    /// (key, true when their life ran out rather than a hit).
     pub bullets: Vec<player::wisdom_form::Bullet>,
+    pub bullet_ends: Vec<(u64, bool)>,
     bullet_serial: u64,
 }
 
@@ -585,6 +604,7 @@ impl DriveRt {
             enemy_character,
             menu_forms: Vec::new(),
             bullets: Vec::new(),
+            bullet_ends: Vec::new(),
             limit_running: false,
             limit_request: None,
             tint: [128; 3],
@@ -896,6 +916,7 @@ fn swap_kit(game: &mut Game, form: u8) -> Result<(), String> {
             Stash {
                 blade: kit.blades,
                 weapon_pax: kit.weapon_pax.map(Arc::new),
+                weapon2_pax: kit.weapon2_pax.map(Arc::new),
                 target_shape: kit.target_shape,
                 params: kit.params,
                 clips: kit.clips,
@@ -929,10 +950,11 @@ fn swap_kit(game: &mut Game, form: u8) -> Result<(), String> {
         attack: std::mem::replace(&mut game.sora_attack, incoming.attack),
         blade,
         weapon_pax: std::mem::replace(&mut game.weapon_pax, incoming.weapon_pax),
+        weapon2_pax: std::mem::replace(&mut game.weapon2_pax, incoming.weapon2_pax),
     };
     game.weapon_pax_changed = true;
     // The trail's length follows the new Keyblade's size.
-    game.trail_length = None;
+    game.trail_length = [None; 2];
     // The new kit's attack rows (ATKP by id, sub-table 0) for the hits.
     if let Some(rt) = game.enemy.as_mut() {
         let ids: Vec<u16> = game
@@ -1528,18 +1550,25 @@ pub fn present(
 /// bullet (`player::wisdom_form`); live bullets fly and join the spell
 /// volumes, and a bullet that hit is removed.
 pub fn shots(game: &mut Game) {
+    // The muzzle: shot elements 25..43 bind to bone 0x4003, the Keyblade's
+    // tip, and the bullet starts at their first position (BindOnlyStart).
+    let tip = super::drive_fx::blade_tip(game, 0);
     let Game {
         drive,
         player,
         clips,
         magic,
         enemy,
+        fx_queue,
         ..
     } = game;
     let (Some(d), Some(m)) = (drive.as_mut(), magic.as_mut()) else {
         return;
     };
     let hits = &m.last_hits;
+    for b in d.bullets.iter().filter(|b| hits.contains(&b.key)) {
+        d.bullet_ends.push((b.key, false));
+    }
     d.bullets.retain(|b| !hits.contains(&b.key));
     if d.active && d.form == forms::WISDOM && d.change.is_none() {
         let clip = player.clip(clips);
@@ -1553,16 +1582,22 @@ pub fn shots(game: &mut Game) {
                 };
                 d.bullet_serial += 1;
                 let p = player.position;
-                // The muzzle is effect n's position [U: the effect's
-                // geometry is not decoded; Sora's TARGET height here].
-                let muzzle = [p[0], p[1] + m.src.target_lift, p[2]];
+                let muzzle = tip.map_or([p[0], p[1] + m.src.target_lift, p[2]], |t| t.to_array());
                 let dir = [player.yaw.sin(), 0., player.yaw.cos()];
-                d.bullets.push(player::wisdom_form::Bullet::new(
-                    BULLET_KEYS | d.bullet_serial,
-                    sub,
-                    muzzle,
-                    dir,
-                ));
+                let key = BULLET_KEYS | d.bullet_serial;
+                d.bullets
+                    .push(player::wisdom_form::Bullet::new(key, sub, muzzle, dir));
+                // Its visual: MAGF element 20, unbound, on the bullet.
+                if let Some(pax) = d.paxes.get(&forms::WISDOM).cloned() {
+                    fx_queue.push(super::drive_fx::Placed {
+                        req: super::drive_fx::FxRequest {
+                            pax,
+                            id: BULLET_ELEMENT,
+                            owner: forms::WISDOM,
+                        },
+                        anchor: super::drive_fx::Anchor::Bullet(key),
+                    });
+                }
             }
         }
     }
@@ -1570,7 +1605,14 @@ pub fn shots(game: &mut Game) {
         .as_ref()
         .filter(|rt| rt.enemy.targetable())
         .and_then(|rt| enemy_targets(rt).first().map(|t| t.centre));
-    d.bullets.retain_mut(|b| b.step(target));
+    let ends = &mut d.bullet_ends;
+    d.bullets.retain_mut(|b| {
+        let live = b.step(target);
+        if !live {
+            ends.push((b.key, true));
+        }
+        live
+    });
     for b in &d.bullets {
         m.volumes.push(player::magic::Volume {
             key: b.key,
@@ -1588,6 +1630,8 @@ pub fn shots(game: &mut Game) {
 
 /// Wisdom bullets' volume keys (below the spells' serial keys' range).
 const BULLET_KEYS: u64 = 1 << 60;
+/// MAGF's bullet element (formcmd §2.3).
+const BULLET_ELEMENT: u16 = 20;
 
 /// A party member's character id (objentry +0x4c) by its model.
 fn character_of(name: &str) -> u16 {
