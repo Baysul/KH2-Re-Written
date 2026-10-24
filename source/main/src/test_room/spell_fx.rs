@@ -133,6 +133,8 @@ struct Frames {
     members: Vec<MemberFrame>,
     /// The summon that is out (its drawn root and heading).
     summon: Option<MemberFrame>,
+    /// Battle actors by gallery id (their root and heading).
+    actors: HashMap<u64, MemberFrame>,
 }
 
 /// A party member's frame of this tick: origin, facing, the staff's top as
@@ -208,6 +210,25 @@ impl Frames {
             body_lift: 85.,
             heal_lift: 105.,
         });
+        // [I] A battle actor's bones are not sampled either: as
+        // `drive_fx`'s actor anchor, its root and heading, with Sora's
+        // heights for the body-centre codes.
+        let actors = game
+            .actor_poses
+            .iter()
+            .map(|(&id, &(pos, yaw))| {
+                (
+                    id,
+                    MemberFrame {
+                        pos,
+                        yaw,
+                        staff: None,
+                        body_lift: 85.,
+                        heal_lift: 105.,
+                    },
+                )
+            })
+            .collect();
         Frames {
             root,
             hand: hand.copied(),
@@ -217,6 +238,7 @@ impl Frames {
             heal_lift: game.magic.as_ref().map_or(105., |m| m.src.heal_lift),
             members,
             summon,
+            actors,
         }
     }
 
@@ -225,6 +247,7 @@ impl Frames {
         let member = match anchor {
             Anchor::Party(i) if i > 0 => self.members.get(i - 1),
             Anchor::Summon => self.summon.as_ref(),
+            Anchor::Actor(id) => self.actors.get(&id),
             _ => None,
         };
         let root = match member {
@@ -831,6 +854,7 @@ mod tests {
                 heal_lift: 90.,
             }],
             summon: None,
+            actors: HashMap::new(),
         }
     }
 
@@ -909,6 +933,44 @@ mod tests {
             &f,
         );
         close(pos(&m), [-200., 90., 0.]);
+    }
+
+    #[test]
+    fn an_actor_anchor_follows_that_actors_root() {
+        let mut f = frames();
+        f.actors.insert(
+            7,
+            MemberFrame {
+                pos: Vec3::new(300., 0., -50.),
+                yaw: 0.,
+                staff: None,
+                body_lift: 85.,
+                heal_lift: 105.,
+            },
+        );
+        let m = element_world(
+            1,
+            Some(Anchor::Actor(7)),
+            0x4001,
+            ([0.; 3], [0.; 3], [1.; 3]),
+            None,
+            None,
+            None,
+            &f,
+        );
+        close(pos(&m), [300., 85., -50.]);
+        // An actor the room does not know takes Sora's root.
+        let m = element_world(
+            1,
+            Some(Anchor::Actor(8)),
+            0x4000,
+            ([0.; 3], [0.; 3], [1.; 3]),
+            None,
+            None,
+            None,
+            &f,
+        );
+        close(pos(&m), pos(&to_effect(f.root)));
     }
 
     #[test]

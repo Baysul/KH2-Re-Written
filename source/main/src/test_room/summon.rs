@@ -1074,6 +1074,8 @@ fn spawn(game: &mut Game, s: &Summoned, gallery: &EnemyGallery) -> Result<Actor,
     brain.player_yaw = game.player.yaw;
     brain.set_spawner(Box::new(Spawner::new(source.clone(), &objects)));
     brain.fx.drawn = true;
+    brain.fx.anchor = Some(player::magic::Anchor::Summon);
+    brain.fx.key_base = super::enemy_script::SUMMON_FX_KEY;
     brain.start_act(if s.appear {
         b"appear".as_slice()
     } else {
