@@ -3,7 +3,6 @@
 
 use super::math::{native, native_own, native_own_yaw, read_native, read_sanitized};
 use crate::script::{Fault, Memory, Slot, Thread};
-use crate::sysobj::Vec3;
 use crate::world::{Ctx, Event, Object, SideThread, TrapFn, object_handle};
 
 type Args = [Slot; 16];
@@ -795,29 +794,68 @@ fn target_dist(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result
     Ok(())
 }
 
-/// 6:51 FUN_14053eb70 -> FUN_14040c2b0: the map blocks the line.
+/// FUN_14040c2b0's hit record (the script's buffer): the crossing point
+/// at +0 (vec4), the polygon at +0x14 (-1 for none), the dynamic collider
+/// at +0x18 (0 for the map).
+const RECORD_POLYGON: u32 = 0x14;
+const RECORD_COLLIDER: u32 = 0x18;
+
+/// 6:51 FUN_14053eb70 -> FUN_14040c2b0: `(record, a, b, mask)`. Whether the
+/// map of collision class `mask` crosses the segment from `a` to `b`; the
+/// record takes the crossing and its polygon.
 fn bghit_check_line(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let a: Vec3 = {
-        let v = read_native(ctx, m, args[0].value)?;
-        [v[0], v[1], v[2]]
-    };
-    let b: Vec3 = {
-        let v = read_native(ctx, m, args[1].value)?;
-        [v[0], v[1], v[2]]
-    };
-    let hit = ctx.env.line_blocked(a, b);
-    ctx.world.last_line_cross = hit.then(|| ctx.env.line_hit(a, b)).flatten();
+    let record = args[0].value;
+    let a = read_native(ctx, m, args[1].value)?;
+    let b = read_native(ctx, m, args[2].value)?;
+    let mask = args[3].value;
+    ctx.write_u32(m, record + RECORD_POLYGON, u32::MAX);
+    ctx.write_u32(m, record + RECORD_COLLIDER, 0);
+    ctx.write_u32(m, record + RECORD_COLLIDER + 4, 0);
+    let hit = ctx
+        .env
+        .line_hit_polygon([a[0], a[1], a[2]], [b[0], b[1], b[2]], mask);
+    if let Some((at, polygon)) = hit {
+        for (k, lane) in native([at[0], at[1], at[2], 1.0]).iter().enumerate() {
+            ctx.write_f32(m, record + 4 * k as u32, *lane);
+        }
+        // [I] A host that cannot name the polygon (the generated arena, the
+        // attack ray) records polygon 0, so the record still reads as a hit.
+        ctx.write_u32(m, record + RECORD_POLYGON, polygon.max(0) as u32);
+    }
+    args[0] = Slot::int(hit.is_some() as i32);
+    Ok(())
+}
+
+/// The record's polygon (-1 for none).
+pub(super) fn record_polygon(ctx: &Ctx<'_>, m: &Memory<'_>, record: u32) -> i32 {
+    ctx.read_u32(m, record + RECORD_POLYGON)
+        .map_or(-1, |p| p as i32)
+}
+
+/// 6:53 FUN_14053ecd0: the record names a polygon.
+fn bghit_is_hit(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let hit = record_polygon(ctx, m, args[0].value) != -1;
     args[0] = Slot::int(hit as i32);
     Ok(())
 }
 
-/// 6:54 FUN_14053ed00: where the last line check crossed the map (zero when
-/// it did not).
+/// 6:55 FUN_14053ed40 -> FUN_14040c380: the surface nibble of the
+/// record's polygon (FUN_140170910).
+fn bghit_get_kind(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
+    let polygon = record_polygon(ctx, m, args[0].value);
+    let kind = ctx.env.map_surface(polygon).unwrap_or(0);
+    args[0] = Slot::int(kind as i32);
+    Ok(())
+}
+
+/// 6:54 FUN_14053ed00: the record's crossing point, copied to the static
+/// vector 6:52 also uses (DAT_1407883d8).
 fn bghit_cross_pos(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    let at = ctx.world.last_line_cross.unwrap_or([0.; 3]);
+    let record = args[0].value;
     let cell = ctx.world.static_cell(6, 54, 0);
-    for (k, lane) in native([at[0], at[1], at[2], 1.0]).iter().enumerate() {
-        ctx.write_f32(m, cell + 4 * k as u32, *lane);
+    for k in 0..4 {
+        let lane = ctx.read_f32(m, record + 4 * k).unwrap_or(0.);
+        ctx.write_f32(m, cell + 4 * k, lane);
     }
     args[0] = Slot::address(cell);
     Ok(())
@@ -850,8 +888,6 @@ macro_rules! constant_int_traps {
 
 constant_int_traps! {
     message_is_end = 1, "method_message_is_end";
-    bghit_is_hit = 0, "bghit_is_hit";
-    bghit_get_kind = 0, "bghit_get_kind";
 }
 
 /// 1:155 FUN_14042dc60: the object's HP change (vt+0xe8: FUN_1403d2eb0, or

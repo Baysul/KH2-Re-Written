@@ -293,3 +293,120 @@ fn script_vectors_have_y_down_and_the_engine_has_y_up() {
     let r = run(wished, &mut obj, &mut world, [0.; 4], Slot::default());
     assert_eq!(world.static_read(r.value + 4), Some(2.0f32.to_bits()));
 }
+
+/// A wall at x = 100 whose polygon 7 is class 1 only, surface 3, facing -x.
+struct Wall;
+
+impl crate::env::Env for Wall {
+    fn floor(&self, _: f32, _: f32, _: f32) -> Option<f32> {
+        None
+    }
+    fn clips(&self, model: u32) -> &dyn crate::env::Clips {
+        NullEnv.clips(model)
+    }
+    fn player_position(&self) -> crate::sysobj::Vec3 {
+        [0.; 3]
+    }
+    fn target_position(&self, _: u32) -> Option<crate::sysobj::Vec3> {
+        None
+    }
+    fn line_hit_polygon(
+        &self,
+        from: crate::sysobj::Vec3,
+        to: crate::sysobj::Vec3,
+        class: u32,
+    ) -> Option<(crate::sysobj::Vec3, i32)> {
+        (class == 1 && from[0] < 100. && 100. <= to[0]).then_some(([100., from[1], from[2]], 7))
+    }
+    fn map_normal(&self, polygon: i32) -> Option<crate::sysobj::Vec3> {
+        (polygon == 7).then_some([-1., 0., 0.])
+    }
+    fn map_surface(&self, polygon: i32) -> Option<u32> {
+        (polygon == 7).then_some(3)
+    }
+}
+
+fn run_on_wall(
+    world: &mut World,
+    f: &mut crate::traps::test_support::Frame,
+    trap: crate::world::TrapFn,
+    args: &[Slot],
+) -> Slot {
+    let mut me = Object::bare(1);
+    let mut slots = [Slot::default(); 16];
+    slots[..args.len()].copy_from_slice(args);
+    let mut memory = Memory::new(&mut f.inst, &mut f.th);
+    let mut ctx = Ctx {
+        world,
+        me: &mut me,
+        env: &Wall,
+    };
+    trap(&mut ctx, &mut memory, &mut slots).unwrap();
+    slots[0]
+}
+
+#[test]
+fn a_line_check_fills_the_scripts_hit_record_and_the_getters_read_it() {
+    use crate::traps::test_support::{frame, vector};
+    let mut world = World::default();
+    let mut f = frame();
+    let record = f.inst.work_base() + 0x40;
+    // Script vectors are the engine's (y down, z flipped): x is shared.
+    let a = vector(&mut f, 0, [0., -50., 0., 1.]);
+    let b = vector(&mut f, 0x20, [200., -50., 0., 1.]);
+    let hit = run_on_wall(
+        &mut world,
+        &mut f,
+        bghit_check_line,
+        &[
+            Slot::address(record),
+            Slot::address(a),
+            Slot::address(b),
+            Slot::int(1),
+        ],
+    );
+    assert_eq!(hit.value, 1);
+    assert_eq!(
+        run_on_wall(&mut world, &mut f, bghit_is_hit, &[Slot::address(record)]).value,
+        1
+    );
+    assert_eq!(
+        run_on_wall(&mut world, &mut f, bghit_get_kind, &[Slot::address(record)]).value,
+        3
+    );
+    let at = run_on_wall(
+        &mut world,
+        &mut f,
+        bghit_cross_pos,
+        &[Slot::address(record)],
+    )
+    .value;
+    {
+        let memory = Memory::new(&mut f.inst, &mut f.th);
+        let mut me = Object::bare(1);
+        let ctx = Ctx {
+            world: &mut world,
+            me: &mut me,
+            env: &Wall,
+        };
+        assert_eq!(ctx.read_f32(&memory, at), Some(100.));
+        assert_eq!(ctx.read_f32(&memory, at + 4), Some(-50.));
+    }
+    // The other class passes through: the record says no polygon.
+    let miss = run_on_wall(
+        &mut world,
+        &mut f,
+        bghit_check_line,
+        &[
+            Slot::address(record),
+            Slot::address(a),
+            Slot::address(b),
+            Slot::int(2),
+        ],
+    );
+    assert_eq!(miss.value, 0);
+    assert_eq!(
+        run_on_wall(&mut world, &mut f, bghit_is_hit, &[Slot::address(record)]).value,
+        0
+    );
+}

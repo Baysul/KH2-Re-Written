@@ -502,8 +502,6 @@ pub struct World {
     /// The engine's own random generator (DAT_140783ca0), which the shout
     /// delay draws from; the scripts' generator is [`World::rng`].
     pub engine_rng: Lcg,
-    /// Where the last map line check crossed the map (`bghit_get_cross_pos`).
-    pub last_line_cross: Option<[f32; 3]>,
     /// The hit mark's two vectors (DAT_14074c0d8 / DAT_14074c0e8), engine
     /// frame: where the hit spark goes, and a second point.
     pub hit_mark: [[f32; 4]; 2],
@@ -601,7 +599,6 @@ impl Default for World {
             shots_freed: Vec::new(),
             shouts: Vec::new(),
             engine_rng: Lcg::default(),
-            last_line_cross: None,
             hit_mark: [[0.; 4]; 2],
             status: 0,
             mission_timer_paused: false,

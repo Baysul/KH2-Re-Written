@@ -1693,6 +1693,14 @@
           ]
         },
         {
+          "id": "NATIVE-T222-01",
+          "label": "Map hit record of the script line check and its normal, hit, crossing and surface getters - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T222-map-hit-record.md"
+          ]
+        },
+        {
           "id": "NATIVE-T211-01",
           "label": "Reaction command search over the held command, record 1, partner, shapes, attacks and auto offers - translation, equivalence unproved",
           "status": "PARTIAL",

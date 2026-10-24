@@ -886,10 +886,20 @@ impl MapWorld {
     /// A script's map-line query (FUN_14040c2b0 -> FUN_140171350) in scene
     /// coordinates: the first crossing of the segment by a polygon of
     /// collision `class`.
-    pub fn line(&self, from: [f32; 3], to: [f32; 3], class: u32) -> Option<[f32; 3]> {
+    pub fn line(&self, from: [f32; 3], to: [f32; 3], class: u32) -> Option<([f32; 3], u16)> {
         self.world
             .segment(engine(from), engine(to), class)
-            .map(|(p, _)| engine(p))
+            .map(|(p, poly)| (engine(p), poly))
+    }
+
+    /// A map polygon's unit normal in scene coordinates (FUN_140170ac0).
+    pub fn polygon_normal(&self, poly: u16) -> Option<[f32; 3]> {
+        self.world.polygon_normal(poly).map(engine)
+    }
+
+    /// A map polygon's surface nibble (FUN_140170910).
+    pub fn polygon_surface(&self, poly: u16) -> Option<u32> {
+        self.world.polygon_surface(poly)
     }
 
     /// The floor material under Sora as of the last move.
