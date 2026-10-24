@@ -33,6 +33,9 @@ struct BrainEnv<'a> {
 /// Effect keys of a summon's script effects (above the limits' and the
 /// party's).
 pub const SUMMON_FX_KEY: u64 = 1 << 56;
+/// Effect keys of a battle actor's script effects: this, the actor id in
+/// bits 32..56, the handle below.
+pub const ACTOR_FX_KEY: u64 = 2 << 56;
 
 /// The script's effect handles as the room plays them. A host that draws
 /// them (the summon's, from each object's own PAX) turns `drawn` on; for
@@ -40,6 +43,10 @@ pub const SUMMON_FX_KEY: u64 = 1 << 56;
 #[derive(Default)]
 pub struct BrainFx {
     pub drawn: bool,
+    /// What the brain's own object's bound effects follow, and the key range
+    /// of its effects in the room's effect state.
+    pub anchor: Option<player::magic::Anchor>,
+    pub key_base: u64,
     /// Handle -> (effect key, tick asked for).
     handles: std::collections::HashMap<u32, (u64, u64)>,
     /// This brain's running effects after the room's last effect update.
@@ -969,16 +976,17 @@ impl ScriptBrain {
                     ..
                 } => {
                     if let Ok(id) = u16::try_from(effect) {
-                        self.effects.push(ScriptEffect { id, at: position });
-                        if self.fx.drawn {
-                            let key = SUMMON_FX_KEY | u64::from(handle);
+                        if !self.fx.drawn {
+                            self.effects.push(ScriptEffect { id, at: position });
+                        } else {
+                            let key = self.fx.key_base | u64::from(handle);
                             self.fx.handles.insert(handle, (key, self.fx.tick));
-                            // [I] Bound to the summon's root when it or its
+                            // [I] Bound to the brain's own root when it or its
                             // own object starts it; another object's effect
                             // starts where that object stands.
                             let by = other.unwrap_or(object);
                             let (bound, at) = if by == self.object.id {
-                                (Some(player::magic::Anchor::Summon), position)
+                                (self.fx.anchor, position)
                             } else {
                                 (None, position.or_else(|| self.object_position(by)))
                             };

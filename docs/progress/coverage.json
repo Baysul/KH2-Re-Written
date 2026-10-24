@@ -1709,6 +1709,14 @@
           ]
         },
         {
+          "id": "NATIVE-T224-01",
+          "label": "Boss script effects on tracked handles with commands, liveness and per-object containers - translation, equivalence unproved",
+          "status": "PARTIAL",
+          "evidence": [
+            "docs/tasks/T224-boss-script-effects-tracked.md"
+          ]
+        },
+        {
           "id": "NATIVE-T211-01",
           "label": "Reaction command search over the held command, record 1, partner, shapes, attacks and auto offers - translation, equivalence unproved",
           "status": "PARTIAL",
