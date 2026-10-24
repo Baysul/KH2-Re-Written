@@ -263,14 +263,29 @@ impl Env for BrainEnv<'_> {
     }
     /// A game map answers any segment for the given class; the generated
     /// arena keeps the vertical floor test.
-    fn line_hit_class(&self, from: Vec3, to: Vec3, class: u32) -> Option<Vec3> {
+    fn line_hit_polygon(&self, from: Vec3, to: Vec3, class: u32) -> Option<(Vec3, i32)> {
         match self.room? {
             // FUN_14040c2b0: mask bit 16 takes the attack ray (FUN_140171090).
+            // [U] Its polygon is not reported.
             super::RoomWorld::Map(map) if class >> 16 & 1 != 0 => {
-                map.attack_hit(from, to).map(|h| h.point)
+                map.attack_hit(from, to).map(|h| (h.point, -1))
             }
-            super::RoomWorld::Map(map) => map.line(from, to, class),
-            super::RoomWorld::Triangles(_) => self.line_hit(from, to),
+            super::RoomWorld::Map(map) => map
+                .line(from, to, class)
+                .map(|(p, poly)| (p, i32::from(poly))),
+            super::RoomWorld::Triangles(_) => self.line_hit(from, to).map(|p| (p, -1)),
+        }
+    }
+    fn map_normal(&self, polygon: i32) -> Option<Vec3> {
+        match self.room? {
+            super::RoomWorld::Map(map) => map.polygon_normal(u16::try_from(polygon).ok()?),
+            super::RoomWorld::Triangles(_) => None,
+        }
+    }
+    fn map_surface(&self, polygon: i32) -> Option<u32> {
+        match self.room? {
+            super::RoomWorld::Map(map) => map.polygon_surface(u16::try_from(polygon).ok()?),
+            super::RoomWorld::Triangles(_) => None,
         }
     }
     fn target_position(&self, _id: u32) -> Option<Vec3> {

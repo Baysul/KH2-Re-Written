@@ -156,9 +156,10 @@ fn bg_get_normal(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Resu
 }
 
 /// 6:52 FUN_14053ec80 -> FUN_14040c3c0: the normal of the polygon a map hit
-/// record names (the last hit here).
+/// record names, in the static vector 6:54 also uses (DAT_1407883d8).
 fn bghit_get_normal(ctx: &mut Ctx<'_>, m: &mut Memory<'_>, args: &mut Args) -> Result<(), Fault> {
-    map_normal(ctx, m, args, (6, 52), -1);
+    let polygon = super::state::record_polygon(ctx, m, args[0].value);
+    map_normal(ctx, m, args, (6, 54), polygon);
     Ok(())
 }
 
