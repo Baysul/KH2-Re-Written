@@ -195,4 +195,5 @@ Records through T128 retain historical commands and paths. See [the folder guide
 | [T225](T225-form-effect-anchors-sparks-and-trails.md) | Drive form effects: Keyblade anchors, form hit sparks, Wisdom's bullet, the second trail | PARTIAL. Follows the executable's effect data; nothing is compared with the original game. |
 | [T231](T231-bar-byte-match.md) | BAR archives written back byte for byte | PASS for the BAR round-trip: 54,202 of 54,202 installed BARs (nested ones included) written back with the original SHA-256. |
 | [T232](T232-save-byte-match.md) | Save files written back byte for byte | PARTIAL. The original-game container round-trips; save images checked on synthetic images only (the owner's container holds no saves). |
+| [T233](T233-movement-output-match.md) | Movement physics matched bit for bit against the executable's own routines | PASS for the compared routines: 8,097 of 8,097 cases bit-identical after the knock and blow normalising was fixed. |
 | [T141](T141-ik-and-animation-parity.md) | IK aim chains, pole vectors and joint-space motion blends | PROGRESS. Master Form matches the PS2 routine; 87% of installed motions within 0.1. |
